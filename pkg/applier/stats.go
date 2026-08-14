@@ -103,9 +103,11 @@ const handoffNoiseFloor = time.Millisecond
 // which no server-side signal can report and more write workers cannot fix.
 const buildShareThreshold = 0.25
 
-// String renders the snapshot in the kebab-case key=value style used by the
-// runner status lines, so migrate and move report identical fields. Durations
-// are rounded to the millisecond — finer precision is noise at status cadence.
+// String renders the snapshot as the applier row of a runner's status block, so
+// migrate, move and sync report identical fields. Durations are rounded to the
+// millisecond — finer precision is noise at status cadence. The fields are not
+// prefixed with "applier-": the row is labelled, which is the whole point of
+// the block layout.
 //
 // It renders a deliberately small subset of Stats, because the status line is
 // read every 30 seconds by a human and a field that reads the same on every
@@ -123,7 +125,7 @@ const buildShareThreshold = 0.25
 // Nothing is lost by trimming: every field stays on Stats, and the metrics
 // sink emits them all, which is what dashboards should read anyway.
 func (s Stats) String() string {
-	out := fmt.Sprintf("applier-queue=%d/%d applier-workers=%d applier-queue-wait-p50=%v applier-write-p50=%v applier-write-p90=%v",
+	out := fmt.Sprintf("queue=%d/%d  workers=%d  wait-p50=%v  write-p50=%v  write-p90=%v",
 		s.QueueDepth,
 		s.QueueCap,
 		s.ActiveWorkers,
@@ -132,22 +134,36 @@ func (s Stats) String() string {
 		s.WriteTimeP90.Round(time.Millisecond),
 	)
 	if s.WriteTimeP50 > 0 && float64(s.BuildTimeP50) >= buildShareThreshold*float64(s.WriteTimeP50) {
-		out += fmt.Sprintf(" applier-build-p50=%v", s.BuildTimeP50.Round(time.Millisecond))
+		out += fmt.Sprintf("  build-p50=%v", s.BuildTimeP50.Round(time.Millisecond))
 	}
 	if s.HandoffP50 >= handoffNoiseFloor {
-		out += fmt.Sprintf(" applier-handoff-p50=%v", s.HandoffP50.Round(time.Millisecond))
+		out += fmt.Sprintf("  handoff-p50=%v", s.HandoffP50.Round(time.Millisecond))
 	}
 	return out
 }
 
-// StatusSuffix renders a's Stats() for appending to a runner status line: a
-// leading space plus Stats().String(), or "" when a is nil. Runner Status()
-// can be called before the applier is constructed, so this must be nil-safe.
-func StatusSuffix(a Applier) string {
-	if a == nil {
-		return ""
+// QueueFill returns queue occupancy in 0..1, which the status block renders as
+// the applier's progress bar. Unlike a copy bar this one is not progress toward
+// anything — a full bar is the healthy steady state for a copy (the writers are
+// saturated and backpressuring the readers), and a bar that empties means the
+// pipeline has become read-limited.
+func (s Stats) QueueFill() float64 {
+	if s.QueueCap == 0 {
+		return 0
 	}
-	return " " + a.Stats().String()
+	return float64(s.QueueDepth) / float64(s.QueueCap)
+}
+
+// StatusRow renders a's Stats() as the applier row of a runner status block:
+// the queue fill for the row's bar and the fields that follow it. Runner
+// Status() can be called before the applier is constructed, so this must be
+// nil-safe; the empty text it returns then makes the block drop the row.
+func StatusRow(a Applier) (fill float64, text string) {
+	if a == nil {
+		return 0, ""
+	}
+	s := a.Stats()
+	return s.QueueFill(), s.String()
 }
 
 // splitCounter accumulates how many chunklets a chunk's rows were cut into, so

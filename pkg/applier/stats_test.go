@@ -99,20 +99,19 @@ func TestStatsString(t *testing.T) {
 	// Build is 30/95 of write (over the threshold) and handoff is off the
 	// floor, so both exception fields are present.
 	require.Equal(t,
-		"applier-queue=48/128 applier-workers=4 applier-queue-wait-p50=1.8s "+
-			"applier-write-p50=95ms applier-write-p90=210ms "+
-			"applier-build-p50=30ms applier-handoff-p50=2ms",
+		"queue=48/128  workers=4  wait-p50=1.8s  "+
+			"write-p50=95ms  write-p90=210ms  "+
+			"build-p50=30ms  handoff-p50=2ms",
 		s.String())
 
 	require.Equal(t,
-		"applier-queue=0/0 applier-workers=0 applier-queue-wait-p50=0s "+
-			"applier-write-p50=0s applier-write-p90=0s",
+		"queue=0/0  workers=0  wait-p50=0s  write-p50=0s  write-p90=0s",
 		Stats{}.String())
 
 	// Sub-millisecond noise rounds away.
 	require.Contains(t,
 		Stats{WriteTimeP50: 1499 * time.Microsecond}.String(),
-		"applier-write-p50=1ms")
+		"write-p50=1ms")
 }
 
 // The two exception fields stay off a healthy line and appear only when they
@@ -126,28 +125,40 @@ func TestStatsStringExceptionFields(t *testing.T) {
 		BuildTimeP50: 2 * time.Millisecond, // well under a quarter of write
 		HandoffP50:   50 * time.Microsecond,
 	}
-	require.NotContains(t, healthy.String(), "applier-build-p50")
-	require.NotContains(t, healthy.String(), "applier-handoff-p50")
+	require.NotContains(t, healthy.String(), "build-p50")
+	require.NotContains(t, healthy.String(), "handoff-p50")
 
 	// Client-CPU bound: build is most of write.
 	clientBound := healthy
 	clientBound.BuildTimeP50 = 25 * time.Millisecond
-	require.Contains(t, clientBound.String(), "applier-build-p50=25ms")
+	require.Contains(t, clientBound.String(), "build-p50=25ms")
 
 	// Blocked behind the completion path.
 	slowHandoff := healthy
 	slowHandoff.HandoffP50 = 4 * time.Millisecond
-	require.Contains(t, slowHandoff.String(), "applier-handoff-p50=4ms")
+	require.Contains(t, slowHandoff.String(), "handoff-p50=4ms")
 
 	// A zero write p50 must not make the build share division blow up or
 	// report a share of nothing.
-	require.NotContains(t, Stats{BuildTimeP50: time.Second}.String(), "applier-build-p50")
+	require.NotContains(t, Stats{BuildTimeP50: time.Second}.String(), "build-p50")
 }
 
-// TestStatusSuffixNil verifies the runner-facing helper is nil-safe: Status()
-// can be requested before the applier is constructed.
-func TestStatusSuffixNil(t *testing.T) {
-	require.Empty(t, StatusSuffix(nil))
+// TestStatusRowNil verifies the runner-facing helper is nil-safe: Status() can
+// be requested before the applier is constructed. The empty text is what makes
+// the status block drop the applier row.
+func TestStatusRowNil(t *testing.T) {
+	fill, text := StatusRow(nil)
+	require.Zero(t, fill)
+	require.Empty(t, text)
+}
+
+// TestStatsQueueFill covers the applier bar: a full queue is the healthy
+// steady state, and an empty one means the pipeline has gone read-limited.
+func TestStatsQueueFill(t *testing.T) {
+	require.InDelta(t, 1.0, Stats{QueueDepth: 128, QueueCap: 128}.QueueFill(), 0.0001)
+	require.InDelta(t, 0.25, Stats{QueueDepth: 32, QueueCap: 128}.QueueFill(), 0.0001)
+	// No divide by zero before the buffers exist.
+	require.Zero(t, Stats{}.QueueFill())
 }
 
 // TestSingleTargetApplierStatsFresh verifies the zero-value snapshot of a
@@ -170,8 +181,10 @@ func TestSingleTargetApplierStatsFresh(t *testing.T) {
 	require.Zero(t, stats.QueueWaitP90)
 	require.Zero(t, stats.WriteTimeP90)
 
-	// StatusSuffix on a live applier: a leading space plus String().
-	require.Equal(t, " "+a.Stats().String(), StatusSuffix(a))
+	// StatusRow on a live applier: the queue fill and the row fields.
+	fill, text := StatusRow(a)
+	require.Zero(t, fill)
+	require.Equal(t, a.Stats().String(), text)
 }
 
 // TestSingleTargetApplierStatsQueueDepth verifies that chunklets enqueued

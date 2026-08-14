@@ -1399,10 +1399,10 @@ func (r *Runner) fatalError(reason change.FatalReason) bool {
 	return true
 }
 
-// Status returns the single periodic line that reports on the whole move. It
-// deliberately absorbs what used to be separate periodic lines from the change
-// feeds (since-flush / rotations) and the checkpoint dumper (since-checkpoint) —
-// see github.com/block/spirit/issues/329.
+// Status returns the periodic report on the whole move: a header line plus one
+// indented row per subsystem (see status.Block). It deliberately absorbs what
+// used to be separate periodic lines from the change feeds (flushes, rotations)
+// and the checkpoint dumper — see github.com/block/spirit/issues/329.
 func (r *Runner) Status() string {
 	state := r.status.Get()
 	if state > status.CutOver {
@@ -1410,54 +1410,68 @@ func (r *Runner) Status() string {
 	}
 	switch state { //nolint:exhaustive
 	case status.CopyRows:
-		// Status for copy rows
-		return fmt.Sprintf("migration status: state=%s copy-progress=%s chunk-size=%d binlog-deltas=%v total-time=%s copier-time=%s copier-remaining-time=%v copier-is-throttled=%v since-checkpoint=%s checkpoint-position=%s%s%s",
-			r.status.Get().String(),
-			r.copier.GetProgress(),
-			r.copier.ChunkSize(),
-			r.getDeltaLenAll(),
+		progress := r.copier.CopyProgress()
+		applierFill, applierFields := applier.StatusRow(r.applier)
+		b := status.NewBlock("migration status: state=%s total-time=%s copier-time=%s",
+			state.String(),
 			r.status.TotalElapsed().Round(time.Second),
 			r.status.Elapsed().Round(time.Second),
+		)
+		b.BarRow("copier", progress.Fraction(), "%6.2f%%  %d/%d  chunk=%d  eta=%s  throttled=%v",
+			progress.Fraction()*100,
+			progress.RowsCopied,
+			progress.RowsTotal,
+			r.copier.ChunkSize(),
 			r.copier.GetETA(),
 			r.copier.GetThrottler().IsThrottled(),
-			r.lastCheckpoint.Age(),
-			r.lastCheckpoint.Position(),
-			r.feedStatusSuffix(),
-			applier.StatusSuffix(r.applier),
 		)
+		b.BarRow("applier", applierFill, "%s", applierFields)
+		b.Row("binlog", "deltas=%d  %s", r.getDeltaLenAll(), r.feedStatusRow())
+		b.Row("ckpt", "%s", r.lastCheckpoint.Row())
+		return b.String()
 	case status.WaitingOnSentinelTable:
-		return fmt.Sprintf("migration status: state=%s total-time=%s sentinel-wait-time=%s sentinel-max-wait-time=%s%s",
-			r.status.Get().String(),
+		b := status.NewBlock("migration status: state=%s total-time=%s",
+			state.String(),
 			r.status.TotalElapsed().Round(time.Second),
+		)
+		b.Row("sentinel", "waiting=%s  max-wait=%s",
 			r.status.Elapsed().Round(time.Second),
 			sentinel.WaitLimit,
-			r.feedStatusSuffix(),
 		)
+		b.Row("binlog", "deltas=%d  %s", r.getDeltaLenAll(), r.feedStatusRow())
+		b.Row("ckpt", "%s", r.lastCheckpoint.Row())
+		return b.String()
 	case status.ApplyChangeset, status.PostChecksum:
 		// We've finished copying rows, and we are now trying to reduce the number of binlog deltas before
 		// proceeding to the checksum and then the final cutover.
-		return fmt.Sprintf("migration status: state=%s binlog-deltas=%v total-time=%s%s%s",
-			r.status.Get().String(),
-			r.getDeltaLenAll(),
+		applierFill, applierFields := applier.StatusRow(r.applier)
+		b := status.NewBlock("migration status: state=%s total-time=%s",
+			state.String(),
 			r.status.TotalElapsed().Round(time.Second),
-			r.feedStatusSuffix(),
-			applier.StatusSuffix(r.applier),
 		)
+		b.BarRow("applier", applierFill, "%s", applierFields)
+		b.Row("binlog", "deltas=%d  %s", r.getDeltaLenAll(), r.feedStatusRow())
+		return b.String()
 	case status.Checksum:
 		// This could take a while if it's a large table.
-		return fmt.Sprintf("migration status: state=%s checksum-progress=%s binlog-deltas=%v total-time=%s checksum-time=%s since-checkpoint=%s checkpoint-position=%s%s",
-			r.status.Get().String(),
-			r.checker.GetProgress().String(),
-			r.getDeltaLenAll(),
+		progress := r.checker.GetProgress()
+		b := status.NewBlock("migration status: state=%s total-time=%s checksum-time=%s",
+			state.String(),
 			r.status.TotalElapsed().Round(time.Second),
 			r.status.Elapsed().Round(time.Second),
-			r.lastCheckpoint.Age(),
-			r.lastCheckpoint.Position(),
-			r.feedStatusSuffix(),
 		)
+		b.BarRow("checksum", progress.Fraction(), "%6.2f%%  %d/%d%s",
+			progress.Fraction()*100,
+			progress.RowsChecked,
+			progress.RowsTotal,
+			checksum.StatusSuffix(r.checker),
+		)
+		b.Row("binlog", "deltas=%d  %s", r.getDeltaLenAll(), r.feedStatusRow())
+		b.Row("ckpt", "%s", r.lastCheckpoint.Row())
+		return b.String()
 	case status.RestoreSecondaryIndexes:
 		return fmt.Sprintf("migration status: state=%s total-time=%s",
-			r.status.Get().String(),
+			state.String(),
 			r.status.TotalElapsed().Round(time.Second),
 		)
 	default:
@@ -2221,15 +2235,15 @@ func (r *Runner) getDeltaLenAll() int {
 	return total
 }
 
-// feedStatusSuffix renders the change-feed fields for the status line across
-// every source. change.StatusSuffix merges them into one set of fields (see
-// there for how), so a 16-shard move does not print 16 copies.
-func (r *Runner) feedStatusSuffix() string {
+// feedStatusRow renders the change-feed fields for the status block's binlog
+// row across every source. change.StatusRow merges them into one set of fields
+// (see there for how), so a 16-shard move does not print 16 rows.
+func (r *Runner) feedStatusRow() string {
 	srcs := make([]change.Source, 0, len(r.sources))
 	for i := range r.sources {
 		srcs = append(srcs, r.sources[i].replClient)
 	}
-	return change.StatusSuffix(srcs...)
+	return change.StatusRow(srcs...)
 }
 
 // stopPeriodicFlushAll stops periodic flushing on all replication clients.

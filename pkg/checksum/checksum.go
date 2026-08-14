@@ -176,15 +176,16 @@ type Paced interface {
 	IsThrottled() bool
 }
 
-// StatusSuffix renders the pacing fields for a runner status line, or "" if the
-// checker does not report them. Mirrors applier.StatusSuffix, including the
-// leading space so callers can append it unconditionally.
+// StatusSuffix renders the pacing fields for the checksum row of a runner
+// status block, or "" if the checker does not report them. It keeps the leading
+// two spaces used between fields within a row, so callers can append it
+// unconditionally.
 func StatusSuffix(c Checker) string {
 	p, ok := c.(Paced)
 	if !ok {
 		return ""
 	}
-	return fmt.Sprintf(" checksum-threads=%d checksum-is-throttled=%v", p.Threads(), p.IsThrottled())
+	return fmt.Sprintf("  threads=%d  throttled=%v", p.Threads(), p.IsThrottled())
 }
 
 type CheckerConfig struct {

@@ -164,15 +164,16 @@ func TestCheckpoint(t *testing.T) {
 	r.status.Set(status.CopyRows)
 	require.Equal(t, "copyRows", r.status.Get().String())
 
-	// chunk-size is 0 until the first chunk is claimed.
-	require.Contains(t, r.Status(), `migration status: state=copyRows copy-progress=0/11040 0.00% chunk-size=0 binlog-deltas=0`)
-	// The status line also reports the applier pipeline snapshot, plus the
-	// change-feed and checkpoint fields that used to be logged separately.
-	require.Contains(t, r.Status(), `applier-queue=`)
-	require.Contains(t, r.Status(), `applier-write-p90=`)
-	require.Contains(t, r.Status(), `since-checkpoint=never checkpoint-position=none`)
-	require.Contains(t, r.Status(), `since-flush=`)
-	require.Contains(t, r.Status(), `binlog-rotations=`)
+	// The status block: a header line, then one row per subsystem. chunk is 0
+	// until the first chunk is claimed, and the bar is empty at 0%.
+	require.Contains(t, r.Status(), "migration status: state=copyRows total-time=")
+	require.Contains(t, r.Status(), "\n  copier  [·························]    0.00%  0/11040  chunk=0  eta=")
+	// The rows the change feed and the checkpoint dumper used to log for
+	// themselves, plus the applier pipeline snapshot.
+	require.Contains(t, r.Status(), "\n  applier [")
+	require.Contains(t, r.Status(), "write-p90=")
+	require.Contains(t, r.Status(), "\n  binlog  deltas=0  rotations=")
+	require.Contains(t, r.Status(), "\n  ckpt    never")
 
 	// first chunk.
 	chunk1, err := r.copyChunker.Next()
@@ -204,7 +205,7 @@ func TestCheckpoint(t *testing.T) {
 	// The status update is asynchronous (the applier phones home after each
 	// chunk completes), so poll until it reflects all three copied chunks.
 	require.Eventually(t, func() bool {
-		return strings.Contains(r.Status(), `migration status: state=copyRows copy-progress=3000/11040 27.17% chunk-size=1000 binlog-deltas=0`)
+		return strings.Contains(r.Status(), "\n  copier  [######···················]   27.17%  3000/11040  chunk=1000  eta=")
 	}, 10*time.Second, 50*time.Millisecond, "status never reached expected copy progress; last status: %s", r.Status())
 
 	// The watermark should exist now, because migrateChunk()
@@ -214,9 +215,9 @@ func TestCheckpoint(t *testing.T) {
 	require.JSONEq(t, "{\"Key\":[\"id\"],\"ChunkSize\":1000,\"LowerBound\":{\"Value\": [\"1001\"],\"Inclusive\":true},\"UpperBound\":{\"Value\": [\"2001\"],\"Inclusive\":false}}", watermark)
 	// Dump a checkpoint
 	require.NoError(t, r.DumpCheckpoint(t.Context()))
-	// Which the status line now reports in place of the checkpoint's own log
+	// Which the status block now reports in place of the checkpoint's own log
 	// line: the binlog coordinate a resumed run would restart reading from.
-	require.Contains(t, r.Status(), `since-checkpoint=0s checkpoint-position=`+r.replClient.Position())
+	require.Contains(t, r.Status(), "\n  ckpt    0s ago  "+r.replClient.Position())
 
 	// Clean up first runner
 	require.NoError(t, r.Close())

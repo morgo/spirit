@@ -1481,8 +1481,9 @@ func (r *Runner) Progress() status.Progress {
 	}
 }
 
-// Status returns a one-line, human-readable status for logging. It does not
-// log itself; status.WatchTask (when used) logs the returned value.
+// Status returns the periodic human-readable report for logging: a header line
+// plus one indented row per subsystem (see status.Block). It does not log
+// itself; status.WatchTask (when used) logs the returned value.
 func (r *Runner) Status() string {
 	state := r.status.Get()
 
@@ -1492,32 +1493,40 @@ func (r *Runner) Status() string {
 	r.progMu.RUnlock()
 
 	elapsed := r.status.TotalElapsed().Round(time.Second)
+	pending := 0
+	if repl != nil {
+		pending = repl.GetDeltaLen()
+	}
 	switch state { //nolint:exhaustive // sync only uses Initial/CopyRows/ApplyChangeset
 	case status.CopyRows:
-		progress, eta := "", ""
-		var chunkSize uint64
+		b := status.NewBlock("sync status: state=%s total-time=%s", state.String(), elapsed)
+		// The copy pipeline is built asynchronously, so a status tick can land
+		// before there is a copier to report on.
 		if cp != nil {
-			progress, eta, chunkSize = cp.GetProgress(), cp.GetETA(), cp.ChunkSize()
+			progress := cp.CopyProgress()
+			b.BarRow("copier", progress.Fraction(), "%6.2f%%  %d/%d  chunk=%d  eta=%s",
+				progress.Fraction()*100,
+				progress.RowsCopied,
+				progress.RowsTotal,
+				cp.ChunkSize(),
+				cp.GetETA(),
+			)
 		}
-		pending := 0
-		if repl != nil {
-			pending = repl.GetDeltaLen()
-		}
-		return fmt.Sprintf("sync status: state=%s copy-progress=%s chunk-size=%d copy-eta=%s pending-changes=%d total-time=%s since-checkpoint=%s checkpoint-position=%s%s",
-			state.String(), progress, chunkSize, eta, pending, elapsed,
-			r.lastCheckpoint.Age(), r.lastCheckpoint.Position(), change.StatusSuffix(repl))
+		b.Row("binlog", "deltas=%d  %s", pending, change.StatusRow(repl))
+		b.Row("ckpt", "%s", r.lastCheckpoint.Row())
+		return b.String()
 	case status.ApplyChangeset:
 		pos := ""
-		pending := 0
 		if repl != nil {
-			pos, pending = repl.Position(), repl.GetDeltaLen()
+			pos = repl.Position()
 		}
-		// position= is where the feed has read to; checkpoint-position= is the
-		// older point a restart would actually resume from. The gap between
-		// them is how much re-reading a crash would cost.
-		return fmt.Sprintf("sync status: state=%s position=%s pending-changes=%d total-time=%s since-checkpoint=%s checkpoint-position=%s%s",
-			state.String(), pos, pending, elapsed,
-			r.lastCheckpoint.Age(), r.lastCheckpoint.Position(), change.StatusSuffix(repl))
+		b := status.NewBlock("sync status: state=%s total-time=%s", state.String(), elapsed)
+		// position= is where the feed has read to; the ckpt row's position is
+		// the older point a restart would actually resume from. The gap
+		// between them is how much re-reading a crash would cost.
+		b.Row("binlog", "position=%s  deltas=%d  %s", pos, pending, change.StatusRow(repl))
+		b.Row("ckpt", "%s", r.lastCheckpoint.Row())
+		return b.String()
 	default:
 		return fmt.Sprintf("sync status: state=%s total-time=%s", state.String(), elapsed)
 	}

@@ -557,10 +557,15 @@ func (c *buffered) getCopyStats() (uint64, uint64, float64) {
 
 // GetProgress returns the progress of the copier
 func (c *buffered) GetProgress() string {
+	return c.CopyProgress().String()
+}
+
+// CopyProgress satisfies Copier.
+func (c *buffered) CopyProgress() status.CopyProgress {
 	c.Lock()
 	defer c.Unlock()
-	copied, total, pct := c.getCopyStats()
-	return fmt.Sprintf("%d/%d %.2f%%", copied, total, pct)
+	copied, total, _ := c.getCopyStats()
+	return status.CopyProgress{RowsCopied: copied, RowsTotal: total}
 }
 
 // ChunkSize satisfies Copier.

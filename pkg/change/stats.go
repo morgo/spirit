@@ -51,38 +51,34 @@ type StatsReporter interface {
 	FeedStats() FeedStats
 }
 
-// String renders the stats for a runner status line. Field names are kebab
-// case with no spaces inside values, matching applier.Stats.
+// String renders the stats as the binlog row of a runner's status block.
 //
-// Naming: an age (how long ago something happened) is `since-<thing>`, and a
-// duration (how long something took) is `<thing>-took`. Both render as a Go
-// duration, so without that distinction in the name `flush=0s` would be
-// ambiguous between "flushed just now" and "the flush was instant" — which is
-// exactly the pair of numbers reported here.
+// The flush figures read as a phrase — "flushed 30s ago (took 9µs, 0 rows)" —
+// rather than as three separate duration fields, because two of them are
+// durations of different kinds: how long ago the flush was, and how long it
+// took. Side by side as bare `key=0s` pairs those are genuinely ambiguous;
+// as a phrase the reading is forced.
 func (s FeedStats) String() string {
-	lastFlush := "never"
+	flush := "never flushed"
 	if !s.LastFlushAt.IsZero() {
-		lastFlush = time.Since(s.LastFlushAt).Round(time.Second).String()
+		flush = fmt.Sprintf("flushed %v ago (took %v, %d rows)",
+			time.Since(s.LastFlushAt).Round(time.Second),
+			s.LastFlushDuration.Round(time.Microsecond),
+			s.LastFlushRows,
+		)
 	}
-	return fmt.Sprintf("since-flush=%s flush-took=%v flush-rows=%d binlog-rotations=%d binlog-rotations-forced=%d",
-		lastFlush,
-		s.LastFlushDuration.Round(time.Microsecond),
-		s.LastFlushRows,
-		s.Rotations,
-		s.ForcedRotations,
-	)
+	return fmt.Sprintf("rotations=%d (%d forced)  %s", s.Rotations, s.ForcedRotations, flush)
 }
 
-// StatusSuffix renders the feed stats of srcs for appending to a runner status
-// line: a leading space plus String(), or "" when no source can report. Runner
-// Status() can be called before the feed is constructed, so nil sources are
-// skipped.
+// StatusRow renders the feed stats of srcs as the binlog row of a runner status
+// block, or "" when no source can report. Runner Status() can be called before
+// the feed is constructed, so nil sources are skipped.
 //
 // Multiple sources (a sharded move reads one feed per source) are merged into
 // one set of fields: counters are summed, and the flush figures are taken from
 // the feed that flushed least recently, since that is the one holding the
 // position back.
-func StatusSuffix(srcs ...Source) string {
+func StatusRow(srcs ...Source) string {
 	var merged FeedStats
 	var found bool
 	for _, src := range srcs {
@@ -108,7 +104,7 @@ func StatusSuffix(srcs ...Source) string {
 	if !found {
 		return ""
 	}
-	return " " + merged.String()
+	return merged.String()
 }
 
 // isStaler reports whether candidate's last flush is older than current's. A

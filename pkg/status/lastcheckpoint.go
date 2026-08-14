@@ -60,6 +60,16 @@ func (c *LastCheckpoint) Age() string {
 	return time.Since(at).Round(time.Second).String()
 }
 
+// Row renders the checkpoint row of a status block: how long ago the last
+// checkpoint was written and the position it saved, or "never" before the
+// first one.
+func (c *LastCheckpoint) Row() string {
+	if c.At().IsZero() {
+		return "never"
+	}
+	return c.Age() + " ago  " + c.Position()
+}
+
 // Position returns the resume coordinate the last checkpoint saved, or "none"
 // if no checkpoint has been written yet (or the source reported no position).
 // Never returns the empty string: the status line needs something to render.

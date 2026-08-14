@@ -27,8 +27,8 @@ func (f *statsFeed) FeedStats() FeedStats { return f.stats }
 
 // plainFeed is a Source that deliberately does NOT implement StatsReporter,
 // standing in for an out-of-tree source. Embedding the interface satisfies
-// Source without supplying FeedStats; StatusSuffix only type-asserts, so the
-// nil embedded value is never called.
+// Source without supplying FeedStats; StatusRow only type-asserts, so the nil
+// embedded value is never called.
 type plainFeed struct{ Source }
 
 func (f *statsFeed) AddSubscription(_, _ *table.TableInfo, _ table.MappedChunker) error { return nil }
@@ -50,7 +50,7 @@ func (f *statsFeed) Close()                                                     
 
 func TestFeedStatsStringNeverFlushed(t *testing.T) {
 	require.Equal(t,
-		"since-flush=never flush-took=0s flush-rows=0 binlog-rotations=0 binlog-rotations-forced=0",
+		"rotations=0 (0 forced)  never flushed",
 		FeedStats{}.String())
 }
 
@@ -63,19 +63,19 @@ func TestFeedStatsString(t *testing.T) {
 		ForcedRotations:   1,
 	}
 	require.Equal(t,
-		"since-flush=10s flush-took=2.855ms flush-rows=5583 binlog-rotations=4 binlog-rotations-forced=1",
+		"rotations=4 (1 forced)  flushed 10s ago (took 2.855ms, 5583 rows)",
 		s.String())
 }
 
-func TestStatusSuffixNoReporter(t *testing.T) {
+func TestStatusRowNoReporter(t *testing.T) {
 	// A nil source, and a source that cannot report, both contribute nothing
 	// rather than printing empty fields.
-	require.Empty(t, StatusSuffix())
-	require.Empty(t, StatusSuffix(nil))
-	require.Empty(t, StatusSuffix(&plainFeed{}))
+	require.Empty(t, StatusRow())
+	require.Empty(t, StatusRow(nil))
+	require.Empty(t, StatusRow(&plainFeed{}))
 }
 
-func TestStatusSuffixSingleSource(t *testing.T) {
+func TestStatusRowSingleSource(t *testing.T) {
 	src := &statsFeed{stats: FeedStats{
 		LastFlushAt:       time.Now().Add(-3 * time.Second),
 		LastFlushDuration: 5 * time.Millisecond,
@@ -84,14 +84,14 @@ func TestStatusSuffixSingleSource(t *testing.T) {
 		ForcedRotations:   1,
 	}}
 	require.Equal(t,
-		" since-flush=3s flush-took=5ms flush-rows=12 binlog-rotations=2 binlog-rotations-forced=1",
-		StatusSuffix(src))
+		"rotations=2 (1 forced)  flushed 3s ago (took 5ms, 12 rows)",
+		StatusRow(src))
 }
 
 // A sharded move reads one feed per source. The fields are merged into one
 // set: counters sum, and the flush figures come from the feed that flushed
 // least recently, because that is the one holding the position back.
-func TestStatusSuffixMergesSources(t *testing.T) {
+func TestStatusRowMergesSources(t *testing.T) {
 	recent := &statsFeed{stats: FeedStats{
 		LastFlushAt:       time.Now().Add(-time.Second),
 		LastFlushDuration: time.Millisecond,
@@ -107,15 +107,15 @@ func TestStatusSuffixMergesSources(t *testing.T) {
 		ForcedRotations:   0,
 	}}
 	require.Equal(t,
-		" since-flush=1m30s flush-took=7ms flush-rows=900 binlog-rotations=5 binlog-rotations-forced=1",
-		StatusSuffix(recent, stale))
+		"rotations=5 (1 forced)  flushed 1m30s ago (took 7ms, 900 rows)",
+		StatusRow(recent, stale))
 	// Order must not matter.
-	require.Equal(t, StatusSuffix(recent, stale), StatusSuffix(stale, recent))
+	require.Equal(t, StatusRow(recent, stale), StatusRow(stale, recent))
 }
 
 // A feed that has never flushed is the stalest of all: it must not be masked
 // by a sibling that has.
-func TestStatusSuffixNeverFlushedWins(t *testing.T) {
+func TestStatusRowNeverFlushedWins(t *testing.T) {
 	flushed := &statsFeed{stats: FeedStats{
 		LastFlushAt:       time.Now().Add(-time.Second),
 		LastFlushDuration: time.Millisecond,
@@ -124,13 +124,13 @@ func TestStatusSuffixNeverFlushedWins(t *testing.T) {
 	}}
 	never := &statsFeed{stats: FeedStats{Rotations: 1}}
 	require.Equal(t,
-		" since-flush=never flush-took=0s flush-rows=0 binlog-rotations=2 binlog-rotations-forced=0",
-		StatusSuffix(flushed, never))
-	require.Equal(t, StatusSuffix(flushed, never), StatusSuffix(never, flushed))
+		"rotations=2 (0 forced)  never flushed",
+		StatusRow(flushed, never))
+	require.Equal(t, StatusRow(flushed, never), StatusRow(never, flushed))
 }
 
 // The feed records real flushes and real rotations, which is what the runner
-// status line reports in place of the per-flush and per-rotation log lines.
+// status block reports in place of the per-flush and per-rotation log lines.
 func TestFeedStatsFromLiveFeed(t *testing.T) {
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 	require.NoError(t, err)
@@ -157,7 +157,7 @@ func TestFeedStatsFromLiveFeed(t *testing.T) {
 
 	// Nothing flushed yet.
 	require.True(t, client.FeedStats().LastFlushAt.IsZero())
-	require.Contains(t, StatusSuffix(client), "since-flush=never")
+	require.Contains(t, StatusRow(client), "never flushed")
 
 	testutils.RunSQL(t, "INSERT INTO feedstatst1 (a, b) VALUES (1, 2), (3, 4)")
 	require.NoError(t, client.BlockWait(t.Context()))

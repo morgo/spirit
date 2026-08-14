@@ -66,6 +66,10 @@ type Copier interface {
 	GetThrottler() throttler.Throttler
 	StartTime() time.Time
 	GetProgress() string
+	// CopyProgress returns the same progress as GetProgress in numeric form,
+	// which the status block needs in order to render a progress bar as well
+	// as the percentage.
+	CopyProgress() status.CopyProgress
 	// ChunkSize returns the row count of the most recently claimed chunk, or
 	// 0 before the first one. This is the dynamic chunker's current sizing
 	// decision, and it is reported on the runner status line: it used to be

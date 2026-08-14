@@ -43,22 +43,32 @@ The `Task` interface defines the contract that a migration runner must implement
 
 The checkpoint dumper also handles a race condition where the state transitions past cutover mid-checkpoint — the checkpoint table may have already been dropped, so this case is handled gracefully rather than treated as an error.
 
-### One line, not three
+### One report, not three lines
 
-The status line is deliberately the *only* recurring INFO line a run emits. It used to compete with a per-checkpoint line and a per-flush line from the change feed, each on its own interval, which made the log hard to read and hard to grep ([#329](https://github.com/block/spirit/issues/329)). Those events now report themselves as fields here instead, and still log their detail at DEBUG:
+The status report is deliberately the *only* recurring INFO output a run emits. It used to compete with a per-checkpoint line and a per-flush line from the change feed, each on its own interval, which made the log hard to read ([#329](https://github.com/block/spirit/issues/329)). Those events now report themselves here instead, and still log their detail at DEBUG.
 
-| Field | Source | Meaning |
+`Status()` returns a `Block`: a header line plus one indented row per subsystem, which the runners build identically.
+
+```
+migration status: state=copyRows total-time=2m6s copier-time=2m0s
+  copier  [#######··················]   30.84%  5048712/16370180  chunk=92220  eta=4m39s  throttled=false
+  applier [#########################]  queue=128/128  workers=4  wait-p50=1.323s  write-p50=32ms  write-p90=127ms
+  binlog  deltas=0  rotations=962 (0 forced)  flushed 0s ago (took 3µs, 0 rows)
+  ckpt    20s ago  binlog.000123:41909012
+```
+
+| Row | Source | Contents |
 | --- | --- | --- |
-| `chunk-size` | `copier.Copier.ChunkSize()` | Rows in the most recently claimed chunk — the dynamic chunker's current sizing decision. Was previously visible only inside the checkpoint line's watermark JSON. |
-| `since-checkpoint` | `status.LastCheckpoint` on the runner | How long ago the checkpoint was last persisted, or `never`. |
-| `checkpoint-position` | `status.LastCheckpoint` on the runner | The change-feed coordinate that checkpoint saved — where a resumed run would restart reading. Paired with `since-checkpoint` because the two together answer whether that point is still within the source's binlog retention. `none` before the first checkpoint. A multi-source move renders `key=position` per source. |
-| `since-flush` | `change.FeedStats` | How long ago the change feed last completed a flush, or `never`. |
-| `flush-took` | `change.FeedStats` | How long that flush took. |
-| `flush-rows` | `change.FeedStats` | How many buffered changes it started with. `0` is normal for a feed that is keeping up. |
-| `binlog-rotations` | `change.FeedStats` | Binlog rotations the feed has followed. Replaces go-mysql's per-rotation `rotate to next binlog` line, which spirit now demotes to DEBUG. |
-| `binlog-rotations-forced` | `change.FeedStats` | The subset spirit caused itself, by issuing `FLUSH BINARY LOGS` from `BlockWait` when the buffered position stalled. Watch this when the question is whether cutover-time waiting is churning through binlogs. |
+| `copier` | `copier.Copier` | Bar and percentage from `CopyProgress()`, then `chunk=` (rows in the most recently claimed chunk — the dynamic chunker's current sizing decision, previously visible only inside the checkpoint line's watermark JSON), the ETA, and whether a throttler is pausing the copy. |
+| `applier` | `applier.Stats` | Bar is queue occupancy, *not* progress: a full bar is the healthy steady state for a copy, and a bar that empties means the pipeline has gone read-limited. See `pkg/applier/README.md` for which fields render and which appear only when they carry a diagnosis. |
+| `binlog` | runner + `change.FeedStats` | `deltas=` is the runner's unapplied-change count; the rest is the feed. `rotations=` replaces go-mysql's per-rotation `rotate to next binlog` line, which spirit now demotes to DEBUG, and `(n forced)` is the subset spirit caused itself by issuing `FLUSH BINARY LOGS` from `BlockWait` when the buffered position stalled. |
+| `ckpt` | `status.LastCheckpoint` | How long ago the checkpoint was persisted and the change-feed coordinate it saved — where a resumed run would restart reading. The pair is what answers whether that point is still within the source's binlog retention. `never` before the first checkpoint; a multi-source move renders `key=position` per source. |
+| `checksum` | `checksum.Checker` | Replaces the copier row during the checksum phase, with `threads=` / `throttled=` for the same reason the copier row reports throttling. |
+| `sentinel` | runner | Only in `waitingOnSentinelTable`: how long it has been waiting and the limit. |
 
-Two naming conventions keep the duration fields apart, since both render as Go durations: an age is `since-<thing>`, and how long something took is `<thing>-took`.
+The flush figures read as a phrase — `flushed 30s ago (took 9µs, 0 rows)` — because two of them are durations of different kinds. Side by side as `key=0s` pairs, "flushed just now" and "the flush was instant" are indistinguishable.
+
+Two things the block gives up, deliberately: the whole report is one log record with newlines in it, which the default slog handler (what the CLI uses) prints as written but a quoting handler (`TextHandler`, JSON) will escape; and the `applier-`/`binlog-` field prefixes are gone, since the row label carries them.
 
 `conns-in-use` was dropped: it reported `sql.DB` pool occupancy, which tracks the configured thread count and says nothing an operator acts on.
 
