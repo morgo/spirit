@@ -1618,8 +1618,8 @@ func (s *SetOprType) String() string {
 
 // SetOprStmt represents "union/except/intersect statement"
 // See https://dev.mysql.com/doc/refman/5.7/en/union.html
-// See https://mariadb.com/kb/en/intersect/
-// See https://mariadb.com/kb/en/except/
+// INTERSECT and EXCEPT are supported by MySQL 8.0.31+.
+// See https://dev.mysql.com/doc/refman/8.0/en/set-operations.html
 type SetOprStmt struct {
 	dmlNode
 

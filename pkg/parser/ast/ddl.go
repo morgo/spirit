@@ -734,9 +734,6 @@ const (
 type Constraint struct {
 	node
 
-	// only supported by MariaDB 10.0.2+ (ADD {INDEX|KEY}, ADD FOREIGN KEY),
-	// see https://mariadb.com/kb/en/library/alter-table/
-
 	Tp   ConstraintType
 	Name string
 
@@ -1444,9 +1441,6 @@ const (
 type CreateIndexStmt struct {
 	ddlNode
 
-	// only supported by MariaDB 10.0.2+,
-	// see https://mariadb.com/kb/en/library/create-index/
-
 	IndexName               string
 	Table                   *TableName
 	IndexPartSpecifications []*IndexPartSpecification
@@ -1927,7 +1921,6 @@ func (n *TableOption) Restore(ctx *format.RestoreCtx) error {
 		ctx.WritePlain("= ")
 		ctx.WritePlain(n.StrValue) // e.g. '4M'
 
-	// MariaDB specific options
 	default:
 		return fmt.Errorf("invalid TableOption: %d", n.Tp)
 	}
@@ -2822,18 +2815,6 @@ type PartitionDefinitionClauseIn struct {
 }
 
 func (n *PartitionDefinitionClauseIn) restore(ctx *format.RestoreCtx) error {
-	// we special-case an empty list of values to mean MariaDB's "DEFAULT" clause.
-	if len(n.Values) == 0 {
-		ctx.WriteKeyWord(" DEFAULT")
-		return nil
-	}
-	if len(n.Values) == 1 && len(n.Values[0]) == 1 {
-		if _, ok := n.Values[0][0].(*DefaultExpr); ok {
-			ctx.WriteKeyWord(" DEFAULT")
-			return nil
-		}
-	}
-
 	ctx.WriteKeyWord(" VALUES IN ")
 	ctx.WritePlain("(")
 	for i, valList := range n.Values {
@@ -2885,23 +2866,9 @@ func (n *PartitionDefinitionClauseIn) Validate(pt PartitionType, columns int) er
 		return nil
 	}
 
-	nextIdx := 1
 	expectedColCount := len(n.Values[0])
-	// OK if one of the n.Values is DefaultExpr as only value
-	if expectedColCount == 1 {
-		if _, ok := n.Values[0][0].(*DefaultExpr); ok {
-			// Only DEFAULT in the partition definition, OK
-			if len(n.Values) > 1 {
-				expectedColCount = len(n.Values[1])
-				nextIdx++
-			}
-		}
-	}
-	for _, val := range n.Values[nextIdx:] {
+	for _, val := range n.Values[1:] {
 		if len(val) != expectedColCount {
-			if _, ok := val[0].(*DefaultExpr); ok && len(val) == 1 {
-				continue
-			}
 			return ErrPartitionColumnList
 		}
 	}

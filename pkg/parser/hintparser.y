@@ -48,6 +48,7 @@ import (
 
 	/*yy:token "'%c'" */
 	hintStringLit
+
 	/* SET_VAR-only decimal/float literal. Integer values still use hintIntLit. */
 	hintNumericLit
 
@@ -107,15 +108,15 @@ import (
 	OptimizerHintList "optimizer hint list"
 
 %type	<hint>
-	TableOptimizerHintOpt   "optimizer hint"
-	HintTableList           "table list in optimizer hint"
-	HintTableListOpt        "optional table list in optimizer hint"
-	HintIndexList           "table name with index list in optimizer hint"
-	IndexNameList           "index list in optimizer hint"
-	IndexNameListOpt        "optional index list in optimizer hint"
-	ViewNameList            "view name list in optimizer hint"
-	SubqueryStrategies      "subquery strategies"
-	SubqueryStrategiesOpt   "optional subquery strategies"
+	TableOptimizerHintOpt "optimizer hint"
+	HintTableList         "table list in optimizer hint"
+	HintTableListOpt      "optional table list in optimizer hint"
+	HintIndexList         "table name with index list in optimizer hint"
+	IndexNameList         "index list in optimizer hint"
+	IndexNameListOpt      "optional index list in optimizer hint"
+	ViewNameList          "view name list in optimizer hint"
+	SubqueryStrategies    "subquery strategies"
+	SubqueryStrategiesOpt "optional subquery strategies"
 
 %type	<table>
 	HintTable "Table in optimizer hint"
@@ -123,6 +124,7 @@ import (
 
 %type	<modelIdents>
 	PartitionList "partition name list in optimizer hint"
+
 
 %start	Start
 
