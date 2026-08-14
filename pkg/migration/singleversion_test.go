@@ -46,30 +46,35 @@ func TestUniqueOnNonUniqueData(t *testing.T) {
 }
 
 // TestUnparsableStatements tests that the behavior is expected in cases
-// where we know the TiDB parser does not support the statement. We document
-// that we require the TiDB parser to parse the statement for it to execute,
+// where we know the parser does not support the statement. We document
+// that we require the parser to parse the statement for it to execute,
 // which feels like a reasonable limitation based on its capabilities.
-// Example TiDB bug: https://github.com/pingcap/tidb/issues/54700
+// The parser fork in pkg/parser removes limitations the TiDB parser had
+// (e.g. https://github.com/pingcap/tidb/issues/57768, fixed here as
+// https://github.com/block/spirit/issues/542), so this also covers cases
+// that used to be unparsable and now work.
 func TestUnparsableStatements(t *testing.T) {
 	t.Parallel()
-	// CREATE TABLE with BLOB DEFAULT — TiDB parser doesn't support this but MySQL does.
+	// CREATE TABLE with an expression default on a BLOB column.
 	m := NewTestMigration(t, WithStatement(`CREATE TABLE t1parse (id int not null primary key auto_increment, b BLOB DEFAULT ('abc'))`))
 	require.NoError(t, m.Run())
 
-	// ALTER TABLE with BLOB DEFAULT via --statement — fails because TiDB parser rejects it.
+	// ALTER TABLE with BLOB DEFAULT via --statement. This used to fail with
+	// Error 1101 because the TiDB parser restored DEFAULT ('abc') as the
+	// bare literal DEFAULT 'abc' (issue #542); the parser fork preserves
+	// the parentheses, so it now works.
 	m = NewTestMigration(t, WithStatement("ALTER TABLE t1parse ADD COLUMN c BLOB DEFAULT ('abc')"))
-	err := m.Run()
-	require.Error(t, err)
-	require.ErrorContains(t, err, "can't have a default value")
+	require.NoError(t, m.Run())
 
-	// ALTER TABLE with BLOB DEFAULT via --table/--alter — works (bypasses parser limitation).
+	// The same thing via --table/--alter (this path always worked: the
+	// alter clause is passed through without a parser round trip).
 	m = NewTestMigration(t, WithTable("t1parse"),
-		WithAlter("ADD COLUMN c BLOB DEFAULT ('abc')"))
+		WithAlter("ADD COLUMN c2 BLOB DEFAULT ('abc')"))
 	require.NoError(t, m.Run())
 
 	// CREATE TRIGGER — not supported.
 	m = NewTestMigration(t, WithStatement("CREATE TRIGGER ins_sum BEFORE INSERT ON t1parse FOR EACH ROW SET @sum = @sum + NEW.b;"))
-	err = m.Run()
+	err := m.Run()
 	require.Error(t, err)
 	require.ErrorContains(t, err, "line 1 column 14 near \"TRIGGER")
 
