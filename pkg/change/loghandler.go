@@ -12,8 +12,8 @@ import (
 // on the source, which on a busy server (or when BlockWait has to issue
 // `FLUSH BINARY LOGS` to unstick a stalled position) is often enough to
 // dominate the log. The information it carried is not lost — the feed counts
-// rotations and reports them on the runner's periodic status line as
-// binlog-rotations / forced-rotations (see FeedStats).
+// rotations and reports them on the binlog row of the runner's periodic status
+// block as "rotations=<n> (<m> forced)" (see FeedStats).
 //
 // Everything else go-mysql logs — reconnects, errors, "begin to re-sync" —
 // is left alone, because those do indicate something worth seeing. The map is

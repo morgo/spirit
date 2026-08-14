@@ -118,8 +118,8 @@ type Runner struct {
 	continuousChecker checksum.Checker
 
 	// lastCheckpoint is when the checkpoint was last persisted and the
-	// position(s) it saved, reported as since-checkpoint= and
-	// checkpoint-position= on the status line. Mirrors pkg/migration (#329).
+	// position(s) it saved, reported together on the ckpt row of the status
+	// block. Mirrors pkg/migration (#329).
 	lastCheckpoint status.LastCheckpoint
 
 	// checkpointMu serializes checkpoint persistence (DumpCheckpoint's
@@ -2023,7 +2023,7 @@ func (r *Runner) DumpCheckpoint(ctx context.Context) error {
 			checksumWatermark = wm
 		}
 	}
-	// Debug, not Info: the status line reports since-checkpoint= instead —
+	// Debug, not Info: the status block's ckpt row reports it instead —
 	// see pkg/migration's DumpCheckpoint (#329).
 	//
 	// Note: when we dump the lowWatermark to the log, we are exposing the PK values,
@@ -2050,7 +2050,7 @@ func (r *Runner) DumpCheckpoint(ctx context.Context) error {
 }
 
 // renderCheckpointPosition turns the per-source position map that gets
-// persisted as JSON into something readable on a single status line. A
+// persisted as JSON into something readable on a single status row. A
 // single-source move (the common case) renders the bare position, so it reads
 // exactly like pkg/migration's; a multi-source move renders key=position for
 // every source, sorted, because the sources advance independently and the

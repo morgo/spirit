@@ -106,9 +106,9 @@ type Runner struct {
 	continuousChecker continuousDivergenceReporter
 
 	// lastCheckpoint is when the checkpoint was last persisted and the binlog
-	// position it saved, reported as since-checkpoint= and
-	// checkpoint-position= on the status line. The checkpoint itself no
-	// longer logs at INFO on every dump (#329).
+	// position it saved, reported together on the ckpt row of the status
+	// block. The checkpoint itself no longer logs at INFO on every dump
+	// (#329).
 	lastCheckpoint status.LastCheckpoint
 
 	// checkpointMu serializes checkpoint persistence (DumpCheckpoint's
@@ -1877,7 +1877,7 @@ func (r *Runner) DumpCheckpoint(ctx context.Context) error {
 			checksumWatermark = wm
 		}
 	}
-	// Debug, not Info: the status line reports since-checkpoint= instead, so
+	// Debug, not Info: the status block's ckpt row reports it instead, so
 	// this no longer needs a line of its own on every dump (#329). The
 	// watermark detail is still one -v away when a resume needs debugging.
 	//

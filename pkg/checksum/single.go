@@ -59,7 +59,7 @@ type SingleChecker struct {
 	// chunks accumulates the chunk-size distribution for the pass in flight.
 	chunks *chunkObserver
 	// chunkSize is the row count of the most recently checksummed chunk,
-	// reported on the runner status line. Sampled from the chunk rather than
+	// reported on the runner status block. Sampled from the chunk rather than
 	// read off the chunker so it works for every Chunker implementation,
 	// including the multi-table one. Mirrors copier.Copier.ChunkSize.
 	chunkSize atomic.Uint64

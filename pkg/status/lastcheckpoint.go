@@ -6,9 +6,9 @@ import (
 )
 
 // LastCheckpoint records what the last successful checkpoint write saved, so a
-// runner can report it as fields on its periodic status line
-// ("since-checkpoint=12s checkpoint-position=binlog.000123:4567") instead of
-// the checkpoint dumper logging a line of its own every time it runs. See
+// runner can report it as the ckpt row of its periodic status block
+// ("ckpt  12s ago  binlog.000123:4567" — see Row) instead of the checkpoint
+// dumper logging a line of its own every time it runs. See
 // github.com/block/spirit/issues/329.
 //
 // The age and the position belong together because together they answer the
@@ -72,7 +72,7 @@ func (c *LastCheckpoint) Row() string {
 
 // Position returns the resume coordinate the last checkpoint saved, or "none"
 // if no checkpoint has been written yet (or the source reported no position).
-// Never returns the empty string: the status line needs something to render.
+// Never returns the empty string: the status block needs something to render.
 func (c *LastCheckpoint) Position() string {
 	p := c.position.Load()
 	if p == nil || *p == "" {

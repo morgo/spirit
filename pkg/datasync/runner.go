@@ -82,8 +82,8 @@ type Runner struct {
 	status status.Tracker
 
 	// lastCheckpoint is when the checkpoint was last persisted and the
-	// change-feed position it saved, reported as since-checkpoint= and
-	// checkpoint-position= on the status line (#329).
+	// change-feed position it saved, reported together on the ckpt row of the
+	// status block (#329).
 	lastCheckpoint status.LastCheckpoint
 
 	logger     *slog.Logger

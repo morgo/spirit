@@ -164,7 +164,7 @@ func loadOnlyThrottler(t throttler.Throttler) throttler.Throttler {
 }
 
 // Paced is the optional capability a Checker exposes when it can report how it
-// is currently being paced. Runner status lines use it so a slow checksum can be
+// is currently being paced. The runner status block uses it so a slow checksum can be
 // told apart from a throttled or scaled-down one — the same question the copier
 // row's throttled= answers for the copy phase.
 type Paced interface {

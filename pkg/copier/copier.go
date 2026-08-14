@@ -67,12 +67,12 @@ type Copier interface {
 	StartTime() time.Time
 	GetProgress() string
 	// CopyProgress returns the same progress as GetProgress in numeric form,
-	// which the status block needs in order to render a progress bar as well
-	// as the percentage.
+	// which the status block needs in order to lay the percentage and the
+	// row counts out as separate fields.
 	CopyProgress() status.CopyProgress
 	// ChunkSize returns the row count of the most recently claimed chunk, or
 	// 0 before the first one. This is the dynamic chunker's current sizing
-	// decision, and it is reported on the runner status line: it used to be
+	// decision, and it is reported on the runner status block: it used to be
 	// visible only inside the checkpoint line's watermark JSON, which is no
 	// longer logged at INFO (#329).
 	//

@@ -133,15 +133,15 @@ func (c ChecksumProgress) String() string {
 	return fmt.Sprintf("%d/%d %.2f%%", c.RowsChecked, c.RowsTotal, fraction(c.RowsChecked, c.RowsTotal)*100)
 }
 
-// Fraction returns progress in 0..1, for Bar. 0 before the row estimate is
-// known.
+// Fraction returns progress in 0..1, for callers that need the ratio rather
+// than the rendered percentage. 0 before the row estimate is known.
 func (c ChecksumProgress) Fraction() float64 {
 	return fraction(c.RowsChecked, c.RowsTotal)
 }
 
 // CopyProgress tracks progress of the row copy. It is the numeric form of what
-// the copier used to report only as a preformatted string, which the status
-// block needs so it can render a progress bar as well as the percentage.
+// the copier used to report only as a preformatted string, so the status block
+// can lay the percentage and the counts out as separate fields.
 type CopyProgress struct {
 	RowsCopied uint64 // rows copied so far
 	RowsTotal  uint64 // estimated total rows to copy
@@ -152,8 +152,8 @@ func (c CopyProgress) String() string {
 	return fmt.Sprintf("%d/%d %.2f%%", c.RowsCopied, c.RowsTotal, fraction(c.RowsCopied, c.RowsTotal)*100)
 }
 
-// Fraction returns progress in 0..1, for Bar. 0 before the row estimate is
-// known.
+// Fraction returns progress in 0..1, for callers that need the ratio rather
+// than the rendered percentage. 0 before the row estimate is known.
 func (c CopyProgress) Fraction() float64 {
 	return fraction(c.RowsCopied, c.RowsTotal)
 }

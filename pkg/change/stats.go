@@ -6,9 +6,9 @@ import (
 )
 
 // FeedStats is a point-in-time summary of what the change feed has been doing.
-// It exists so the runners can fold the feed's activity into their single
-// periodic status line instead of the feed logging about itself on its own
-// schedule (see github.com/block/spirit/issues/329).
+// It exists so the runners can fold the feed's activity into the binlog row of
+// their single periodic status block, instead of the feed logging about itself
+// on its own schedule (see github.com/block/spirit/issues/329).
 //
 // The zero value means "nothing to report yet" and renders as a feed that has
 // not flushed.
@@ -46,7 +46,7 @@ type FeedStats struct {
 // report FeedStats. It is deliberately a separate, optional interface rather
 // than part of Source: out-of-tree sources (e.g. a VStream-backed one) should
 // not have to grow a method to keep compiling, and a source that cannot
-// report simply contributes nothing to the status line.
+// report simply contributes nothing to the status block.
 type StatsReporter interface {
 	FeedStats() FeedStats
 }

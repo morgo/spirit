@@ -15,7 +15,7 @@ import (
 const timingRingSize = 128
 
 // Stats is a point-in-time snapshot of an applier's write pipeline. It exists
-// so status lines and metrics can distinguish a read-limited pipeline (queue
+// so status blocks and metrics can distinguish a read-limited pipeline (queue
 // near empty) from a write-limited one (queue pegged at capacity with
 // queue-wait far above write time) — without this, write-side saturation is
 // invisible: the copier's end-to-end chunk feedback misattributes it to the
@@ -109,7 +109,7 @@ const buildShareThreshold = 0.25
 // prefixed with "applier-": the row is labelled, which is the whole point of
 // the block layout.
 //
-// It renders a deliberately small subset of Stats, because the status line is
+// It renders a deliberately small subset of Stats, because the status block is
 // read every 30 seconds by a human and a field that reads the same on every
 // healthy run costs attention without paying it back (#329). Five fields are
 // always present — queue occupancy, worker count, queue wait, and the write

@@ -81,7 +81,7 @@ type binlogClient struct {
 
 	// lastFlush* describe the most recently completed flush, for FeedStats.
 	// Guarded by mu. Recorded for every flush, not just the periodic one, so
-	// the status line's since-flush answers "when did the position last
+	// the status block's "flushed X ago" answers "when did the position last
 	// advance?" rather than "when did the ticker last fire?".
 	lastFlushAt       time.Time
 	lastFlushDuration time.Duration
@@ -411,7 +411,7 @@ func (c *binlogClient) buildSyncerConfig(host string, port uint16) replication.B
 		User:     c.username,
 		Password: c.password,
 		// Wrapped so go-mysql's per-rotation INFO line does not dominate the
-		// log; we report rotations on the status line instead. See
+		// log; we report rotations on the status block instead. See
 		// syncerQuietMessages.
 		Logger: newDemotingLogger(c.logger, syncerQuietMessages),
 		// Render JSON columns directly from the JSONB byte stream in the
@@ -1190,7 +1190,7 @@ func (c *binlogClient) FlushResidual() (int, int) {
 }
 
 // FeedStats satisfies StatsReporter, so the runner can fold the feed's
-// activity into its periodic status line.
+// activity into the binlog row of its periodic status block.
 func (c *binlogClient) FeedStats() FeedStats {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -1314,7 +1314,7 @@ func (c *binlogClient) runPeriodicFlush(ctx context.Context, interval time.Durat
 		}
 		// Debug, not Info: the runner reports the same information (when the
 		// last flush was, how long it took, how many rows) on its periodic
-		// status line, and this loop runs often enough that logging it here
+		// status block, and this loop runs often enough that logging it here
 		// was one of the top contributors to log volume (#329).
 		c.logger.Debug("finished periodic flush of binary log", "total-duration", time.Since(startLoop).String(), "trigger", trigger)
 	}

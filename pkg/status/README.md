@@ -26,7 +26,7 @@ err := r.status.Do(status.CopyRows, func() error {
 
 `Set` remains the transition primitive for states with no bracketable extent from the setter's perspective (`Close`, `ErrCleanup`); it closes the previous state's still-open interval (a gap after a completed `Do` stays unattributed), preserving the historical "one state ends when the next starts" semantics. In both cases the state stays current after the phase's code completes — `Get()` and the ordinal comparisons above behave exactly as before.
 
-Because the tracker owns the timing, the runners no longer carry ad-hoc fields like `copyDuration` or `sentinelWaitStartTime`: status lines render `Elapsed()` (time in the current state) and final summaries render `Duration(state)` (total time attributed to a state, accumulating across repeat visits). The two can disagree after a bracket completes: `Duration(state)` freezes when the bracket closes, while `Elapsed()` keeps growing until the next transition.
+Because the tracker owns the timing, the runners no longer carry ad-hoc fields like `copyDuration` or `sentinelWaitStartTime`: the status block header renders `Elapsed()` (time in the current state) and final summaries render `Duration(state)` (total time attributed to a state, accumulating across repeat visits). The two can disagree after a bracket completes: `Duration(state)` freezes when the bracket closes, while `Elapsed()` keeps growing until the next transition.
 
 The tracker assumes spirit's linear execution model — one goroutine advances through the phases in order, and the only concurrent transition is a fatal `Set(ErrCleanup)` racing an open bracket (time accrues to the bracketed state up to the fatal transition; the bracket's own exit becomes a no-op). It is not designed for concurrent or overlapping phases. `Begin()` marks the start of a run and resets all timing; runners call it once at the top of `Run`.
 
@@ -47,7 +47,7 @@ The checkpoint dumper also handles a race condition where the state transitions 
 
 The status report is deliberately the *only* recurring INFO output a run emits. It used to compete with a per-checkpoint line and a per-flush line from the change feed, each on its own interval, which made the log hard to read ([#329](https://github.com/block/spirit/issues/329)). Those events now report themselves here instead, and still log their detail at DEBUG.
 
-`Status()` returns a `Block`: a header line plus one indented row per subsystem, which the runners build identically.
+`Task.Status()` still returns a `string`; each runner now builds a `Block` and returns its rendered form — a header line plus one indented row per subsystem. All three runners build it the same way.
 
 ```
 migration status: state=copyRows total-time=2m6s copier-time=2m0s

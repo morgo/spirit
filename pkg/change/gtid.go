@@ -677,7 +677,7 @@ func (c *gtidClient) readStream(ctx context.Context) {
 		case *replication.RotateEvent:
 			// Stream housekeeping: position tracking advances via
 			// GTIDEvent/XIDEvent above, not via rotations. We only count
-			// them, for the runner status line. Duplicate rotate events
+			// them, for the runner status block. Duplicate rotate events
 			// (the server sends a real one and an artificial one carrying
 			// the same position) are collapsed by comparing file names.
 			if name := string(event.NextLogName); name != currentLogName {
