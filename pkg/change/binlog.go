@@ -1332,11 +1332,19 @@ func (c *binlogClient) BlockWait(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	// Debug: Flush() calls BlockWait in a loop until the delta count is
-	// trivial, so at Info this printed several times per second during
-	// applyChangeset. The forced-rotations counter on the status line is the
-	// signal that used to be read off these lines (#329).
-	c.logger.Debug("waiting to catch up to source position", "target_position", targetPos, "current_position", c.getBufferedPos())
+	// Info only when there is actually a gap to close. Flush() calls BlockWait
+	// in a loop until the delta count is trivial, and most of those calls find
+	// the buffered position already at or past the target — at Info those
+	// printed several times per second during applyChangeset, every one of
+	// them reporting target_position == current_position and so carrying no
+	// information (#329). A real wait still says so at Info, which is the
+	// reading this line is kept for.
+	bufferedPos := c.getBufferedPos()
+	logCatchUp := c.logger.Debug
+	if bufferedPos.Compare(targetPos) < 0 {
+		logCatchUp = c.logger.Info
+	}
+	logCatchUp("waiting to catch up to source position", "target_position", targetPos, "current_position", bufferedPos)
 	timer := time.NewTimer(DefaultTimeout)
 	defer timer.Stop() // Ensure timer is always stopped to prevent goroutine leak
 

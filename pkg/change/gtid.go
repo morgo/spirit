@@ -1250,8 +1250,14 @@ func (c *gtidClient) BlockWait(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	// Debug — see binlogClient.BlockWait (#329).
-	c.logger.Debug("waiting to catch up to source GTID", "target", targetGTID.String(), "current", c.getBufferedGTID().String())
+	// Info only when there is actually a gap to close — see
+	// binlogClient.BlockWait (#329).
+	bufferedGTID := c.getBufferedGTID()
+	logCatchUp := c.logger.Debug
+	if !bufferedGTID.Contain(targetGTID) {
+		logCatchUp = c.logger.Info
+	}
+	logCatchUp("waiting to catch up to source GTID", "target", targetGTID.String(), "current", bufferedGTID.String())
 	timer := time.NewTimer(DefaultTimeout)
 	defer timer.Stop()
 
