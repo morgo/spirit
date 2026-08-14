@@ -167,10 +167,10 @@ func TestCheckpoint(t *testing.T) {
 	// The status block: a header line, then one row per subsystem. chunk is 0
 	// until the first chunk is claimed, and the bar is empty at 0%.
 	require.Contains(t, r.Status(), "migration status: state=copyRows total-time=")
-	require.Contains(t, r.Status(), "\n  copier  [·························]    0.00%  0/11040  chunk=0  eta=")
+	require.Contains(t, r.Status(), "\n  copier    0.00%  0/11040  chunk-size=0  eta=")
 	// The rows the change feed and the checkpoint dumper used to log for
 	// themselves, plus the applier pipeline snapshot.
-	require.Contains(t, r.Status(), "\n  applier [")
+	require.Contains(t, r.Status(), "\n  applier queue=")
 	require.Contains(t, r.Status(), "write-p90=")
 	require.Contains(t, r.Status(), "\n  binlog  deltas=0  rotations=")
 	require.Contains(t, r.Status(), "\n  ckpt    never")
@@ -205,7 +205,7 @@ func TestCheckpoint(t *testing.T) {
 	// The status update is asynchronous (the applier phones home after each
 	// chunk completes), so poll until it reflects all three copied chunks.
 	require.Eventually(t, func() bool {
-		return strings.Contains(r.Status(), "\n  copier  [######···················]   27.17%  3000/11040  chunk=1000  eta=")
+		return strings.Contains(r.Status(), "\n  copier   27.17%  3000/11040  chunk-size=1000  eta=")
 	}, 10*time.Second, 50*time.Millisecond, "status never reached expected copy progress; last status: %s", r.Status())
 
 	// The watermark should exist now, because migrateChunk()

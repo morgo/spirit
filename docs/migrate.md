@@ -668,8 +668,8 @@ The report is a header line plus one indented row per subsystem:
 
 ```
 2026/08/14 11:47:10 INFO migration status: state=copyRows total-time=2m30s copier-time=2m30s
-  copier  [###########··············]   46.13%  7550855/16370180  chunk=8097  eta=3m29s  throttled=false
-  applier [#########################]  queue=128/128  workers=4  wait-p50=1.564s  write-p50=37ms  write-p90=131ms
+  copier   46.13%  7550855/16370180  chunk-size=8097  eta=3m29s  throttled=false
+  applier queue=128/128  workers=4  wait-p50=1.564s  write-p50=37ms  write-p90=131ms
   binlog  deltas=0  rotations=56 (0 forced)  flushed 30s ago (took 9µs, 0 rows)
   ckpt    50s ago  binlog.000047:104857600
 ```
@@ -690,13 +690,13 @@ Note that the whole report is a single log record containing newlines. Spirit's 
 
 | Field | Meaning |
 | --- | --- |
-| bar and `%` | Rows copied out of the estimated total. The total comes from table statistics, so the percentage can drift slightly and is not a row count you should reconcile against. |
-| `n/m` | The same figures the percentage is derived from. |
-| `chunk` | Rows in the most recently claimed chunk. The chunker sizes chunks dynamically to hit [`--target-chunk-time`](#target-chunk-time), so this number moving is normal and healthy — it is how Spirit adapts to row width and server load. A chunk size that has collapsed to its floor and stayed there means each chunk is taking longer than the target, i.e. the server is struggling. |
+| `%` | Rows copied out of the estimated total. The total comes from table statistics, so the percentage can drift slightly and is not a row count you should reconcile against. |
+| `n/m` | The figures the percentage is derived from. |
+| `chunk-size` | Rows in the most recently claimed chunk. The chunker sizes chunks dynamically to hit [`--target-chunk-time`](#target-chunk-time), so this number moving is normal and healthy — it is how Spirit adapts to row width and server load. A chunk size that has collapsed to its floor and stayed there means each chunk is taking longer than the target, i.e. the server is struggling. |
 | `eta` | Remaining rows divided by the recently measured copy rate. `TBD` for the first minute (no rate measured yet) and `DUE` past 99.99%. It is computed from a single 10-second sample, so early on it swings a lot; treat a large jump as noise unless it persists. |
 | `throttled` | Whether the copy is currently paused by a throttler (replica lag, commit latency, or load). A migration that is throttled is behaving as designed — it is protecting the server, not stalling. |
 
-The `checksum` row that replaces this one during the checksum phase has the same shape, plus `threads=` and `throttled=` for the checksum's own pacing.
+The `checksum` row that replaces this one during the checksum phase has the same shape — including its own `chunk-size`, since the checksum sizes chunks dynamically as well — plus `threads=` and `throttled=` for the checksum's own pacing.
 
 ### `binlog` row
 
@@ -723,7 +723,7 @@ The applier is the shared write path that both the copier and the replication fe
 
 | Field | Meaning |
 | --- | --- |
-| bar / `queue` | Queued chunklets out of the queue capacity. Unlike the copier bar this is not progress toward anything: a full bar (`128/128` above) means the writers are the bottleneck and the readers are being backpressured, which is normally the intended state during a copy since it keeps the write side saturated. A bar well below full means the copy is read-limited instead. |
+| `queue` | Queued chunklets out of the queue capacity. Sitting at capacity (`128/128` above) means the writers are the bottleneck and the readers are being backpressured, which is normally the intended state during a copy since it keeps the write side saturated. A queue well below capacity means the copy is read-limited instead. |
 | `workers` | Live write workers. Changes over time when [autoscaling](#enable-experimental-autoscaling) is enabled. |
 | `wait-p50` | How long a chunklet waits in the queue before a worker picks it up. Far above the write time means the write side is saturated. |
 | `write-p50` / `write-p90` | Time to execute the write against the target. A rising p90 points at the target server rather than at Spirit. |

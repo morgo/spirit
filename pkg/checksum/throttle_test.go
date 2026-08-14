@@ -351,7 +351,7 @@ func TestStatusSuffixReportsPacing(t *testing.T) {
 
 	// Before the first pass the limiter does not exist yet, so Threads falls
 	// back to the configured concurrency rather than reporting zero.
-	assert.Equal(t, "  threads=3  throttled=false", StatusSuffix(checker))
+	assert.Equal(t, "  chunk-size=0  threads=3  throttled=false", StatusSuffix(checker))
 
 	// A throttled checker must say so, which is the whole point of the field.
 	// The stub carries a continuous signal because a checksum only reacts to

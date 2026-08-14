@@ -1411,13 +1411,12 @@ func (r *Runner) Status() string {
 	switch state { //nolint:exhaustive
 	case status.CopyRows:
 		progress := r.copier.CopyProgress()
-		applierFill, applierFields := applier.StatusRow(r.applier)
 		b := status.NewBlock("migration status: state=%s total-time=%s copier-time=%s",
 			state.String(),
 			r.status.TotalElapsed().Round(time.Second),
 			r.status.Elapsed().Round(time.Second),
 		)
-		b.BarRow("copier", progress.Fraction(), "%6.2f%%  %d/%d  chunk=%d  eta=%s  throttled=%v",
+		b.Row("copier", "%6.2f%%  %d/%d  chunk-size=%d  eta=%s  throttled=%v",
 			progress.Fraction()*100,
 			progress.RowsCopied,
 			progress.RowsTotal,
@@ -1425,7 +1424,7 @@ func (r *Runner) Status() string {
 			r.copier.GetETA(),
 			r.copier.GetThrottler().IsThrottled(),
 		)
-		b.BarRow("applier", applierFill, "%s", applierFields)
+		b.Row("applier", "%s", applier.StatusRow(r.applier))
 		b.Row("binlog", "deltas=%d  %s", r.getDeltaLenAll(), r.feedStatusRow())
 		b.Row("ckpt", "%s", r.lastCheckpoint.Row())
 		return b.String()
@@ -1444,12 +1443,11 @@ func (r *Runner) Status() string {
 	case status.ApplyChangeset, status.PostChecksum:
 		// We've finished copying rows, and we are now trying to reduce the number of binlog deltas before
 		// proceeding to the checksum and then the final cutover.
-		applierFill, applierFields := applier.StatusRow(r.applier)
 		b := status.NewBlock("migration status: state=%s total-time=%s",
 			state.String(),
 			r.status.TotalElapsed().Round(time.Second),
 		)
-		b.BarRow("applier", applierFill, "%s", applierFields)
+		b.Row("applier", "%s", applier.StatusRow(r.applier))
 		b.Row("binlog", "deltas=%d  %s", r.getDeltaLenAll(), r.feedStatusRow())
 		return b.String()
 	case status.Checksum:
@@ -1460,7 +1458,7 @@ func (r *Runner) Status() string {
 			r.status.TotalElapsed().Round(time.Second),
 			r.status.Elapsed().Round(time.Second),
 		)
-		b.BarRow("checksum", progress.Fraction(), "%6.2f%%  %d/%d%s",
+		b.Row("checksum", "%6.2f%%  %d/%d%s",
 			progress.Fraction()*100,
 			progress.RowsChecked,
 			progress.RowsTotal,

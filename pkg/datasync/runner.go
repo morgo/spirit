@@ -1504,7 +1504,7 @@ func (r *Runner) Status() string {
 		// before there is a copier to report on.
 		if cp != nil {
 			progress := cp.CopyProgress()
-			b.BarRow("copier", progress.Fraction(), "%6.2f%%  %d/%d  chunk=%d  eta=%s",
+			b.Row("copier", "%6.2f%%  %d/%d  chunk-size=%d  eta=%s",
 				progress.Fraction()*100,
 				progress.RowsCopied,
 				progress.RowsTotal,

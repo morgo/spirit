@@ -147,18 +147,7 @@ func TestStatsStringExceptionFields(t *testing.T) {
 // be requested before the applier is constructed. The empty text is what makes
 // the status block drop the applier row.
 func TestStatusRowNil(t *testing.T) {
-	fill, text := StatusRow(nil)
-	require.Zero(t, fill)
-	require.Empty(t, text)
-}
-
-// TestStatsQueueFill covers the applier bar: a full queue is the healthy
-// steady state, and an empty one means the pipeline has gone read-limited.
-func TestStatsQueueFill(t *testing.T) {
-	require.InDelta(t, 1.0, Stats{QueueDepth: 128, QueueCap: 128}.QueueFill(), 0.0001)
-	require.InDelta(t, 0.25, Stats{QueueDepth: 32, QueueCap: 128}.QueueFill(), 0.0001)
-	// No divide by zero before the buffers exist.
-	require.Zero(t, Stats{}.QueueFill())
+	require.Empty(t, StatusRow(nil))
 }
 
 // TestSingleTargetApplierStatsFresh verifies the zero-value snapshot of a
@@ -181,10 +170,8 @@ func TestSingleTargetApplierStatsFresh(t *testing.T) {
 	require.Zero(t, stats.QueueWaitP90)
 	require.Zero(t, stats.WriteTimeP90)
 
-	// StatusRow on a live applier: the queue fill and the row fields.
-	fill, text := StatusRow(a)
-	require.Zero(t, fill)
-	require.Equal(t, a.Stats().String(), text)
+	// StatusRow on a live applier: the row fields.
+	require.Equal(t, a.Stats().String(), StatusRow(a))
 }
 
 // TestSingleTargetApplierStatsQueueDepth verifies that chunklets enqueued

@@ -142,28 +142,14 @@ func (s Stats) String() string {
 	return out
 }
 
-// QueueFill returns queue occupancy in 0..1, which the status block renders as
-// the applier's progress bar. Unlike a copy bar this one is not progress toward
-// anything — a full bar is the healthy steady state for a copy (the writers are
-// saturated and backpressuring the readers), and a bar that empties means the
-// pipeline has become read-limited.
-func (s Stats) QueueFill() float64 {
-	if s.QueueCap == 0 {
-		return 0
-	}
-	return float64(s.QueueDepth) / float64(s.QueueCap)
-}
-
-// StatusRow renders a's Stats() as the applier row of a runner status block:
-// the queue fill for the row's bar and the fields that follow it. Runner
-// Status() can be called before the applier is constructed, so this must be
-// nil-safe; the empty text it returns then makes the block drop the row.
-func StatusRow(a Applier) (fill float64, text string) {
+// StatusRow renders a's Stats() as the applier row of a runner status block.
+// Runner Status() can be called before the applier is constructed, so this must
+// be nil-safe; the empty string it returns then makes the block drop the row.
+func StatusRow(a Applier) string {
 	if a == nil {
-		return 0, ""
+		return ""
 	}
-	s := a.Stats()
-	return s.QueueFill(), s.String()
+	return a.Stats().String()
 }
 
 // splitCounter accumulates how many chunklets a chunk's rows were cut into, so
