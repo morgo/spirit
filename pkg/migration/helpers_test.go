@@ -187,20 +187,6 @@ func WithRespectSentinel() RunnerOption {
 	}
 }
 
-// WithLint enables linting during migration.
-func WithLint() RunnerOption {
-	return func(m *Migration) {
-		m.Lint = true
-	}
-}
-
-// WithLintOnly enables lint-only mode (no migration).
-func WithLintOnly() RunnerOption {
-	return func(m *Migration) {
-		m.LintOnly = true
-	}
-}
-
 // WithHost overrides the host address.
 func WithHost(host string) RunnerOption {
 	return func(m *Migration) {

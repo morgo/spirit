@@ -22,8 +22,6 @@ spirit migrate --host mydb:3306 --username root --password secret \
 - [enable-experimental-autoscaling](#enable-experimental-autoscaling)
 - [enable-experimental-gtid](#enable-experimental-gtid)
 - [host](#host)
-- [lint](#lint)
-- [lint-only](#lint-only)
 - [lock-wait-timeout](#lock-wait-timeout)
 - [max-commit-latency](#max-commit-latency)
 - [password](#password)
@@ -218,20 +216,6 @@ spirit migrate --enable-experimental-gtid \
 - Examples: `mydbhost`, `mydbhost:3307`
 
 The host (and optional port) to use when connecting to MySQL. If no port is provided, 3306 is used.
-
-### lint
-
-- Type: Boolean
-- Default value: `false`
-
-Spirit can optionally run lint checks before executing a migration. This uses the same linting engine as [`spirit lint`](lint.md) and [`spirit diff`](diff.md), but runs inline as part of the migration process.
-
-### lint-only
-
-- Type: Boolean
-- Default value: `false`
-
-Similar to `--lint` except spirit will exit after running linting.
 
 ### lock-wait-timeout
 
