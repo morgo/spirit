@@ -578,6 +578,8 @@ const (
 	FlushStatus
 	FlushHosts
 	FlushLogs
+	FlushUserResources
+	FlushOptimizerCosts
 )
 
 // LogType is the log type used in FLUSH statement.
@@ -590,6 +592,7 @@ const (
 	LogTypeError
 	LogTypeGeneral
 	LogTypeSlow
+	LogTypeRelay
 )
 
 // FlushStmt is a statement to flush tables/privileges/optimizer costs and so on.
@@ -601,6 +604,9 @@ type FlushStmt struct {
 	LogType         LogType
 	Tables          []*TableName // For FlushTableStmt, if Tables is empty, it means flush all tables.
 	ReadLock        bool
+	ForExport       bool
+	// Channel is the FOR CHANNEL of FLUSH RELAY LOGS.
+	Channel string
 }
 
 // Restore implements Node interface.
@@ -625,12 +631,19 @@ func (n *FlushStmt) Restore(ctx *format.RestoreCtx) error {
 		if n.ReadLock {
 			ctx.WriteKeyWord(" WITH READ LOCK")
 		}
+		if n.ForExport {
+			ctx.WriteKeyWord(" FOR EXPORT")
+		}
 	case FlushPrivileges:
 		ctx.WriteKeyWord("PRIVILEGES")
 	case FlushStatus:
 		ctx.WriteKeyWord("STATUS")
 	case FlushHosts:
 		ctx.WriteKeyWord("HOSTS")
+	case FlushUserResources:
+		ctx.WriteKeyWord("USER_RESOURCES")
+	case FlushOptimizerCosts:
+		ctx.WriteKeyWord("OPTIMIZER_COSTS")
 	case FlushLogs:
 		var logType string
 		switch n.LogType {
@@ -646,8 +659,14 @@ func (n *FlushStmt) Restore(ctx *format.RestoreCtx) error {
 			logType = "GENERAL LOGS"
 		case LogTypeSlow:
 			logType = "SLOW LOGS"
+		case LogTypeRelay:
+			logType = "RELAY LOGS"
 		}
 		ctx.WriteKeyWord(logType)
+		if n.LogType == LogTypeRelay && n.Channel != "" {
+			ctx.WriteKeyWord(" FOR CHANNEL ")
+			ctx.WriteString(n.Channel)
+		}
 	default:
 		return errors.New("unsupported type of FlushStmt")
 	}
@@ -1408,23 +1427,55 @@ func (n *AlterUserStmt) Accept(v Visitor) (Node, bool) {
 	return v.Leave(n)
 }
 
+// RedoLogAction is the {ENABLE | DISABLE} INNODB REDO_LOG action of ALTER INSTANCE.
+type RedoLogAction int
+
+// RedoLogAction values.
+const (
+	RedoLogActionNone RedoLogAction = iota
+	RedoLogActionEnable
+	RedoLogActionDisable
+)
+
 // AlterInstanceStmt modifies instance.
-// See https://dev.mysql.com/doc/refman/8.0/en/alter-instance.html
+// See https://dev.mysql.com/doc/refman/8.4/en/alter-instance.html
 type AlterInstanceStmt struct {
 	stmtNode
 
 	ReloadTLS         bool
 	NoRollbackOnError bool
+	// TLSChannel is the optional FOR CHANNEL of RELOAD TLS.
+	TLSChannel string
+	// RotateMasterKey is "INNODB" or "BINLOG" for ROTATE ... MASTER KEY.
+	RotateMasterKey string
+	// RedoLog is set for {ENABLE | DISABLE} INNODB REDO_LOG.
+	RedoLog       RedoLogAction
+	ReloadKeyring bool
 }
 
 // Restore implements Node interface.
 func (n *AlterInstanceStmt) Restore(ctx *format.RestoreCtx) error {
 	ctx.WriteKeyWord("ALTER INSTANCE")
-	if n.ReloadTLS {
+	switch {
+	case n.ReloadTLS:
 		ctx.WriteKeyWord(" RELOAD TLS")
-	}
-	if n.NoRollbackOnError {
-		ctx.WriteKeyWord(" NO ROLLBACK ON ERROR")
+		if n.TLSChannel != "" {
+			ctx.WriteKeyWord(" FOR CHANNEL ")
+			ctx.WriteName(n.TLSChannel)
+		}
+		if n.NoRollbackOnError {
+			ctx.WriteKeyWord(" NO ROLLBACK ON ERROR")
+		}
+	case n.RotateMasterKey != "":
+		ctx.WriteKeyWord(" ROTATE ")
+		ctx.WriteKeyWord(n.RotateMasterKey)
+		ctx.WriteKeyWord(" MASTER KEY")
+	case n.RedoLog == RedoLogActionEnable:
+		ctx.WriteKeyWord(" ENABLE INNODB REDO_LOG")
+	case n.RedoLog == RedoLogActionDisable:
+		ctx.WriteKeyWord(" DISABLE INNODB REDO_LOG")
+	case n.ReloadKeyring:
+		ctx.WriteKeyWord(" RELOAD KEYRING")
 	}
 	return nil
 }

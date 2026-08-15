@@ -212,6 +212,7 @@ type likeEscapeSpec struct {
 	of                "OF"
 	on                "ON"
 	optimize          "OPTIMIZE"
+	optimizerCosts    "OPTIMIZER_COSTS"
 	option            "OPTION"
 	optionally        "OPTIONALLY"
 	or                "OR"
@@ -257,6 +258,7 @@ type likeEscapeSpec struct {
 	starting          "STARTING"
 	stored            "STORED"
 	straightJoin      "STRAIGHT_JOIN"
+	system            "SYSTEM"
 	tableKwd          "TABLE"
 	terminated        "TERMINATED"
 	then              "THEN"
@@ -267,6 +269,7 @@ type likeEscapeSpec struct {
 	trailing          "TRAILING"
 	trigger           "TRIGGER"
 	trueKwd           "TRUE"
+	undo              "UNDO"
 	union             "UNION"
 	unique            "UNIQUE"
 	unlock            "UNLOCK"
@@ -296,6 +299,7 @@ type likeEscapeSpec struct {
 	/* The following tokens belong to UnReservedKeyword. Notice: make sure these tokens are contained in UnReservedKeyword. */
 	account                  "ACCOUNT"
 	action                   "ACTION"
+	active                   "ACTIVE"
 	after                    "AFTER"
 	against                  "AGAINST"
 	algorithm                "ALGORITHM"
@@ -303,6 +307,7 @@ type likeEscapeSpec struct {
 	any                      "ANY"
 	ascii                    "ASCII"
 	attribute                "ATTRIBUTE"
+	auto                     "AUTO"
 	autoextendSize           "AUTOEXTEND_SIZE"
 	autoIncrement            "AUTO_INCREMENT"
 	avg                      "AVG"
@@ -318,6 +323,7 @@ type likeEscapeSpec struct {
 	byteType                 "BYTE"
 	cascaded                 "CASCADED"
 	chain                    "CHAIN"
+	channel                  "CHANNEL"
 	charsetKwd               "CHARSET"
 	checksum                 "CHECKSUM"
 	cipher                   "CIPHER"
@@ -339,12 +345,15 @@ type likeEscapeSpec struct {
 	cpu                      "CPU"
 	current                  "CURRENT"
 	data                     "DATA"
+	datafile                 "DATAFILE"
 	dateType                 "DATE"
 	datetimeType             "DATETIME"
 	day                      "DAY"
 	deallocate               "DEALLOCATE"
 	definer                  "DEFINER"
+	definition               "DEFINITION"
 	delayKeyWrite            "DELAY_KEY_WRITE"
+	description              "DESCRIPTION"
 	directory                "DIRECTORY"
 	disable                  "DISABLE"
 	discard                  "DISCARD"
@@ -370,11 +379,14 @@ type likeEscapeSpec struct {
 	expansion                "EXPANSION"
 	expire                   "EXPIRE"
 	explore                  "EXPLORE"
+	export                   "EXPORT"
 	extended                 "EXTENDED"
+	extentSize               "EXTENT_SIZE"
 	failedLoginAttempts      "FAILED_LOGIN_ATTEMPTS"
 	faultsSym                "FAULTS"
 	fields                   "FIELDS"
 	file                     "FILE"
+	fileBlockSize            "FILE_BLOCK_SIZE"
 	first                    "FIRST"
 	fixed                    "FIXED"
 	flush                    "FLUSH"
@@ -395,7 +407,9 @@ type likeEscapeSpec struct {
 	hour                     "HOUR"
 	identified               "IDENTIFIED"
 	importKwd                "IMPORT"
+	inactive                 "INACTIVE"
 	indexes                  "INDEXES"
+	initialSize              "INITIAL_SIZE"
 	insertMethod             "INSERT_METHOD"
 	instance                 "INSTANCE"
 	invisible                "INVISIBLE"
@@ -405,6 +419,7 @@ type likeEscapeSpec struct {
 	isolation                "ISOLATION"
 	issuer                   "ISSUER"
 	jsonType                 "JSON"
+	keyring                  "KEYRING"
 	keyBlockSize             "KEY_BLOCK_SIZE"
 	language                 "LANGUAGE"
 	last                     "LAST"
@@ -414,17 +429,21 @@ type likeEscapeSpec struct {
 	list                     "LIST"
 	local                    "LOCAL"
 	locked                   "LOCKED"
+	logfile                  "LOGFILE"
 	logs                     "LOGS"
+	manual                   "MANUAL"
 	master                   "MASTER"
 	maxConnectionsPerHour    "MAX_CONNECTIONS_PER_HOUR"
 	maxQueriesPerHour        "MAX_QUERIES_PER_HOUR"
 	maxRows                  "MAX_ROWS"
+	maxSize                  "MAX_SIZE"
 	maxUpdatesPerHour        "MAX_UPDATES_PER_HOUR"
 	maxUserConnections       "MAX_USER_CONNECTIONS"
 	member                   "MEMBER"
 	memory                   "MEMORY"
 	merge                    "MERGE"
 	microsecond              "MICROSECOND"
+	migrate                  "MIGRATE"
 	minute                   "MINUTE"
 	minRows                  "MIN_ROWS"
 	mode                     "MODE"
@@ -433,6 +452,7 @@ type likeEscapeSpec struct {
 	multiLineString          "MULTILINESTRING"
 	multiPoint               "MULTIPOINT"
 	multiPolygon             "MULTIPOLYGON"
+	nameKwd                  "NAME"
 	names                    "NAMES"
 	national                 "NATIONAL"
 	ncharType                "NCHAR"
@@ -446,8 +466,10 @@ type likeEscapeSpec struct {
 	nvarcharType             "NVARCHAR"
 	offset                   "OFFSET"
 	old                      "OLD"
+	one                      "ONE"
 	only                     "ONLY"
 	open                     "OPEN"
+	organization             "ORGANIZATION"
 	packKeys                 "PACK_KEYS"
 	pageSym                  "PAGE"
 	parser                   "PARSER"
@@ -456,6 +478,7 @@ type likeEscapeSpec struct {
 	partitions               "PARTITIONS"
 	password                 "PASSWORD"
 	passwordLockTime         "PASSWORD_LOCK_TIME"
+	phase                    "PHASE"
 	pipesAsOr
 	plugins                  "PLUGINS"
 	point                    "POINT"
@@ -472,7 +495,10 @@ type likeEscapeSpec struct {
 	query                    "QUERY"
 	quick                    "QUICK"
 	rebuild                  "REBUILD"
+	recover                  "RECOVER"
 	redundant                "REDUNDANT"
+	reference                "REFERENCE"
+	relay                    "RELAY"
 	reload                   "RELOAD"
 	remove                   "REMOVE"
 	reorganize               "REORGANIZE"
@@ -483,12 +509,14 @@ type likeEscapeSpec struct {
 	resource                 "RESOURCE"
 	respect                  "RESPECT"
 	restart                  "RESTART"
+	resume                   "RESUME"
 	retain                   "RETAIN"
 	reuse                    "REUSE"
 	reverse                  "REVERSE"
 	role                     "ROLE"
 	rollback                 "ROLLBACK"
 	rollup                   "ROLLUP"
+	rotate                   "ROTATE"
 	routine                  "ROUTINE"
 	rowCount                 "ROW_COUNT"
 	rowFormat                "ROW_FORMAT"
@@ -537,6 +565,7 @@ type likeEscapeSpec struct {
 	subpartition             "SUBPARTITION"
 	subpartitions            "SUBPARTITIONS"
 	super                    "SUPER"
+	suspend                  "SUSPEND"
 	swaps                    "SWAPS"
 	switchesSym              "SWITCHES"
 	tables                   "TABLES"
@@ -556,9 +585,12 @@ type likeEscapeSpec struct {
 	unbounded                "UNBOUNDED"
 	uncommitted              "UNCOMMITTED"
 	undefined                "UNDEFINED"
+	undofile                 "UNDOFILE"
 	unicodeSym               "UNICODE"
 	unknown                  "UNKNOWN"
 	user                     "USER"
+	useFrm                   "USE_FRM"
+	userResources            "USER_RESOURCES"
 	validation               "VALIDATION"
 	value                    "VALUE"
 	variables                "VARIABLES"
@@ -569,7 +601,10 @@ type likeEscapeSpec struct {
 	week                     "WEEK"
 	weightString             "WEIGHT_STRING"
 	without                  "WITHOUT"
+	work                     "WORK"
 	x509                     "X509"
+	xa                       "XA"
+	xid                      "XID"
 	yearType                 "YEAR"
 
 	/* The following tokens belong to NotKeywordToken. Notice: make sure these tokens are contained in NotKeywordToken. */
@@ -722,6 +757,7 @@ type likeEscapeSpec struct {
 	SelectStmtWithClause       "common table expression SELECT statement"
 	RenameTableStmt            "rename table statement"
 	RenameUserStmt             "rename user statement"
+	RepairTableStmt            "REPAIR TABLE statement"
 	ReplaceIntoStmt            "REPLACE INTO statement"
 	RevokeStmt                 "Revoke statement"
 	RevokeRoleStmt             "Revoke role statement"
@@ -1015,7 +1051,13 @@ type likeEscapeSpec struct {
 	WhenClauseList                         "When clause list"
 	WithClause                             "With Clause"
 	WithList                               "With list"
-	WithReadLockOpt                        "With Read Lock opt"
+	WithReadLockOpt                        "FLUSH TABLES WITH READ LOCK / FOR EXPORT opt"
+	StartTransactionOpt                    "START TRANSACTION characteristic"
+	StartTransactionOptList                "START TRANSACTION characteristic list"
+	RepairTypeListOpt                      "REPAIR TABLE options"
+	HistogramUpdateOpt                     "UPDATE HISTOGRAM MANUAL/AUTO UPDATE opt"
+	NoRollbackOnErrorOpt                   "NO ROLLBACK ON ERROR opt"
+	DatabaseOptionReadOnlyValue            "READ ONLY option value"
 	WithGrantOptionOpt                     "With Grant Option opt"
 	WithValidation                         "with validation"
 	WithValidationOpt                      "optional with validation"
@@ -1083,45 +1125,48 @@ type likeEscapeSpec struct {
 	MatchOpt                               "optional MATCH clause"
 
 %type	<ident>
-	AsOpt             "AS or EmptyString"
-	KeyOrIndex        "{KEY|INDEX}"
-	ColumnKeywordOpt  "Column keyword or empty"
-	PrimaryOpt        "Optional primary keyword"
-	NowSym            "CURRENT_TIMESTAMP/LOCALTIME/LOCALTIMESTAMP"
-	NowSymFunc        "CURRENT_TIMESTAMP/LOCALTIME/LOCALTIMESTAMP/NOW"
-	CurdateSym        "CURDATE or CURRENT_DATE"
-	DefaultKwdOpt     "optional DEFAULT keyword"
-	DatabaseSym       "DATABASE or SCHEMA"
-	ExplainSym        "EXPLAIN or DESCRIBE or DESC"
-	RegexpSym         "REGEXP or RLIKE"
-	IntoOpt           "INTO or EmptyString"
-	ValueSym          "Value or Values"
-	NotSym            "Not token"
-	Char              "{CHAR|CHARACTER}"
-	NChar             "{NCHAR|NATIONAL CHARACTER|NATIONAL CHAR}"
-	Varchar           "{VARCHAR|VARCHARACTER|CHARACTER VARYING|CHAR VARYING}"
-	NVarchar          "{NATIONAL VARCHAR|NATIONAL VARCHARACTER|NVARCHAR|NCHAR VARCHAR|NATIONAL CHARACTER VARYING|NATIONAL CHAR VARYING|NCHAR VARYING}"
-	Year              "{YEAR|SQL_TSI_YEAR}"
-	DeallocateSym     "Deallocate or drop"
-	OuterOpt          "optional OUTER clause"
-	CrossOpt          "Cross join option"
-	TablesTerminalSym "{TABLE|TABLES}"
-	IsolationLevel    "Isolation level"
-	ShowIndexKwd      "Show index/indexs/key keyword"
-	DistinctKwd       "DISTINCT/DISTINCTROW keyword"
-	FromOrIn          "From or In"
-	OptTable          "Optional table keyword"
-	OptInteger        "Optional Integer keyword"
-	CharsetKw         "charset or charater set"
-	logAnd            "logical and operator"
-	logOr             "logical or operator"
-	LinearOpt         "linear or empty"
-	FieldsOrColumns   "Fields or columns"
-	StorageMedia      "{DISK|MEMORY|DEFAULT}"
-	EncryptionOpt     "Encryption option 'Y' or 'N'"
-	FirstOrNext       "FIRST or NEXT"
-	RowOrRows         "ROW or ROWS"
-	Replica           "{REPLICA | SLAVE}"
+	AsOpt                "AS or EmptyString"
+	KeyOrIndex           "{KEY|INDEX}"
+	ColumnKeywordOpt     "Column keyword or empty"
+	PrimaryOpt           "Optional primary keyword"
+	WorkOpt              "Optional WORK keyword"
+	TLSChannelOpt        "ALTER INSTANCE RELOAD TLS FOR CHANNEL opt"
+	FlushRelayChannelOpt "FLUSH RELAY LOGS FOR CHANNEL opt"
+	NowSym               "CURRENT_TIMESTAMP/LOCALTIME/LOCALTIMESTAMP"
+	NowSymFunc           "CURRENT_TIMESTAMP/LOCALTIME/LOCALTIMESTAMP/NOW"
+	CurdateSym           "CURDATE or CURRENT_DATE"
+	DefaultKwdOpt        "optional DEFAULT keyword"
+	DatabaseSym          "DATABASE or SCHEMA"
+	ExplainSym           "EXPLAIN or DESCRIBE or DESC"
+	RegexpSym            "REGEXP or RLIKE"
+	IntoOpt              "INTO or EmptyString"
+	ValueSym             "Value or Values"
+	NotSym               "Not token"
+	Char                 "{CHAR|CHARACTER}"
+	NChar                "{NCHAR|NATIONAL CHARACTER|NATIONAL CHAR}"
+	Varchar              "{VARCHAR|VARCHARACTER|CHARACTER VARYING|CHAR VARYING}"
+	NVarchar             "{NATIONAL VARCHAR|NATIONAL VARCHARACTER|NVARCHAR|NCHAR VARCHAR|NATIONAL CHARACTER VARYING|NATIONAL CHAR VARYING|NCHAR VARYING}"
+	Year                 "{YEAR|SQL_TSI_YEAR}"
+	DeallocateSym        "Deallocate or drop"
+	OuterOpt             "optional OUTER clause"
+	CrossOpt             "Cross join option"
+	TablesTerminalSym    "{TABLE|TABLES}"
+	IsolationLevel       "Isolation level"
+	ShowIndexKwd         "Show index/indexs/key keyword"
+	DistinctKwd          "DISTINCT/DISTINCTROW keyword"
+	FromOrIn             "From or In"
+	OptTable             "Optional table keyword"
+	OptInteger           "Optional Integer keyword"
+	CharsetKw            "charset or charater set"
+	logAnd               "logical and operator"
+	logOr                "logical or operator"
+	LinearOpt            "linear or empty"
+	FieldsOrColumns      "Fields or columns"
+	StorageMedia         "{DISK|MEMORY|DEFAULT}"
+	EncryptionOpt        "Encryption option 'Y' or 'N'"
+	FirstOrNext          "FIRST or NEXT"
+	RowOrRows            "ROW or ROWS"
+	Replica              "{REPLICA | SLAVE}"
 
 %type	<ident>
 	Identifier                      "identifier or unreserved keyword"
@@ -1906,7 +1951,7 @@ Symbol:
  *     [, tbl_name2 TO new_tbl_name2] ...
  *******************************************************************************************/
 RenameTableStmt:
-	"RENAME" "TABLE" TableToTableList
+	"RENAME" TableOrTables TableToTableList
 	{
 		$$ = &ast.RenameTableStmt{
 			TableToTables: $3.([]*ast.TableToTable),
@@ -1976,28 +2021,53 @@ UserToUser:
  *
  *******************************************************************/
 AnalyzeTableStmt:
-	"ANALYZE" NoWriteToBinLogAliasOpt "TABLE" TableNameList
+	"ANALYZE" NoWriteToBinLogAliasOpt TableOrTables TableNameList
 	{
 		$$ = &ast.AnalyzeTableStmt{TableNames: $4.([]*ast.TableName), NoWriteToBinLog: $2.(bool)}
 	}
-|	"ANALYZE" NoWriteToBinLogAliasOpt "TABLE" TableName "UPDATE" "HISTOGRAM" "ON" IdentList AnalyzeOptionListOpt
+|	"ANALYZE" NoWriteToBinLogAliasOpt TableOrTables TableNameList "UPDATE" "HISTOGRAM" "ON" IdentList AnalyzeOptionListOpt HistogramUpdateOpt
 	{
 		$$ = &ast.AnalyzeTableStmt{
-			TableNames:         []*ast.TableName{$4.(*ast.TableName)},
+			TableNames:         $4.([]*ast.TableName),
 			NoWriteToBinLog:    $2.(bool),
 			ColumnNames:        $8.([]ast.CIStr),
 			AnalyzeOpts:        $9.([]ast.AnalyzeOpt),
+			HistogramUpdate:    $10.(ast.HistogramUpdateType),
 			HistogramOperation: ast.HistogramOperationUpdate,
 		}
 	}
-|	"ANALYZE" NoWriteToBinLogAliasOpt "TABLE" TableName "DROP" "HISTOGRAM" "ON" IdentList
+|	"ANALYZE" NoWriteToBinLogAliasOpt TableOrTables TableNameList "UPDATE" "HISTOGRAM" "ON" IdentList "USING" "DATA" stringLit
 	{
 		$$ = &ast.AnalyzeTableStmt{
-			TableNames:         []*ast.TableName{$4.(*ast.TableName)},
+			TableNames:         $4.([]*ast.TableName),
+			NoWriteToBinLog:    $2.(bool),
+			ColumnNames:        $8.([]ast.CIStr),
+			HistogramOperation: ast.HistogramOperationUpdate,
+			UsingData:          true,
+			HistogramData:      $11,
+		}
+	}
+|	"ANALYZE" NoWriteToBinLogAliasOpt TableOrTables TableNameList "DROP" "HISTOGRAM" "ON" IdentList
+	{
+		$$ = &ast.AnalyzeTableStmt{
+			TableNames:         $4.([]*ast.TableName),
 			NoWriteToBinLog:    $2.(bool),
 			ColumnNames:        $8.([]ast.CIStr),
 			HistogramOperation: ast.HistogramOperationDrop,
 		}
+	}
+
+HistogramUpdateOpt:
+	{
+		$$ = ast.HistogramUpdateNop
+	}
+|	"MANUAL" "UPDATE"
+	{
+		$$ = ast.HistogramUpdateManual
+	}
+|	"AUTO" "UPDATE"
+	{
+		$$ = ast.HistogramUpdateAuto
 	}
 
 AnalyzeOptionListOpt:
@@ -2046,7 +2116,7 @@ AssignmentList:
 	}
 
 BeginTransactionStmt:
-	"BEGIN"
+	"BEGIN" WorkOpt
 	{
 		$$ = &ast.BeginStmt{}
 	}
@@ -2054,20 +2124,39 @@ BeginTransactionStmt:
 	{
 		$$ = &ast.BeginStmt{}
 	}
-|	"START" "TRANSACTION" "READ" "WRITE"
-	{
-		$$ = &ast.BeginStmt{}
-	}
-|	"START" "TRANSACTION" "WITH" "CONSISTENT" "SNAPSHOT"
-	{
-		$$ = &ast.BeginStmt{}
-	}
-|	"START" "TRANSACTION" "READ" "ONLY"
+|	"START" "TRANSACTION" StartTransactionOptList
 	{
 		$$ = &ast.BeginStmt{
-			ReadOnly: true,
+			ReadOnly: $3.(bool),
 		}
 	}
+
+// StartTransactionOptList is a comma-separated list of transaction
+// characteristics; its value is whether READ ONLY was among them.
+StartTransactionOptList:
+	StartTransactionOpt
+|	StartTransactionOptList ',' StartTransactionOpt
+	{
+		$$ = $1.(bool) || $3.(bool)
+	}
+
+StartTransactionOpt:
+	"READ" "ONLY"
+	{
+		$$ = true
+	}
+|	"READ" "WRITE"
+	{
+		$$ = false
+	}
+|	"WITH" "CONSISTENT" "SNAPSHOT"
+	{
+		$$ = false
+	}
+
+WorkOpt:
+	{}
+|	"WORK"
 
 BinlogStmt:
 	"BINLOG" stringLit
@@ -2189,13 +2278,13 @@ ColumnNameOrUserVarListOptWithBrackets:
 	}
 
 CommitStmt:
-	"COMMIT"
+	"COMMIT" WorkOpt
 	{
 		$$ = &ast.CommitStmt{}
 	}
-|	"COMMIT" CompletionTypeWithinTransaction
+|	"COMMIT" WorkOpt CompletionTypeWithinTransaction
 	{
-		$$ = &ast.CommitStmt{CompletionType: $2.(ast.CompletionType)}
+		$$ = &ast.CommitStmt{CompletionType: $3.(ast.CompletionType)}
 	}
 
 PrimaryOpt:
@@ -2951,6 +3040,22 @@ DatabaseOption:
 |	DefaultKwdOpt "ENCRYPTION" EqOpt EncryptionOpt
 	{
 		$$ = &ast.DatabaseOption{Tp: ast.DatabaseOptionEncryption, Value: $4}
+	}
+|	"READ" "ONLY" EqOpt DatabaseOptionReadOnlyValue
+	{
+		opt := $4.(*ast.DatabaseOption)
+		opt.Tp = ast.DatabaseOptionReadOnly
+		$$ = opt
+	}
+
+DatabaseOptionReadOnlyValue:
+	"DEFAULT"
+	{
+		$$ = &ast.DatabaseOption{Value: "DEFAULT"}
+	}
+|	NUM
+	{
+		$$ = &ast.DatabaseOption{UintValue: getUint64FromNUM($1)}
 	}
 
 DatabaseOptionListOpt:
@@ -4711,6 +4816,38 @@ UnReservedKeyword:
 |	"MULTIPOLYGON"
 |	"POLYGON"
 |	"SRID"
+|	"ACTIVE"
+|	"AUTO"
+|	"CHANNEL"
+|	"DATAFILE"
+|	"DEFINITION"
+|	"DESCRIPTION"
+|	"EXPORT"
+|	"EXTENT_SIZE"
+|	"FILE_BLOCK_SIZE"
+|	"INACTIVE"
+|	"INITIAL_SIZE"
+|	"KEYRING"
+|	"LOGFILE"
+|	"MANUAL"
+|	"MAX_SIZE"
+|	"MIGRATE"
+|	"NAME"
+|	"ONE"
+|	"ORGANIZATION"
+|	"PHASE"
+|	"RECOVER"
+|	"REFERENCE"
+|	"RELAY"
+|	"RESUME"
+|	"ROTATE"
+|	"SUSPEND"
+|	"UNDOFILE"
+|	"USE_FRM"
+|	"USER_RESOURCES"
+|	"WORK"
+|	"XA"
+|	"XID"
 
 NotKeywordToken:
 	"ADDDATE"
@@ -6641,21 +6778,21 @@ DeallocateSym:
 |	"DROP"
 
 RollbackStmt:
-	"ROLLBACK"
+	"ROLLBACK" WorkOpt
 	{
 		$$ = &ast.RollbackStmt{}
 	}
-|	"ROLLBACK" CompletionTypeWithinTransaction
+|	"ROLLBACK" WorkOpt CompletionTypeWithinTransaction
 	{
-		$$ = &ast.RollbackStmt{CompletionType: $2.(ast.CompletionType)}
+		$$ = &ast.RollbackStmt{CompletionType: $3.(ast.CompletionType)}
 	}
-|	"ROLLBACK" "TO" Identifier
-	{
-		$$ = &ast.RollbackStmt{SavepointName: $3}
-	}
-|	"ROLLBACK" "TO" "SAVEPOINT" Identifier
+|	"ROLLBACK" WorkOpt "TO" Identifier
 	{
 		$$ = &ast.RollbackStmt{SavepointName: $4}
+	}
+|	"ROLLBACK" WorkOpt "TO" "SAVEPOINT" Identifier
+	{
+		$$ = &ast.RollbackStmt{SavepointName: $5}
 	}
 
 CompletionTypeWithinTransaction:
@@ -8937,6 +9074,18 @@ FlushOption:
 			Tp: ast.FlushHosts,
 		}
 	}
+|	"USER_RESOURCES"
+	{
+		$$ = &ast.FlushStmt{
+			Tp: ast.FlushUserResources,
+		}
+	}
+|	"OPTIMIZER_COSTS"
+	{
+		$$ = &ast.FlushStmt{
+			Tp: ast.FlushOptimizerCosts,
+		}
+	}
 |	LogTypeOpt "LOGS"
 	{
 		$$ = &ast.FlushStmt{
@@ -8944,13 +9093,36 @@ FlushOption:
 			LogType: $1.(ast.LogType),
 		}
 	}
-|	TableOrTables TableNameListOpt WithReadLockOpt
+|	"RELAY" "LOGS" FlushRelayChannelOpt
 	{
 		$$ = &ast.FlushStmt{
-			Tp:       ast.FlushTables,
-			Tables:   $2.([]*ast.TableName),
-			ReadLock: $3.(bool),
+			Tp:      ast.FlushLogs,
+			LogType: ast.LogTypeRelay,
+			Channel: $3,
 		}
+	}
+|	TableOrTables TableNameListOpt WithReadLockOpt
+	{
+		stmt := &ast.FlushStmt{
+			Tp:     ast.FlushTables,
+			Tables: $2.([]*ast.TableName),
+		}
+		switch $3.(int) {
+		case 1:
+			stmt.ReadLock = true
+		case 2:
+			stmt.ForExport = true
+		}
+		$$ = stmt
+	}
+
+FlushRelayChannelOpt:
+	{
+		$$ = ""
+	}
+|	"FOR" "CHANNEL" stringLit
+	{
+		$$ = $3
 	}
 
 LogTypeOpt:
@@ -9002,11 +9174,15 @@ TableNameListOpt:
 
 WithReadLockOpt:
 	{
-		$$ = false
+		$$ = 0
 	}
 |	"WITH" "READ" "LOCK"
 	{
-		$$ = true
+		$$ = 1
+	}
+|	"FOR" "EXPORT"
+	{
+		$$ = 2
 	}
 
 Statement:
@@ -9047,6 +9223,7 @@ Statement:
 |	PreparedStmt
 |	RollbackStmt
 |	RenameTableStmt
+|	RepairTableStmt
 |	RenameUserStmt
 |	ReplaceIntoStmt
 |	ReleaseSavepointStmt
@@ -10324,18 +10501,68 @@ AlterInstanceStmt:
 	}
 
 InstanceOption:
-	"RELOAD" "TLS"
-	{
-		$$ = &ast.AlterInstanceStmt{
-			ReloadTLS: true,
-		}
-	}
-|	"RELOAD" "TLS" "NO" "ROLLBACK" "ON" "ERROR"
+	"RELOAD" "TLS" TLSChannelOpt NoRollbackOnErrorOpt
 	{
 		$$ = &ast.AlterInstanceStmt{
 			ReloadTLS:         true,
-			NoRollbackOnError: true,
+			TLSChannel:        $3,
+			NoRollbackOnError: $4.(bool),
 		}
+	}
+|	"RELOAD" "KEYRING"
+	{
+		$$ = &ast.AlterInstanceStmt{
+			ReloadKeyring: true,
+		}
+	}
+|	"ROTATE" Identifier "MASTER" "KEY"
+	{
+		engine := strings.ToUpper($2)
+		if engine != "INNODB" && engine != "BINLOG" {
+			yylex.AppendError(yylex.Errorf("ALTER INSTANCE ROTATE %s MASTER KEY is not supported", $2))
+			return 1
+		}
+		$$ = &ast.AlterInstanceStmt{
+			RotateMasterKey: engine,
+		}
+	}
+|	"ENABLE" Identifier Identifier
+	{
+		if !strings.EqualFold($2, "INNODB") || !strings.EqualFold($3, "REDO_LOG") {
+			yylex.AppendError(yylex.Errorf("ALTER INSTANCE ENABLE %s %s is not supported", $2, $3))
+			return 1
+		}
+		$$ = &ast.AlterInstanceStmt{
+			RedoLog: ast.RedoLogActionEnable,
+		}
+	}
+|	"DISABLE" Identifier Identifier
+	{
+		if !strings.EqualFold($2, "INNODB") || !strings.EqualFold($3, "REDO_LOG") {
+			yylex.AppendError(yylex.Errorf("ALTER INSTANCE DISABLE %s %s is not supported", $2, $3))
+			return 1
+		}
+		$$ = &ast.AlterInstanceStmt{
+			RedoLog: ast.RedoLogActionDisable,
+		}
+	}
+
+TLSChannelOpt:
+	{
+		$$ = ""
+	}
+|	"FOR" "CHANNEL" Identifier
+	{
+		$$ = $3
+	}
+
+NoRollbackOnErrorOpt:
+	{
+		$$ = false
+	}
+|	"NO" "ROLLBACK" "ON" "ERROR"
+	{
+		$$ = true
 	}
 
 UserSpec:
@@ -11474,6 +11701,38 @@ TableLockList:
  * Non-transactional Delete Statement
  * Split a SQL on a column. Used for bulk delete that doesn't need ACID.
  *******************************************************************/
+RepairTableStmt:
+	"REPAIR" NoWriteToBinLogAliasOpt TableOrTables TableNameList RepairTypeListOpt
+	{
+		stmt := $5.(*ast.RepairTableStmt)
+		stmt.NoWriteToBinLog = $2.(bool)
+		stmt.Tables = $4.([]*ast.TableName)
+		$$ = stmt
+	}
+
+RepairTypeListOpt:
+	{
+		$$ = &ast.RepairTableStmt{}
+	}
+|	RepairTypeListOpt "QUICK"
+	{
+		stmt := $1.(*ast.RepairTableStmt)
+		stmt.Quick = true
+		$$ = stmt
+	}
+|	RepairTypeListOpt "EXTENDED"
+	{
+		stmt := $1.(*ast.RepairTableStmt)
+		stmt.Extended = true
+		$$ = stmt
+	}
+|	RepairTypeListOpt "USE_FRM"
+	{
+		stmt := $1.(*ast.RepairTableStmt)
+		stmt.UseFrm = true
+		$$ = stmt
+	}
+
 OptimizeTableStmt:
 	"OPTIMIZE" NoWriteToBinLogAliasOpt TableOrTables TableNameList
 	{
