@@ -178,9 +178,9 @@ func loadOnlyThrottler(t throttler.Throttler) throttler.Throttler {
 }
 
 // Paced is the optional capability a Checker exposes when it can report how it
-// is currently being paced. Runner status lines use it so a slow checksum can be
-// told apart from a throttled or scaled-down one — the same question
-// copier-is-throttled answers for the copy phase.
+// is currently being paced. The runner status block uses it so a slow checksum can be
+// told apart from a throttled or scaled-down one — the same question the copier
+// row's throttled= answers for the copy phase.
 type Paced interface {
 	// Threads is the live worker count, which the autoscaler may have moved
 	// away from the configured concurrency.
@@ -188,17 +188,22 @@ type Paced interface {
 	// IsThrottled reports whether the throttler is currently telling the
 	// checksum to pause.
 	IsThrottled() bool
+	// ChunkSize is the row count of the most recently checksummed chunk. The
+	// checksum sizes its chunks dynamically just as the copy does, so the same
+	// field is worth watching in both phases.
+	ChunkSize() uint64
 }
 
-// StatusSuffix renders the pacing fields for a runner status line, or "" if the
-// checker does not report them. Mirrors applier.StatusSuffix, including the
-// leading space so callers can append it unconditionally.
+// StatusSuffix renders the pacing fields for the checksum row of a runner
+// status block, or "" if the checker does not report them. It keeps the leading
+// two spaces used between fields within a row, so callers can append it
+// unconditionally.
 func StatusSuffix(c Checker) string {
 	p, ok := c.(Paced)
 	if !ok {
 		return ""
 	}
-	return fmt.Sprintf(" checksum-threads=%d checksum-is-throttled=%v", p.Threads(), p.IsThrottled())
+	return fmt.Sprintf("  chunk-size=%d  threads=%d  throttled=%v", p.ChunkSize(), p.Threads(), p.IsThrottled())
 }
 
 type CheckerConfig struct {

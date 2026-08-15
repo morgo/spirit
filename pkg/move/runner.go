@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"slices"
 	"strings"
 	"sync"
@@ -115,6 +116,11 @@ type Runner struct {
 	// by the continuous-checksum goroutine and read by the checkpoint
 	// dumper goroutine — both under checkpointMu. Mirrors pkg/migration.
 	continuousChecker checksum.Checker
+
+	// lastCheckpoint is when the checkpoint was last persisted and the
+	// position(s) it saved, reported together on the ckpt row of the status
+	// block. Mirrors pkg/migration (#329).
+	lastCheckpoint status.LastCheckpoint
 
 	// checkpointMu serializes checkpoint persistence (DumpCheckpoint's
 	// watermark-condition evaluation + INSERT) against the sentinel-abort
@@ -1393,6 +1399,10 @@ func (r *Runner) fatalError(reason change.FatalReason) bool {
 	return true
 }
 
+// Status returns the periodic report on the whole move: a header line plus one
+// indented row per subsystem (see status.Block). It deliberately absorbs what
+// used to be separate periodic lines from the change feeds (flushes, rotations)
+// and the checkpoint dumper — see github.com/block/spirit/issues/329.
 func (r *Runner) Status() string {
 	state := r.status.Get()
 	if state > status.CutOver {
@@ -1400,47 +1410,78 @@ func (r *Runner) Status() string {
 	}
 	switch state { //nolint:exhaustive
 	case status.CopyRows:
-		// Status for copy rows
-		return fmt.Sprintf("migration status: state=%s copy-progress=%s binlog-deltas=%v total-time=%s copier-time=%s copier-remaining-time=%v copier-is-throttled=%v%s",
-			r.status.Get().String(),
-			r.copier.GetProgress(),
-			r.getDeltaLenAll(),
+		progress := r.copier.CopyProgress()
+		b := status.NewBlock("migration status: state=%s total-time=%s copier-time=%s",
+			state.String(),
 			r.status.TotalElapsed().Round(time.Second),
 			r.status.Elapsed().Round(time.Second),
+		)
+		b.Row("copier", "%6.2f%%  %d/%d  chunk-size=%d  eta=%s  throttled=%v",
+			progress.Fraction()*100,
+			progress.RowsCopied,
+			progress.RowsTotal,
+			r.copier.ChunkSize(),
 			r.copier.GetETA(),
 			r.copier.GetThrottler().IsThrottled(),
-			applier.StatusSuffix(r.applier),
 		)
+		b.Row("applier", "%s", applier.StatusRow(r.applier))
+		b.Row("binlog", "deltas=%d  %s", r.getDeltaLenAll(), r.feedStatusRow())
+		b.Row("ckpt", "%s", r.lastCheckpoint.Row())
+		return b.String()
 	case status.WaitingOnSentinelTable:
-		return fmt.Sprintf("migration status: state=%s total-time=%s sentinel-wait-time=%s sentinel-max-wait-time=%s",
-			r.status.Get().String(),
+		b := status.NewBlock("migration status: state=%s total-time=%s",
+			state.String(),
 			r.status.TotalElapsed().Round(time.Second),
+		)
+		b.Row("sentinel", "waiting=%s  max-wait=%s",
 			r.status.Elapsed().Round(time.Second),
 			sentinel.WaitLimit,
 		)
+		b.Row("binlog", "deltas=%d  %s", r.getDeltaLenAll(), r.feedStatusRow())
+		b.Row("ckpt", "%s", r.lastCheckpoint.Row())
+		return b.String()
 	case status.ApplyChangeset, status.PostChecksum:
 		// We've finished copying rows, and we are now trying to reduce the number of binlog deltas before
 		// proceeding to the checksum and then the final cutover.
-		return fmt.Sprintf("migration status: state=%s binlog-deltas=%v total-time=%s%s",
-			r.status.Get().String(),
-			r.getDeltaLenAll(),
+		b := status.NewBlock("migration status: state=%s total-time=%s",
+			state.String(),
 			r.status.TotalElapsed().Round(time.Second),
-			applier.StatusSuffix(r.applier),
 		)
+		b.Row("applier", "%s", applier.StatusRow(r.applier))
+		b.Row("binlog", "deltas=%d  %s", r.getDeltaLenAll(), r.feedStatusRow())
+		// See pkg/migration: the dumper keeps checkpointing during the drain,
+		// so the resume position is still worth watching here.
+		b.Row("ckpt", "%s", r.lastCheckpoint.Row())
+		return b.String()
 	case status.Checksum:
 		// This could take a while if it's a large table.
-		return fmt.Sprintf("migration status: state=%s checksum-progress=%s binlog-deltas=%v total-time=%s checksum-time=%s",
-			r.status.Get().String(),
-			r.checker.GetProgress().String(),
-			r.getDeltaLenAll(),
+		progress := r.checker.GetProgress()
+		b := status.NewBlock("migration status: state=%s total-time=%s checksum-time=%s",
+			state.String(),
 			r.status.TotalElapsed().Round(time.Second),
 			r.status.Elapsed().Round(time.Second),
 		)
-	case status.RestoreSecondaryIndexes:
-		return fmt.Sprintf("migration status: state=%s total-time=%s",
-			r.status.Get().String(),
-			r.status.TotalElapsed().Round(time.Second),
+		b.Row("checksum", "%6.2f%%  %d/%d%s",
+			progress.Fraction()*100,
+			progress.RowsChecked,
+			progress.RowsTotal,
+			checksum.StatusSuffix(r.checker),
 		)
+		b.Row("binlog", "deltas=%d  %s", r.getDeltaLenAll(), r.feedStatusRow())
+		b.Row("ckpt", "%s", r.lastCheckpoint.Row())
+		return b.String()
+	case status.RestoreSecondaryIndexes, status.AnalyzeTable:
+		// Neither phase has progress to report, but both can block for a long
+		// time on a busy server, and with the per-dump checkpoint line now at
+		// DEBUG this is the only INFO output they produce. See pkg/migration.
+		b := status.NewBlock("migration status: state=%s total-time=%s state-time=%s",
+			state.String(),
+			r.status.TotalElapsed().Round(time.Second),
+			r.status.Elapsed().Round(time.Second),
+		)
+		b.Row("binlog", "deltas=%d  %s", r.getDeltaLenAll(), r.feedStatusRow())
+		b.Row("ckpt", "%s", r.lastCheckpoint.Row())
+		return b.String()
 	default:
 		return ""
 	}
@@ -1992,11 +2033,14 @@ func (r *Runner) DumpCheckpoint(ctx context.Context) error {
 			checksumWatermark = wm
 		}
 	}
+	// Debug, not Info: the status block's ckpt row reports it instead —
+	// see pkg/migration's DumpCheckpoint (#329).
+	//
 	// Note: when we dump the lowWatermark to the log, we are exposing the PK values,
 	// when using the composite chunker are based on actual user-data.
 	// We believe this is OK but may change it in the future. Please do not
 	// add any other fields to this log line.
-	r.logger.Info("checkpoint",
+	r.logger.Debug("checkpoint",
 		"low-watermark", copierWatermark,
 		"binlog-positions", string(positionsJSON))
 	// Statement and OriginalTableName are unused by move; Position carries the
@@ -2011,7 +2055,28 @@ func (r *Runner) DumpCheckpoint(ctx context.Context) error {
 		// checkpoint table, which is fatal.
 		return fmt.Errorf("%w: %w", status.ErrCouldNotWriteCheckpoint, err)
 	}
+	r.lastCheckpoint.Record(renderCheckpointPosition(positions))
 	return nil
+}
+
+// renderCheckpointPosition turns the per-source position map that gets
+// persisted as JSON into something readable on a single status row. A
+// single-source move (the common case) renders the bare position, so it reads
+// exactly like pkg/migration's; a multi-source move renders key=position for
+// every source, sorted, because the sources advance independently and the
+// question the field answers — is any of these too far behind to still be
+// resumable? — has to be asked of each one.
+func renderCheckpointPosition(positions map[string]string) string {
+	if len(positions) == 1 {
+		for _, pos := range positions {
+			return pos
+		}
+	}
+	parts := make([]string, 0, len(positions))
+	for _, key := range slices.Sorted(maps.Keys(positions)) {
+		parts = append(parts, key+"="+positions[key])
+	}
+	return strings.Join(parts, ",")
 }
 
 func (r *Runner) Cancel() {
@@ -2176,6 +2241,17 @@ func (r *Runner) getDeltaLenAll() int {
 		total += r.sources[i].replClient.GetDeltaLen()
 	}
 	return total
+}
+
+// feedStatusRow renders the change-feed fields for the status block's binlog
+// row across every source. change.StatusRow merges them into one set of fields
+// (see there for how), so a 16-shard move does not print 16 rows.
+func (r *Runner) feedStatusRow() string {
+	srcs := make([]change.Source, 0, len(r.sources))
+	for i := range r.sources {
+		srcs = append(srcs, r.sources[i].replClient)
+	}
+	return change.StatusRow(srcs...)
 }
 
 // stopPeriodicFlushAll stops periodic flushing on all replication clients.

@@ -64,6 +64,11 @@ type SingleChecker struct {
 	yieldsPerformed atomic.Uint64 // number of yield/resume cycles performed
 	// chunks accumulates the chunk-size distribution for the pass in flight.
 	chunks *chunkObserver
+	// chunkSize is the row count of the most recently checksummed chunk,
+	// reported on the runner status block. Sampled from the chunk rather than
+	// read off the chunker so it works for every Chunker implementation,
+	// including the multi-table one. Mirrors copier.Copier.ChunkSize.
+	chunkSize atomic.Uint64
 }
 
 // SetThrottler installs the throttler the checksum paces itself against. It
@@ -124,6 +129,12 @@ func (c *SingleChecker) Threads() int {
 	return c.concurrency
 }
 
+// ChunkSize reports the row count of the most recently checksummed chunk, or 0
+// before the first one.
+func (c *SingleChecker) ChunkSize() uint64 {
+	return c.chunkSize.Load()
+}
+
 // IsThrottled reports whether the throttler is currently pausing dispatch.
 func (c *SingleChecker) IsThrottled() bool {
 	return c.getThrottler().IsThrottled()
@@ -131,6 +142,7 @@ func (c *SingleChecker) IsThrottled() bool {
 
 func (c *SingleChecker) ChecksumChunk(ctx context.Context, trxPool *dbconn.TrxPool, chunk *table.Chunk) error {
 	startTime := time.Now()
+	c.chunkSize.Store(chunk.ChunkSize)
 	trx, err := trxPool.Get()
 	if err != nil {
 		return err

@@ -26,7 +26,7 @@ err := r.status.Do(status.CopyRows, func() error {
 
 `Set` remains the transition primitive for states with no bracketable extent from the setter's perspective (`Close`, `ErrCleanup`); it closes the previous state's still-open interval (a gap after a completed `Do` stays unattributed), preserving the historical "one state ends when the next starts" semantics. In both cases the state stays current after the phase's code completes — `Get()` and the ordinal comparisons above behave exactly as before.
 
-Because the tracker owns the timing, the runners no longer carry ad-hoc fields like `copyDuration` or `sentinelWaitStartTime`: status lines render `Elapsed()` (time in the current state) and final summaries render `Duration(state)` (total time attributed to a state, accumulating across repeat visits). The two can disagree after a bracket completes: `Duration(state)` freezes when the bracket closes, while `Elapsed()` keeps growing until the next transition.
+Because the tracker owns the timing, the runners no longer carry ad-hoc fields like `copyDuration` or `sentinelWaitStartTime`: the status block header renders `Elapsed()` (time in the current state) and final summaries render `Duration(state)` (total time attributed to a state, accumulating across repeat visits). The two can disagree after a bracket completes: `Duration(state)` freezes when the bracket closes, while `Elapsed()` keeps growing until the next transition.
 
 The tracker assumes spirit's linear execution model — one goroutine advances through the phases in order, and the only concurrent transition is a fatal `Set(ErrCleanup)` racing an open bracket (time accrues to the bracketed state up to the fatal transition; the bracket's own exit becomes a no-op). It is not designed for concurrent or overlapping phases. `Begin()` marks the start of a run and resets all timing; runners call it once at the top of `Run`.
 
@@ -42,6 +42,35 @@ The `Task` interface defines the contract that a migration runner must implement
 2. **Checkpoint dumper**: Calls `task.DumpCheckpoint()` every 50 seconds until cutover. If a checkpoint write fails (with anything other than `ErrWatermarkNotReady` or `context.Canceled`), the task is **cancelled immediately**. The rationale is that it is better to fail early than to discover after a multi-day migration that progress was never being saved.
 
 The checkpoint dumper also handles a race condition where the state transitions past cutover mid-checkpoint — the checkpoint table may have already been dropped, so this case is handled gracefully rather than treated as an error.
+
+### One report, not three lines
+
+The status report is deliberately the *only* recurring INFO output a run emits. It used to compete with a per-checkpoint line and a per-flush line from the change feed, each on its own interval, which made the log hard to read ([#329](https://github.com/block/spirit/issues/329)). Those events now report themselves here instead, and still log their detail at DEBUG.
+
+`Task.Status()` still returns a `string`; each runner now builds a `Block` and returns its rendered form — a header line plus one indented row per subsystem. All three runners build it the same way.
+
+```
+migration status: state=copyRows total-time=2m6s copier-time=2m0s
+  copier   30.84%  5048712/16370180  chunk-size=92220  eta=4m39s  throttled=false
+  applier queue=128/128  workers=4  wait-p50=1.323s  write-p50=32ms  write-p90=127ms
+  binlog  deltas=0  rotations=962 (0 forced)  flushed 0s ago (took 3µs, 0 rows)
+  ckpt    20s ago  binlog.000123:41909012
+```
+
+| Row | Source | Contents |
+| --- | --- | --- |
+| `copier` | `copier.Copier` | Percentage and counts from `CopyProgress()`, then `chunk-size=` (rows in the most recently claimed chunk — the dynamic chunker's current sizing decision, previously visible only inside the checkpoint line's watermark JSON), the ETA, and whether a throttler is pausing the copy. |
+| `applier` | `applier.Stats` | `queue=` is occupancy, not progress: at capacity is the healthy steady state for a copy, and a queue that empties means the pipeline has gone read-limited. See `pkg/applier/README.md` for which fields render and which appear only when they carry a diagnosis. |
+| `binlog` | runner + `change.FeedStats` | `deltas=` is the runner's unapplied-change count; the rest is the feed. `rotations=` replaces go-mysql's per-rotation `rotate to next binlog` line, which spirit now demotes to DEBUG, and `(n forced)` is the subset spirit caused itself by issuing `FLUSH BINARY LOGS` from `BlockWait` when the buffered position stalled. |
+| `ckpt` | `status.LastCheckpoint` | How long ago the checkpoint was persisted and the change-feed coordinate it saved — where a resumed run would restart reading. The pair is what answers whether that point is still within the source's binlog retention. `never` before the first checkpoint; a multi-source move renders `key=position` per source. |
+| `checksum` | `checksum.Checker` | Replaces the copier row during the checksum phase, with its own `chunk-size=` (the checksum sizes chunks dynamically too) plus `threads=` / `throttled=`, for the same reason the copier row reports throttling. |
+| `sentinel` | runner | Only in `waitingOnSentinelTable`: how long it has been waiting and the limit. |
+
+The flush figures read as a phrase — `flushed 30s ago (took 9µs, 0 rows)` — because two of them are durations of different kinds. Side by side as `key=0s` pairs, "flushed just now" and "the flush was instant" are indistinguishable.
+
+Two things the block gives up, deliberately: the whole report is one log record with newlines in it, which the default slog handler (what the CLI uses) prints as written but a quoting handler (`TextHandler`, JSON) will escape; and the `applier-`/`binlog-` field prefixes are gone, since the row label carries them.
+
+`conns-in-use` was dropped: it reported `sql.DB` pool occupancy, which tracks the configured thread count and says nothing an operator acts on.
 
 ## Progress Reporting
 
