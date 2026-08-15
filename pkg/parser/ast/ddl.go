@@ -60,6 +60,7 @@ const (
 	DatabaseOptionCharset
 	DatabaseOptionCollate
 	DatabaseOptionEncryption
+	DatabaseOptionReadOnly
 )
 
 // DatabaseOption represents database option.
@@ -84,6 +85,14 @@ func (n *DatabaseOption) Restore(ctx *format.RestoreCtx) error {
 		ctx.WriteKeyWord("ENCRYPTION")
 		ctx.WritePlain(" = ")
 		ctx.WriteString(n.Value)
+	case DatabaseOptionReadOnly:
+		ctx.WriteKeyWord("READ ONLY")
+		ctx.WritePlain(" = ")
+		if n.Value != "" {
+			ctx.WriteKeyWord(n.Value) // DEFAULT
+		} else {
+			ctx.WritePlainf("%d", n.UintValue)
+		}
 	default:
 		return fmt.Errorf("invalid DatabaseOptionType: %d", n.Tp)
 	}
@@ -1208,6 +1217,62 @@ func (n *OptimizeTableStmt) Accept(v Visitor) (Node, bool) {
 		return v.Leave(newNode)
 	}
 	n = newNode.(*OptimizeTableStmt)
+	return v.Leave(n)
+}
+
+// RepairTableStmt is a statement to repair tables.
+// See https://dev.mysql.com/doc/refman/8.4/en/repair-table.html
+type RepairTableStmt struct {
+	ddlNode
+
+	NoWriteToBinLog bool
+	Tables          []*TableName
+	Quick           bool
+	Extended        bool
+	UseFrm          bool
+}
+
+// Restore implements Node interface.
+func (n *RepairTableStmt) Restore(ctx *format.RestoreCtx) error {
+	ctx.WriteKeyWord("REPAIR ")
+	if n.NoWriteToBinLog {
+		ctx.WriteKeyWord("NO_WRITE_TO_BINLOG ")
+	}
+	ctx.WriteKeyWord("TABLE ")
+	for index, table := range n.Tables {
+		if index != 0 {
+			ctx.WritePlain(", ")
+		}
+		if err := table.Restore(ctx); err != nil {
+			return fmt.Errorf("an error occurred while restore RepairTableStmt.Tables[%d]: %w", index, err)
+		}
+	}
+	if n.Quick {
+		ctx.WriteKeyWord(" QUICK")
+	}
+	if n.Extended {
+		ctx.WriteKeyWord(" EXTENDED")
+	}
+	if n.UseFrm {
+		ctx.WriteKeyWord(" USE_FRM")
+	}
+	return nil
+}
+
+// Accept implements Node Accept interface.
+func (n *RepairTableStmt) Accept(v Visitor) (Node, bool) {
+	newNode, skipChildren := v.Enter(n)
+	if skipChildren {
+		return v.Leave(newNode)
+	}
+	n = newNode.(*RepairTableStmt)
+	for i, val := range n.Tables {
+		node, ok := val.Accept(v)
+		if !ok {
+			return n, false
+		}
+		n.Tables[i] = node.(*TableName)
+	}
 	return v.Leave(n)
 }
 

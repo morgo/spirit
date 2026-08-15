@@ -1,0 +1,101 @@
+// Copyright 2026 Block, Inc.
+
+package parser_test
+
+import (
+	"testing"
+)
+
+// These statements are all valid MySQL that can appear in the binary log as
+// Query events; spirit's pkg/change must be able to parse them.
+
+func TestRepairTable(t *testing.T) {
+	table := []testCase{
+		{"REPAIR TABLE t1", true, "REPAIR TABLE `t1`"},
+		{"repair tables t1, t2", true, "REPAIR TABLE `t1`, `t2`"},
+		{"REPAIR NO_WRITE_TO_BINLOG TABLE t1 QUICK EXTENDED USE_FRM", true, "REPAIR NO_WRITE_TO_BINLOG TABLE `t1` QUICK EXTENDED USE_FRM"},
+		{"REPAIR LOCAL TABLE t1 USE_FRM", true, "REPAIR NO_WRITE_TO_BINLOG TABLE `t1` USE_FRM"},
+		{"REPAIR TABLE t1 EXTENDED QUICK", true, "REPAIR TABLE `t1` QUICK EXTENDED"},
+		{"REPAIR TABLE", false, ""},
+	}
+	RunTest(t, table, false)
+}
+
+func TestRenameTables(t *testing.T) {
+	table := []testCase{
+		{"RENAME TABLES t1 TO t2", true, "RENAME TABLE `t1` TO `t2`"},
+		{"RENAME TABLES t1 TO t2, t3 TO t4", true, "RENAME TABLE `t1` TO `t2`, `t3` TO `t4`"},
+	}
+	RunTest(t, table, false)
+}
+
+func TestAnalyzeTableHistograms(t *testing.T) {
+	table := []testCase{
+		{"ANALYZE TABLES t1, t2", true, "ANALYZE TABLE `t1`,`t2`"},
+		{"ANALYZE TABLE t UPDATE HISTOGRAM ON c1, c2 WITH 8 BUCKETS", true, "ANALYZE TABLE `t` UPDATE HISTOGRAM ON `c1`,`c2` WITH 8 BUCKETS"},
+		{"ANALYZE TABLE t UPDATE HISTOGRAM ON c WITH 4 BUCKETS AUTO UPDATE", true, "ANALYZE TABLE `t` UPDATE HISTOGRAM ON `c` WITH 4 BUCKETS AUTO UPDATE"},
+		{"ANALYZE TABLE t UPDATE HISTOGRAM ON c AUTO UPDATE", true, "ANALYZE TABLE `t` UPDATE HISTOGRAM ON `c` AUTO UPDATE"},
+		{"ANALYZE TABLE t UPDATE HISTOGRAM ON c MANUAL UPDATE", true, "ANALYZE TABLE `t` UPDATE HISTOGRAM ON `c` MANUAL UPDATE"},
+		{`ANALYZE TABLE t UPDATE HISTOGRAM ON c USING DATA '{"histogram": {}}'`, true, "ANALYZE TABLE `t` UPDATE HISTOGRAM ON `c` USING DATA '{\"histogram\": {}}'"},
+		{"ANALYZE TABLE t DROP HISTOGRAM ON c", true, "ANALYZE TABLE `t` DROP HISTOGRAM ON `c`"},
+	}
+	RunTest(t, table, false)
+}
+
+func TestTransactionSpellings(t *testing.T) {
+	table := []testCase{
+		{"BEGIN WORK", true, "START TRANSACTION"},
+		{"COMMIT WORK", true, "COMMIT"},
+		{"ROLLBACK WORK", true, "ROLLBACK"},
+		{"COMMIT WORK AND CHAIN", true, "COMMIT AND CHAIN"},
+		{"ROLLBACK WORK AND NO CHAIN NO RELEASE", true, "ROLLBACK"},
+		{"ROLLBACK WORK TO SAVEPOINT sp1", true, "ROLLBACK TO sp1"},
+		{"ROLLBACK WORK TO sp1", true, "ROLLBACK TO sp1"},
+		{"START TRANSACTION READ ONLY, WITH CONSISTENT SNAPSHOT", true, "START TRANSACTION READ ONLY"},
+		{"START TRANSACTION WITH CONSISTENT SNAPSHOT, READ WRITE", true, "START TRANSACTION"},
+		{"START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY", true, "START TRANSACTION READ ONLY"},
+	}
+	RunTest(t, table, false)
+}
+
+func TestFlushOptions(t *testing.T) {
+	table := []testCase{
+		{"FLUSH USER_RESOURCES", true, "FLUSH USER_RESOURCES"},
+		{"FLUSH OPTIMIZER_COSTS", true, "FLUSH OPTIMIZER_COSTS"},
+		{"FLUSH LOCAL OPTIMIZER_COSTS", true, "FLUSH NO_WRITE_TO_BINLOG OPTIMIZER_COSTS"},
+		{"FLUSH RELAY LOGS", true, "FLUSH RELAY LOGS"},
+		{"FLUSH RELAY LOGS FOR CHANNEL 'group_replication_applier'", true, "FLUSH RELAY LOGS FOR CHANNEL 'group_replication_applier'"},
+		{"FLUSH TABLES t1 FOR EXPORT", true, "FLUSH TABLES `t1` FOR EXPORT"},
+		{"FLUSH TABLES t1, t2 WITH READ LOCK", true, "FLUSH TABLES `t1`, `t2` WITH READ LOCK"},
+	}
+	RunTest(t, table, false)
+}
+
+func TestAlterDatabaseReadOnly(t *testing.T) {
+	table := []testCase{
+		{"ALTER DATABASE d READ ONLY = 1", true, "ALTER DATABASE `d` READ ONLY = 1"},
+		{"ALTER DATABASE d READ ONLY 0", true, "ALTER DATABASE `d` READ ONLY = 0"},
+		{"ALTER DATABASE d READ ONLY = DEFAULT", true, "ALTER DATABASE `d` READ ONLY = DEFAULT"},
+		{"ALTER DATABASE READ ONLY = 1", true, "ALTER DATABASE READ ONLY = 1"},
+		{"ALTER SCHEMA d READ ONLY = 1 CHARACTER SET = utf8mb4", true, "ALTER DATABASE `d` READ ONLY = 1 CHARACTER SET = utf8mb4"},
+	}
+	RunTest(t, table, false)
+}
+
+func TestAlterInstance(t *testing.T) {
+	table := []testCase{
+		{"ALTER INSTANCE RELOAD TLS", true, "ALTER INSTANCE RELOAD TLS"},
+		{"ALTER INSTANCE RELOAD TLS NO ROLLBACK ON ERROR", true, "ALTER INSTANCE RELOAD TLS NO ROLLBACK ON ERROR"},
+		{"ALTER INSTANCE RELOAD TLS FOR CHANNEL mysql_admin", true, "ALTER INSTANCE RELOAD TLS FOR CHANNEL `mysql_admin`"},
+		{"ALTER INSTANCE RELOAD TLS FOR CHANNEL mysql_main NO ROLLBACK ON ERROR", true, "ALTER INSTANCE RELOAD TLS FOR CHANNEL `mysql_main` NO ROLLBACK ON ERROR"},
+		{"ALTER INSTANCE ROTATE INNODB MASTER KEY", true, "ALTER INSTANCE ROTATE INNODB MASTER KEY"},
+		{"ALTER INSTANCE ROTATE BINLOG MASTER KEY", true, "ALTER INSTANCE ROTATE BINLOG MASTER KEY"},
+		{"ALTER INSTANCE ROTATE innodb master key", true, "ALTER INSTANCE ROTATE INNODB MASTER KEY"},
+		{"ALTER INSTANCE ENABLE INNODB REDO_LOG", true, "ALTER INSTANCE ENABLE INNODB REDO_LOG"},
+		{"ALTER INSTANCE DISABLE INNODB REDO_LOG", true, "ALTER INSTANCE DISABLE INNODB REDO_LOG"},
+		{"ALTER INSTANCE RELOAD KEYRING", true, "ALTER INSTANCE RELOAD KEYRING"},
+		{"ALTER INSTANCE ROTATE FOO MASTER KEY", false, ""},
+		{"ALTER INSTANCE ENABLE FOO REDO_LOG", false, ""},
+	}
+	RunTest(t, table, false)
+}
