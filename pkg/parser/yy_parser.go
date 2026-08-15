@@ -324,10 +324,17 @@ func toInt(l yyLexer, lval *yySymType, str string) int {
 func toDecimal(l yyLexer, lval *yySymType, str string) int {
 	dec, err := ast.NewDecimal(str)
 	if err != nil {
-		if errors.Is(err, types.ErrDataOutOfRange) {
+		switch {
+		case errors.Is(err, types.ErrDataOutOfRange):
+			// Integer part exceeds the 65-digit maximum: MySQL clamps the
+			// literal to the maximum decimal value with a truncation warning.
 			l.AppendWarn(types.ErrTruncatedWrongValue.GenByArgs("DECIMAL", dec))
 			dec, _ = ast.NewDecimal(mysql.DefaultDecimal)
-		} else {
+		case errors.Is(err, types.ErrTruncatedWrongValue):
+			// Fractional part was too long and got truncated; keep the
+			// truncated value like MySQL does.
+			l.AppendWarn(types.ErrTruncatedWrongValue.GenByArgs("DECIMAL", dec))
+		default:
 			l.AppendError(l.Errorf("decimal literal: %v", err))
 		}
 	}
