@@ -934,9 +934,10 @@ func TestE2EGTIDChangeSource(t *testing.T) {
 	require.NoError(t, m.Run())
 }
 
-// TestMigrationValidate covers the Kong Validate() hook: invalid flag
-// combinations and explicitly-negative numeric/duration flags are rejected,
-// while zero values (meaning "use the default") pass.
+// TestMigrationValidate covers the Kong Validate() hook: explicitly-negative
+// numeric/duration flags are rejected, while zero values (meaning "use the
+// default") pass. Validate() has no cross-flag combination checks today; add a
+// case here alongside the first one.
 func TestMigrationValidate(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

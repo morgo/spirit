@@ -103,6 +103,8 @@ Each violation has one of three severity levels:
 | **Warning** | Best practice violation or potential issue | `0` |
 | **Info** | Suggestion or style preference | `0` |
 
+Severity is decided per-linter. Note that `invisible_index_before_drop` reports at **Error** severity by default, so dropping an index that was not first made invisible fails the command with exit code `1`.
+
 ## See Also
 
 - [`spirit diff`](diff.md) — compare two schemas and lint the changes

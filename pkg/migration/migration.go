@@ -111,10 +111,10 @@ type Migration struct {
 	useTestThrottler bool
 }
 
-// Validate is called by Kong after parsing to check for invalid flag combinations.
+// Validate is called by Kong after parsing to reject invalid flag values.
 // Zero values mean "use the default" (normalizeOptions fills them in), so they
 // are not rejected here; only explicitly-negative or otherwise invalid values
-// are caught.
+// are caught. There are currently no cross-flag combination checks.
 func (m *Migration) Validate() error {
 	if m.Threads < 0 {
 		return fmt.Errorf("--threads must be non-negative, got %d", m.Threads)
