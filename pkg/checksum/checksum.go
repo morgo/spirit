@@ -34,14 +34,28 @@ var (
 	// pass before yielding to release long-running REPEATABLE READ transactions.
 	DefaultYieldTimeout = 24 * time.Hour
 
-	// fixChunkTimeout bounds the DELETE + REPLACE (or DELETE + Apply) pair that
-	// recopies a mismatched chunk. The pair runs under a context derived from
-	// context.WithoutCancel so a sentinel-drop cancellation can't leave the
-	// target in a partial state between the two transactions. The bound still
-	// catches the case where one transaction is hung. This applies to every
-	// repair path (initial and continuous checksum), so it has to be generous
-	// enough for legitimate large/slow recopies on busy or distant replicas.
+	// fixChunkTimeout bounds the DELETE + Apply pair that recopies a mismatched
+	// chunk. The pair runs under a context derived from context.WithoutCancel so
+	// a sentinel-drop cancellation can't leave the target in a partial state
+	// between the two steps. The bound still catches the case where one of them
+	// is hung. This applies to every repair path (initial and continuous
+	// checksum), so it has to be generous enough for legitimate large/slow
+	// recopies on busy or distant replicas.
 	fixChunkTimeout = 10 * time.Minute
+)
+
+const (
+	// repairBatchRows and repairBatchBytes bound how much of a mismatched chunk
+	// SingleChecker.replaceChunk holds in memory at once: source rows are read in
+	// batches and each batch is handed to the applier, which splits it further
+	// into the statements it writes. Both bounds are deliberately of the same
+	// order as the applier's own chunklet limits, so a batch is roughly one
+	// statement's worth of rows and the read stays a little ahead of the writers
+	// without buffering a whole (possibly enormous) chunk. The byte half is
+	// measured with applier.EstimateRowSize, the same (approximate, cheap)
+	// accounting the applier uses to cut its own statements.
+	repairBatchRows  = 1000
+	repairBatchBytes = applier.MaxStatementSizeBytes
 )
 
 // chunkMismatch describes why a chunk's source and target disagreed. It is
@@ -196,7 +210,14 @@ type CheckerConfig struct {
 	Watermark       string // optional; defines a watermark to start from
 	MaxRetries      int
 	Applier         applier.Applier // optional; indicates it is a distributed checker
-	YieldTimeout    time.Duration   // maximum duration for a single checksum pass before yielding to release long-running transactions
+	// RepairApplier is the write path the single-server checker rewrites a
+	// mismatched chunk through (see SingleChecker.replaceChunk). Required for
+	// that checker, whether or not FixDifferences is set — a checker that cannot
+	// repair should fail to build, not on the first mismatch hours in. Ignored
+	// when Applier is set, because that selects the distributed checker, which
+	// repairs through Applier itself.
+	RepairApplier applier.Applier
+	YieldTimeout  time.Duration // maximum duration for a single checksum pass before yielding to release long-running transactions
 	// Throttler paces the checksum. Optional: nil installs a Noop, and callers
 	// that build the checker before their throttlers are open should use
 	// SetThrottler instead (the migration runner does).
@@ -272,6 +293,13 @@ func NewChecker(sourceDBs []*sql.DB, chunker table.Chunker, feeds []change.Sourc
 			yieldTimeout:    config.YieldTimeout,
 		}, nil
 	}
+	// The single-server checker repairs a mismatched chunk through an applier
+	// (see SingleChecker.replaceChunk), and it is the caller's to supply: every
+	// runner already has one, and building a second write path here would hide
+	// which one a repair actually goes through.
+	if config.RepairApplier == nil {
+		return nil, errors.New("repair applier must be non-nil")
+	}
 	return &SingleChecker{
 		concurrency:     concurrency,
 		maxConcurrency:  maxConcurrency,
@@ -286,6 +314,7 @@ func NewChecker(sourceDBs []*sql.DB, chunker table.Chunker, feeds []change.Sourc
 		logger:          config.Logger,
 		fixDifferences:  config.FixDifferences,
 		maxRetries:      config.MaxRetries,
+		repairApplier:   config.RepairApplier,
 		yieldTimeout:    config.YieldTimeout,
 	}, nil
 }

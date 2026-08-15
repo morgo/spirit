@@ -50,7 +50,7 @@ func TestJSONChecksumDecimalTypeDegradation(t *testing.T) {
 	require.NoError(t, feed.Start(t.Context()))
 	require.NoError(t, chunker.Open())
 
-	checker, err := NewChecker([]*sql.DB{db}, chunker, []change.Source{feed}, NewCheckerDefaultConfig())
+	checker, err := NewChecker([]*sql.DB{db}, chunker, []change.Source{feed}, newTestCheckerConfig(t, db))
 	require.NoError(t, err)
 	singleChecker, ok := checker.(*SingleChecker)
 	require.True(t, ok, "checker is not of type *SingleChecker")
@@ -113,7 +113,7 @@ func TestJSONChecksumFullMantissaTextImage(t *testing.T) {
 
 	// FixDifferences is left false (the default): a single pass must find
 	// zero differences, i.e. this passes on the first attempt with no repair.
-	checker, err := NewChecker([]*sql.DB{db}, chunker, []change.Source{feed}, NewCheckerDefaultConfig())
+	checker, err := NewChecker([]*sql.DB{db}, chunker, []change.Source{feed}, newTestCheckerConfig(t, db))
 	require.NoError(t, err)
 	singleChecker, ok := checker.(*SingleChecker)
 	require.True(t, ok, "checker is not of type *SingleChecker")
@@ -210,10 +210,11 @@ func TestDistributedJSONChecksumTextImage(t *testing.T) {
 // must flag this: for a misparsed double, byte-equal is the WRONG target
 // state (the deployed text write paths could never have produced it), and
 // notably the previous symmetric casts were blind to it — both sides
-// round-tripped onto the same value. The repair then recopies the chunk
-// through RepairExprs' text round-trip, so the recopied rows store exactly
-// the predicted image and the next attempt converges. A byte-faithful repair
-// would NOT converge (Run would exhaust MaxRetries=2 re-flagging the same
+// round-tripped onto the same value. The repair then recopies the chunk by
+// reading each document as text and writing it back through the applier for the
+// target to re-parse — one text round-trip, exactly the predicted image — so the
+// next attempt converges. A byte-faithful repair, or one that round-tripped
+// twice, would NOT converge (Run would exhaust MaxRetries=2 re-flagging the same
 // rows): that this test passes is the convergence proof.
 func TestJSONChecksumMisparsedDoubleRepairConverges(t *testing.T) {
 	testutils.RunSQL(t, "DROP TABLE IF EXISTS chkjsonasym2, _chkjsonasym2_new, _chkjsonasym2_chkpnt")
@@ -250,7 +251,7 @@ func TestJSONChecksumMisparsedDoubleRepairConverges(t *testing.T) {
 	require.NoError(t, chunker.Open())
 
 	// Phase 1: with FixDifferences off, the divergence must be flagged.
-	detectChecker, err := NewChecker([]*sql.DB{db}, chunker, []change.Source{feed}, NewCheckerDefaultConfig())
+	detectChecker, err := NewChecker([]*sql.DB{db}, chunker, []change.Source{feed}, newTestCheckerConfig(t, db))
 	require.NoError(t, err)
 	singleChecker, ok := detectChecker.(*SingleChecker)
 	require.True(t, ok, "checker is not of type *SingleChecker")
@@ -261,7 +262,7 @@ func TestJSONChecksumMisparsedDoubleRepairConverges(t *testing.T) {
 	// come back clean — MaxRetries=2 leaves no room for a repair that fails
 	// to converge.
 	require.NoError(t, chunker.Reset())
-	config := NewCheckerDefaultConfig()
+	config := newTestCheckerConfig(t, db)
 	config.FixDifferences = true
 	config.MaxRetries = 2
 	fixChecker, err := NewChecker([]*sql.DB{db}, chunker, []change.Source{feed}, config)
@@ -314,7 +315,7 @@ func TestJSONChecksumDecimalGenuineMismatchStillCaught(t *testing.T) {
 	require.NoError(t, feed.Start(t.Context()))
 	require.NoError(t, chunker.Open())
 
-	checker, err := NewChecker([]*sql.DB{db}, chunker, []change.Source{feed}, NewCheckerDefaultConfig())
+	checker, err := NewChecker([]*sql.DB{db}, chunker, []change.Source{feed}, newTestCheckerConfig(t, db))
 	require.NoError(t, err)
 	singleChecker, ok := checker.(*SingleChecker)
 	require.True(t, ok, "checker is not of type *SingleChecker")
@@ -356,7 +357,7 @@ func TestJSONChecksumTextToJSONConversion(t *testing.T) {
 	require.NoError(t, feed.Start(t.Context()))
 	require.NoError(t, chunker.Open())
 
-	checker, err := NewChecker([]*sql.DB{db}, chunker, []change.Source{feed}, NewCheckerDefaultConfig())
+	checker, err := NewChecker([]*sql.DB{db}, chunker, []change.Source{feed}, newTestCheckerConfig(t, db))
 	require.NoError(t, err)
 	singleChecker, ok := checker.(*SingleChecker)
 	require.True(t, ok, "checker is not of type *SingleChecker")
