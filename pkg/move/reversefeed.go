@@ -80,10 +80,6 @@ type ReverseFeedConfig struct {
 	DBConfig      *dbconn.DBConfig
 	Threads       int           // applier write threads; 0 => default (4)
 	FlushInterval time.Duration // 0 => change.DefaultFlushInterval
-	// GTID selects the GTID-based change source (matching the forward move's
-	// --enable-experimental-gtid) instead of binlog file+offset, so the reverse
-	// feed uses the same coordinate scheme the operator chose for the move.
-	GTID bool
 }
 
 // ReverseFeed is a running change-only reverse feed: one change.Source per
@@ -204,8 +200,13 @@ func NewReverseFeed(cfg ReverseFeedConfig) (_ *ReverseFeed, err error) {
 			DBConfig:   dbCfg,
 			CancelFunc: rf.onFatal,
 		}
+		// The captured start position's own encoding selects the change
+		// source implementation: it was captured by targetCurrentPosition in
+		// this server's auto-detected coordinate scheme (GTID when the server
+		// has GTIDs enabled), and Start hands it back via StartFromPosition,
+		// so the same classification here guarantees the round-trip parses.
 		var client change.Source
-		if cfg.GTID {
+		if change.IsGTIDPosition(src.Position) {
 			client = change.NewGTIDClient(src.DB, src.Addr, src.User, src.Password, appl, clientCfg)
 		} else {
 			client = change.NewBinlogClient(src.DB, src.Addr, src.User, src.Password, appl, clientCfg)
