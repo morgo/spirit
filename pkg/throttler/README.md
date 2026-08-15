@@ -136,7 +136,7 @@ Throttlers are integrated into the copier and automatically pause chunk copying 
 ```go
 config := copier.NewCopierDefaultConfig()
 config.Throttler = throttler
-// ... other config (Applier is required)
+config.Applier = rowApplier // required (non-nil); see pkg/applier
 c, err := copier.NewCopier(chunker, config)
 ```
 

@@ -112,10 +112,18 @@ func (c *buffered) CopyChunk(ctx context.Context, chunk *table.Chunk) error {
 		return fmt.Errorf("failed to apply rows: %w", err)
 	}
 	// The applier guarantees the callback is invoked exactly once per Apply
-	// that returned nil (including on error or cancellation), so this cannot
-	// block forever.
-	<-done
-	return applyErr
+	// that returned nil: worker errors and cancellation are delivered as
+	// error completions, and its feedback coordinator drains until the
+	// completions channel closes rather than exiting on ctx.Done(). The ctx
+	// branch below is defense-in-depth against a non-conforming future
+	// applier; if it fires, the callback (chunker feedback + metrics) may
+	// still run later on the coordinator goroutine.
+	select {
+	case <-done:
+		return applyErr
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // readChunkData reads all rows from a chunk into memory

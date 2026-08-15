@@ -154,8 +154,9 @@ func TestBufferedCopierDataTypeConversionError(t *testing.T) {
 	cfg := NewCopierDefaultConfig()
 	cfg.Applier, err = applier.NewSingleTargetApplier(applier.Target{DB: db}, applier.NewApplierDefaultConfig())
 	require.NoError(t, err)
-	// Tiny chunk-time target so the chunker creates many small chunks.
-	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2, TargetChunkTime: 10, Logger: cfg.Logger})
+	// Absurdly tiny chunk-time target (10ns) so the chunker creates many
+	// small chunks.
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2, TargetChunkTime: 10 * time.Nanosecond, Logger: cfg.Logger})
 	require.NoError(t, err)
 
 	require.NoError(t, chunker.Open())
