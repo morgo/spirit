@@ -934,9 +934,10 @@ func TestE2EGTIDChangeSource(t *testing.T) {
 	require.NoError(t, m.Run())
 }
 
-// TestMigrationValidate covers the Kong Validate() hook: invalid flag
-// combinations and explicitly-negative numeric/duration flags are rejected,
-// while zero values (meaning "use the default") pass.
+// TestMigrationValidate covers the Kong Validate() hook: explicitly-negative
+// numeric/duration flags are rejected, while zero values (meaning "use the
+// default") pass. Validate() has no cross-flag combination checks today; add a
+// case here alongside the first one.
 func TestMigrationValidate(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -951,10 +952,7 @@ func TestMigrationValidate(t *testing.T) {
 			TargetChunkTime:  500 * time.Millisecond,
 			ReplicaMaxLag:    120 * time.Second,
 			CheckpointMaxAge: 168 * time.Hour,
-			Lint:             true,
 		}},
-		{name: "lint and lint-only together", m: Migration{Lint: true, LintOnly: true},
-			wantErr: "--lint and --lint-only cannot be used together"},
 		{name: "negative threads", m: Migration{Threads: -5},
 			wantErr: "--threads must be non-negative, got -5"},
 		{name: "negative write-threads", m: Migration{WriteThreads: -1},

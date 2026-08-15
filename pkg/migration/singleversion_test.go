@@ -1,6 +1,6 @@
 //go:build singleversion
 
-// This file (together with resume_test.go and lint_test.go) makes up the
+// This file (together with resume_test.go) makes up the
 // "single-version" test suite: tests that exercise Spirit's own logic and do
 // not depend on the MySQL server version, so there is no value in re-running
 // them against every MySQL version in the CI matrix. They are gated behind the
@@ -11,13 +11,13 @@
 // runs without the tag and therefore excludes these files.
 //
 // The dedicated job selects the suite with
-// `-run 'Resume|Checkpoint|UniqueOnNonUniqueData|ChunkerPrefetching|Unparsable|Lint'`,
+// `-run 'Resume|Checkpoint|UniqueOnNonUniqueData|ChunkerPrefetching|Unparsable'`,
 // so a new single-version test must either match that pattern by name or be
 // added to it.
 //
 // To run the suite locally:
 //
-//	go test -tags singleversion -run 'Resume|Checkpoint|UniqueOnNonUniqueData|ChunkerPrefetching|Unparsable|Lint' ./pkg/migration/...
+//	go test -tags singleversion -run 'Resume|Checkpoint|UniqueOnNonUniqueData|ChunkerPrefetching|Unparsable' ./pkg/migration/...
 //
 // A plain `go test ./...` (no tag) skips these files.
 package migration

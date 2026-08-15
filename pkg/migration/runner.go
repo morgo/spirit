@@ -22,12 +22,9 @@ import (
 	"github.com/block/spirit/pkg/checksum"
 	"github.com/block/spirit/pkg/copier"
 	"github.com/block/spirit/pkg/dbconn"
-	"github.com/block/spirit/pkg/dbconn/sqlescape"
-	"github.com/block/spirit/pkg/lint"
 	"github.com/block/spirit/pkg/metrics"
 	"github.com/block/spirit/pkg/migration/check"
 	"github.com/block/spirit/pkg/sentinel"
-	"github.com/block/spirit/pkg/statement"
 	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/throttler"
@@ -291,18 +288,6 @@ func (r *Runner) Run(ctx context.Context) error {
 	r.db, err = dbconn.New(r.dsn(), r.dbConfig)
 	if err != nil {
 		return fmt.Errorf("failed to connect to main database (DSN: %s): %w", dbconn.RedactDSN(r.dsn()), err)
-	}
-
-	// Run linting if --lint or --lint-only is specified.
-	// --lint-only implies lint.
-	if r.migration.Lint || r.migration.LintOnly {
-		if err := r.lint(ctx); err != nil {
-			return err
-		}
-		if r.migration.LintOnly {
-			r.logger.Info("--lint-only set; exiting after running linters")
-			return nil
-		}
 	}
 
 	if len(r.changes) == 1 {
@@ -615,75 +600,6 @@ func (r *Runner) runChecks(ctx context.Context, scope check.ScopeFlag) error {
 		}
 	}
 	return nil
-}
-
-func (r *Runner) lint(ctx context.Context) error {
-	var createTables []*statement.CreateTable
-	var alterTables []*statement.AbstractStatement
-	config := lint.Config{
-		Enabled:  make(map[string]bool),
-		Settings: defaultLinterSettings,
-	}
-
-	if err := printLinters(config); err != nil {
-		return err
-	}
-
-	for _, change := range r.changes {
-		// Collect ALTER TABLE statements and the CREATE TABLEs for the tables they reference
-		if change.stmt.IsAlterTable() {
-			alterTables = append(alterTables, change.stmt)
-
-			ct, err := r.getCreateTable(ctx, change.stmt.Schema, change.stmt.Table)
-			if err != nil {
-				return err
-			}
-			createTables = append(createTables, ct)
-		}
-
-		// If the migration creates a table, we need to collect that CREATE TABLE as well
-		if change.stmt.IsCreateTable() {
-			ct, err := change.stmt.ParseCreateTable()
-			if err != nil {
-				return err
-			}
-			createTables = append(createTables, ct)
-		}
-	}
-
-	var errs []error
-
-	violations, err := lint.RunLinters(createTables, alterTables, config)
-	if err != nil {
-		errs = append(errs, err)
-	}
-
-	for _, v := range violations {
-		if v.Severity == lint.SeverityError {
-			errs = append(errs, errors.New(v.String()))
-		}
-		fmt.Println(v)
-	}
-
-	if len(errs) > 0 {
-		return errors.Join(errs...)
-	}
-	return nil
-}
-
-func (r *Runner) getCreateTable(ctx context.Context, db string, tbl string) (*statement.CreateTable, error) {
-	sql := fmt.Sprintf("show create table %s.%s", sqlescape.EscapeIdentifier(db), sqlescape.EscapeIdentifier(tbl))
-
-	row := r.db.QueryRowContext(ctx, sql)
-	var createTable string
-	if err := row.Scan(&tbl, &createTable); err != nil {
-		return nil, err
-	}
-	stmt, err := statement.ParseCreateTable(createTable)
-	if err != nil {
-		return nil, err
-	}
-	return stmt, nil
 }
 
 func (r *Runner) dsn() string {
