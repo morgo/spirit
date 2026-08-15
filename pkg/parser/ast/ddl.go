@@ -1449,6 +1449,196 @@ func (n *CreateViewStmt) Accept(v Visitor) (Node, bool) {
 	return v.Leave(n)
 }
 
+// AlterViewStmt is a statement to alter a View.
+// See https://dev.mysql.com/doc/refman/8.4/en/alter-view.html
+type AlterViewStmt struct {
+	ddlNode
+
+	ViewName    *TableName
+	Cols        []CIStr
+	Select      StmtNode
+	Algorithm   ViewAlgorithm
+	Definer     *auth.UserIdentity
+	Security    ViewSecurity
+	CheckOption ViewCheckOption
+}
+
+// Restore implements Node interface.
+func (n *AlterViewStmt) Restore(ctx *format.RestoreCtx) error {
+	ctx.WriteKeyWord("ALTER ")
+	ctx.WriteKeyWord("ALGORITHM")
+	ctx.WritePlain(" = ")
+	ctx.WriteKeyWord(n.Algorithm.String())
+	ctx.WriteKeyWord(" DEFINER")
+	ctx.WritePlain(" = ")
+	if n.Definer.CurrentUser {
+		ctx.WriteKeyWord("current_user")
+	} else {
+		ctx.WriteName(n.Definer.Username)
+		if n.Definer.Hostname != "" {
+			ctx.WritePlain("@")
+			ctx.WriteName(n.Definer.Hostname)
+		}
+	}
+	ctx.WriteKeyWord(" SQL SECURITY ")
+	ctx.WriteKeyWord(n.Security.String())
+	ctx.WriteKeyWord(" VIEW ")
+	if err := n.ViewName.Restore(ctx); err != nil {
+		return fmt.Errorf("an error occurred while restore AlterViewStmt.ViewName: %w", err)
+	}
+	for i, col := range n.Cols {
+		if i == 0 {
+			ctx.WritePlain(" (")
+		} else {
+			ctx.WritePlain(",")
+		}
+		ctx.WriteName(col.O)
+		if i == len(n.Cols)-1 {
+			ctx.WritePlain(")")
+		}
+	}
+	ctx.WriteKeyWord(" AS ")
+	if err := n.Select.Restore(ctx); err != nil {
+		return fmt.Errorf("an error occurred while restore AlterViewStmt.Select: %w", err)
+	}
+	if n.CheckOption != CheckOptionCascaded {
+		ctx.WriteKeyWord(" WITH ")
+		ctx.WriteKeyWord(n.CheckOption.String())
+		ctx.WriteKeyWord(" CHECK OPTION")
+	}
+	return nil
+}
+
+// Accept implements Node Accept interface.
+func (n *AlterViewStmt) Accept(v Visitor) (Node, bool) {
+	newNode, skipChildren := v.Enter(n)
+	if skipChildren {
+		return v.Leave(newNode)
+	}
+	n = newNode.(*AlterViewStmt)
+	node, ok := n.ViewName.Accept(v)
+	if !ok {
+		return n, false
+	}
+	n.ViewName = node.(*TableName)
+	selnode, ok := n.Select.Accept(v)
+	if !ok {
+		return n, false
+	}
+	n.Select = selnode.(StmtNode)
+	return v.Leave(n)
+}
+
+// SRSAttributeType is the attribute kind in CREATE SPATIAL REFERENCE SYSTEM.
+type SRSAttributeType int
+
+// SRS attribute types.
+const (
+	SRSAttrName SRSAttributeType = iota
+	SRSAttrDefinition
+	SRSAttrOrganization
+	SRSAttrDescription
+)
+
+// SRSAttribute is one attribute of CREATE SPATIAL REFERENCE SYSTEM.
+type SRSAttribute struct {
+	Tp    SRSAttributeType
+	Value string
+	OrgID uint64 // ORGANIZATION ... IDENTIFIED BY
+}
+
+// Restore implements Node interface.
+func (n *SRSAttribute) Restore(ctx *format.RestoreCtx) error {
+	switch n.Tp {
+	case SRSAttrName:
+		ctx.WriteKeyWord("NAME ")
+	case SRSAttrDefinition:
+		ctx.WriteKeyWord("DEFINITION ")
+	case SRSAttrOrganization:
+		ctx.WriteKeyWord("ORGANIZATION ")
+	case SRSAttrDescription:
+		ctx.WriteKeyWord("DESCRIPTION ")
+	default:
+		return fmt.Errorf("invalid SRSAttributeType: %d", n.Tp)
+	}
+	ctx.WriteString(n.Value)
+	if n.Tp == SRSAttrOrganization {
+		ctx.WriteKeyWord(" IDENTIFIED BY ")
+		ctx.WritePlainf("%d", n.OrgID)
+	}
+	return nil
+}
+
+// CreateSpatialRefSysStmt is a statement to create a spatial reference system.
+// See https://dev.mysql.com/doc/refman/8.4/en/create-spatial-reference-system.html
+type CreateSpatialRefSysStmt struct {
+	ddlNode
+
+	OrReplace   bool
+	IfNotExists bool
+	SRID        uint64
+	Attributes  []*SRSAttribute
+}
+
+// Restore implements Node interface.
+func (n *CreateSpatialRefSysStmt) Restore(ctx *format.RestoreCtx) error {
+	ctx.WriteKeyWord("CREATE ")
+	if n.OrReplace {
+		ctx.WriteKeyWord("OR REPLACE ")
+	}
+	ctx.WriteKeyWord("SPATIAL REFERENCE SYSTEM ")
+	if n.IfNotExists {
+		ctx.WriteKeyWord("IF NOT EXISTS ")
+	}
+	ctx.WritePlainf("%d", n.SRID)
+	for i, attr := range n.Attributes {
+		ctx.WritePlain(" ")
+		if err := attr.Restore(ctx); err != nil {
+			return fmt.Errorf("an error occurred while restore CreateSpatialRefSysStmt.Attributes[%d]: %w", i, err)
+		}
+	}
+	return nil
+}
+
+// Accept implements Node Accept interface.
+func (n *CreateSpatialRefSysStmt) Accept(v Visitor) (Node, bool) {
+	newNode, skipChildren := v.Enter(n)
+	if skipChildren {
+		return v.Leave(newNode)
+	}
+	n = newNode.(*CreateSpatialRefSysStmt)
+	return v.Leave(n)
+}
+
+// DropSpatialRefSysStmt is a statement to drop a spatial reference system.
+// See https://dev.mysql.com/doc/refman/8.4/en/drop-spatial-reference-system.html
+type DropSpatialRefSysStmt struct {
+	ddlNode
+
+	IfExists bool
+	SRID     uint64
+}
+
+// Restore implements Node interface.
+func (n *DropSpatialRefSysStmt) Restore(ctx *format.RestoreCtx) error {
+	ctx.WriteKeyWord("DROP SPATIAL REFERENCE SYSTEM ")
+	if n.IfExists {
+		ctx.WriteKeyWord("IF EXISTS ")
+	}
+	ctx.WritePlainf("%d", n.SRID)
+	return nil
+}
+
+// Accept implements Node Accept interface.
+func (n *DropSpatialRefSysStmt) Accept(v Visitor) (Node, bool) {
+	newNode, skipChildren := v.Enter(n)
+	if skipChildren {
+		return v.Leave(newNode)
+	}
+	n = newNode.(*DropSpatialRefSysStmt)
+	return v.Leave(n)
+}
+
 // IndexLockAndAlgorithm stores the algorithm option and the lock option.
 type IndexLockAndAlgorithm struct {
 	node

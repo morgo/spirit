@@ -462,6 +462,7 @@ type likeEscapeSpec struct {
 	nodegroup                "NODEGROUP"
 	none                     "NONE"
 	nowait                   "NOWAIT"
+	noWaitTablespace         "NO_WAIT"
 	nulls                    "NULLS"
 	nvarcharType             "NVARCHAR"
 	offset                   "OFFSET"
@@ -496,6 +497,7 @@ type likeEscapeSpec struct {
 	quick                    "QUICK"
 	rebuild                  "REBUILD"
 	recover                  "RECOVER"
+	redoBufferSize           "REDO_BUFFER_SIZE"
 	redundant                "REDUNDANT"
 	reference                "REFERENCE"
 	relay                    "RELAY"
@@ -586,6 +588,7 @@ type likeEscapeSpec struct {
 	uncommitted              "UNCOMMITTED"
 	undefined                "UNDEFINED"
 	undofile                 "UNDOFILE"
+	undoBufferSize           "UNDO_BUFFER_SIZE"
 	unicodeSym               "UNICODE"
 	unknown                  "UNKNOWN"
 	user                     "USER"
@@ -758,6 +761,16 @@ type likeEscapeSpec struct {
 	RenameTableStmt            "rename table statement"
 	RenameUserStmt             "rename user statement"
 	RepairTableStmt            "REPAIR TABLE statement"
+	AlterViewStmt              "ALTER VIEW statement"
+	XAStmt                     "XA transaction statement"
+	CreateSpatialRefSysStmt    "CREATE SPATIAL REFERENCE SYSTEM statement"
+	DropSpatialRefSysStmt      "DROP SPATIAL REFERENCE SYSTEM statement"
+	CreateTablespaceStmt       "CREATE [UNDO] TABLESPACE statement"
+	AlterTablespaceStmt        "ALTER [UNDO] TABLESPACE statement"
+	DropTablespaceStmt         "DROP [UNDO] TABLESPACE statement"
+	CreateLogfileGroupStmt     "CREATE LOGFILE GROUP statement"
+	AlterLogfileGroupStmt      "ALTER LOGFILE GROUP statement"
+	DropLogfileGroupStmt       "DROP LOGFILE GROUP statement"
 	ReplaceIntoStmt            "REPLACE INTO statement"
 	RevokeStmt                 "Revoke statement"
 	RevokeRoleStmt             "Revoke role statement"
@@ -1055,6 +1068,13 @@ type likeEscapeSpec struct {
 	StartTransactionOpt                    "START TRANSACTION characteristic"
 	StartTransactionOptList                "START TRANSACTION characteristic list"
 	RepairTypeListOpt                      "REPAIR TABLE options"
+	XAXid                                  "XA transaction identifier"
+	SRSAttribute                           "Spatial reference system attribute"
+	SRSAttributeListOpt                    "Spatial reference system attribute list"
+	TablespaceOption                       "Tablespace or logfile group option"
+	TablespaceOptionList                   "Tablespace or logfile group option list"
+	TablespaceOptionListOpt                "Optional tablespace or logfile group option list"
+	TablespaceSizeValue                    "Tablespace size value"
 	HistogramUpdateOpt                     "UPDATE HISTOGRAM MANUAL/AUTO UPDATE opt"
 	NoRollbackOnErrorOpt                   "NO ROLLBACK ON ERROR opt"
 	DatabaseOptionReadOnlyValue            "READ ONLY option value"
@@ -1125,48 +1145,51 @@ type likeEscapeSpec struct {
 	MatchOpt                               "optional MATCH clause"
 
 %type	<ident>
-	AsOpt                "AS or EmptyString"
-	KeyOrIndex           "{KEY|INDEX}"
-	ColumnKeywordOpt     "Column keyword or empty"
-	PrimaryOpt           "Optional primary keyword"
-	WorkOpt              "Optional WORK keyword"
-	TLSChannelOpt        "ALTER INSTANCE RELOAD TLS FOR CHANNEL opt"
-	FlushRelayChannelOpt "FLUSH RELAY LOGS FOR CHANNEL opt"
-	NowSym               "CURRENT_TIMESTAMP/LOCALTIME/LOCALTIMESTAMP"
-	NowSymFunc           "CURRENT_TIMESTAMP/LOCALTIME/LOCALTIMESTAMP/NOW"
-	CurdateSym           "CURDATE or CURRENT_DATE"
-	DefaultKwdOpt        "optional DEFAULT keyword"
-	DatabaseSym          "DATABASE or SCHEMA"
-	ExplainSym           "EXPLAIN or DESCRIBE or DESC"
-	RegexpSym            "REGEXP or RLIKE"
-	IntoOpt              "INTO or EmptyString"
-	ValueSym             "Value or Values"
-	NotSym               "Not token"
-	Char                 "{CHAR|CHARACTER}"
-	NChar                "{NCHAR|NATIONAL CHARACTER|NATIONAL CHAR}"
-	Varchar              "{VARCHAR|VARCHARACTER|CHARACTER VARYING|CHAR VARYING}"
-	NVarchar             "{NATIONAL VARCHAR|NATIONAL VARCHARACTER|NVARCHAR|NCHAR VARCHAR|NATIONAL CHARACTER VARYING|NATIONAL CHAR VARYING|NCHAR VARYING}"
-	Year                 "{YEAR|SQL_TSI_YEAR}"
-	DeallocateSym        "Deallocate or drop"
-	OuterOpt             "optional OUTER clause"
-	CrossOpt             "Cross join option"
-	TablesTerminalSym    "{TABLE|TABLES}"
-	IsolationLevel       "Isolation level"
-	ShowIndexKwd         "Show index/indexs/key keyword"
-	DistinctKwd          "DISTINCT/DISTINCTROW keyword"
-	FromOrIn             "From or In"
-	OptTable             "Optional table keyword"
-	OptInteger           "Optional Integer keyword"
-	CharsetKw            "charset or charater set"
-	logAnd               "logical and operator"
-	logOr                "logical or operator"
-	LinearOpt            "linear or empty"
-	FieldsOrColumns      "Fields or columns"
-	StorageMedia         "{DISK|MEMORY|DEFAULT}"
-	EncryptionOpt        "Encryption option 'Y' or 'N'"
-	FirstOrNext          "FIRST or NEXT"
-	RowOrRows            "ROW or ROWS"
-	Replica              "{REPLICA | SLAVE}"
+	AsOpt                     "AS or EmptyString"
+	KeyOrIndex                "{KEY|INDEX}"
+	ColumnKeywordOpt          "Column keyword or empty"
+	PrimaryOpt                "Optional primary keyword"
+	WorkOpt                   "Optional WORK keyword"
+	BeginOrStartSym           "BEGIN or START"
+	TablespaceDataFileOpt     "Tablespace ADD DATAFILE opt"
+	TablespaceLogfileGroupOpt "Tablespace USE LOGFILE GROUP opt"
+	TLSChannelOpt             "ALTER INSTANCE RELOAD TLS FOR CHANNEL opt"
+	FlushRelayChannelOpt      "FLUSH RELAY LOGS FOR CHANNEL opt"
+	NowSym                    "CURRENT_TIMESTAMP/LOCALTIME/LOCALTIMESTAMP"
+	NowSymFunc                "CURRENT_TIMESTAMP/LOCALTIME/LOCALTIMESTAMP/NOW"
+	CurdateSym                "CURDATE or CURRENT_DATE"
+	DefaultKwdOpt             "optional DEFAULT keyword"
+	DatabaseSym               "DATABASE or SCHEMA"
+	ExplainSym                "EXPLAIN or DESCRIBE or DESC"
+	RegexpSym                 "REGEXP or RLIKE"
+	IntoOpt                   "INTO or EmptyString"
+	ValueSym                  "Value or Values"
+	NotSym                    "Not token"
+	Char                      "{CHAR|CHARACTER}"
+	NChar                     "{NCHAR|NATIONAL CHARACTER|NATIONAL CHAR}"
+	Varchar                   "{VARCHAR|VARCHARACTER|CHARACTER VARYING|CHAR VARYING}"
+	NVarchar                  "{NATIONAL VARCHAR|NATIONAL VARCHARACTER|NVARCHAR|NCHAR VARCHAR|NATIONAL CHARACTER VARYING|NATIONAL CHAR VARYING|NCHAR VARYING}"
+	Year                      "{YEAR|SQL_TSI_YEAR}"
+	DeallocateSym             "Deallocate or drop"
+	OuterOpt                  "optional OUTER clause"
+	CrossOpt                  "Cross join option"
+	TablesTerminalSym         "{TABLE|TABLES}"
+	IsolationLevel            "Isolation level"
+	ShowIndexKwd              "Show index/indexs/key keyword"
+	DistinctKwd               "DISTINCT/DISTINCTROW keyword"
+	FromOrIn                  "From or In"
+	OptTable                  "Optional table keyword"
+	OptInteger                "Optional Integer keyword"
+	CharsetKw                 "charset or charater set"
+	logAnd                    "logical and operator"
+	logOr                     "logical or operator"
+	LinearOpt                 "linear or empty"
+	FieldsOrColumns           "Fields or columns"
+	StorageMedia              "{DISK|MEMORY|DEFAULT}"
+	EncryptionOpt             "Encryption option 'Y' or 'N'"
+	FirstOrNext               "FIRST or NEXT"
+	RowOrRows                 "ROW or ROWS"
+	Replica                   "{REPLICA | SLAVE}"
 
 %type	<ident>
 	Identifier                      "identifier or unreserved keyword"
@@ -3522,6 +3545,33 @@ CreateViewStmt:
 		$$ = x
 	}
 
+/* See https://dev.mysql.com/doc/refman/8.4/en/alter-view.html */
+AlterViewStmt:
+	"ALTER" ViewAlgorithm ViewDefiner ViewSQLSecurity "VIEW" ViewName ViewFieldList "AS" CreateViewSelectOpt ViewCheckOption
+	{
+		startOffset := parser.startOffset(&yyS[yypt-1])
+		endOffset := parser.yylval.offset
+		selStmt := $9.(ast.StmtNode)
+		x := &ast.AlterViewStmt{
+			ViewName:  $6.(*ast.TableName),
+			Select:    selStmt,
+			Algorithm: $2.(ast.ViewAlgorithm),
+			Definer:   $3.(*auth.UserIdentity),
+			Security:  $4.(ast.ViewSecurity),
+		}
+		if $7 != nil {
+			x.Cols = $7.([]ast.CIStr)
+		}
+		if $10 != nil {
+			x.CheckOption = $10.(ast.ViewCheckOption)
+			endOffset = parser.startOffset(&yyS[yypt])
+		} else {
+			x.CheckOption = ast.CheckOptionCascaded
+		}
+		parser.setNodeText(selStmt, strings.TrimSpace(parser.src[startOffset:endOffset]))
+		$$ = x
+	}
+
 OrReplace:
 	/* EMPTY */
 	{
@@ -4837,12 +4887,15 @@ UnReservedKeyword:
 |	"ORGANIZATION"
 |	"PHASE"
 |	"RECOVER"
+|	"REDO_BUFFER_SIZE"
+|	"NO_WAIT"
 |	"REFERENCE"
 |	"RELAY"
 |	"RESUME"
 |	"ROTATE"
 |	"SUSPEND"
 |	"UNDOFILE"
+|	"UNDO_BUFFER_SIZE"
 |	"USE_FRM"
 |	"USER_RESOURCES"
 |	"WORK"
@@ -9224,6 +9277,16 @@ Statement:
 |	RollbackStmt
 |	RenameTableStmt
 |	RepairTableStmt
+|	AlterViewStmt
+|	XAStmt
+|	CreateSpatialRefSysStmt
+|	DropSpatialRefSysStmt
+|	CreateTablespaceStmt
+|	AlterTablespaceStmt
+|	DropTablespaceStmt
+|	CreateLogfileGroupStmt
+|	AlterLogfileGroupStmt
+|	DropLogfileGroupStmt
 |	RenameUserStmt
 |	ReplaceIntoStmt
 |	ReleaseSavepointStmt
@@ -10324,6 +10387,415 @@ TextStringList:
 |	TextStringList ',' TextString
 	{
 		$$ = append($1.([]*ast.TextString), $3.(*ast.TextString))
+	}
+
+/*******************************************************************
+ * XA transaction statements. spirit refuses XA workloads, but the
+ * parser must recognize them so pkg/change can do so cleanly.
+ * See https://dev.mysql.com/doc/refman/8.4/en/xa-statements.html
+ *******************************************************************/
+XAStmt:
+	"XA" BeginOrStartSym XAXid
+	{
+		$$ = &ast.XAStmt{Op: ast.XAOpStart, Xid: $3.(*ast.XAXid)}
+	}
+|	"XA" BeginOrStartSym XAXid "JOIN"
+	{
+		$$ = &ast.XAStmt{Op: ast.XAOpStart, Xid: $3.(*ast.XAXid), Join: true}
+	}
+|	"XA" BeginOrStartSym XAXid "RESUME"
+	{
+		$$ = &ast.XAStmt{Op: ast.XAOpStart, Xid: $3.(*ast.XAXid), Resume: true}
+	}
+|	"XA" "END" XAXid
+	{
+		$$ = &ast.XAStmt{Op: ast.XAOpEnd, Xid: $3.(*ast.XAXid)}
+	}
+|	"XA" "END" XAXid "SUSPEND"
+	{
+		$$ = &ast.XAStmt{Op: ast.XAOpEnd, Xid: $3.(*ast.XAXid), Suspend: true}
+	}
+|	"XA" "END" XAXid "SUSPEND" "FOR" "MIGRATE"
+	{
+		$$ = &ast.XAStmt{Op: ast.XAOpEnd, Xid: $3.(*ast.XAXid), Suspend: true, ForMigrate: true}
+	}
+|	"XA" "PREPARE" XAXid
+	{
+		$$ = &ast.XAStmt{Op: ast.XAOpPrepare, Xid: $3.(*ast.XAXid)}
+	}
+|	"XA" "COMMIT" XAXid
+	{
+		$$ = &ast.XAStmt{Op: ast.XAOpCommit, Xid: $3.(*ast.XAXid)}
+	}
+|	"XA" "COMMIT" XAXid "ONE" "PHASE"
+	{
+		$$ = &ast.XAStmt{Op: ast.XAOpCommit, Xid: $3.(*ast.XAXid), OnePhase: true}
+	}
+|	"XA" "ROLLBACK" XAXid
+	{
+		$$ = &ast.XAStmt{Op: ast.XAOpRollback, Xid: $3.(*ast.XAXid)}
+	}
+|	"XA" "RECOVER"
+	{
+		$$ = &ast.XAStmt{Op: ast.XAOpRecover}
+	}
+|	"XA" "RECOVER" "CONVERT" "XID"
+	{
+		$$ = &ast.XAStmt{Op: ast.XAOpRecover, ConvertXid: true}
+	}
+
+BeginOrStartSym:
+	"BEGIN"
+|	"START"
+
+XAXid:
+	TextString
+	{
+		$$ = &ast.XAXid{GTRID: $1.(*ast.TextString).Value, NParts: 1}
+	}
+|	TextString ',' TextString
+	{
+		$$ = &ast.XAXid{GTRID: $1.(*ast.TextString).Value, BQual: $3.(*ast.TextString).Value, NParts: 2}
+	}
+|	TextString ',' TextString ',' NUM
+	{
+		$$ = &ast.XAXid{GTRID: $1.(*ast.TextString).Value, BQual: $3.(*ast.TextString).Value, FormatID: getUint64FromNUM($5), NParts: 3}
+	}
+|	TextString ',' TextString ',' hexLit
+	{
+		// MySQL's ulong_num accepts a hex number (0xb) as the formatID.
+		var formatID uint64
+		for _, b := range []byte($5.(ast.HexLiteral)) {
+			formatID = formatID<<8 | uint64(b)
+		}
+		$$ = &ast.XAXid{GTRID: $1.(*ast.TextString).Value, BQual: $3.(*ast.TextString).Value, FormatID: formatID, NParts: 3}
+	}
+
+/*******************************************************************
+ * Spatial reference system statements
+ * See https://dev.mysql.com/doc/refman/8.4/en/create-spatial-reference-system.html
+ *******************************************************************/
+CreateSpatialRefSysStmt:
+	"CREATE" "SPATIAL" "REFERENCE" "SYSTEM" IfNotExists NUM SRSAttributeListOpt
+	{
+		$$ = &ast.CreateSpatialRefSysStmt{
+			IfNotExists: $5.(bool),
+			SRID:        getUint64FromNUM($6),
+			Attributes:  $7.([]*ast.SRSAttribute),
+		}
+	}
+|	"CREATE" "OR" "REPLACE" "SPATIAL" "REFERENCE" "SYSTEM" IfNotExists NUM SRSAttributeListOpt
+	{
+		$$ = &ast.CreateSpatialRefSysStmt{
+			OrReplace:   true,
+			IfNotExists: $7.(bool),
+			SRID:        getUint64FromNUM($8),
+			Attributes:  $9.([]*ast.SRSAttribute),
+		}
+	}
+
+DropSpatialRefSysStmt:
+	"DROP" "SPATIAL" "REFERENCE" "SYSTEM" IfExists NUM
+	{
+		$$ = &ast.DropSpatialRefSysStmt{
+			IfExists: $5.(bool),
+			SRID:     getUint64FromNUM($6),
+		}
+	}
+
+SRSAttributeListOpt:
+	{
+		$$ = []*ast.SRSAttribute{}
+	}
+|	SRSAttributeListOpt SRSAttribute
+	{
+		$$ = append($1.([]*ast.SRSAttribute), $2.(*ast.SRSAttribute))
+	}
+
+SRSAttribute:
+	"NAME" stringLit
+	{
+		$$ = &ast.SRSAttribute{Tp: ast.SRSAttrName, Value: $2}
+	}
+|	"DEFINITION" stringLit
+	{
+		$$ = &ast.SRSAttribute{Tp: ast.SRSAttrDefinition, Value: $2}
+	}
+|	"ORGANIZATION" stringLit "IDENTIFIED" "BY" NUM
+	{
+		$$ = &ast.SRSAttribute{Tp: ast.SRSAttrOrganization, Value: $2, OrgID: getUint64FromNUM($5)}
+	}
+|	"DESCRIPTION" stringLit
+	{
+		$$ = &ast.SRSAttribute{Tp: ast.SRSAttrDescription, Value: $2}
+	}
+
+/*******************************************************************
+ * Tablespace and logfile group statements
+ * See https://dev.mysql.com/doc/refman/8.4/en/create-tablespace.html
+ *******************************************************************/
+CreateTablespaceStmt:
+	"CREATE" "TABLESPACE" Identifier TablespaceDataFileOpt TablespaceLogfileGroupOpt TablespaceOptionListOpt
+	{
+		stmt := &ast.CreateTablespaceStmt{
+			Name:         ast.NewCIStr($3),
+			LogfileGroup: ast.NewCIStr($5),
+			Options:      $6.([]*ast.TablespaceOption),
+		}
+		if $4 != "" {
+			stmt.DataFile = $4
+			stmt.HasDataFile = true
+		}
+		$$ = stmt
+	}
+|	"CREATE" "UNDO" "TABLESPACE" Identifier TablespaceDataFileOpt TablespaceOptionListOpt
+	{
+		stmt := &ast.CreateTablespaceStmt{
+			Undo:    true,
+			Name:    ast.NewCIStr($4),
+			Options: $6.([]*ast.TablespaceOption),
+		}
+		if $5 != "" {
+			stmt.DataFile = $5
+			stmt.HasDataFile = true
+		}
+		$$ = stmt
+	}
+
+TablespaceDataFileOpt:
+	{
+		$$ = ""
+	}
+|	"ADD" "DATAFILE" stringLit
+	{
+		$$ = $3
+	}
+
+TablespaceLogfileGroupOpt:
+	{
+		$$ = ""
+	}
+|	"USE" "LOGFILE" "GROUP" Identifier
+	{
+		$$ = $4
+	}
+
+AlterTablespaceStmt:
+	"ALTER" "TABLESPACE" Identifier "ADD" "DATAFILE" stringLit TablespaceOptionListOpt
+	{
+		$$ = &ast.AlterTablespaceStmt{
+			Name:     ast.NewCIStr($3),
+			Action:   ast.AlterTablespaceAddDataFile,
+			DataFile: $6,
+			Options:  $7.([]*ast.TablespaceOption),
+		}
+	}
+|	"ALTER" "TABLESPACE" Identifier "DROP" "DATAFILE" stringLit TablespaceOptionListOpt
+	{
+		$$ = &ast.AlterTablespaceStmt{
+			Name:     ast.NewCIStr($3),
+			Action:   ast.AlterTablespaceDropDataFile,
+			DataFile: $6,
+			Options:  $7.([]*ast.TablespaceOption),
+		}
+	}
+|	"ALTER" "TABLESPACE" Identifier "RENAME" "TO" Identifier
+	{
+		$$ = &ast.AlterTablespaceStmt{
+			Name:    ast.NewCIStr($3),
+			Action:  ast.AlterTablespaceRenameTo,
+			NewName: ast.NewCIStr($6),
+			Options: []*ast.TablespaceOption{},
+		}
+	}
+|	"ALTER" "TABLESPACE" Identifier TablespaceOptionList
+	{
+		$$ = &ast.AlterTablespaceStmt{
+			Name:    ast.NewCIStr($3),
+			Options: $4.([]*ast.TablespaceOption),
+		}
+	}
+|	"ALTER" "TABLESPACE" Identifier "SET" "ACTIVE" TablespaceOptionListOpt
+	{
+		$$ = &ast.AlterTablespaceStmt{
+			Name:    ast.NewCIStr($3),
+			Action:  ast.AlterTablespaceSetActive,
+			Options: $6.([]*ast.TablespaceOption),
+		}
+	}
+|	"ALTER" "TABLESPACE" Identifier "SET" "INACTIVE" TablespaceOptionListOpt
+	{
+		$$ = &ast.AlterTablespaceStmt{
+			Name:    ast.NewCIStr($3),
+			Action:  ast.AlterTablespaceSetInactive,
+			Options: $6.([]*ast.TablespaceOption),
+		}
+	}
+|	"ALTER" "UNDO" "TABLESPACE" Identifier "SET" "ACTIVE" TablespaceOptionListOpt
+	{
+		$$ = &ast.AlterTablespaceStmt{
+			Undo:    true,
+			Name:    ast.NewCIStr($4),
+			Action:  ast.AlterTablespaceSetActive,
+			Options: $7.([]*ast.TablespaceOption),
+		}
+	}
+|	"ALTER" "UNDO" "TABLESPACE" Identifier "SET" "INACTIVE" TablespaceOptionListOpt
+	{
+		$$ = &ast.AlterTablespaceStmt{
+			Undo:    true,
+			Name:    ast.NewCIStr($4),
+			Action:  ast.AlterTablespaceSetInactive,
+			Options: $7.([]*ast.TablespaceOption),
+		}
+	}
+
+DropTablespaceStmt:
+	"DROP" "TABLESPACE" Identifier TablespaceOptionListOpt
+	{
+		$$ = &ast.DropTablespaceStmt{
+			Name:    ast.NewCIStr($3),
+			Options: $4.([]*ast.TablespaceOption),
+		}
+	}
+|	"DROP" "UNDO" "TABLESPACE" Identifier TablespaceOptionListOpt
+	{
+		$$ = &ast.DropTablespaceStmt{
+			Undo:    true,
+			Name:    ast.NewCIStr($4),
+			Options: $5.([]*ast.TablespaceOption),
+		}
+	}
+
+CreateLogfileGroupStmt:
+	"CREATE" "LOGFILE" "GROUP" Identifier "ADD" "UNDOFILE" stringLit TablespaceOptionListOpt
+	{
+		$$ = &ast.CreateLogfileGroupStmt{
+			Name:     ast.NewCIStr($4),
+			UndoFile: $7,
+			Options:  $8.([]*ast.TablespaceOption),
+		}
+	}
+
+AlterLogfileGroupStmt:
+	"ALTER" "LOGFILE" "GROUP" Identifier "ADD" "UNDOFILE" stringLit TablespaceOptionListOpt
+	{
+		$$ = &ast.AlterLogfileGroupStmt{
+			Name:     ast.NewCIStr($4),
+			UndoFile: $7,
+			Options:  $8.([]*ast.TablespaceOption),
+		}
+	}
+
+DropLogfileGroupStmt:
+	"DROP" "LOGFILE" "GROUP" Identifier TablespaceOptionListOpt
+	{
+		$$ = &ast.DropLogfileGroupStmt{
+			Name:    ast.NewCIStr($4),
+			Options: $5.([]*ast.TablespaceOption),
+		}
+	}
+
+TablespaceOptionListOpt:
+	{
+		$$ = []*ast.TablespaceOption{}
+	}
+|	TablespaceOptionList
+
+TablespaceOptionList:
+	TablespaceOption
+	{
+		$$ = []*ast.TablespaceOption{$1.(*ast.TablespaceOption)}
+	}
+|	TablespaceOptionList TablespaceOption
+	{
+		$$ = append($1.([]*ast.TablespaceOption), $2.(*ast.TablespaceOption))
+	}
+|	TablespaceOptionList ',' TablespaceOption
+	{
+		$$ = append($1.([]*ast.TablespaceOption), $3.(*ast.TablespaceOption))
+	}
+
+TablespaceOption:
+	"INITIAL_SIZE" EqOpt TablespaceSizeValue
+	{
+		opt := $3.(*ast.TablespaceOption)
+		opt.Tp = ast.TablespaceOptInitialSize
+		$$ = opt
+	}
+|	"MAX_SIZE" EqOpt TablespaceSizeValue
+	{
+		opt := $3.(*ast.TablespaceOption)
+		opt.Tp = ast.TablespaceOptMaxSize
+		$$ = opt
+	}
+|	"EXTENT_SIZE" EqOpt TablespaceSizeValue
+	{
+		opt := $3.(*ast.TablespaceOption)
+		opt.Tp = ast.TablespaceOptExtentSize
+		$$ = opt
+	}
+|	"AUTOEXTEND_SIZE" EqOpt TablespaceSizeValue
+	{
+		opt := $3.(*ast.TablespaceOption)
+		opt.Tp = ast.TablespaceOptAutoextendSize
+		$$ = opt
+	}
+|	"FILE_BLOCK_SIZE" EqOpt TablespaceSizeValue
+	{
+		opt := $3.(*ast.TablespaceOption)
+		opt.Tp = ast.TablespaceOptFileBlockSize
+		$$ = opt
+	}
+|	"UNDO_BUFFER_SIZE" EqOpt TablespaceSizeValue
+	{
+		opt := $3.(*ast.TablespaceOption)
+		opt.Tp = ast.TablespaceOptUndoBufferSize
+		$$ = opt
+	}
+|	"REDO_BUFFER_SIZE" EqOpt TablespaceSizeValue
+	{
+		opt := $3.(*ast.TablespaceOption)
+		opt.Tp = ast.TablespaceOptRedoBufferSize
+		$$ = opt
+	}
+|	"NODEGROUP" EqOpt NUM
+	{
+		$$ = &ast.TablespaceOption{Tp: ast.TablespaceOptNodegroup, UintValue: getUint64FromNUM($3)}
+	}
+|	"WAIT"
+	{
+		$$ = &ast.TablespaceOption{Tp: ast.TablespaceOptWait}
+	}
+|	"NO_WAIT"
+	{
+		$$ = &ast.TablespaceOption{Tp: ast.TablespaceOptNoWait}
+	}
+|	"COMMENT" EqOpt stringLit
+	{
+		$$ = &ast.TablespaceOption{Tp: ast.TablespaceOptComment, StrValue: $3}
+	}
+|	"ENCRYPTION" EqOpt stringLit
+	{
+		$$ = &ast.TablespaceOption{Tp: ast.TablespaceOptEncryption, StrValue: $3}
+	}
+|	"ENGINE" EqOpt StringName
+	{
+		$$ = &ast.TablespaceOption{Tp: ast.TablespaceOptEngine, StrValue: $3}
+	}
+|	"ENGINE_ATTRIBUTE" EqOpt stringLit
+	{
+		$$ = &ast.TablespaceOption{Tp: ast.TablespaceOptEngineAttribute, StrValue: $3}
+	}
+
+TablespaceSizeValue:
+	NUM
+	{
+		$$ = &ast.TablespaceOption{UintValue: getUint64FromNUM($1)}
+	}
+|	Identifier
+	{
+		$$ = &ast.TablespaceOption{StrValue: $1}
 	}
 
 StringName:
