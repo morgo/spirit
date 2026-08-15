@@ -61,7 +61,7 @@ type TablespaceOption struct {
 
 // Restore implements Node interface.
 func (n *TablespaceOption) Restore(ctx *format.RestoreCtx) error {
-	switch n.Tp {
+	switch n.Tp { //nolint:exhaustive // TablespaceOptNone is invalid and hits the default error.
 	case TablespaceOptInitialSize:
 		ctx.WriteKeyWord("INITIAL_SIZE")
 	case TablespaceOptMaxSize:
@@ -96,7 +96,7 @@ func (n *TablespaceOption) Restore(ctx *format.RestoreCtx) error {
 		return fmt.Errorf("invalid TablespaceOptionType: %d", n.Tp)
 	}
 	ctx.WritePlain(" = ")
-	switch n.Tp {
+	switch n.Tp { //nolint:exhaustive // remaining options are numeric sizes handled by default
 	case TablespaceOptComment, TablespaceOptEncryption, TablespaceOptEngineAttribute:
 		ctx.WriteString(n.StrValue)
 	case TablespaceOptEngine:
