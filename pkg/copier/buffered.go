@@ -2,7 +2,6 @@ package copier
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -29,7 +28,6 @@ import (
 type buffered struct {
 	sync.Mutex
 
-	db            *sql.DB
 	applier       applier.Applier
 	chunker       table.Chunker
 	concurrency   int
@@ -63,8 +61,62 @@ type buffered struct {
 	readScalingClosed bool               // set true when the pool has drained, to block new spawns
 }
 
-// Assert that buffered implements the Copier interface
-var _ Copier = (*buffered)(nil)
+// Assert that buffered implements the Copier interface, and ChunkCopier for
+// the tests that step through the copy one chunk at a time.
+var (
+	_ Copier      = (*buffered)(nil)
+	_ ChunkCopier = (*buffered)(nil)
+)
+
+// CopyChunk copies a single chunk synchronously: it reads the chunk's rows,
+// writes them through the applier, and blocks until the write has completed
+// and chunker feedback has been sent. It exists for tests that need to drive
+// the copy deterministically (see ChunkCopier); Run does not use it.
+//
+// It starts the applier if needed (Start is idempotent, so this composes with
+// a later Run on the same copier). It does not stop it: write workers stay up
+// for the next call, and the runner's Close (or Run's own Stop) tears them
+// down.
+func (c *buffered) CopyChunk(ctx context.Context, chunk *table.Chunk) error {
+	if err := c.applier.Start(ctx); err != nil {
+		return fmt.Errorf("failed to start applier: %w", err)
+	}
+	c.throttler.BlockWait(ctx)
+	c.chunkSize.Store(chunk.ChunkSize)
+	startTime := time.Now()
+	rows, err := c.readChunkData(ctx, chunk)
+	if err != nil {
+		return fmt.Errorf("failed to read chunk data: %w", err)
+	}
+	chunk.ActualBytes = rowsByteSize(rows)
+	// The callback runs on the applier's feedback coordinator goroutine; done
+	// closes only after feedback and metrics are sent, so both have completed
+	// before CopyChunk returns. Empty chunks take the same path — the applier
+	// invokes the callback immediately.
+	done := make(chan struct{})
+	var applyErr error
+	callback := func(affectedRows int64, err error) {
+		defer close(done)
+		if err != nil {
+			applyErr = err
+			return
+		}
+		totalTime := time.Since(startTime)
+		c.chunker.Feedback(chunk, totalTime, uint64(affectedRows))
+		if metricsErr := c.sendMetrics(ctx, totalTime, chunk.ChunkSize, uint64(affectedRows)); metricsErr != nil {
+			// Metrics failures don't fail the copy; log and continue.
+			c.logger.Error("error sending metrics from copier", "error", metricsErr)
+		}
+	}
+	if err := c.applier.Apply(ctx, chunk, rows, callback); err != nil {
+		return fmt.Errorf("failed to apply rows: %w", err)
+	}
+	// The applier guarantees the callback is invoked exactly once per Apply
+	// that returned nil (including on error or cancellation), so this cannot
+	// block forever.
+	<-done
+	return applyErr
+}
 
 // readChunkData reads all rows from a chunk into memory
 func (c *buffered) readChunkData(ctx context.Context, chunk *table.Chunk) ([][]any, error) {
