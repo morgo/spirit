@@ -682,7 +682,7 @@ Note that the whole report is a single log record containing newlines. Spirit's 
 
 | Field | Meaning |
 | --- | --- |
-| `state` | The migration phase. Runs in order: `copyRows` → `waitingOnSentinelTable` (only with `--defer-cutover`) → `applyChangeset` → `restoreSecondaryIndexes` → `analyzeTable` → `checksum` → `postChecksum` → `cutOver`. |
+| `state` | The migration phase. Runs in order: `copyRows` → `applyChangeset` → `analyzeTable` → `checksum` → `postChecksum` → `waitingOnSentinelTable` → `cutOver`. The sentinel wait sits immediately before cutover and is entered whenever the sentinel is respected, which is the default: with [`--defer-cutover`](#defer-cutover) it blocks until you drop the sentinel table, and without it Spirit confirms no sentinel table exists and moves on. |
 | `total-time` | Wall-clock time since the migration started. |
 | `copier-time` / `checksum-time` | Time spent in the current phase. |
 
@@ -732,7 +732,7 @@ Two more fields appear **only when they have something to say**, so their presen
 
 | Field | Appears when | Meaning |
 | --- | --- | --- |
-| `build-p50` | Building the statement takes ≥25% of the write time | Spirit's own CPU is a limit, not the target. No server-side signal reports this, and adding write threads will not help. Build time is contained *within* write time, not additional to it. |
+| `build-p50` | Building the statement takes ≥25% of the write time, and at least 1ms | Spirit's own CPU is a limit, not the target. No server-side signal reports this, and adding write threads will not help. Build time is contained *within* write time, not additional to it. |
 | `handoff-p50` | Handoff reaches 1ms | Write workers are backing up behind the single goroutine that publishes completions, rather than behind the target. Adding write threads will not help here either. |
 
 Everything Spirit measures about the write path — including the fields not rendered here, such as pending work, mean rows per chunklet, and the remaining p90s — is still emitted to the metrics sink, which is the better source for dashboards.

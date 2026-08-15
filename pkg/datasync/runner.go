@@ -109,7 +109,7 @@ type Runner struct {
 	fatalErr  error
 	fatalOnce sync.Once
 
-	// progMu guards the progress-related fields (copier, copyChunker,
+	// progMu guards the progress-related fields (applier, copier, copyChunker,
 	// replClient, cancelFunc) that Run assigns during setup and
 	// that the status.Task accessors (Progress/Status/DumpCheckpoint/Cancel)
 	// read concurrently from a separate monitoring goroutine.
@@ -698,10 +698,15 @@ func (r *Runner) setup(ctx context.Context) error {
 	}
 
 	r.logger.Info("Creating applier")
-	r.applier, err = r.createApplier()
+	appl, err := r.createApplier()
 	if err != nil {
 		return err
 	}
+	// Published under progMu because Status() reads it from the monitoring
+	// goroutine to render the applier row.
+	r.progMu.Lock()
+	r.applier = appl
+	r.progMu.Unlock()
 
 	// Wire the change source (continuous mode only): injected (e.g. VStream),
 	// or a built-in MySQL binlog client constructed from the source DSN. Sync
@@ -1490,6 +1495,7 @@ func (r *Runner) Status() string {
 	r.progMu.RLock()
 	cp := r.copier
 	repl := r.replClient
+	appl := r.applier
 	r.progMu.RUnlock()
 
 	elapsed := r.status.TotalElapsed().Round(time.Second)
@@ -1504,6 +1510,9 @@ func (r *Runner) Status() string {
 		// before there is a copier to report on.
 		if cp != nil {
 			progress := cp.CopyProgress()
+			// No throttled= here, unlike migrate and move: a sync copies
+			// through a Noop throttler, so the field would be a constant
+			// false.
 			b.Row("copier", "%6.2f%%  %d/%d  chunk-size=%d  eta=%s",
 				progress.Fraction()*100,
 				progress.RowsCopied,
@@ -1512,6 +1521,7 @@ func (r *Runner) Status() string {
 				cp.GetETA(),
 			)
 		}
+		b.Row("applier", "%s", applier.StatusRow(appl))
 		b.Row("binlog", "deltas=%d  %s", pending, change.StatusRow(repl))
 		b.Row("ckpt", "%s", r.lastCheckpoint.Row())
 		return b.String()
@@ -1521,6 +1531,7 @@ func (r *Runner) Status() string {
 			pos = repl.Position()
 		}
 		b := status.NewBlock("sync status: state=%s total-time=%s", state.String(), elapsed)
+		b.Row("applier", "%s", applier.StatusRow(appl))
 		// position= is where the feed has read to; the ckpt row's position is
 		// the older point a restart would actually resume from. The gap
 		// between them is how much re-reading a crash would cost.

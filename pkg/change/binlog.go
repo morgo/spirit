@@ -1198,8 +1198,6 @@ func (c *binlogClient) FeedStats() FeedStats {
 		LastFlushAt:       c.lastFlushAt,
 		LastFlushDuration: c.lastFlushDuration,
 		LastFlushRows:     c.lastFlushRows,
-		Flushes:           c.flushCount,
-		Residual:          c.flushResidual,
 		Rotations:         c.rotations.Load(),
 		ForcedRotations:   c.flushedBinlogs.Load(),
 	}

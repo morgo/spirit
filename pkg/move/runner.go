@@ -1449,6 +1449,9 @@ func (r *Runner) Status() string {
 		)
 		b.Row("applier", "%s", applier.StatusRow(r.applier))
 		b.Row("binlog", "deltas=%d  %s", r.getDeltaLenAll(), r.feedStatusRow())
+		// See pkg/migration: the dumper keeps checkpointing during the drain,
+		// so the resume position is still worth watching here.
+		b.Row("ckpt", "%s", r.lastCheckpoint.Row())
 		return b.String()
 	case status.Checksum:
 		// This could take a while if it's a large table.
@@ -1467,11 +1470,18 @@ func (r *Runner) Status() string {
 		b.Row("binlog", "deltas=%d  %s", r.getDeltaLenAll(), r.feedStatusRow())
 		b.Row("ckpt", "%s", r.lastCheckpoint.Row())
 		return b.String()
-	case status.RestoreSecondaryIndexes:
-		return fmt.Sprintf("migration status: state=%s total-time=%s",
+	case status.RestoreSecondaryIndexes, status.AnalyzeTable:
+		// Neither phase has progress to report, but both can block for a long
+		// time on a busy server, and with the per-dump checkpoint line now at
+		// DEBUG this is the only INFO output they produce. See pkg/migration.
+		b := status.NewBlock("migration status: state=%s total-time=%s state-time=%s",
 			state.String(),
 			r.status.TotalElapsed().Round(time.Second),
+			r.status.Elapsed().Round(time.Second),
 		)
+		b.Row("binlog", "deltas=%d  %s", r.getDeltaLenAll(), r.feedStatusRow())
+		b.Row("ckpt", "%s", r.lastCheckpoint.Row())
+		return b.String()
 	default:
 		return ""
 	}

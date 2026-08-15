@@ -103,6 +103,13 @@ const handoffNoiseFloor = time.Millisecond
 // which no server-side signal can report and more write workers cannot fix.
 const buildShareThreshold = 0.25
 
+// buildNoiseFloor keeps the share test from firing on a pipeline that is
+// simply fast. A 300µs build against an 800µs write is 38% of it, but nothing
+// is wrong and the row rounds to the millisecond, so it would render as the
+// self-contradictory "build-p50=0s". Below this the client cannot be the
+// bottleneck whatever the share says.
+const buildNoiseFloor = time.Millisecond
+
 // String renders the snapshot as the applier row of a runner's status block, so
 // migrate, move and sync report identical fields. Durations are rounded to the
 // millisecond — finer precision is noise at status cadence. The fields are not
@@ -116,8 +123,9 @@ const buildShareThreshold = 0.25
 // p50/p90 — because those are what you steer by.
 //
 // Two more appear only when they have something to say: build time when it is
-// a large enough share of write time to mean the client is the bottleneck, and
-// handoff when it rises off the floor. Both diagnose a pipeline that has
+// a large enough share of write time to mean the client is the bottleneck (and
+// large enough in absolute terms to be worth reading), and handoff when it
+// rises off the floor. Both diagnose a pipeline that has
 // stopped responding to more write workers (see
 // github.com/block/spirit/issues/1097), and both are silent on a healthy run —
 // so their *presence* is the signal, and their absence is not a gap.
@@ -133,7 +141,7 @@ func (s Stats) String() string {
 		s.WriteTimeP50.Round(time.Millisecond),
 		s.WriteTimeP90.Round(time.Millisecond),
 	)
-	if s.WriteTimeP50 > 0 && float64(s.BuildTimeP50) >= buildShareThreshold*float64(s.WriteTimeP50) {
+	if s.WriteTimeP50 > 0 && s.BuildTimeP50 >= buildNoiseFloor && float64(s.BuildTimeP50) >= buildShareThreshold*float64(s.WriteTimeP50) {
 		out += fmt.Sprintf("  build-p50=%v", s.BuildTimeP50.Round(time.Millisecond))
 	}
 	if s.HandoffP50 >= handoffNoiseFloor {

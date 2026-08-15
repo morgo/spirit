@@ -141,6 +141,14 @@ func TestStatsStringExceptionFields(t *testing.T) {
 	// A zero write p50 must not make the build share division blow up or
 	// report a share of nothing.
 	require.NotContains(t, Stats{BuildTimeP50: time.Second}.String(), "build-p50")
+
+	// A fast pipeline is not client-CPU bound just because build is a large
+	// share of a sub-millisecond write: the field would round to "0s" and say
+	// nothing. See buildNoiseFloor.
+	fast := healthy
+	fast.WriteTimeP50 = 800 * time.Microsecond
+	fast.BuildTimeP50 = 300 * time.Microsecond
+	require.NotContains(t, fast.String(), "build-p50")
 }
 
 // TestStatusRowNil verifies the runner-facing helper is nil-safe: Status() can

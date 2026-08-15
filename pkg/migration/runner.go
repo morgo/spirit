@@ -1962,6 +1962,24 @@ func (r *Runner) Status() string {
 		)
 		b.Row("applier", "%s", applier.StatusRow(r.applier))
 		b.Row("binlog", "deltas=%d  %s", r.replClient.GetDeltaLen(), change.StatusRow(r.replClient))
+		// The dumper keeps checkpointing in these states, and a long drain
+		// under heavy rotation is exactly when the resume position can fall
+		// off the source's binlog retention — so the ckpt row belongs here
+		// too.
+		b.Row("ckpt", "%s", r.lastCheckpoint.Row())
+		return b.String()
+	case status.AnalyzeTable:
+		// ANALYZE TABLE can block behind other work on the server, and with
+		// the per-dump checkpoint line now at DEBUG this is the only INFO
+		// output a stuck ANALYZE would produce. Keep it minimal but present,
+		// so log-based liveness checks still see the run.
+		b := status.NewBlock("migration status: state=%s total-time=%s analyze-time=%s",
+			state.String(),
+			r.status.TotalElapsed().Round(time.Second),
+			r.status.Elapsed().Round(time.Second),
+		)
+		b.Row("binlog", "deltas=%d  %s", r.replClient.GetDeltaLen(), change.StatusRow(r.replClient))
+		b.Row("ckpt", "%s", r.lastCheckpoint.Row())
 		return b.String()
 	case status.Checksum:
 		progress := r.checker.GetProgress()

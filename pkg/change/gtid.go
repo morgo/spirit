@@ -530,7 +530,9 @@ func (c *gtidClient) readStream(ctx context.Context) {
 	lastErrorTime := time.Time{}
 	var recentErrors []string
 	// Tracked only to de-duplicate rotate events for the rotation counter;
-	// this client resumes by GTID, never by file name.
+	// this client resumes by GTID, never by file name. Empty means "no rotate
+	// seen yet" — see countRotation, which is what keeps the dump's opening
+	// artificial rotate from counting.
 	currentLogName := ""
 
 	c.logger.Debug("readStream started for GTID position", "gtid", c.getBufferedGTID().String())
@@ -677,13 +679,8 @@ func (c *gtidClient) readStream(ctx context.Context) {
 		case *replication.RotateEvent:
 			// Stream housekeeping: position tracking advances via
 			// GTIDEvent/XIDEvent above, not via rotations. We only count
-			// them, for the runner status block. Duplicate rotate events
-			// (the server sends a real one and an artificial one carrying
-			// the same position) are collapsed by comparing file names.
-			if name := string(event.NextLogName); name != currentLogName {
-				c.rotations.Add(1)
-				currentLogName = name
-			}
+			// them, for the runner status block.
+			currentLogName = c.countRotation(currentLogName, string(event.NextLogName))
 		case *replication.TableMapEvent,
 			*replication.FormatDescriptionEvent,
 			*replication.PreviousGTIDsEvent:
@@ -1142,6 +1139,27 @@ func (c *gtidClient) FlushResidual() (int, int) {
 	return c.flushResidual, c.flushCount
 }
 
+// countRotation folds one rotate event into the rotation counter and returns
+// the file name to compare the next one against.
+//
+// Two kinds of rotate event have to be ignored. The server prefaces every
+// binlog dump with an artificial rotate naming the file it is about to read,
+// and it sends a real rotate followed by an artificial one carrying the same
+// position; recreateStreamer re-opening the current file produces the first
+// kind again. binlogClient dedups both by seeding from the position it is
+// resuming at (see its readStream), but this client resumes by GTID and has no
+// file name to seed from — so an empty currentLogName means "nothing seen yet"
+// and the first rotate only seeds the comparison.
+func (c *gtidClient) countRotation(currentLogName, nextLogName string) string {
+	if nextLogName == "" || nextLogName == currentLogName {
+		return currentLogName
+	}
+	if currentLogName != "" {
+		c.rotations.Add(1)
+	}
+	return nextLogName
+}
+
 // FeedStats satisfies StatsReporter. ForcedRotations is always zero: this
 // client never issues `FLUSH BINARY LOGS` — BlockWait polls
 // @@GLOBAL.gtid_executed instead of chasing a file offset.
@@ -1152,8 +1170,6 @@ func (c *gtidClient) FeedStats() FeedStats {
 		LastFlushAt:       c.lastFlushAt,
 		LastFlushDuration: c.lastFlushDuration,
 		LastFlushRows:     c.lastFlushRows,
-		Flushes:           c.flushCount,
-		Residual:          c.flushResidual,
 		Rotations:         c.rotations.Load(),
 	}
 }

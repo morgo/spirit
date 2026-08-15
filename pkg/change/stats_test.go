@@ -129,6 +129,53 @@ func TestStatusRowNeverFlushedWins(t *testing.T) {
 	require.Equal(t, StatusRow(flushed, never), StatusRow(never, flushed))
 }
 
+// The GTID client counts rotations for the status block but resumes by GTID,
+// so unlike binlogClient it has no file name to seed the dedup with. Every
+// rotate event that is not a rotation we followed has to fall out of
+// countRotation itself.
+func TestGTIDCountRotation(t *testing.T) {
+	c := &gtidClient{}
+
+	// The dump opens with an artificial rotate naming the file the server is
+	// about to read. Nothing rotated; it only seeds the comparison.
+	name := c.countRotation("", "binlog.000004")
+	require.Equal(t, "binlog.000004", name)
+	require.Zero(t, c.rotations.Load())
+
+	// A real rotation, followed by the artificial event carrying the same
+	// file: one rotation between them.
+	name = c.countRotation(name, "binlog.000005")
+	name = c.countRotation(name, "binlog.000005")
+	require.Equal(t, int64(1), c.rotations.Load())
+
+	// recreateStreamer re-opens the current file, producing another synthetic
+	// rotate to the file we are already reading.
+	name = c.countRotation(name, "binlog.000005")
+	require.Equal(t, int64(1), c.rotations.Load())
+
+	// A rotate with no file name has nothing to compare and is ignored.
+	require.Equal(t, "binlog.000005", c.countRotation(name, ""))
+	require.Equal(t, int64(1), c.rotations.Load())
+}
+
+// The GTID client's FeedStats is plumbed the same way as the binlog client's,
+// minus forced rotations: it never issues FLUSH BINARY LOGS.
+func TestGTIDFeedStats(t *testing.T) {
+	c := &gtidClient{subs: newSubscriptionRegistry()}
+	require.Equal(t, "rotations=0 (0 forced)  never flushed", StatusRow(c))
+
+	c.rotations.Store(2)
+	c.recordFlush(time.Now().Add(-5*time.Millisecond), 42)
+
+	stats := c.FeedStats()
+	require.Equal(t, int64(2), stats.Rotations)
+	require.Zero(t, stats.ForcedRotations)
+	require.Equal(t, 42, stats.LastFlushRows)
+	require.False(t, stats.LastFlushAt.IsZero())
+	require.GreaterOrEqual(t, stats.LastFlushDuration, 5*time.Millisecond)
+	require.Contains(t, StatusRow(c), "rotations=2 (0 forced)  flushed 0s ago")
+}
+
 // The feed records real flushes and real rotations, which is what the runner
 // status block reports in place of the per-flush and per-rotation log lines.
 func TestFeedStatsFromLiveFeed(t *testing.T) {
@@ -166,16 +213,18 @@ func TestFeedStatsFromLiveFeed(t *testing.T) {
 
 	stats := client.FeedStats()
 	require.False(t, stats.LastFlushAt.IsZero(), "a completed flush must be recorded")
-	require.Equal(t, 1, stats.Flushes)
 	require.Equal(t, 2, stats.LastFlushRows, "batch size is the pending count at the start of the flush")
-	require.Zero(t, stats.Residual, "the flush drained everything")
+	residual, flushes := client.FlushResidual()
+	require.Equal(t, 1, flushes)
+	require.Zero(t, residual, "the flush drained everything")
 
 	// The public Flush loops until the backlog is trivial and then flushes
 	// once more, so it ends on an empty batch. That is reported honestly: a
 	// feed that is keeping up has nothing to flush.
 	require.NoError(t, client.Flush(t.Context()))
 	stats = client.FeedStats()
-	require.Greater(t, stats.Flushes, 1)
+	_, flushes = client.FlushResidual()
+	require.Greater(t, flushes, 1)
 	require.Zero(t, stats.LastFlushRows)
 
 	// Rotating the source binlog advances the rotation counter. Only the

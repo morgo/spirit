@@ -24,12 +24,6 @@ type FeedStats struct {
 	// Source.Flush always ends on (it loops until the backlog is trivial and
 	// then flushes once more).
 	LastFlushRows int
-	// Flushes counts completed flushes, and Residual is the pending-change
-	// count observed immediately after the most recent one. See
-	// Source.FlushResidual for why the residual has to be sampled by the feed
-	// rather than polled by the caller.
-	Flushes  int
-	Residual int
 	// Rotations counts binlog rotations the feed has followed. Duplicate
 	// rotate events (the server sends a real one and an artificial one
 	// carrying the same position) are counted once.
@@ -95,8 +89,6 @@ func StatusRow(srcs ...Source) string {
 			merged.LastFlushDuration = s.LastFlushDuration
 			merged.LastFlushRows = s.LastFlushRows
 		}
-		merged.Flushes += s.Flushes
-		merged.Residual += s.Residual
 		merged.Rotations += s.Rotations
 		merged.ForcedRotations += s.ForcedRotations
 		found = true
