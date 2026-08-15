@@ -40,7 +40,7 @@ var maxConnLifetime = time.Minute * 3
 // every subsequent acquire into a fresh dial, TLS handshake and MySQL auth.
 // The copy phase is exactly that workload — up to a few hundred write and read
 // workers cycling connections continuously — and the churn is invisible in the
-// status line, which reports only Stats().InUse.
+// status block, which does not report pool internals at all.
 //
 // Holding the connections idle instead costs nothing the caller has not
 // already reserved: SetMaxOpenConns is the budget, and this only stops the pool

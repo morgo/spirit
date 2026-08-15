@@ -49,7 +49,11 @@ func continuallyDumpStatus(ctx context.Context, task Task, logger *slog.Logger) 
 			if state > CutOver {
 				return
 			}
-			logger.Info(task.Status()) // call the task to write the status
+			// Skip states that report nothing rather than logging a bare
+			// INFO with an empty message.
+			if s := task.Status(); s != "" {
+				logger.Info(s)
+			}
 		}
 	}
 }

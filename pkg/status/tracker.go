@@ -94,8 +94,8 @@ func (t *Tracker) TotalElapsed() time.Duration {
 }
 
 // Elapsed returns how long the current state has been current. It reports 0
-// before the first transition. This is the value to render on status lines
-// ("copier-time", "sentinel-wait-time", ...).
+// before the first transition. This is the value to render on the status
+// block's header ("copier-time", "sentinel-wait-time", ...).
 func (t *Tracker) Elapsed() time.Duration {
 	t.mu.Lock()
 	defer t.mu.Unlock()
