@@ -19,7 +19,8 @@ func runRenameTest(t *testing.T, tableName, createTable, insertData, alter strin
 		testutils.RunSQLInDatabase(t, dbName, insertData)
 	}
 
-	m := NewTestMigration(t, WithDBName(dbName), WithTable(tableName), WithAlter(alter))
+	m := NewTestMigration(t, WithDBName(dbName),
+		WithStatement(fmt.Sprintf("ALTER TABLE %s %s", tableName, alter)))
 	require.NoError(t, m.Run())
 
 	if verifyFunc != nil {
@@ -238,8 +239,8 @@ func TestRenameColumnLargerDataset(t *testing.T) {
 	}
 	// Should have 16 rows now
 
-	m := NewTestMigration(t, WithDBName(dbName), WithTable(tableName),
-		WithAlter("RENAME COLUMN old_name TO new_name"))
+	m := NewTestMigration(t, WithDBName(dbName),
+		WithStatement(fmt.Sprintf("ALTER TABLE %s RENAME COLUMN old_name TO new_name", tableName)))
 	require.NoError(t, m.Run())
 
 	db, err := sql.Open("mysql", testutils.DSNForDatabase(dbName))
@@ -277,8 +278,8 @@ func TestRenameColumnPKBlocked(t *testing.T) {
 
 	// CHANGE COLUMN with type change on PK forces Spirit's copy algorithm,
 	// which should be blocked by the preflight check.
-	m := NewTestMigration(t, WithDBName(dbName), WithTable(tableName),
-		WithAlter("CHANGE COLUMN id new_id BIGINT NOT NULL AUTO_INCREMENT"),
+	m := NewTestMigration(t, WithDBName(dbName),
+		WithStatement(fmt.Sprintf("ALTER TABLE %s CHANGE COLUMN id new_id BIGINT NOT NULL AUTO_INCREMENT", tableName)),
 		WithThreads(1))
 	err := m.Run()
 	require.Error(t, err)
@@ -423,8 +424,8 @@ func TestRenameColumnForceCopyPath(t *testing.T) {
 	// Should have 32 rows
 
 	// CHANGE COLUMN with type change forces the copy algorithm
-	m := NewTestMigration(t, WithDBName(dbName), WithTable(tableName),
-		WithAlter("CHANGE COLUMN old_name new_name varchar(200) NOT NULL"))
+	m := NewTestMigration(t, WithDBName(dbName),
+		WithStatement(fmt.Sprintf("ALTER TABLE %s CHANGE COLUMN old_name new_name varchar(200) NOT NULL", tableName)))
 	require.NoError(t, m.Run())
 
 	db, err := sql.Open("mysql", testutils.DSNForDatabase(dbName))
