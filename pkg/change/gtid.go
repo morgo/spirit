@@ -82,6 +82,17 @@ type gtidClient struct {
 	flushResidual int
 	flushCount    int
 
+	// lastFlush* describe the most recently completed flush, for FeedStats.
+	// Guarded by mu. See binlogClient for why every flush is recorded, not
+	// just the periodic one.
+	lastFlushAt       time.Time
+	lastFlushDuration time.Duration
+	lastFlushRows     int
+
+	// rotations counts binlog rotations seen on the stream. Position
+	// tracking here is by GTID, so this is reported for diagnostics only.
+	rotations atomic.Int64
+
 	periodicFlushLock   sync.Mutex
 	periodicFlushCancel context.CancelFunc
 	periodicFlushDone   chan struct{}
@@ -389,7 +400,9 @@ func (c *gtidClient) buildSyncerConfig(host string, port uint16) replication.Bin
 		Port:     port,
 		User:     c.username,
 		Password: c.password,
-		Logger:   c.logger,
+		// Demote go-mysql's per-rotation INFO line the same way the binlog
+		// client does — see syncerQuietMessages.
+		Logger: newDemotingLogger(c.logger, syncerQuietMessages),
 		// Render JSON the same way the binlog client does — see the
 		// rationale on NewBinlogClient.
 		RenderJSONAsMySQLText: true,
@@ -516,6 +529,11 @@ func (c *gtidClient) readStream(ctx context.Context) {
 	backoffDuration := initialBackoffDuration
 	lastErrorTime := time.Time{}
 	var recentErrors []string
+	// Tracked only to de-duplicate rotate events for the rotation counter;
+	// this client resumes by GTID, never by file name. Empty means "no rotate
+	// seen yet" — see countRotation, which is what keeps the dump's opening
+	// artificial rotate from counting.
+	currentLogName := ""
 
 	c.logger.Debug("readStream started for GTID position", "gtid", c.getBufferedGTID().String())
 
@@ -658,10 +676,14 @@ func (c *gtidClient) readStream(ctx context.Context) {
 				c.fatalError(FatalReasonStreamError)
 				return
 			}
+		case *replication.RotateEvent:
+			// Stream housekeeping: position tracking advances via
+			// GTIDEvent/XIDEvent above, not via rotations. We only count
+			// them, for the runner status block.
+			currentLogName = c.countRotation(currentLogName, string(event.NextLogName))
 		case *replication.TableMapEvent,
 			*replication.FormatDescriptionEvent,
-			*replication.PreviousGTIDsEvent,
-			*replication.RotateEvent:
+			*replication.PreviousGTIDsEvent:
 			// Stream housekeeping events. Position tracking advances via
 			// GTIDEvent/XIDEvent above, not via these.
 		case *replication.GenericEvent:
@@ -1056,6 +1078,11 @@ func (c *gtidClient) FlushUnderTableLock(ctx context.Context, locks []*dbconn.Ta
 }
 
 func (c *gtidClient) flush(ctx context.Context, underLock bool, locks []*dbconn.TableLock) error {
+	// Sampled before the flush starts: this is the batch size the flush is
+	// about to work through. GetDeltaLen takes no lock of its own, so it is
+	// called before acquiring c.mu.
+	start := time.Now()
+	batch := c.GetDeltaLen()
 	c.mu.Lock()
 	newFlushedGTID := c.bufferedGTID.Clone()
 	c.mu.Unlock()
@@ -1084,22 +1111,25 @@ func (c *gtidClient) flush(ctx context.Context, underLock bool, locks []*dbconn.
 		}
 		c.mu.Unlock()
 	}
-	c.recordFlushResidual()
+	c.recordFlush(start, batch)
 	return nil
 }
 
-// recordFlushResidual captures what this flush left behind, for
-// FlushResidual. Recorded whether or not every change could be flushed: a
-// flush that could not drain everything is exactly the case a caller watching
-// for a feed losing ground needs to see.
+// recordFlush captures what this flush left behind (for FlushResidual) and
+// how long it took on how many changes (for FeedStats). Recorded whether or
+// not every change could be flushed: a flush that could not drain everything
+// is exactly the case a caller watching for a feed losing ground needs to see.
 //
 // GetDeltaLen takes no lock of its own, so it is called before acquiring c.mu.
-func (c *gtidClient) recordFlushResidual() {
+func (c *gtidClient) recordFlush(start time.Time, batch int) {
 	residual := c.GetDeltaLen()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.flushResidual = residual
 	c.flushCount++
+	c.lastFlushAt = time.Now()
+	c.lastFlushDuration = time.Since(start)
+	c.lastFlushRows = batch
 }
 
 // FlushResidual satisfies Source.
@@ -1107,6 +1137,41 @@ func (c *gtidClient) FlushResidual() (int, int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.flushResidual, c.flushCount
+}
+
+// countRotation folds one rotate event into the rotation counter and returns
+// the file name to compare the next one against.
+//
+// Two kinds of rotate event have to be ignored. The server prefaces every
+// binlog dump with an artificial rotate naming the file it is about to read,
+// and it sends a real rotate followed by an artificial one carrying the same
+// position; recreateStreamer re-opening the current file produces the first
+// kind again. binlogClient dedups both by seeding from the position it is
+// resuming at (see its readStream), but this client resumes by GTID and has no
+// file name to seed from — so an empty currentLogName means "nothing seen yet"
+// and the first rotate only seeds the comparison.
+func (c *gtidClient) countRotation(currentLogName, nextLogName string) string {
+	if nextLogName == "" || nextLogName == currentLogName {
+		return currentLogName
+	}
+	if currentLogName != "" {
+		c.rotations.Add(1)
+	}
+	return nextLogName
+}
+
+// FeedStats satisfies StatsReporter. ForcedRotations is always zero: this
+// client never issues `FLUSH BINARY LOGS` — BlockWait polls
+// @@GLOBAL.gtid_executed instead of chasing a file offset.
+func (c *gtidClient) FeedStats() FeedStats {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return FeedStats{
+		LastFlushAt:       c.lastFlushAt,
+		LastFlushDuration: c.lastFlushDuration,
+		LastFlushRows:     c.lastFlushRows,
+		Rotations:         c.rotations.Load(),
+	}
 }
 
 // Flush satisfies Source. Same shape as binlogClient.Flush.
@@ -1189,7 +1254,8 @@ func (c *gtidClient) runPeriodicFlush(ctx context.Context, interval time.Duratio
 		if err := c.flush(ctx, false, nil); err != nil {
 			c.logger.Error("error flushing GTID changeset", "error", err)
 		}
-		c.logger.Info("finished periodic flush of GTID changeset", "total-duration", time.Since(startLoop).String(), "trigger", trigger)
+		// Debug, not Info — see binlogClient.runPeriodicFlush (#329).
+		c.logger.Debug("finished periodic flush of GTID changeset", "total-duration", time.Since(startLoop).String(), "trigger", trigger)
 	}
 }
 
@@ -1200,7 +1266,14 @@ func (c *gtidClient) BlockWait(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	c.logger.Info("waiting to catch up to source GTID", "target", targetGTID.String(), "current", c.getBufferedGTID().String())
+	// Info only when there is actually a gap to close — see
+	// binlogClient.BlockWait (#329).
+	bufferedGTID := c.getBufferedGTID()
+	logCatchUp := c.logger.Debug
+	if !bufferedGTID.Contain(targetGTID) {
+		logCatchUp = c.logger.Info
+	}
+	logCatchUp("waiting to catch up to source GTID", "target", targetGTID.String(), "current", bufferedGTID.String())
 	timer := time.NewTimer(DefaultTimeout)
 	defer timer.Stop()
 

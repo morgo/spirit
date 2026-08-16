@@ -22,8 +22,6 @@ spirit migrate --host mydb:3306 --username root --password secret \
 - [enable-experimental-autoscaling](#enable-experimental-autoscaling)
 - [enable-experimental-gtid](#enable-experimental-gtid)
 - [host](#host)
-- [lint](#lint)
-- [lint-only](#lint-only)
 - [lock-wait-timeout](#lock-wait-timeout)
 - [max-commit-latency](#max-commit-latency)
 - [password](#password)
@@ -218,20 +216,6 @@ spirit migrate --enable-experimental-gtid \
 - Examples: `mydbhost`, `mydbhost:3307`
 
 The host (and optional port) to use when connecting to MySQL. If no port is provided, 3306 is used.
-
-### lint
-
-- Type: Boolean
-- Default value: `false`
-
-Spirit can optionally run lint checks before executing a migration. This uses the same linting engine as [`spirit lint`](lint.md) and [`spirit diff`](diff.md), but runs inline as part of the migration process.
-
-### lint-only
-
-- Type: Boolean
-- Default value: `false`
-
-Similar to `--lint` except spirit will exit after running linting.
 
 ### lock-wait-timeout
 
@@ -659,3 +643,80 @@ Both copiers require `binlog_row_image=FULL` and an empty `binlog_row_value_opti
 - Default value: `spirit`
 
 The username to use when connecting to MySQL.
+
+## Reading the status output
+
+While a migration runs, Spirit logs one status report every 30 seconds. It is deliberately the only recurring `INFO` output: the checkpoint, the binlog flush and the binlog rotations each used to log on their own schedule, and they are now rows in this report instead ([#329](https://github.com/block/spirit/issues/329)). Their detail is still available by running with debug logging.
+
+The report is a header line plus one indented row per subsystem:
+
+```
+2026/08/14 11:47:10 INFO migration status: state=copyRows total-time=2m30s copier-time=2m30s
+  copier   46.13%  7550855/16370180  chunk-size=8097  eta=3m29s  throttled=false
+  applier queue=128/128  workers=4  wait-p50=1.564s  write-p50=37ms  write-p90=131ms
+  binlog  deltas=0  rotations=56 (0 forced)  flushed 30s ago (took 9µs, 0 rows)
+  ckpt    50s ago  binlog.000047:104857600
+```
+
+Which rows appear depends on `state`; the copy phase (`copyRows`, above) prints the most. During `checksum` a `checksum` row replaces the `copier` one, and during `waitingOnSentinelTable` a `sentinel` row reports the wait.
+
+Note that the whole report is a single log record containing newlines. Spirit's own CLI prints it as written; if you pipe Spirit's output through a handler that quotes log messages (JSON, or slog's `TextHandler`), the rows will arrive escaped on one line.
+
+### Header
+
+| Field | Meaning |
+| --- | --- |
+| `state` | The migration phase. Runs in order: `copyRows` → `applyChangeset` → `analyzeTable` → `checksum` → `postChecksum` → `waitingOnSentinelTable` → `cutOver`. The sentinel wait sits immediately before cutover and is entered whenever the sentinel is respected, which is the default: with [`--defer-cutover`](#defer-cutover) it blocks until you drop the sentinel table, and without it Spirit confirms no sentinel table exists and moves on. |
+| `total-time` | Wall-clock time since the migration started. |
+| `copier-time` / `checksum-time` | Time spent in the current phase. |
+
+### `copier` row
+
+| Field | Meaning |
+| --- | --- |
+| `%` | Rows copied out of the estimated total. The total comes from table statistics, so the percentage can drift slightly and is not a row count you should reconcile against. |
+| `n/m` | The figures the percentage is derived from. |
+| `chunk-size` | Rows in the most recently claimed chunk. The chunker sizes chunks dynamically to hit [`--target-chunk-time`](#target-chunk-time), so this number moving is normal and healthy — it is how Spirit adapts to row width and server load. A chunk size that has collapsed to its floor and stayed there means each chunk is taking longer than the target, i.e. the server is struggling. |
+| `eta` | Remaining rows divided by the recently measured copy rate. `TBD` for the first minute (no rate measured yet) and `DUE` past 99.99%. It is computed from a single 10-second sample, so early on it swings a lot; treat a large jump as noise unless it persists. |
+| `throttled` | Whether the copy is currently paused by a throttler (replica lag, commit latency, or load). A migration that is throttled is behaving as designed — it is protecting the server, not stalling. |
+
+The `checksum` row that replaces this one during the checksum phase has the same shape — including its own `chunk-size`, since the checksum sizes chunks dynamically as well — plus `threads=` and `throttled=` for the checksum's own pacing.
+
+### `binlog` row
+
+Spirit keeps the new table in sync with writes that land during the copy by subscribing to the source's binary log.
+
+| Field | Meaning |
+| --- | --- |
+| `deltas` | Changes discovered in the binary log that have not been applied to the new table yet. This is usually low at the start of a migration because of the *key above watermark* optimization: a change to a row the copier has not reached yet can simply be dropped, since the copier will read the current version when it gets there. It rises as the copy approaches 100%, and the `applyChangeset` state exists to drain it before cutover. |
+| `rotations` | How many binlog rotations Spirit has followed on the source. High counts usually just indicate a high volume of write activity on the server (from any workload, not only this migration). Worth knowing because binlog retention is what bounds how long a paused or resumable migration can survive. |
+| `(n forced)` | The subset of those rotations Spirit caused itself, by issuing `FLUSH BINARY LOGS` when it was waiting for the feed to catch up and the position had stalled. A number that climbs here (rather than in `rotations`) means Spirit's own catch-up waiting is churning through binlogs. |
+| `flushed X ago (took Y, n rows)` | When the change feed last flushed its buffered changes to the new table, how long that flush took, and how many buffered changes it started with. Flushes are periodic (every 30 seconds by default), so `X` reads somewhere between `0s` and the interval during a healthy copy; a value that keeps climbing well past it means flushes are not completing. `0 rows` is the normal reading for a feed that is keeping up — there was nothing left to write. |
+
+### `ckpt` row
+
+Reads `<age> ago  <position>`, or `never` before the first checkpoint.
+
+The age is how long ago the resume checkpoint was last written. Checkpoints are attempted every 50 seconds but are skipped while the copier has no resumable watermark yet, so `never` early in a run is expected. If the age keeps growing, an interrupted migration will resume from further back than you would like. A checkpoint that cannot be written at all is fatal — Spirit stops rather than working for hours without being able to record progress.
+
+The position is the binlog coordinate that checkpoint saved: the point a resumed migration would start reading from. Read it against `rotations` and the server's binlog retention, because resuming only works while this position is still on the server — a run with heavy rotation and a short `binlog_expire_logs_seconds` can become unresumable long before it fails.
+
+### `applier` row
+
+The applier is the shared write path that both the copier and the replication feed hand work to. Chunks are split into chunklets and queued for a pool of write workers.
+
+| Field | Meaning |
+| --- | --- |
+| `queue` | Queued chunklets out of the queue capacity. Sitting at capacity (`128/128` above) means the writers are the bottleneck and the readers are being backpressured, which is normally the intended state during a copy since it keeps the write side saturated. A queue well below capacity means the copy is read-limited instead. |
+| `workers` | Live write workers. Changes over time when [autoscaling](#enable-experimental-autoscaling) is enabled. |
+| `wait-p50` | How long a chunklet waits in the queue before a worker picks it up. Far above the write time means the write side is saturated. |
+| `write-p50` / `write-p90` | Time to execute the write against the target. A rising p90 points at the target server rather than at Spirit. |
+
+Two more fields appear **only when they have something to say**, so their presence is itself the signal and their absence means "not the problem":
+
+| Field | Appears when | Meaning |
+| --- | --- | --- |
+| `build-p50` | Building the statement takes ≥25% of the write time, and at least 1ms | Spirit's own CPU is a limit, not the target. No server-side signal reports this, and adding write threads will not help. Build time is contained *within* write time, not additional to it. |
+| `handoff-p50` | Handoff reaches 1ms | Write workers are backing up behind the single goroutine that publishes completions, rather than behind the target. Adding write threads will not help here either. |
+
+Everything Spirit measures about the write path — including the fields not rendered here, such as pending work, mean rows per chunklet, and the remaining p90s — is still emitted to the metrics sink, which is the better source for dashboards.

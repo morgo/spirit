@@ -21,17 +21,17 @@ import (
 type Unbuffered struct {
 	sync.Mutex
 
-	db               *sql.DB
-	chunker          table.Chunker
-	concurrency      int
-	rowsPerSecond    atomic.Uint64
-	isInvalid        bool
-	startTime        time.Time
-	throttler        throttler.Throttler
-	dbConfig         *dbconn.DBConfig
-	logger           *slog.Logger
-	metricsSink      metrics.Sink
-	copierEtaHistory *copierEtaHistory
+	db            *sql.DB
+	chunker       table.Chunker
+	concurrency   int
+	rowsPerSecond atomic.Uint64
+	chunkSize     atomic.Uint64 // size of the most recently claimed chunk; see Copier.ChunkSize
+	isInvalid     bool
+	startTime     time.Time
+	throttler     throttler.Throttler
+	dbConfig      *dbconn.DBConfig
+	logger        *slog.Logger
+	metricsSink   metrics.Sink
 }
 
 // Assert that unbuffered implements the Copier interface
@@ -41,6 +41,10 @@ var _ Copier = (*Unbuffered)(nil)
 // it is public so it can be used in tests incrementally.
 func (c *Unbuffered) CopyChunk(ctx context.Context, chunk *table.Chunk) error {
 	c.throttler.BlockWait(ctx)
+	// Recorded here rather than next to chunker.Next() in Run so the
+	// incremental path tests drive — calling CopyChunk directly — reports it
+	// too.
+	c.chunkSize.Store(chunk.ChunkSize)
 	startTime := time.Now()
 	// INSERT IGNORE so resuming from a checkpoint can re-apply chunks that
 	// were already (partially) copied without erroring on PK collisions.
@@ -165,10 +169,20 @@ func (c *Unbuffered) getCopyStats() (uint64, uint64, float64) {
 
 // GetProgress returns the progress of the copier
 func (c *Unbuffered) GetProgress() string {
+	return c.CopyProgress().String()
+}
+
+// CopyProgress satisfies Copier.
+func (c *Unbuffered) CopyProgress() status.CopyProgress {
 	c.Lock()
 	defer c.Unlock()
-	copied, total, pct := c.getCopyStats()
-	return fmt.Sprintf("%d/%d %.2f%%", copied, total, pct)
+	copied, total, _ := c.getCopyStats()
+	return status.CopyProgress{RowsCopied: copied, RowsTotal: total}
+}
+
+// ChunkSize satisfies Copier.
+func (c *Unbuffered) ChunkSize() uint64 {
+	return c.chunkSize.Load()
 }
 
 func (c *Unbuffered) GetETA() string {
@@ -183,10 +197,6 @@ func (c *Unbuffered) GetETA() string {
 		return "TBD"
 	case status.ETAReady, status.ETANone:
 		// A ready estimate is formatted below; ETANone cannot occur during copy.
-	}
-	comparison := c.copierEtaHistory.addCurrentEstimateAndCompare(estimate)
-	if comparison != "" {
-		return fmt.Sprintf("%s (%s)", estimate.String(), comparison)
 	}
 	return estimate.String()
 }

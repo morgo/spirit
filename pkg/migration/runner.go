@@ -22,12 +22,9 @@ import (
 	"github.com/block/spirit/pkg/checksum"
 	"github.com/block/spirit/pkg/copier"
 	"github.com/block/spirit/pkg/dbconn"
-	"github.com/block/spirit/pkg/dbconn/sqlescape"
-	"github.com/block/spirit/pkg/lint"
 	"github.com/block/spirit/pkg/metrics"
 	"github.com/block/spirit/pkg/migration/check"
 	"github.com/block/spirit/pkg/sentinel"
-	"github.com/block/spirit/pkg/statement"
 	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/throttler"
@@ -105,6 +102,12 @@ type Runner struct {
 	// dumper goroutine — both under checkpointMu.
 	continuousChecker continuousDivergenceReporter
 
+	// lastCheckpoint is when the checkpoint was last persisted and the binlog
+	// position it saved, reported together on the ckpt row of the status
+	// block. The checkpoint itself no longer logs at INFO on every dump
+	// (#329).
+	lastCheckpoint status.LastCheckpoint
+
 	// checkpointMu serializes checkpoint persistence (DumpCheckpoint's
 	// watermark-condition evaluation + INSERT) against the sentinel-abort
 	// path that blanks the persisted checksum_watermark
@@ -177,8 +180,11 @@ func NewRunner(m *Migration) (*Runner, error) {
 // the pool does not cover. Both are serialized, so one connection each:
 //
 //   - Chunk repair. When a chunk mismatches, replaceChunk runs its DELETE and
-//     REPLACE on r.db rather than on the pooled read-view transaction, and the
-//     two statements run sequentially under the checker's recopyLock.
+//     then its re-read of the source on r.db rather than on the pooled read-view
+//     transaction, and repairs are serialized under the checker's recopyLock —
+//     so it is one connection at a time. (The rewrite itself goes through the
+//     applier, whose write connections are already budgeted below as maxWrite;
+//     the copy phase has finished by then, so that headroom is free.)
 //   - Chunker prefetch. chunker.Next() runs a SELECT ... LIMIT 1 OFFSET n on
 //     Ti.Db to find the next chunk boundary, also off-pool. Workers call it
 //     concurrently but the chunker's own mutex serializes them, so only one
@@ -282,18 +288,6 @@ func (r *Runner) Run(ctx context.Context) error {
 	r.db, err = dbconn.New(r.dsn(), r.dbConfig)
 	if err != nil {
 		return fmt.Errorf("failed to connect to main database (DSN: %s): %w", dbconn.RedactDSN(r.dsn()), err)
-	}
-
-	// Run linting if --lint or --lint-only is specified.
-	// --lint-only implies lint.
-	if r.migration.Lint || r.migration.LintOnly {
-		if err := r.lint(ctx); err != nil {
-			return err
-		}
-		if r.migration.LintOnly {
-			r.logger.Info("--lint-only set; exiting after running linters")
-			return nil
-		}
 	}
 
 	if len(r.changes) == 1 {
@@ -507,7 +501,6 @@ func (r *Runner) Run(ctx context.Context) error {
 		"copy-rows-time", r.status.Duration(status.CopyRows).Round(time.Second).String(),
 		"checksum-time", r.status.Duration(status.Checksum).Round(time.Second).String(),
 		"total-time", r.status.TotalElapsed().Round(time.Second).String(),
-		"conns-in-use", r.db.Stats().InUse,
 	)
 	// cleanup all the tables
 	for _, change := range r.changes {
@@ -607,75 +600,6 @@ func (r *Runner) runChecks(ctx context.Context, scope check.ScopeFlag) error {
 		}
 	}
 	return nil
-}
-
-func (r *Runner) lint(ctx context.Context) error {
-	var createTables []*statement.CreateTable
-	var alterTables []*statement.AbstractStatement
-	config := lint.Config{
-		Enabled:  make(map[string]bool),
-		Settings: defaultLinterSettings,
-	}
-
-	if err := printLinters(config); err != nil {
-		return err
-	}
-
-	for _, change := range r.changes {
-		// Collect ALTER TABLE statements and the CREATE TABLEs for the tables they reference
-		if change.stmt.IsAlterTable() {
-			alterTables = append(alterTables, change.stmt)
-
-			ct, err := r.getCreateTable(ctx, change.stmt.Schema, change.stmt.Table)
-			if err != nil {
-				return err
-			}
-			createTables = append(createTables, ct)
-		}
-
-		// If the migration creates a table, we need to collect that CREATE TABLE as well
-		if change.stmt.IsCreateTable() {
-			ct, err := change.stmt.ParseCreateTable()
-			if err != nil {
-				return err
-			}
-			createTables = append(createTables, ct)
-		}
-	}
-
-	var errs []error
-
-	violations, err := lint.RunLinters(createTables, alterTables, config)
-	if err != nil {
-		errs = append(errs, err)
-	}
-
-	for _, v := range violations {
-		if v.Severity == lint.SeverityError {
-			errs = append(errs, errors.New(v.String()))
-		}
-		fmt.Println(v)
-	}
-
-	if len(errs) > 0 {
-		return errors.Join(errs...)
-	}
-	return nil
-}
-
-func (r *Runner) getCreateTable(ctx context.Context, db string, tbl string) (*statement.CreateTable, error) {
-	sql := fmt.Sprintf("show create table %s.%s", sqlescape.EscapeIdentifier(db), sqlescape.EscapeIdentifier(tbl))
-
-	row := r.db.QueryRowContext(ctx, sql)
-	var createTable string
-	if err := row.Scan(&tbl, &createTable); err != nil {
-		return nil, err
-	}
-	stmt, err := statement.ParseCreateTable(createTable)
-	if err != nil {
-		return nil, err
-	}
-	return stmt, nil
 }
 
 func (r *Runner) dsn() string {
@@ -974,6 +898,12 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 		MaxRetries:      3,
 		YieldTimeout:    r.migration.ChecksumYieldTimeout,
 		MetricsSink:     r.metricsSink,
+		// Repairing a mismatched chunk writes through the same applier the copy
+		// and binlog-apply phases use, so a repair inherits the configured write
+		// concurrency instead of standing up a second write path. The copier has
+		// stopped it by the time the checksum runs; the checker starts and stops
+		// it around each repair.
+		RepairApplier: appl,
 		// The checksum reads with its own pool, so it shares the read side's
 		// bounds: it starts at Threads and grows to maxRead, which is already in
 		// the pool sizing above. The copier's readers have finished by the time the
@@ -1872,11 +1802,15 @@ func (r *Runner) DumpCheckpoint(ctx context.Context) error {
 			checksumWatermark = wm
 		}
 	}
+	// Debug, not Info: the status block's ckpt row reports it instead, so
+	// this no longer needs a line of its own on every dump (#329). The
+	// watermark detail is still one -v away when a resume needs debugging.
+	//
 	// Note: when we dump the lowWatermark to the log, we are exposing the PK values,
 	// when using the composite chunker are based on actual user-data.
 	// We believe this is OK but may change it in the future. Please do not
 	// add any other fields to this log line.
-	r.logger.Info("checkpoint",
+	r.logger.Debug("checkpoint",
 		"low-watermark", copierWatermark,
 		"position", binlogPosition,
 	)
@@ -1896,9 +1830,15 @@ func (r *Runner) DumpCheckpoint(ctx context.Context) error {
 		// checkpoint table, which is fatal.
 		return fmt.Errorf("%w: %w", status.ErrCouldNotWriteCheckpoint, err)
 	}
+	r.lastCheckpoint.Record(binlogPosition)
 	return nil
 }
 
+// Status returns the periodic report on the whole migration: a header line
+// plus one indented row per subsystem (see status.Block). It deliberately
+// absorbs what used to be separate periodic lines from the change feed
+// (flushes, rotations) and the checkpoint dumper, which each ran on their own
+// interval — see github.com/block/spirit/issues/329.
 func (r *Runner) Status() string {
 	state := r.status.Get()
 	if state > status.CutOver {
@@ -1906,51 +1846,85 @@ func (r *Runner) Status() string {
 	}
 	switch state { //nolint: exhaustive
 	case status.CopyRows:
-		// Status for copy rows
-		return fmt.Sprintf("migration status: state=%s copy-progress=%s binlog-deltas=%v total-time=%s copier-time=%s copier-remaining-time=%v copier-is-throttled=%v conns-in-use=%d%s",
-			r.status.Get().String(),
-			r.copier.GetProgress(),
-			r.replClient.GetDeltaLen(),
+		progress := r.copier.CopyProgress()
+		b := status.NewBlock("migration status: state=%s total-time=%s copier-time=%s",
+			state.String(),
 			r.status.TotalElapsed().Round(time.Second),
 			r.status.Elapsed().Round(time.Second),
+		)
+		b.Row("copier", "%6.2f%%  %d/%d  chunk-size=%d  eta=%s  throttled=%v",
+			progress.Fraction()*100,
+			progress.RowsCopied,
+			progress.RowsTotal,
+			r.copier.ChunkSize(),
 			r.copier.GetETA(),
 			r.copier.GetThrottler().IsThrottled(),
-			r.db.Stats().InUse,
-			applier.StatusSuffix(r.applier),
 		)
+		b.Row("applier", "%s", applier.StatusRow(r.applier))
+		b.Row("binlog", "deltas=%d  %s", r.replClient.GetDeltaLen(), change.StatusRow(r.replClient))
+		b.Row("ckpt", "%s", r.lastCheckpoint.Row())
+		return b.String()
 	case status.WaitingOnSentinelTable:
-		return fmt.Sprintf("migration status: state=%s sentinel-table=%s.%s total-time=%s sentinel-wait-time=%s sentinel-max-wait-time=%s conns-in-use=%d",
-			r.status.Get().String(),
+		b := status.NewBlock("migration status: state=%s total-time=%s",
+			state.String(),
+			r.status.TotalElapsed().Round(time.Second),
+		)
+		b.Row("sentinel", "table=%s.%s  waiting=%s  max-wait=%s",
 			r.changes[0].table.SchemaName,
 			sentinel.TableName,
-			r.status.TotalElapsed().Round(time.Second),
 			r.status.Elapsed().Round(time.Second),
 			sentinel.WaitLimit,
-			r.db.Stats().InUse,
 		)
+		b.Row("binlog", "deltas=%d  %s", r.replClient.GetDeltaLen(), change.StatusRow(r.replClient))
+		b.Row("ckpt", "%s", r.lastCheckpoint.Row())
+		return b.String()
 	case status.ApplyChangeset, status.PostChecksum:
 		// We've finished copying rows, and we are now trying to reduce the number of binlog deltas before
 		// proceeding to the checksum and then the final cutover.
-		return fmt.Sprintf("migration status: state=%s binlog-deltas=%v total-time=%s conns-in-use=%d%s",
-			r.status.Get().String(),
-			r.replClient.GetDeltaLen(),
+		b := status.NewBlock("migration status: state=%s total-time=%s",
+			state.String(),
 			r.status.TotalElapsed().Round(time.Second),
-			r.db.Stats().InUse,
-			applier.StatusSuffix(r.applier),
 		)
-	case status.Checksum:
-		return fmt.Sprintf("migration status: state=%s checksum-progress=%s binlog-deltas=%v total-time=%s checksum-time=%s conns-in-use=%d%s",
-			r.status.Get().String(),
-			r.checker.GetProgress().String(),
-			r.replClient.GetDeltaLen(),
+		b.Row("applier", "%s", applier.StatusRow(r.applier))
+		b.Row("binlog", "deltas=%d  %s", r.replClient.GetDeltaLen(), change.StatusRow(r.replClient))
+		// The dumper keeps checkpointing in these states, and a long drain
+		// under heavy rotation is exactly when the resume position can fall
+		// off the source's binlog retention — so the ckpt row belongs here
+		// too.
+		b.Row("ckpt", "%s", r.lastCheckpoint.Row())
+		return b.String()
+	case status.AnalyzeTable:
+		// ANALYZE TABLE can block behind other work on the server, and with
+		// the per-dump checkpoint line now at DEBUG this is the only INFO
+		// output a stuck ANALYZE would produce. Keep it minimal but present,
+		// so log-based liveness checks still see the run.
+		b := status.NewBlock("migration status: state=%s total-time=%s analyze-time=%s",
+			state.String(),
 			r.status.TotalElapsed().Round(time.Second),
 			r.status.Elapsed().Round(time.Second),
-			r.db.Stats().InUse,
-			// Mirrors copier-is-throttled on the copy line: without it a
-			// checksum that is deliberately paused or scaled down looks
-			// identical to one that is simply slow.
+		)
+		b.Row("binlog", "deltas=%d  %s", r.replClient.GetDeltaLen(), change.StatusRow(r.replClient))
+		b.Row("ckpt", "%s", r.lastCheckpoint.Row())
+		return b.String()
+	case status.Checksum:
+		progress := r.checker.GetProgress()
+		b := status.NewBlock("migration status: state=%s total-time=%s checksum-time=%s",
+			state.String(),
+			r.status.TotalElapsed().Round(time.Second),
+			r.status.Elapsed().Round(time.Second),
+		)
+		// threads/throttled mirror the copier row's throttled=: without them a
+		// checksum that is deliberately paused or scaled down looks identical
+		// to one that is simply slow.
+		b.Row("checksum", "%6.2f%%  %d/%d%s",
+			progress.Fraction()*100,
+			progress.RowsChecked,
+			progress.RowsTotal,
 			checksum.StatusSuffix(r.checker),
 		)
+		b.Row("binlog", "deltas=%d  %s", r.replClient.GetDeltaLen(), change.StatusRow(r.replClient))
+		b.Row("ckpt", "%s", r.lastCheckpoint.Row())
+		return b.String()
 	}
 	return ""
 }

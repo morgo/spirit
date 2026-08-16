@@ -8,7 +8,7 @@ When creating a new connection, Spirit appends standardized DSN parameters to en
 
 ## Pool sizing
 
-Use `SetPoolSize(db, n)` rather than `db.SetMaxOpenConns(n)` directly. It sets the open and idle limits together, and they must stay together: `database/sql` closes a connection returned to a pool whose free list already holds `MaxIdleConns` entries, so an idle limit below the open limit turns every release past that point into a close and every subsequent acquire into a fresh dial, TLS handshake and MySQL auth. The copy phase — hundreds of read and write workers cycling connections continuously — is exactly that workload, and the churn is invisible on the status line, which reports only `Stats().InUse`.
+Use `SetPoolSize(db, n)` rather than `db.SetMaxOpenConns(n)` directly. It sets the open and idle limits together, and they must stay together: `database/sql` closes a connection returned to a pool whose free list already holds `MaxIdleConns` entries, so an idle limit below the open limit turns every release past that point into a close and every subsequent acquire into a fresh dial, TLS handshake and MySQL auth. The copy phase — hundreds of read and write workers cycling connections continuously — is exactly that workload, and the churn is invisible on the status block, which does not report pool internals at all.
 
 Holding the connections idle instead costs nothing that was not already reserved: the open limit is the budget, and matching the idle limit to it only stops the pool from discarding what it is entitled to keep. Several call sites ratchet a pool's size after it was created (the migration runner once thread counts are final, the checksum, cutover), which is why this lives in a helper rather than at construction only.
 

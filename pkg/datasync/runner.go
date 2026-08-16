@@ -81,6 +81,11 @@ type Runner struct {
 
 	status status.Tracker
 
+	// lastCheckpoint is when the checkpoint was last persisted and the
+	// change-feed position it saved, reported together on the ckpt row of the
+	// status block (#329).
+	lastCheckpoint status.LastCheckpoint
+
 	logger     *slog.Logger
 	cancelFunc context.CancelFunc
 	// sourceDBConfig connects to the read-only source: ForceKill and
@@ -104,7 +109,7 @@ type Runner struct {
 	fatalErr  error
 	fatalOnce sync.Once
 
-	// progMu guards the progress-related fields (copier, copyChunker,
+	// progMu guards the progress-related fields (applier, copier, copyChunker,
 	// replClient, cancelFunc) that Run assigns during setup and
 	// that the status.Task accessors (Progress/Status/DumpCheckpoint/Cancel)
 	// read concurrently from a separate monitoring goroutine.
@@ -693,10 +698,15 @@ func (r *Runner) setup(ctx context.Context) error {
 	}
 
 	r.logger.Info("Creating applier")
-	r.applier, err = r.createApplier()
+	appl, err := r.createApplier()
 	if err != nil {
 		return err
 	}
+	// Published under progMu because Status() reads it from the monitoring
+	// goroutine to render the applier row.
+	r.progMu.Lock()
+	r.applier = appl
+	r.progMu.Unlock()
 
 	// Wire the change source (continuous mode only): injected (e.g. VStream),
 	// or a built-in MySQL binlog client constructed from the source DSN. Sync
@@ -1220,10 +1230,14 @@ func (r *Runner) dumpCheckpoint(ctx context.Context) error {
 	if repl != nil {
 		pos = repl.Position()
 	}
-	return r.checkpointTbl().Write(ctx, checkpoint.Record{
+	if err := r.checkpointTbl().Write(ctx, checkpoint.Record{
 		CopierWatermark: watermark,
 		Position:        pos,
-	})
+	}); err != nil {
+		return err
+	}
+	r.lastCheckpoint.Record(pos)
+	return nil
 }
 
 // readCheckpoint reports whether the target carries a sync checkpoint and, if
@@ -1472,37 +1486,58 @@ func (r *Runner) Progress() status.Progress {
 	}
 }
 
-// Status returns a one-line, human-readable status for logging. It does not
-// log itself; status.WatchTask (when used) logs the returned value.
+// Status returns the periodic human-readable report for logging: a header line
+// plus one indented row per subsystem (see status.Block). It does not log
+// itself; status.WatchTask (when used) logs the returned value.
 func (r *Runner) Status() string {
 	state := r.status.Get()
 
 	r.progMu.RLock()
 	cp := r.copier
 	repl := r.replClient
+	appl := r.applier
 	r.progMu.RUnlock()
 
 	elapsed := r.status.TotalElapsed().Round(time.Second)
+	pending := 0
+	if repl != nil {
+		pending = repl.GetDeltaLen()
+	}
 	switch state { //nolint:exhaustive // sync only uses Initial/CopyRows/ApplyChangeset
 	case status.CopyRows:
-		progress, eta := "", ""
+		b := status.NewBlock("sync status: state=%s total-time=%s", state.String(), elapsed)
+		// The copy pipeline is built asynchronously, so a status tick can land
+		// before there is a copier to report on.
 		if cp != nil {
-			progress, eta = cp.GetProgress(), cp.GetETA()
+			progress := cp.CopyProgress()
+			// No throttled= here, unlike migrate and move: a sync copies
+			// through a Noop throttler, so the field would be a constant
+			// false.
+			b.Row("copier", "%6.2f%%  %d/%d  chunk-size=%d  eta=%s",
+				progress.Fraction()*100,
+				progress.RowsCopied,
+				progress.RowsTotal,
+				cp.ChunkSize(),
+				cp.GetETA(),
+			)
 		}
-		pending := 0
-		if repl != nil {
-			pending = repl.GetDeltaLen()
-		}
-		return fmt.Sprintf("sync status: state=%s copy-progress=%s copy-eta=%s pending-changes=%d total-time=%s",
-			state.String(), progress, eta, pending, elapsed)
+		b.Row("applier", "%s", applier.StatusRow(appl))
+		b.Row("binlog", "deltas=%d  %s", pending, change.StatusRow(repl))
+		b.Row("ckpt", "%s", r.lastCheckpoint.Row())
+		return b.String()
 	case status.ApplyChangeset:
 		pos := ""
-		pending := 0
 		if repl != nil {
-			pos, pending = repl.Position(), repl.GetDeltaLen()
+			pos = repl.Position()
 		}
-		return fmt.Sprintf("sync status: state=%s position=%s pending-changes=%d total-time=%s",
-			state.String(), pos, pending, elapsed)
+		b := status.NewBlock("sync status: state=%s total-time=%s", state.String(), elapsed)
+		b.Row("applier", "%s", applier.StatusRow(appl))
+		// position= is where the feed has read to; the ckpt row's position is
+		// the older point a restart would actually resume from. The gap
+		// between them is how much re-reading a crash would cost.
+		b.Row("binlog", "position=%s  deltas=%d  %s", pos, pending, change.StatusRow(repl))
+		b.Row("ckpt", "%s", r.lastCheckpoint.Row())
+		return b.String()
 	default:
 		return fmt.Sprintf("sync status: state=%s total-time=%s", state.String(), elapsed)
 	}

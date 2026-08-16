@@ -65,6 +65,9 @@ type DistributedChecker struct {
 	maxRetries       int
 	yieldTimeout     time.Duration
 	yieldsPerformed  atomic.Uint64 // number of yield/resume cycles performed
+	// chunkSize is the row count of the most recently checksummed chunk. See
+	// the SingleChecker equivalent.
+	chunkSize atomic.Uint64
 }
 
 var (
@@ -79,6 +82,12 @@ func (c *DistributedChecker) Threads() int {
 		return l.Limit()
 	}
 	return c.concurrency
+}
+
+// ChunkSize reports the row count of the most recently checksummed chunk. See
+// the SingleChecker equivalent.
+func (c *DistributedChecker) ChunkSize() uint64 {
+	return c.chunkSize.Load()
 }
 
 // IsThrottled reports whether the throttler is currently pausing dispatch.
@@ -167,6 +176,7 @@ func (c *DistributedChecker) flushResidual() (int, int) {
 
 func (c *DistributedChecker) ChecksumChunk(ctx context.Context, chunk *table.Chunk) error {
 	startTime := time.Now()
+	c.chunkSize.Store(chunk.ChunkSize)
 
 	c.logger.Debug("checksumming chunk", "chunk", chunk.String())
 
@@ -343,8 +353,7 @@ func (c *DistributedChecker) replaceChunk(ctx context.Context, chunk *table.Chun
 	// This ensures the column ordinals match when the applier extracts the sharding column.
 	//
 	// JSON columns are deliberately read bare here — no text round-trip cast.
-	// Unlike the single-server repair (see table.ColumnMapping.RepairExprs),
-	// this path is already text-mediated: the SELECT renders each document to
+	// This path is already text-mediated: the SELECT renders each document to
 	// text on the wire and the applier writes it back as a SQL literal that
 	// the target re-parses. The repaired row therefore lands as exactly the
 	// one-round-trip text image the checksum's source side predicts. Adding a
