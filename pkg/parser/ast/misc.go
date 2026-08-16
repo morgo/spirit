@@ -629,6 +629,11 @@ type FlushStmt struct {
 	ForExport       bool
 	// Channel is the FOR CHANNEL of FLUSH RELAY LOGS.
 	Channel string
+	// ExtraTargets are the additional comma-separated flush targets when the
+	// statement lists several, e.g. FLUSH STATUS, USER_RESOURCES. Only the
+	// Tp, LogType and Channel fields of each entry are meaningful: the table
+	// form cannot appear in a list.
+	ExtraTargets []*FlushStmt
 }
 
 // Restore implements Node interface.
@@ -637,6 +642,21 @@ func (n *FlushStmt) Restore(ctx *format.RestoreCtx) error {
 	if n.NoWriteToBinLog {
 		ctx.WriteKeyWord("NO_WRITE_TO_BINLOG ")
 	}
+	if err := n.restoreTarget(ctx); err != nil {
+		return err
+	}
+	for _, extra := range n.ExtraTargets {
+		ctx.WritePlain(", ")
+		if err := extra.restoreTarget(ctx); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// restoreTarget restores one flush target, without the FLUSH keyword and
+// NO_WRITE_TO_BINLOG prefix that belong to the statement as a whole.
+func (n *FlushStmt) restoreTarget(ctx *format.RestoreCtx) error {
 	switch n.Tp { //nolint:exhaustive
 	case FlushTables:
 		ctx.WriteKeyWord("TABLES")
@@ -1732,6 +1752,8 @@ const (
 	ObjectTypeFunction
 	// ObjectTypeProcedure means the following object is a stored procedure.
 	ObjectTypeProcedure
+	// ObjectTypeLibrary means the following object is a library (MySQL 9.x).
+	ObjectTypeLibrary
 )
 
 // Restore implements Node interface.
@@ -1745,6 +1767,8 @@ func (n ObjectTypeType) Restore(ctx *format.RestoreCtx) error {
 		ctx.WriteKeyWord("FUNCTION")
 	case ObjectTypeProcedure:
 		ctx.WriteKeyWord("PROCEDURE")
+	case ObjectTypeLibrary:
+		ctx.WriteKeyWord("LIBRARY")
 	default:
 		return errors.New("unsupported object type")
 	}

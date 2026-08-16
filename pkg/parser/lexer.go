@@ -688,6 +688,31 @@ func startString(s *Scanner) (tok int, pos Pos, lit string) {
 	return s.scanString()
 }
 
+func startWithDollar(s *Scanner) (tok int, pos Pos, lit string) {
+	pos = s.r.pos()
+	s.r.inc() // consume '$'
+	// A dollar-quoted string literal is $tag$body$tag$ with an identifier
+	// tag (MySQL 9.x; used for routine and library bodies, which keep
+	// quotes and backslashes verbatim). Anything else starting with '$'
+	// is an ordinary identifier.
+	s.r.incAsLongAs(func(b byte) bool { return b != '$' && isIdentChar(b) })
+	if s.r.peek() != '$' {
+		s.r.updatePos(pos)
+		return scanIdentifier(s)
+	}
+	s.r.inc()                   // consume the tag-closing '$'
+	delimiter := s.r.data(&pos) // "$tag$"
+	rest := s.r.s[s.r.p.Offset:]
+	idx := strings.Index(rest, delimiter)
+	if idx < 0 {
+		// unterminated dollar-quoted string
+		return invalid, pos, ""
+	}
+	lit = rest[:idx]
+	s.r.incN(idx + len(delimiter))
+	return stringLit, pos, lit
+}
+
 func (s *Scanner) scanString() (tok int, pos Pos, lit string) {
 	tok, pos = stringLit, s.r.pos()
 	ending := s.r.readByte()

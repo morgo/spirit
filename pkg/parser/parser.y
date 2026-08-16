@@ -430,6 +430,7 @@ type likeEscapeSpec struct {
 	keyBlockSize             "KEY_BLOCK_SIZE"
 	language                 "LANGUAGE"
 	last                     "LAST"
+	library                  "LIBRARY"
 	less                     "LESS"
 	level                    "LEVEL"
 	lineString               "LINESTRING"
@@ -777,6 +778,9 @@ type likeEscapeSpec struct {
 	XAStmt                     "XA transaction statement"
 	CreateSpatialRefSysStmt    "CREATE SPATIAL REFERENCE SYSTEM statement"
 	DropSpatialRefSysStmt      "DROP SPATIAL REFERENCE SYSTEM statement"
+	CreateLibraryStmt          "CREATE LIBRARY statement"
+	AlterLibraryStmt           "ALTER LIBRARY statement"
+	DropLibraryStmt            "DROP LIBRARY statement"
 	CreateTablespaceStmt       "CREATE [UNDO] TABLESPACE statement"
 	AlterTablespaceStmt        "ALTER [UNDO] TABLESPACE statement"
 	DropTablespaceStmt         "DROP [UNDO] TABLESPACE statement"
@@ -882,6 +886,9 @@ type likeEscapeSpec struct {
 	Fields                                 "Fields clause"
 	FieldList                              "field expression list"
 	FlushOption                            "Flush option"
+	FlushNonTableOption                    "Flush option other than a table list"
+	FlushNonTableOptionListOpt             "Optional additional comma-separated flush options"
+	LibraryCommentOpt                      "Optional COMMENT clause of CREATE LIBRARY"
 	ForceOpt                               "Force opt"
 	InstanceOption                         "Instance option"
 	FulltextSearchModifierOpt              "Fulltext modifier"
@@ -1275,7 +1282,7 @@ type likeEscapeSpec struct {
 %precedence lowerThenOrder
 %precedence order
 %precedence lowerThanFunction
-%precedence function
+%precedence function library
 %precedence constraint
 
 /* A dummy token to force the priority of TableRef production in a join. */
@@ -4882,6 +4889,7 @@ UnReservedKeyword:
 |	"SQL_TSI_QUARTER"
 |	"SQL_TSI_SECOND"
 |	"LANGUAGE"
+|	"LIBRARY"
 |	"SQL_TSI_WEEK"
 |	"SQL_TSI_YEAR"
 |	"INVISIBLE"
@@ -9206,6 +9214,33 @@ FlushStmt:
 	}
 
 FlushOption:
+	TableOrTables TableNameListOpt WithReadLockOpt
+	{
+		stmt := &ast.FlushStmt{
+			Tp:     ast.FlushTables,
+			Tables: $2.([]*ast.TableName),
+		}
+		switch $3.(int) {
+		case 1:
+			stmt.ReadLock = true
+		case 2:
+			stmt.ForExport = true
+		}
+		$$ = stmt
+	}
+|	FlushNonTableOption FlushNonTableOptionListOpt
+	{
+		// MySQL allows a comma-separated list of the non-table flush
+		// options: FLUSH STATUS, USER_RESOURCES. The table form is
+		// exclusive and cannot appear in a list.
+		tmp := $1.(*ast.FlushStmt)
+		if $2 != nil {
+			tmp.ExtraTargets = $2.([]*ast.FlushStmt)
+		}
+		$$ = tmp
+	}
+
+FlushNonTableOption:
 	"PRIVILEGES"
 	{
 		$$ = &ast.FlushStmt{
@@ -9251,19 +9286,18 @@ FlushOption:
 			Channel: $3,
 		}
 	}
-|	TableOrTables TableNameListOpt WithReadLockOpt
+
+FlushNonTableOptionListOpt:
 	{
-		stmt := &ast.FlushStmt{
-			Tp:     ast.FlushTables,
-			Tables: $2.([]*ast.TableName),
+		$$ = nil
+	}
+|	FlushNonTableOptionListOpt ',' FlushNonTableOption
+	{
+		var list []*ast.FlushStmt
+		if $1 != nil {
+			list = $1.([]*ast.FlushStmt)
 		}
-		switch $3.(int) {
-		case 1:
-			stmt.ReadLock = true
-		case 2:
-			stmt.ForExport = true
-		}
-		$$ = stmt
+		$$ = append(list, $3.(*ast.FlushStmt))
 	}
 
 FlushRelayChannelOpt:
@@ -9378,6 +9412,9 @@ Statement:
 |	XAStmt
 |	CreateSpatialRefSysStmt
 |	DropSpatialRefSysStmt
+|	CreateLibraryStmt
+|	AlterLibraryStmt
+|	DropLibraryStmt
 |	CreateTablespaceStmt
 |	AlterTablespaceStmt
 |	DropTablespaceStmt
@@ -10609,6 +10646,55 @@ XAXid:
  * Spatial reference system statements
  * See https://dev.mysql.com/doc/refman/8.4/en/create-spatial-reference-system.html
  *******************************************************************/
+/********************************************************************
+ * CREATE/ALTER/DROP LIBRARY (MySQL 9.x)
+ * See https://dev.mysql.com/doc/refman/9.4/en/create-library.html
+ * The body accepts an ordinary string literal or a dollar-quoted
+ * string ($tag$ ... $tag$); the lexer delivers both as stringLit.
+ *******************************************************************/
+CreateLibraryStmt:
+	"CREATE" "LIBRARY" IfNotExists TableName LibraryCommentOpt "LANGUAGE" Identifier "AS" stringLit
+	{
+		stmt := &ast.CreateLibraryStmt{
+			IfNotExists: $3.(bool),
+			Library:     $4.(*ast.TableName),
+			Language:    strings.ToUpper($7),
+			Body:        $9,
+		}
+		if $5 != nil {
+			stmt.HasComment = true
+			stmt.Comment = $5.(string)
+		}
+		$$ = stmt
+	}
+
+LibraryCommentOpt:
+	{
+		$$ = nil
+	}
+|	"COMMENT" stringLit
+	{
+		$$ = $2
+	}
+
+AlterLibraryStmt:
+	"ALTER" "LIBRARY" TableName "COMMENT" stringLit
+	{
+		$$ = &ast.AlterLibraryStmt{
+			Library: $3.(*ast.TableName),
+			Comment: $5,
+		}
+	}
+
+DropLibraryStmt:
+	"DROP" "LIBRARY" IfExists TableName
+	{
+		$$ = &ast.DropLibraryStmt{
+			IfExists: $3.(bool),
+			Library:  $4.(*ast.TableName),
+		}
+	}
+
 CreateSpatialRefSysStmt:
 	"CREATE" "SPATIAL" "REFERENCE" "SYSTEM" IfNotExists NUM SRSAttributeListOpt
 	{
@@ -12209,6 +12295,10 @@ ObjectType:
 |	"PROCEDURE"
 	{
 		$$ = ast.ObjectTypeProcedure
+	}
+|	"LIBRARY"
+	{
+		$$ = ast.ObjectTypeLibrary
 	}
 
 PrivLevel:

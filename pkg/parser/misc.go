@@ -140,7 +140,8 @@ func init() {
 	initTokenFunc("Nn", startWithNn)
 	initTokenFunc("Bb", startWithBb)
 	initTokenFunc(".", startWithDot)
-	initTokenFunc("_$ACDEFGHIJKLMOPQRSTUVWYZacdefghijklmopqrstuvwyz", scanIdentifier)
+	initTokenFunc("_ACDEFGHIJKLMOPQRSTUVWYZacdefghijklmopqrstuvwyz", scanIdentifier)
+	initTokenFunc("$", startWithDollar)
 	initTokenFunc("`", scanQuotedIdent)
 	initTokenFunc("0123456789", startWithNumber)
 	initTokenFunc("'\"", startString)
@@ -415,6 +416,7 @@ var tokenMap = map[string]int{
 	"LEFT":                       left,
 	"LESS":                       less,
 	"LEVEL":                      level,
+	"LIBRARY":                    library,
 	"LIKE":                       like,
 	"LIMIT":                      limit,
 	"LINEAR":                     linear,

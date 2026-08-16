@@ -1660,6 +1660,125 @@ func (n *DropSpatialRefSysStmt) Accept(v Visitor) (Node, bool) {
 	return v.Leave(n)
 }
 
+// CreateLibraryStmt is a statement to create a library (MySQL 9.x).
+// See https://dev.mysql.com/doc/refman/9.4/en/create-library.html
+type CreateLibraryStmt struct {
+	ddlNode
+
+	IfNotExists bool
+	Library     *TableName
+	HasComment  bool
+	Comment     string
+	Language    string
+	Body        string
+}
+
+// Restore implements Node interface.
+func (n *CreateLibraryStmt) Restore(ctx *format.RestoreCtx) error {
+	ctx.WriteKeyWord("CREATE LIBRARY ")
+	if n.IfNotExists {
+		ctx.WriteKeyWord("IF NOT EXISTS ")
+	}
+	if err := n.Library.Restore(ctx); err != nil {
+		return fmt.Errorf("an error occurred while restore CreateLibraryStmt.Library: %w", err)
+	}
+	if n.HasComment {
+		ctx.WriteKeyWord(" COMMENT ")
+		ctx.WriteString(n.Comment)
+	}
+	ctx.WriteKeyWord(" LANGUAGE ")
+	ctx.WriteKeyWord(n.Language)
+	ctx.WriteKeyWord(" AS ")
+	ctx.WriteString(n.Body)
+	return nil
+}
+
+// Accept implements Node Accept interface.
+func (n *CreateLibraryStmt) Accept(v Visitor) (Node, bool) {
+	newNode, skipChildren := v.Enter(n)
+	if skipChildren {
+		return v.Leave(newNode)
+	}
+	n = newNode.(*CreateLibraryStmt)
+	node, ok := n.Library.Accept(v)
+	if !ok {
+		return n, false
+	}
+	n.Library = node.(*TableName)
+	return v.Leave(n)
+}
+
+// AlterLibraryStmt is a statement to alter a library's comment (MySQL 9.x).
+// See https://dev.mysql.com/doc/refman/9.4/en/alter-library.html
+type AlterLibraryStmt struct {
+	ddlNode
+
+	Library *TableName
+	Comment string
+}
+
+// Restore implements Node interface.
+func (n *AlterLibraryStmt) Restore(ctx *format.RestoreCtx) error {
+	ctx.WriteKeyWord("ALTER LIBRARY ")
+	if err := n.Library.Restore(ctx); err != nil {
+		return fmt.Errorf("an error occurred while restore AlterLibraryStmt.Library: %w", err)
+	}
+	ctx.WriteKeyWord(" COMMENT ")
+	ctx.WriteString(n.Comment)
+	return nil
+}
+
+// Accept implements Node Accept interface.
+func (n *AlterLibraryStmt) Accept(v Visitor) (Node, bool) {
+	newNode, skipChildren := v.Enter(n)
+	if skipChildren {
+		return v.Leave(newNode)
+	}
+	n = newNode.(*AlterLibraryStmt)
+	node, ok := n.Library.Accept(v)
+	if !ok {
+		return n, false
+	}
+	n.Library = node.(*TableName)
+	return v.Leave(n)
+}
+
+// DropLibraryStmt is a statement to drop a library (MySQL 9.x).
+// See https://dev.mysql.com/doc/refman/9.4/en/drop-library.html
+type DropLibraryStmt struct {
+	ddlNode
+
+	IfExists bool
+	Library  *TableName
+}
+
+// Restore implements Node interface.
+func (n *DropLibraryStmt) Restore(ctx *format.RestoreCtx) error {
+	ctx.WriteKeyWord("DROP LIBRARY ")
+	if n.IfExists {
+		ctx.WriteKeyWord("IF EXISTS ")
+	}
+	if err := n.Library.Restore(ctx); err != nil {
+		return fmt.Errorf("an error occurred while restore DropLibraryStmt.Library: %w", err)
+	}
+	return nil
+}
+
+// Accept implements Node Accept interface.
+func (n *DropLibraryStmt) Accept(v Visitor) (Node, bool) {
+	newNode, skipChildren := v.Enter(n)
+	if skipChildren {
+		return v.Leave(newNode)
+	}
+	n = newNode.(*DropLibraryStmt)
+	node, ok := n.Library.Accept(v)
+	if !ok {
+		return n, false
+	}
+	n.Library = node.(*TableName)
+	return v.Leave(n)
+}
+
 // IndexLockAndAlgorithm stores the algorithm option and the lock option.
 type IndexLockAndAlgorithm struct {
 	node

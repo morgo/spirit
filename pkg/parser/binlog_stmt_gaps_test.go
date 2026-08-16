@@ -380,3 +380,52 @@ func TestCharsetRegistry(t *testing.T) {
 	}
 	RunTest(t, table, false)
 }
+
+// TestLibraryDDL covers CREATE/ALTER/DROP LIBRARY and GRANT ... ON LIBRARY
+// (MySQL 9.x), including dollar-quoted string bodies ($tag$ ... $tag$), which
+// the lexer accepts and restore normalizes to ordinary quoted strings.
+// Grammar shapes were validated against MySQL 9.7.0.
+func TestLibraryDDL(t *testing.T) {
+	table := []testCase{
+		{"CREATE LIBRARY lib1 LANGUAGE JAVASCRIPT AS 'export function f(n) {return n}'", true, "CREATE LIBRARY `lib1` LANGUAGE JAVASCRIPT AS 'export function f(n) {return n}'"},
+		{"CREATE LIBRARY IF NOT EXISTS lib2 COMMENT 'x' LANGUAGE JAVASCRIPT AS $$ export function g() {} $$", true, "CREATE LIBRARY IF NOT EXISTS `lib2` COMMENT 'x' LANGUAGE JAVASCRIPT AS ' export function g() {} '"},
+		{"CREATE LIBRARY lib3 LANGUAGE JAVASCRIPT AS $mark$ export function h() {} $mark$", true, "CREATE LIBRARY `lib3` LANGUAGE JAVASCRIPT AS ' export function h() {} '"},
+		{"CREATE LIBRARY probedb.libq LANGUAGE javascript AS 'x'", true, "CREATE LIBRARY `probedb`.`libq` LANGUAGE JAVASCRIPT AS 'x'"},
+		{"CREATE LIBRARY q LANGUAGE JAVASCRIPT AS $$it's$$", true, "CREATE LIBRARY `q` LANGUAGE JAVASCRIPT AS 'it''s'"},
+		{"ALTER LIBRARY lib1 COMMENT 'y'", true, "ALTER LIBRARY `lib1` COMMENT 'y'"},
+		{"ALTER LIBRARY probedb.lib1 COMMENT 'y'", true, "ALTER LIBRARY `probedb`.`lib1` COMMENT 'y'"},
+		{"DROP LIBRARY IF EXISTS lib1", true, "DROP LIBRARY IF EXISTS `lib1`"},
+		{"DROP LIBRARY probedb.lib2", true, "DROP LIBRARY `probedb`.`lib2`"},
+		{"GRANT EXECUTE ON LIBRARY probedb.lib1 TO u1@localhost", true, "GRANT EXECUTE ON LIBRARY `probedb`.`lib1` TO `u1`@`localhost`"},
+		{"GRANT ALTER ROUTINE ON LIBRARY probedb.lib1 TO u1@localhost", true, "GRANT ALTER ROUTINE ON LIBRARY `probedb`.`lib1` TO `u1`@`localhost`"},
+		{"REVOKE EXECUTE ON LIBRARY probedb.lib1 FROM u1@localhost", true, "REVOKE EXECUTE ON LIBRARY `probedb`.`lib1` FROM `u1`@`localhost`"},
+		// A database that happens to be named library still works: the
+		// following token ('.' vs identifier) picks the interpretation.
+		{"GRANT SELECT ON library.t TO u1@localhost", true, "GRANT SELECT ON `library`.`t` TO `u1`@`localhost`"},
+		// Identifiers starting with or containing $ are unaffected by
+		// dollar-quote lexing.
+		{"SELECT $x", true, "SELECT `$x`"},
+		{"SELECT 1 AS $y", true, "SELECT 1 AS `$y`"},
+		{"SELECT a$b FROM t", true, "SELECT `a$b` FROM `t`"},
+		// Same rejections as MySQL 9.7.
+		{"CREATE LIBRARY lib9 LANGUAGE JAVASCRIPT AS $$ unterminated", false, ""},
+		{"ALTER LIBRARY lib1", false, ""},
+		{"CREATE OR REPLACE LIBRARY lib4 LANGUAGE JAVASCRIPT AS 'x'", false, ""},
+		{"CREATE LIBRARY lib5 AS 'x' LANGUAGE JAVASCRIPT", false, ""},
+	}
+	RunTest(t, table, false)
+}
+
+// TestFlushTargetList covers FLUSH with a comma-separated option list; the
+// table form stays exclusive as in MySQL's grammar.
+func TestFlushTargetList(t *testing.T) {
+	table := []testCase{
+		{"FLUSH STATUS, USER_RESOURCES", true, "FLUSH STATUS, USER_RESOURCES"},
+		{"FLUSH LOCAL STATUS, USER_RESOURCES, PRIVILEGES", true, "FLUSH NO_WRITE_TO_BINLOG STATUS, USER_RESOURCES, PRIVILEGES"},
+		{"FLUSH NO_WRITE_TO_BINLOG ERROR LOGS, ENGINE LOGS, OPTIMIZER_COSTS", true, "FLUSH NO_WRITE_TO_BINLOG ERROR LOGS, ENGINE LOGS, OPTIMIZER_COSTS"},
+		{"FLUSH RELAY LOGS FOR CHANNEL 'ch1', STATUS", true, "FLUSH RELAY LOGS FOR CHANNEL 'ch1', STATUS"},
+		{"FLUSH STATUS", true, "FLUSH STATUS"},
+		{"FLUSH TABLES t1, t2 WITH READ LOCK", true, "FLUSH TABLES `t1`, `t2` WITH READ LOCK"},
+	}
+	RunTest(t, table, false)
+}
