@@ -566,6 +566,7 @@ var tokenMap = map[string]int{
 	"SCHEMAS":                    databases,
 	"SECOND_MICROSECOND":         secondMicrosecond,
 	"SECOND":                     second,
+	"SECONDARY":                  secondary,
 	"SECONDARY_ENGINE":           secondaryEngine,
 	"SECONDARY_LOAD":             secondaryLoad,
 	"SECONDARY_UNLOAD":           secondaryUnload,

@@ -440,6 +440,7 @@ const (
 	ColumnOptionSrid
 	ColumnOptionVisibility
 	ColumnOptionEngineAttribute
+	ColumnOptionNotSecondary
 )
 
 var (
@@ -584,6 +585,9 @@ func (n *ColumnOption) Restore(ctx *format.RestoreCtx) error {
 		ctx.WriteKeyWord("ENGINE_ATTRIBUTE")
 		ctx.WritePlain(" = ")
 		ctx.WriteString(n.StrValue)
+	case ColumnOptionNotSecondary:
+		// Excludes the column from the HeatWave secondary engine.
+		ctx.WriteKeyWord("NOT SECONDARY")
 	default:
 		return errors.New("an error occurred while splicing ColumnOption")
 	}
@@ -1002,6 +1006,11 @@ type CreateTableStmt struct {
 	Partition      *PartitionOptions
 	OnDuplicate    OnDuplicateKeyHandlingType
 	Select         ResultSetNode
+	// StartTransaction is the trailing START TRANSACTION clause that MySQL
+	// 8.0.21+ writes to the binary log in place of the SELECT part of
+	// CREATE TABLE ... SELECT under row-based replication. Mutually
+	// exclusive with Select.
+	StartTransaction bool
 }
 
 // Restore implements Node interface.
@@ -1078,6 +1087,10 @@ func (n *CreateTableStmt) Restore(ctx *format.RestoreCtx) error {
 		if err := n.Select.Restore(ctx); err != nil {
 			return fmt.Errorf("an error occurred while splicing CreateTableStmt Select: %w", err)
 		}
+	}
+
+	if n.StartTransaction {
+		ctx.WriteKeyWord(" START TRANSACTION")
 	}
 
 	if n.TemporaryKeyword == TemporaryGlobal {

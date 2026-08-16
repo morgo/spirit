@@ -537,6 +537,7 @@ type likeEscapeSpec struct {
 	san                      "SAN"
 	savepoint                "SAVEPOINT"
 	second                   "SECOND"
+	secondary                "SECONDARY"
 	secondaryEngine          "SECONDARY_ENGINE"
 	secondaryEngineAttribute "SECONDARY_ENGINE_ATTRIBUTE"
 	secondaryLoad            "SECONDARY_LOAD"
@@ -2397,6 +2398,10 @@ ColumnOption:
 	{
 		$$ = &ast.ColumnOption{Tp: ast.ColumnOptionNotNull}
 	}
+|	NotSym "SECONDARY"
+	{
+		$$ = &ast.ColumnOption{Tp: ast.ColumnOptionNotSecondary}
+	}
 |	"NULL"
 	{
 		$$ = &ast.ColumnOption{Tp: ast.ColumnOptionNull}
@@ -3173,6 +3178,19 @@ CreateTableStmt:
 		stmt.Select = $11.(*ast.CreateTableStmt).Select
 		$$ = stmt
 	}
+|	"CREATE" OptTemporary "TABLE" IfNotExists TableName TableElementListOpt CreateTableOptionListOpt PartitionOpt "START" "TRANSACTION"
+	{
+		stmt := $6.(*ast.CreateTableStmt)
+		stmt.Table = $5.(*ast.TableName)
+		stmt.IfNotExists = $4.(bool)
+		stmt.TemporaryKeyword = $2.(ast.TemporaryKeyword)
+		stmt.Options = $7.([]*ast.TableOption)
+		if $8 != nil {
+			stmt.Partition = $8.(*ast.PartitionOptions)
+		}
+		stmt.StartTransaction = true
+		$$ = stmt
+	}
 |	"CREATE" OptTemporary "TABLE" IfNotExists TableName LikeTableWithOrWithoutParen
 	{
 		tmp := &ast.CreateTableStmt{
@@ -3699,6 +3717,10 @@ ViewCheckOption:
 		$$ = nil
 	}
 |	"WITH" "CASCADED" "CHECK" "OPTION"
+	{
+		$$ = ast.CheckOptionCascaded
+	}
+|	"WITH" "CHECK" "OPTION"
 	{
 		$$ = ast.CheckOptionCascaded
 	}
@@ -4868,6 +4890,7 @@ UnReservedKeyword:
 |	"STORAGE"
 |	"DISK"
 |	"STATS_SAMPLE_PAGES"
+|	"SECONDARY"
 |	"SECONDARY_ENGINE"
 |	"SECONDARY_LOAD"
 |	"SECONDARY_UNLOAD"
@@ -7547,6 +7570,11 @@ TableFactor:
 	{
 		resultNode := $1.(*ast.SubqueryExpr).Query
 		$$ = &ast.TableSource{Source: resultNode, AsName: $2.(ast.CIStr)}
+	}
+|	SubSelect TableAsName '(' IdentList ')'
+	{
+		resultNode := $1.(*ast.SubqueryExpr).Query
+		$$ = &ast.TableSource{Source: resultNode, AsName: $2.(ast.CIStr), ColumnNames: $4.([]ast.CIStr)}
 	}
 |	"LATERAL" SubSelect TableAsName IdentListWithParenOpt
 	{

@@ -429,3 +429,50 @@ func TestFlushTargetList(t *testing.T) {
 	}
 	RunTest(t, table, false)
 }
+
+func TestNotSecondaryColumn(t *testing.T) {
+	table := []testCase{
+		{"CREATE TABLE t (c INT NOT SECONDARY)", true, "CREATE TABLE `t` (`c` INT NOT SECONDARY)"},
+		{"CREATE TABLE t (c INT NOT NULL NOT SECONDARY DEFAULT 5)", true, "CREATE TABLE `t` (`c` INT NOT NULL NOT SECONDARY DEFAULT 5)"},
+		{"ALTER TABLE t1 MODIFY c INT NOT SECONDARY", true, "ALTER TABLE `t1` MODIFY COLUMN `c` INT NOT SECONDARY"},
+		// SECONDARY stays usable as an identifier.
+		{"CREATE TABLE secondary (secondary INT)", true, "CREATE TABLE `secondary` (`secondary` INT)"},
+		{"CREATE TABLE t (c INT SECONDARY)", false, ""},
+	}
+	RunTest(t, table, false)
+}
+
+func TestCreateTableStartTransaction(t *testing.T) {
+	// MySQL 8.0.21+ logs CREATE TABLE ... SELECT as CREATE TABLE ... START
+	// TRANSACTION followed by row events, so the binlog form must parse.
+	table := []testCase{
+		{"CREATE TABLE t (a INT) START TRANSACTION", true, "CREATE TABLE `t` (`a` INT) START TRANSACTION"},
+		{"CREATE TABLE IF NOT EXISTS t (a INT) ENGINE = InnoDB START TRANSACTION", true, "CREATE TABLE IF NOT EXISTS `t` (`a` INT) ENGINE = InnoDB START TRANSACTION"},
+		{"CREATE TABLE t (a INT) START TRANSACTION AS SELECT 1", false, ""},
+		{"CREATE TABLE t (a INT) START", false, ""},
+	}
+	RunTest(t, table, false)
+}
+
+func TestViewWithCheckOption(t *testing.T) {
+	table := []testCase{
+		// Plain WITH CHECK OPTION means CASCADED; restore normalizes the
+		// default away, like it already does for an explicit CASCADED.
+		{"CREATE VIEW v AS SELECT a FROM t WITH CHECK OPTION", true, "CREATE ALGORITHM = UNDEFINED DEFINER = CURRENT_USER SQL SECURITY DEFINER VIEW `v` AS SELECT `a` FROM `t`"},
+		{"CREATE VIEW v AS SELECT a FROM t WITH CASCADED CHECK OPTION", true, "CREATE ALGORITHM = UNDEFINED DEFINER = CURRENT_USER SQL SECURITY DEFINER VIEW `v` AS SELECT `a` FROM `t`"},
+		{"CREATE VIEW v AS SELECT a FROM t WITH LOCAL CHECK OPTION", true, "CREATE ALGORITHM = UNDEFINED DEFINER = CURRENT_USER SQL SECURITY DEFINER VIEW `v` AS SELECT `a` FROM `t` WITH LOCAL CHECK OPTION"},
+		{"CREATE VIEW v AS SELECT a FROM t WITH CHECK", false, ""},
+	}
+	RunTest(t, table, false)
+}
+
+func TestDerivedTableColumnList(t *testing.T) {
+	table := []testCase{
+		{"SELECT * FROM (SELECT 1, 2) dt (foo, bar)", true, "SELECT * FROM (SELECT 1,2) AS `dt`(`foo`, `bar`)"},
+		{"SELECT * FROM (SELECT 1) AS dt (foo)", true, "SELECT * FROM (SELECT 1) AS `dt`(`foo`)"},
+		{"CREATE VIEW pv8 AS SELECT * FROM (SELECT 1, 2) dt (foo, bar)", true, "CREATE ALGORITHM = UNDEFINED DEFINER = CURRENT_USER SQL SECURITY DEFINER VIEW `pv8` AS SELECT * FROM (SELECT 1,2) AS `dt`(`foo`, `bar`)"},
+		// A column list requires an alias.
+		{"SELECT * FROM (SELECT 1) (foo)", false, ""},
+	}
+	RunTest(t, table, false)
+}
