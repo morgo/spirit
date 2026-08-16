@@ -77,6 +77,14 @@ var (
 // a later Run on the same copier). It does not stop it: write workers stay up
 // for the next call, and the runner's Close (or Run's own Stop) tears them
 // down.
+//
+// If ctx is cancelled while waiting for the applier, CopyChunk returns
+// ctx.Err() without waiting for the callback — and if the apply then
+// completes anyway, the callback still runs later on the applier's
+// coordinator goroutine, feeding the chunker for a chunk whose caller was
+// told it failed. The in-tree appliers make that branch unreachable (they
+// guarantee callback delivery on every path, including cancellation); it
+// exists as defense against a non-conforming applier.
 func (c *buffered) CopyChunk(ctx context.Context, chunk *table.Chunk) error {
 	if err := c.applier.Start(ctx); err != nil {
 		return fmt.Errorf("failed to start applier: %w", err)
