@@ -8,11 +8,11 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/pingcap/tidb/pkg/parser"
-	"github.com/pingcap/tidb/pkg/parser/ast"
-	"github.com/pingcap/tidb/pkg/parser/format"
-	"github.com/pingcap/tidb/pkg/parser/mysql"
-	"github.com/pingcap/tidb/pkg/parser/types"
+	"github.com/block/spirit/pkg/parser"
+	"github.com/block/spirit/pkg/parser/ast"
+	"github.com/block/spirit/pkg/parser/format"
+	"github.com/block/spirit/pkg/parser/mysql"
+	"github.com/block/spirit/pkg/parser/types"
 )
 
 // CreateTable represents a parsed CREATE TABLE statement with structured data
@@ -131,7 +131,7 @@ type TableOptions struct {
 
 // PartitionOptions represents table partitioning configuration
 type PartitionOptions struct {
-	Type         string                `json:"type"`                   // RANGE, LIST, HASH, KEY, SYSTEM_TIME
+	Type         string                `json:"type"`                   // RANGE, LIST, HASH, KEY
 	Expression   *string               `json:"expression,omitempty"`   // For HASH and RANGE
 	Columns      []string              `json:"columns,omitempty"`      // For KEY, RANGE COLUMNS, LIST COLUMNS
 	Linear       bool                  `json:"linear,omitempty"`       // For LINEAR HASH/KEY
@@ -502,7 +502,13 @@ func (ct *CreateTable) parseColumn(col *ast.ColumnDef) Column {
 				// We track this so we can reproduce the correct syntax when generating ALTERs.
 				column.DefaultIsExpr = isExpressionDefault(opt.Expr)
 
-				if literal, isStr := stringLiteralValue(opt.Expr); isStr {
+				// The parenthesized/bare distinction is captured above;
+				// extract the value from inside any parentheses so emission
+				// (which re-adds parens from DefaultIsExpr) doesn't double
+				// them, e.g. DEFAULT ('{}') stores the string {}.
+				defaultExpr := unwrapParenExpr(opt.Expr)
+
+				if literal, isStr := stringLiteralValue(defaultExpr); isStr {
 					// Quoted string literal default. Store the true, raw
 					// (fully-unescaped) value off the AST and remember it
 					// was a string so we re-quote it on emission — even if
@@ -513,7 +519,7 @@ func (ct *CreateTable) parseColumn(col *ast.ColumnDef) Column {
 				} else {
 					// Non-string defaults (numeric, functions, expressions):
 					// keep the Restored text representation.
-					defaultRaw := fmt.Sprintf("%v", ct.parseExpression(opt.Expr))
+					defaultRaw := fmt.Sprintf("%v", ct.parseExpression(defaultExpr))
 					column.Default = &defaultRaw
 				}
 			}
@@ -879,8 +885,6 @@ func (ct *CreateTable) parsePartitionOptions(partition *ast.PartitionOptions) *P
 		partOpts.Type = "KEY"
 	case ast.PartitionTypeList:
 		partOpts.Type = "LIST"
-	case ast.PartitionTypeSystemTime:
-		partOpts.Type = "SYSTEM_TIME"
 	default:
 		partOpts.Type = fmt.Sprintf("UNKNOWN_%d", partition.Tp)
 	}
@@ -1008,12 +1012,6 @@ func (ct *CreateTable) parsePartitionClause(clause ast.PartitionDefinitionClause
 		}
 
 		return values
-	case *ast.PartitionDefinitionClauseHistory:
-		if c.Current {
-			return &PartitionValues{Type: "CURRENT", Values: []any{}}
-		} else {
-			return &PartitionValues{Type: "HISTORY", Values: []any{}}
-		}
 	default:
 		return nil
 	}

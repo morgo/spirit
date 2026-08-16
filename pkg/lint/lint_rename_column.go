@@ -3,8 +3,8 @@ package lint
 import (
 	"fmt"
 
+	"github.com/block/spirit/pkg/parser/ast"
 	"github.com/block/spirit/pkg/statement"
-	"github.com/pingcap/tidb/pkg/parser/ast"
 )
 
 // RenameColumnLinter detects column renames in ALTER TABLE statements.

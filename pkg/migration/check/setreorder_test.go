@@ -10,7 +10,6 @@ import (
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
 	_ "github.com/go-sql-driver/mysql"
-	_ "github.com/pingcap/tidb/pkg/parser/test_driver"
 	"github.com/stretchr/testify/require"
 )
 

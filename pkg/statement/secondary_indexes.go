@@ -5,8 +5,8 @@ import (
 	"strings"
 
 	"github.com/block/spirit/pkg/dbconn/sqlescape"
-	"github.com/pingcap/tidb/pkg/parser/ast"
-	"github.com/pingcap/tidb/pkg/parser/format"
+	"github.com/block/spirit/pkg/parser/ast"
+	"github.com/block/spirit/pkg/parser/format"
 )
 
 // This file holds the free functions that rewrite a CREATE TABLE statement's

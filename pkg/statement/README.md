@@ -1,6 +1,6 @@
 # Statement
 
-The statement package provides SQL statement parsing and analysis capabilities for Spirit. It wraps the [TiDB parser](https://github.com/pingcap/tidb/tree/master/pkg/parser) to extract structured information from DDL statements and determine their safety characteristics for online schema changes.
+The statement package provides SQL statement parsing and analysis capabilities for Spirit. It wraps [pkg/parser](../parser/README.md) (Spirit's MySQL-only fork of the TiDB parser) to extract structured information from DDL statements and determine their safety characteristics for online schema changes.
 
 ## Design Philosophy
 
@@ -12,7 +12,7 @@ Spirit needs to understand DDL statements to:
 5. **Parse** CREATE TABLE statements into structured data for comparison
 6. **Normalize** parsed CREATE TABLE definitions to MySQL's canonical form so equivalent schemas compare equal (see [Normalization](#normalization))
 
-Rather than implementing a custom parser, Spirit leverages the TiDB parser, which provides:
+Rather than implementing a parser from scratch, Spirit maintains a fork of the TiDB parser (see [pkg/parser](../parser/README.md)), which provides:
 - Battle-tested SQL parsing compatible with MySQL syntax
 - AST (Abstract Syntax Tree) representation of statements
 - Ability to restore modified ASTs back to SQL
@@ -335,7 +335,7 @@ MySQL rewrites many constructs when it stores a table definition, so the form a 
 
 Two layers of canonicalization apply:
 
-1. **The TiDB parser** already folds most type *aliases* before Spirit sees them: `BOOL`/`BOOLEAN` → `tinyint(1)`, `SERIAL` → `bigint unsigned NOT NULL AUTO_INCREMENT UNIQUE`, `INTEGER` → `int`, `NVARCHAR` → `varchar`, `DEC` → `decimal`. Nothing in Spirit is needed for these.
+1. **The parser** already folds most type *aliases* before Spirit sees them: `BOOL`/`BOOLEAN` → `tinyint(1)`, `SERIAL` → `bigint unsigned NOT NULL AUTO_INCREMENT UNIQUE`, `INTEGER` → `int`, `NVARCHAR` → `varchar`, `DEC` → `decimal`. Nothing in Spirit is needed for these.
 2. **Spirit's normalization rules** handle the canonicalizations the parser does *not* — each mirrors something MySQL does when storing the table:
 
    | Rule (`normalize_*.go`) | Canonicalization |
@@ -553,7 +553,7 @@ if alterStmt != "" {
 1. **Functional Indexes**: `CREATE INDEX` with functional expressions cannot be converted to `ALTER TABLE`
 2. **Single Schema**: Multi-table operations must use the same schema
 3. **SPATIAL Indexes**: Not fully supported in some helper functions
-4. **Statements must be parseable by the TiDB parser**: When encountered, we typically contribute fixes upstream. The most commonly occurring scenarios tend to be complex DEFAULT or CHECK expressions.
+4. **Statements must be parseable by pkg/parser**: unparseable DDL cannot be migrated. The most commonly occurring scenarios tend to be complex DEFAULT or CHECK expressions; since the parser is part of this repo, fixes land here directly.
 
 ## Best Practices
 
@@ -562,7 +562,7 @@ if alterStmt != "" {
 
 ## See Also
 
-- [TiDB Parser Documentation](https://github.com/pingcap/tidb/tree/master/pkg/parser)
+- [pkg/parser](../parser/README.md) - Spirit's SQL parser (MySQL-only fork of the TiDB parser)
 - [MySQL 8.0 Online DDL Operations](https://dev.mysql.com/doc/refman/8.0/en/innodb-online-ddl-operations.html)
 - [pkg/table](../table/README.md) - Uses statement parsing for table metadata
 - [pkg/migration](../migration/README.md) - Uses safety analysis to determine migration strategy
