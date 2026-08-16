@@ -22,6 +22,7 @@ import (
 	"github.com/block/spirit/pkg/checksum"
 	"github.com/block/spirit/pkg/copier"
 	"github.com/block/spirit/pkg/dbconn"
+	"github.com/block/spirit/pkg/dbconn/sqlescape"
 	"github.com/block/spirit/pkg/metrics"
 	"github.com/block/spirit/pkg/migration/check"
 	"github.com/block/spirit/pkg/sentinel"
@@ -247,7 +248,8 @@ func (r *Runner) Run(ctx context.Context) error {
 		"go", bi.GoVer,
 		"dirty", bi.Modified,
 		"concurrency", r.migration.Threads,
-		"target-chunk-size", r.migration.TargetChunkTime,
+		"target-chunk-size", r.migration.TargetChunkSize,
+		"target-chunk-time", r.migration.TargetChunkTime,
 	)
 
 	// Create a database connection
@@ -262,8 +264,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	// Map TLS configuration from migration to dbConfig
 	r.dbConfig.TLSMode = r.migration.TLSMode
 	r.dbConfig.TLSCertificatePath = r.migration.TLSCertificatePath
-	// Size the connection pool the same way for both the buffered and
-	// unbuffered paths:
+	// Size the connection pool as:
 	//
 	//	pool = threads + write-threads + controlPlaneConns() + checksumOffPoolConns
 	//
@@ -294,7 +295,10 @@ func (r *Runner) Run(ctx context.Context) error {
 		// We only allow non-ALTERs (i.e. CREATE TABLE, DROP TABLE, RENAME TABLE)
 		// in single table mode.
 		if !r.changes[0].stmt.IsAlterTable() {
-			err := dbconn.Exec(ctx, r.db, r.changes[0].stmt.Statement)
+			// The statement is the user's own SQL and is spliced in with %r:
+			// it may contain % characters in literals (e.g. COMMENT
+			// '100%new') that must not be format-interpreted.
+			err := dbconn.Exec(ctx, r.db, "%r", sqlescape.RawSQL(r.changes[0].stmt.Statement))
 			if err != nil {
 				return err
 			}
@@ -641,15 +645,7 @@ func (r *Runner) checkpointTbl() *checkpoint.Table {
 func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context, resumePosition string) error {
 	var err error
 
-	// Autoscaling drives the buffered copier's applier worker pool; the legacy
-	// unbuffered copier has no such pool, so the combination downgrades to a
-	// fixed thread count with a warning rather than silently doing nothing.
 	autoscaleEnabled := r.migration.EnableExperimentalAutoscaling
-	if autoscaleEnabled && r.migration.Unbuffered {
-		r.logger.Warn("--enable-experimental-autoscaling has no effect with --unbuffered; write threads stay fixed",
-			"write_threads", r.migration.WriteThreads)
-		autoscaleEnabled = false
-	}
 	// redoAware tracks whether the Aurora threads throttler will run its
 	// redo-aware perf_schema signal (which excludes redo-log waiters). It gates
 	// the autoscaler's growth cap below: because that signal ignores redo-log
@@ -830,10 +826,8 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context, resumePosi
 	// FROM original ... after the row event arrives, the row image *is* the
 	// applied state.
 	//
-	// The same applier is handed to the copier, but the copier only uses it
-	// for buffered copy (the default). Unbuffered copy (--unbuffered) issues
-	// INSERT IGNORE INTO _new ... SELECT FROM original directly and ignores the
-	// applier.
+	// The same applier is handed to the copier, so the copy and the binlog
+	// replay share one write pipeline.
 	appl, err := applier.NewSingleTargetApplier(
 		applier.Target{DB: r.db},
 		&applier.ApplierConfig{
@@ -849,15 +843,13 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context, resumePosi
 	r.applier = appl
 
 	// Create copier with the prepared chunker
-	r.copier, err = copier.NewCopier(r.db, r.copyChunker, &copier.CopierConfig{
-		Concurrency:     r.migration.Threads,
-		TargetChunkTime: r.migration.TargetChunkTime,
-		Throttler:       &throttler.Noop{},
-		Logger:          r.logger,
-		MetricsSink:     r.metricsSink,
-		DBConfig:        r.dbConfig,
-		Applier:         appl,
-		Unbuffered:      r.migration.Unbuffered,
+	r.copier, err = copier.NewCopier(r.copyChunker, &copier.CopierConfig{
+		Concurrency: r.migration.Threads,
+		Throttler:   &throttler.Noop{},
+		Logger:      r.logger,
+		MetricsSink: r.metricsSink,
+		DBConfig:    r.dbConfig,
+		Applier:     appl,
 		Autoscale: copier.AutoscaleConfig{
 			Enabled:        autoscaleEnabled,
 			StartThreads:   r.migration.WriteThreads,
@@ -1434,6 +1426,18 @@ func (r *Runner) Close() error {
 	if r.replClient != nil {
 		r.replClient.Close()
 	}
+	// Stop the applier's async write workers. After a completed copy this is
+	// a no-op (the copier's Run already stopped them; Stop is idempotent),
+	// but paths that never reach or never finish the copy — early failures,
+	// and tests stepping the copy incrementally via CopyChunk — would
+	// otherwise leak the worker goroutines. The replication client's
+	// synchronous applier methods are unaffected by Stop, and it has already
+	// been closed above.
+	if r.applier != nil {
+		if err := r.applier.Stop(); err != nil {
+			errs = append(errs, err)
+		}
+	}
 	if t := r.currentThrottler(); t != nil {
 		if err := t.Close(); err != nil {
 			errs = append(errs, err)
@@ -1652,16 +1656,12 @@ func (r *Runner) initChunkers() error {
 			Logger:          r.logger,
 			ColumnMapping:   columnMapping,
 		}
-		// The buffered copier (the default) sizes chunks by an in-memory byte
-		// budget rather than copy time — the only path that reads rows into
-		// client memory, and the one whose time signal collapses under
-		// backpressure. This applies to the copy chunker only: the checksum
-		// runs server-side CRC and keeps the time signal. The legacy
-		// --unbuffered copier keeps the time signal (TargetChunkBytes == 0).
+		// The copier sizes chunks by an in-memory byte budget rather than
+		// copy time — it reads rows into client memory, and its time signal
+		// collapses under backpressure. This applies to the copy chunker
+		// only: the checksum runs server-side CRC and keeps the time signal.
 		copyChunkerCfg := chunkerCfg
-		if !r.migration.Unbuffered {
-			copyChunkerCfg.TargetChunkBytes = r.migration.TargetChunkSize
-		}
+		copyChunkerCfg.TargetChunkBytes = r.migration.TargetChunkSize
 		var err error
 		change.chunker, err = table.NewChunker(change.table, copyChunkerCfg)
 		if err != nil {
