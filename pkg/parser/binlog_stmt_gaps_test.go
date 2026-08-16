@@ -200,3 +200,18 @@ func TestEngineAttribute(t *testing.T) {
 	}
 	RunTest(t, table, false)
 }
+
+func TestVectorType(t *testing.T) {
+	table := []testCase{
+		{"CREATE TABLE t (v VECTOR)", true, "CREATE TABLE `t` (`v` VECTOR)"},
+		{"CREATE TABLE t (v VECTOR(4))", true, "CREATE TABLE `t` (`v` VECTOR(4))"},
+		{"CREATE TABLE t (v VECTOR(16383) NOT NULL)", true, "CREATE TABLE `t` (`v` VECTOR(16383) NOT NULL)"},
+		{"ALTER TABLE t ADD COLUMN v VECTOR(4)", true, "ALTER TABLE `t` ADD COLUMN `v` VECTOR(4)"},
+		{"SELECT CAST(x AS VECTOR) FROM t", true, "SELECT CAST(`x` AS VECTOR) FROM `t`"},
+		{"SELECT CAST(x AS VECTOR(8)) FROM t", true, "SELECT CAST(`x` AS VECTOR(8)) FROM `t`"},
+		// VECTOR stays usable as an identifier.
+		{"CREATE TABLE vector (vector INT)", true, "CREATE TABLE `vector` (`vector` INT)"},
+		{"SELECT vector FROM vector", true, "SELECT `vector` FROM `vector`"},
+	}
+	RunTest(t, table, false)
+}

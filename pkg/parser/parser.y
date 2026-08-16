@@ -597,6 +597,7 @@ type likeEscapeSpec struct {
 	validation               "VALIDATION"
 	value                    "VALUE"
 	variables                "VARIABLES"
+	vectorType               "VECTOR"
 	view                     "VIEW"
 	visible                  "VISIBLE"
 	wait                     "WAIT"
@@ -4760,6 +4761,7 @@ UnReservedKeyword:
 |	"SERIALIZABLE"
 |	"LEVEL"
 |	"VARIABLES"
+|	"VECTOR"
 |	"SQL_CACHE"
 |	"INDEXES"
 |	"PROCESSLIST"
@@ -6653,6 +6655,16 @@ CastType:
 		tp.AddFlag(mysql.BinaryFlag | mysql.ParseToJSONFlag)
 		tp.SetCharset(mysql.DefaultCharset)
 		tp.SetCollate(mysql.DefaultCollationName)
+		$$ = tp
+	}
+|	"VECTOR" OptFieldLen
+	{
+		// CAST(expr AS VECTOR[(N)]) (MySQL 9.0+).
+		tp := types.NewFieldType(mysql.TypeVector)
+		tp.SetFlen($2.(int))
+		tp.AddFlag(mysql.BinaryFlag)
+		tp.SetCharset(charset.CharsetBin)
+		tp.SetCollate(charset.CollationBin)
 		$$ = tp
 	}
 |	"DOUBLE"
@@ -10034,6 +10046,16 @@ StringType:
 	{
 		tp := types.NewFieldType(mysql.TypeJSON)
 		tp.SetDecimal(0)
+		tp.SetCharset(charset.CharsetBin)
+		tp.SetCollate(charset.CollationBin)
+		$$ = tp
+	}
+|	"VECTOR" OptFieldLen
+	{
+		// VECTOR(N) (MySQL 9.0+): N float32 dimensions, default 2048
+		// when unspecified.
+		tp := types.NewFieldType(mysql.TypeVector)
+		tp.SetFlen($2.(int))
 		tp.SetCharset(charset.CharsetBin)
 		tp.SetCollate(charset.CollationBin)
 		$$ = tp

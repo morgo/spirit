@@ -465,6 +465,12 @@ func (ft *FieldType) CompactStr() string {
 		suffix = fmt.Sprintf("(%d)", displayFlen)
 	case mysql.TypeYear:
 		suffix = fmt.Sprintf("(%d)", ft.flen)
+	case mysql.TypeVector:
+		// Print the dimension only when it was specified; MySQL applies
+		// the default (2048) server side.
+		if ft.flen != UnspecifiedLength {
+			suffix = fmt.Sprintf("(%d)", ft.flen)
+		}
 	case mysql.TypeNull:
 		suffix = "(0)"
 	}
@@ -617,6 +623,11 @@ func (ft *FieldType) RestoreAsCastType(ctx *format.RestoreCtx, explicitCharset b
 		}
 	case mysql.TypeJSON:
 		ctx.WriteKeyWord("JSON")
+	case mysql.TypeVector:
+		ctx.WriteKeyWord("VECTOR")
+		if ft.flen != UnspecifiedLength {
+			ctx.WritePlainf("(%d)", ft.flen)
+		}
 	case mysql.TypeDouble:
 		ctx.WriteKeyWord("DOUBLE")
 	case mysql.TypeFloat:
