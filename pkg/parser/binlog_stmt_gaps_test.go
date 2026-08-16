@@ -609,3 +609,68 @@ func TestInstanceLockStatements(t *testing.T) {
 	}
 	RunTest(t, table, false)
 }
+
+func TestChangeReplicationStatements(t *testing.T) {
+	table := []testCase{
+		{"CHANGE REPLICATION SOURCE TO SOURCE_HOST='127.0.0.1', SOURCE_PORT=3306, SOURCE_USER='root'", true, "CHANGE REPLICATION SOURCE TO SOURCE_HOST = _UTF8MB4'127.0.0.1', SOURCE_PORT = 3306, SOURCE_USER = _UTF8MB4'root'"},
+		// The deprecated spelling parses to the same node and restores modern.
+		{"CHANGE MASTER TO MASTER_HOST='h', MASTER_AUTO_POSITION=1 FOR CHANNEL 'ch'", true, "CHANGE REPLICATION SOURCE TO MASTER_HOST = _UTF8MB4'h', MASTER_AUTO_POSITION = 1 FOR CHANNEL 'ch'"},
+		{"CHANGE REPLICATION SOURCE TO SOURCE_SSL_VERIFY_SERVER_CERT=0, SOURCE_DELAY=3600", true, "CHANGE REPLICATION SOURCE TO SOURCE_SSL_VERIFY_SERVER_CERT = 0, SOURCE_DELAY = 3600"},
+		{"CHANGE REPLICATION FILTER REPLICATE_DO_DB=(db1,db2), REPLICATE_IGNORE_TABLE=(db1.t1)", true, "CHANGE REPLICATION FILTER REPLICATE_DO_DB = (`db1`, `db2`), REPLICATE_IGNORE_TABLE = (`db1`.`t1`)"},
+		{"CHANGE REPLICATION FILTER REPLICATE_WILD_DO_TABLE=('db1.new%'), REPLICATE_REWRITE_DB=((db1,db2)) FOR CHANNEL 'ch'", true, "CHANGE REPLICATION FILTER REPLICATE_WILD_DO_TABLE = ('db1.new%'), REPLICATE_REWRITE_DB = ((`db1`, `db2`)) FOR CHANNEL 'ch'"},
+		{"CHANGE REPLICATION FILTER REPLICATE_DO_DB=()", true, "CHANGE REPLICATION FILTER REPLICATE_DO_DB = ()"},
+		{"CHANGE REPLICATION SOURCE TO", false, ""},
+	}
+	RunTest(t, table, false)
+}
+
+func TestStartStopReplica(t *testing.T) {
+	table := []testCase{
+		{"START REPLICA", true, "START REPLICA"},
+		{"START SLAVE", true, "START REPLICA"},
+		{"START REPLICA IO_THREAD", true, "START REPLICA IO_THREAD"},
+		{"START REPLICA IO_THREAD, SQL_THREAD", true, "START REPLICA IO_THREAD, SQL_THREAD"},
+		{"START REPLICA SQL_THREAD UNTIL SQL_AFTER_GTIDS = '3E11FA47-71CA-11E1-9E33-C80AA9429562:1-5'", true, "START REPLICA SQL_THREAD UNTIL SQL_AFTER_GTIDS = _UTF8MB4'3E11FA47-71CA-11E1-9E33-C80AA9429562:1-5'"},
+		{"START SLAVE UNTIL MASTER_LOG_FILE='master1-bin.000001', MASTER_LOG_POS=4", true, "START REPLICA UNTIL MASTER_LOG_FILE = _UTF8MB4'master1-bin.000001', MASTER_LOG_POS = 4"},
+		{"START REPLICA USER='root' PASSWORD='' DEFAULT_AUTH='mysql_native_password'", true, "START REPLICA USER = _UTF8MB4'root' PASSWORD = _UTF8MB4'' DEFAULT_AUTH = _UTF8MB4'mysql_native_password'"},
+		{"START REPLICA IO_THREAD UNTIL SQL_AFTER_MTS_GAPS USER='u' PASSWORD='p' FOR CHANNEL 'ch1'", true, "START REPLICA IO_THREAD UNTIL SQL_AFTER_MTS_GAPS USER = _UTF8MB4'u' PASSWORD = _UTF8MB4'p' FOR CHANNEL 'ch1'"},
+		{"START GROUP_REPLICATION", true, "START GROUP_REPLICATION"},
+		{"START GROUP_REPLICATION USER='rpl_user', PASSWORD='pw'", true, "START GROUP_REPLICATION USER = _UTF8MB4'rpl_user', PASSWORD = _UTF8MB4'pw'"},
+		{"STOP REPLICA", true, "STOP REPLICA"},
+		{"STOP SLAVE", true, "STOP REPLICA"},
+		{"STOP REPLICA IO_THREAD FOR CHANNEL ''", true, "STOP REPLICA IO_THREAD FOR CHANNEL ''"},
+		{"STOP GROUP_REPLICATION", true, "STOP GROUP_REPLICATION"},
+		{"START REPLICA UNTIL", false, ""},
+		{"START REPLICA IO_THREAD SQL_THREAD", false, ""},
+		{"STOP REPLICA UNTIL SOURCE_LOG_POS=4", false, ""},
+	}
+	RunTest(t, table, false)
+}
+
+func TestResetStatements(t *testing.T) {
+	table := []testCase{
+		{"RESET REPLICA", true, "RESET REPLICA"},
+		{"RESET SLAVE ALL FOR CHANNEL 'ch'", true, "RESET REPLICA ALL FOR CHANNEL 'ch'"},
+		{"RESET MASTER", true, "RESET BINARY LOGS AND GTIDS"},
+		{"RESET MASTER TO 1234", true, "RESET BINARY LOGS AND GTIDS TO 1234"},
+		{"RESET BINARY LOGS AND GTIDS", true, "RESET BINARY LOGS AND GTIDS"},
+		{"RESET PERSIST", true, "RESET PERSIST"},
+		{"RESET PERSIST system_var", true, "RESET PERSIST `system_var`"},
+		{"RESET PERSIST IF EXISTS innodb_buffer_pool_size", true, "RESET PERSIST IF EXISTS `innodb_buffer_pool_size`"},
+		{"RESET", false, ""},
+	}
+	RunTest(t, table, false)
+}
+
+func TestSetPersist(t *testing.T) {
+	table := []testCase{
+		{"SET PERSIST max_connections = 1000", true, "SET @@PERSIST.`max_connections`=1000"},
+		{"SET PERSIST_ONLY back_log = 100", true, "SET @@PERSIST_ONLY.`back_log`=100"},
+		{"SET PERSIST innodb_buffer_pool_size = DEFAULT", true, "SET @@PERSIST.`innodb_buffer_pool_size`=DEFAULT"},
+		{"SET @@PERSIST.max_connections = 500", true, "SET @@PERSIST.`max_connections`=500"},
+		{"SET @@PERSIST_ONLY.back_log = 99", true, "SET @@PERSIST_ONLY.`back_log`=99"},
+		// New keywords must keep working as plain identifiers.
+		{"SELECT filter, gtids, io_thread, sql_thread, stop, default_auth, plugin_dir FROM t", true, "SELECT `filter`,`gtids`,`io_thread`,`sql_thread`,`stop`,`default_auth`,`plugin_dir` FROM `t`"},
+	}
+	RunTest(t, table, false)
+}

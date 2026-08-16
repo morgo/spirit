@@ -361,6 +361,7 @@ type likeEscapeSpec struct {
 	datetimeType             "DATETIME"
 	day                      "DAY"
 	deallocate               "DEALLOCATE"
+	defaultAuth              "DEFAULT_AUTH"
 	definer                  "DEFINER"
 	definition               "DEFINITION"
 	delayKeyWrite            "DELAY_KEY_WRITE"
@@ -400,6 +401,7 @@ type likeEscapeSpec struct {
 	fields                   "FIELDS"
 	file                     "FILE"
 	fileBlockSize            "FILE_BLOCK_SIZE"
+	filter                   "FILTER"
 	finish                   "FINISH"
 	first                    "FIRST"
 	fixed                    "FIXED"
@@ -415,6 +417,7 @@ type likeEscapeSpec struct {
 	global                   "GLOBAL"
 	grants                   "GRANTS"
 	groupReplication         "GROUP_REPLICATION"
+	gtids                    "GTIDS"
 	handler                  "HANDLER"
 	hash                     "HASH"
 	histogram                "HISTOGRAM"
@@ -435,6 +438,7 @@ type likeEscapeSpec struct {
 	invisible                "INVISIBLE"
 	invoker                  "INVOKER"
 	io                       "IO"
+	ioThread                 "IO_THREAD"
 	ipc                      "IPC"
 	isolation                "ISOLATION"
 	issuer                   "ISSUER"
@@ -510,6 +514,7 @@ type likeEscapeSpec struct {
 	phase                    "PHASE"
 	pipesAsOr
 	plugin                   "PLUGIN"
+	pluginDir                "PLUGIN_DIR"
 	plugins                  "PLUGINS"
 	point                    "POINT"
 	polygon                  "POLYGON"
@@ -541,6 +546,7 @@ type likeEscapeSpec struct {
 	repeatable               "REPEATABLE"
 	replica                  "REPLICA"
 	replication              "REPLICATION"
+	reset                    "RESET"
 	resource                 "RESOURCE"
 	respect                  "RESPECT"
 	restart                  "RESTART"
@@ -585,6 +591,7 @@ type likeEscapeSpec struct {
 	sqlBufferResult          "SQL_BUFFER_RESULT"
 	sqlCache                 "SQL_CACHE"
 	sqlNoCache               "SQL_NO_CACHE"
+	sqlThread                "SQL_THREAD"
 	sqlTsiDay                "SQL_TSI_DAY"
 	sqlTsiHour               "SQL_TSI_HOUR"
 	sqlTsiMinute             "SQL_TSI_MINUTE"
@@ -599,6 +606,7 @@ type likeEscapeSpec struct {
 	statsPersistent          "STATS_PERSISTENT"
 	statsSamplePages         "STATS_SAMPLE_PAGES"
 	status                   "STATUS"
+	stop                     "STOP"
 	storage                  "STORAGE"
 	subject                  "SUBJECT"
 	subpartition             "SUBPARTITION"
@@ -631,6 +639,7 @@ type likeEscapeSpec struct {
 	uninstall                "UNINSTALL"
 	unknown                  "UNKNOWN"
 	unregister               "UNREGISTER"
+	until                    "UNTIL"
 	upgrade                  "UPGRADE"
 	user                     "USER"
 	useFrm                   "USE_FRM"
@@ -860,6 +869,10 @@ type likeEscapeSpec struct {
 	CloneStmt                  "CLONE statement"
 	LockInstanceStmt           "LOCK INSTANCE FOR BACKUP statement"
 	UnlockInstanceStmt         "UNLOCK INSTANCE statement"
+	ChangeReplicationStmt      "CHANGE REPLICATION SOURCE/FILTER statement"
+	StartReplicaStmt           "START REPLICA/GROUP_REPLICATION statement"
+	StopReplicaStmt            "STOP REPLICA/GROUP_REPLICATION statement"
+	ResetStmt                  "RESET statement"
 
 %type	<item>
 	LikeEscapeOpt                          "like escape option"
@@ -888,6 +901,20 @@ type likeEscapeSpec struct {
 	ThreadIdList                           "thread id list"
 	CloneDataDirectoryOpt                  "CLONE INSTANCE optional DATA DIRECTORY clause"
 	CloneRequireSSLOpt                     "CLONE INSTANCE optional REQUIRE SSL clause"
+	ReplicationOption                      "replication statement option"
+	ReplicationOptionEq                    "replication statement name=value option"
+	ReplicationOptionList                  "replication statement option list"
+	ReplicationOptionValue                 "replication statement option value"
+	ReplicationListItem                    "replication option list value item"
+	ReplicationListItemList                "replication option list value items"
+	ForChannelOpt                          "optional FOR CHANNEL clause"
+	ReplicaThreadType                      "replica thread type"
+	ReplicaThreadList                      "replica thread type list"
+	ReplicaThreadListOpt                   "optional replica thread type list"
+	ReplicaUntilOpt                        "optional START REPLICA UNTIL clause"
+	SpaceSepOptionListOpt                  "optional space-separated replication options"
+	SpaceSepOptionList                     "space-separated replication options"
+	SpaceSepOption                         "single space-separated replication option"
 	AllOrPartitionNameList                 "All or partition name list"
 	AlgorithmClause                        "Alter table algorithm"
 	AlterTableSpecSingleOpt                "Alter table single option"
@@ -4773,6 +4800,7 @@ UnReservedKeyword:
 |	"DATETIME"
 |	"DAY"
 |	"DEALLOCATE"
+|	"DEFAULT_AUTH"
 |	"DO"
 |	"DUPLICATE"
 |	"DYNAMIC"
@@ -4782,6 +4810,9 @@ UnReservedKeyword:
 |	"ENGINE"
 |	"ENGINES"
 |	"ENGINE_ATTRIBUTE"
+|	"FILTER"
+|	"GTIDS"
+|	"IO_THREAD"
 |	"SECONDARY_ENGINE_ATTRIBUTE"
 |	"ENUM"
 |	"ERROR"
@@ -4824,6 +4855,7 @@ UnReservedKeyword:
 |	"PERSIST"
 |	"PERSIST_ONLY"
 |	"PLUGIN"
+|	"PLUGIN_DIR"
 |	"PORT"
 |	"PREPARE"
 |	"PREV"
@@ -4913,6 +4945,7 @@ UnReservedKeyword:
 |	"PARTITIONS"
 |	"NONE"
 |	"NULLS"
+|	"SQL_THREAD"
 |	"SUPER"
 |	"STATS_PERSISTENT"
 |	"STATS_AUTO_RECALC"
@@ -4937,6 +4970,7 @@ UnReservedKeyword:
 |	"MAX_UPDATES_PER_HOUR"
 |	"MAX_USER_CONNECTIONS"
 |	"REPLICATION"
+|	"RESET"
 |	"CLIENT"
 |	"SLAVE"
 |	"RELOAD"
@@ -5028,6 +5062,7 @@ UnReservedKeyword:
 |	"RANDOM"
 |	"REGISTRATION"
 |	"UNREGISTER"
+|	"UNTIL"
 |	"REPLICA"
 |	"LOGS"
 |	"HOSTS"
@@ -5078,6 +5113,7 @@ UnReservedKeyword:
 |	"RELAY"
 |	"RESUME"
 |	"ROTATE"
+|	"STOP"
 |	"SUSPEND"
 |	"THREAD_PRIORITY"
 |	"UNDOFILE"
@@ -8715,17 +8751,33 @@ VariableAssignment:
 	{
 		$$ = &ast.VariableAssignment{Name: $2, Value: $4, IsSystem: true}
 	}
+|	"PERSIST" VariableName EqOrAssignmentEq SetExpr
+	{
+		$$ = &ast.VariableAssignment{Name: $2, Value: $4, IsPersist: true, IsSystem: true}
+	}
+|	"PERSIST_ONLY" VariableName EqOrAssignmentEq SetExpr
+	{
+		$$ = &ast.VariableAssignment{Name: $2, Value: $4, IsPersistOnly: true, IsSystem: true}
+	}
 |	doubleAtIdentifier EqOrAssignmentEq SetExpr
 	{
 		v := strings.ToLower($1)
 		var isGlobal bool
 		var isInstance bool
+		var isPersist bool
+		var isPersistOnly bool
 		if strings.HasPrefix(v, "@@global.") {
 			isGlobal = true
 			v = strings.TrimPrefix(v, "@@global.")
 		} else if strings.HasPrefix(v, "@@instance.") {
 			isInstance = true
 			v = strings.TrimPrefix(v, "@@instance.")
+		} else if strings.HasPrefix(v, "@@persist_only.") {
+			isPersistOnly = true
+			v = strings.TrimPrefix(v, "@@persist_only.")
+		} else if strings.HasPrefix(v, "@@persist.") {
+			isPersist = true
+			v = strings.TrimPrefix(v, "@@persist.")
 		} else if strings.HasPrefix(v, "@@session.") {
 			v = strings.TrimPrefix(v, "@@session.")
 		} else if strings.HasPrefix(v, "@@local.") {
@@ -8733,7 +8785,7 @@ VariableAssignment:
 		} else if strings.HasPrefix(v, "@@") {
 			v = strings.TrimPrefix(v, "@@")
 		}
-		$$ = &ast.VariableAssignment{Name: v, Value: $3, IsGlobal: isGlobal, IsInstance: isInstance, IsSystem: true}
+		$$ = &ast.VariableAssignment{Name: v, Value: $3, IsGlobal: isGlobal, IsInstance: isInstance, IsPersist: isPersist, IsPersistOnly: isPersistOnly, IsSystem: true}
 	}
 |	singleAtIdentifier EqOrAssignmentEq Expression
 	{
@@ -9605,6 +9657,10 @@ Statement:
 |	CloneStmt
 |	LockInstanceStmt
 |	UnlockInstanceStmt
+|	ChangeReplicationStmt
+|	StartReplicaStmt
+|	StopReplicaStmt
+|	ResetStmt
 
 ExplainableStmt:
 	DeleteFromStmt
@@ -13500,6 +13556,311 @@ CloneRequireSSLOpt:
 |	"REQUIRE" "NO" "SSL"
 	{
 		$$ = false
+	}
+
+/********************************************************************
+ * Replication administration statements. Option lists parse as generic
+ * name/value pairs; the server validates the names. Deprecated
+ * MASTER/SLAVE spellings parse to the same nodes.
+ * See https://dev.mysql.com/doc/refman/8.0/en/change-replication-source-to.html
+ *******************************************************************/
+ChangeReplicationStmt:
+	"CHANGE" "REPLICATION" "SOURCE" "TO" ReplicationOptionList ForChannelOpt
+	{
+		stmt := &ast.ChangeReplicationSourceStmt{Options: $5.([]*ast.ReplicationOption)}
+		if $6 != nil {
+			stmt.Channel = $6.(string)
+			stmt.HasChannel = true
+		}
+		$$ = stmt
+	}
+|	"CHANGE" "MASTER" "TO" ReplicationOptionList ForChannelOpt
+	{
+		stmt := &ast.ChangeReplicationSourceStmt{Options: $4.([]*ast.ReplicationOption)}
+		if $5 != nil {
+			stmt.Channel = $5.(string)
+			stmt.HasChannel = true
+		}
+		$$ = stmt
+	}
+|	"CHANGE" "REPLICATION" "FILTER" ReplicationOptionList ForChannelOpt
+	{
+		stmt := &ast.ChangeReplicationFilterStmt{Filters: $4.([]*ast.ReplicationOption)}
+		if $5 != nil {
+			stmt.Channel = $5.(string)
+			stmt.HasChannel = true
+		}
+		$$ = stmt
+	}
+
+ForChannelOpt:
+	/* empty */
+	{
+		$$ = nil
+	}
+|	"FOR" "CHANNEL" stringLit
+	{
+		$$ = $3
+	}
+
+ReplicationOptionList:
+	ReplicationOption
+	{
+		$$ = []*ast.ReplicationOption{$1.(*ast.ReplicationOption)}
+	}
+|	ReplicationOptionList ',' ReplicationOption
+	{
+		$$ = append($1.([]*ast.ReplicationOption), $3.(*ast.ReplicationOption))
+	}
+
+ReplicationOption:
+	ReplicationOptionEq
+|	Identifier
+	{
+		$$ = &ast.ReplicationOption{Name: strings.ToUpper($1)}
+	}
+
+ReplicationOptionEq:
+	Identifier "=" ReplicationOptionValue
+	{
+		opt := $3.(*ast.ReplicationOption)
+		opt.Name = strings.ToUpper($1)
+		$$ = opt
+	}
+
+ReplicationOptionValue:
+	Literal
+	{
+		$$ = &ast.ReplicationOption{Value: $1}
+	}
+|	stringLit singleAtIdentifier
+	{
+		$$ = &ast.ReplicationOption{UserValue: &auth.UserIdentity{Username: $1, Hostname: strings.ToLower(strings.TrimPrefix($2, "@"))}}
+	}
+|	Identifier
+	{
+		$$ = &ast.ReplicationOption{IdentValue: ast.NewCIStr($1)}
+	}
+|	"ON"
+	{
+		$$ = &ast.ReplicationOption{IdentValue: ast.NewCIStr("ON")}
+	}
+|	'(' ')'
+	{
+		$$ = &ast.ReplicationOption{HasList: true}
+	}
+|	'(' ReplicationListItemList ')'
+	{
+		$$ = &ast.ReplicationOption{HasList: true, List: $2.([]*ast.ReplicationListItem)}
+	}
+
+ReplicationListItemList:
+	ReplicationListItem
+	{
+		$$ = []*ast.ReplicationListItem{$1.(*ast.ReplicationListItem)}
+	}
+|	ReplicationListItemList ',' ReplicationListItem
+	{
+		$$ = append($1.([]*ast.ReplicationListItem), $3.(*ast.ReplicationListItem))
+	}
+
+ReplicationListItem:
+	TableName
+	{
+		$$ = &ast.ReplicationListItem{Table: $1.(*ast.TableName)}
+	}
+|	stringLit
+	{
+		$$ = &ast.ReplicationListItem{Str: $1, IsStr: true}
+	}
+|	NUM
+	{
+		$$ = &ast.ReplicationListItem{Num: getUint64FromNUM($1), IsNum: true}
+	}
+|	'(' Identifier ',' Identifier ')'
+	{
+		$$ = &ast.ReplicationListItem{PairFrom: ast.NewCIStr($2), PairTo: ast.NewCIStr($4), IsPair: true}
+	}
+
+StartReplicaStmt:
+	"START" ReplicaSym ReplicaThreadListOpt ReplicaUntilOpt SpaceSepOptionListOpt ForChannelOpt
+	{
+		stmt := &ast.StartReplicaStmt{}
+		if $3 != nil {
+			stmt.Threads = $3.([]string)
+		}
+		if $4 != nil {
+			stmt.Until = $4.([]*ast.ReplicationOption)
+		}
+		if $5 != nil {
+			stmt.Options = $5.([]*ast.ReplicationOption)
+		}
+		if $6 != nil {
+			stmt.Channel = $6.(string)
+			stmt.HasChannel = true
+		}
+		$$ = stmt
+	}
+|	"START" "GROUP_REPLICATION"
+	{
+		$$ = &ast.StartGroupReplicationStmt{}
+	}
+|	"START" "GROUP_REPLICATION" ReplicationOptionList
+	{
+		$$ = &ast.StartGroupReplicationStmt{Options: $3.([]*ast.ReplicationOption)}
+	}
+
+StopReplicaStmt:
+	"STOP" ReplicaSym ReplicaThreadListOpt ForChannelOpt
+	{
+		stmt := &ast.StopReplicaStmt{}
+		if $3 != nil {
+			stmt.Threads = $3.([]string)
+		}
+		if $4 != nil {
+			stmt.Channel = $4.(string)
+			stmt.HasChannel = true
+		}
+		$$ = stmt
+	}
+|	"STOP" "GROUP_REPLICATION"
+	{
+		$$ = &ast.StopGroupReplicationStmt{}
+	}
+
+ReplicaSym:
+	"REPLICA"
+|	"SLAVE"
+
+ReplicaThreadListOpt:
+	/* empty */
+	{
+		$$ = nil
+	}
+|	ReplicaThreadList
+
+ReplicaThreadList:
+	ReplicaThreadType
+	{
+		$$ = []string{$1.(string)}
+	}
+|	ReplicaThreadList ',' ReplicaThreadType
+	{
+		$$ = append($1.([]string), $3.(string))
+	}
+
+ReplicaThreadType:
+	"IO_THREAD"
+	{
+		$$ = "IO_THREAD"
+	}
+|	"SQL_THREAD"
+	{
+		$$ = "SQL_THREAD"
+	}
+
+ReplicaUntilOpt:
+	/* empty */
+	{
+		$$ = nil
+	}
+|	"UNTIL" ReplicationOptionList
+	{
+		$$ = $2
+	}
+
+SpaceSepOptionListOpt:
+	/* empty */
+	{
+		$$ = nil
+	}
+|	SpaceSepOptionList
+
+SpaceSepOptionList:
+	SpaceSepOption
+	{
+		$$ = []*ast.ReplicationOption{$1.(*ast.ReplicationOption)}
+	}
+|	SpaceSepOptionList SpaceSepOption
+	{
+		$$ = append($1.([]*ast.ReplicationOption), $2.(*ast.ReplicationOption))
+	}
+
+// SpaceSepOption is restricted to the connection option names MySQL allows in
+// START REPLICA; a generic Identifier here would be ambiguous with IO_THREAD /
+// SQL_THREAD in the optional thread-type list.
+SpaceSepOption:
+	"USER" "=" ReplicationOptionValue
+	{
+		opt := $3.(*ast.ReplicationOption)
+		opt.Name = "USER"
+		$$ = opt
+	}
+|	"PASSWORD" "=" ReplicationOptionValue
+	{
+		opt := $3.(*ast.ReplicationOption)
+		opt.Name = "PASSWORD"
+		$$ = opt
+	}
+|	"DEFAULT_AUTH" "=" ReplicationOptionValue
+	{
+		opt := $3.(*ast.ReplicationOption)
+		opt.Name = "DEFAULT_AUTH"
+		$$ = opt
+	}
+|	"PLUGIN_DIR" "=" ReplicationOptionValue
+	{
+		opt := $3.(*ast.ReplicationOption)
+		opt.Name = "PLUGIN_DIR"
+		$$ = opt
+	}
+
+ResetStmt:
+	"RESET" "PERSIST"
+	{
+		$$ = &ast.ResetPersistStmt{}
+	}
+|	"RESET" "PERSIST" VariableName
+	{
+		$$ = &ast.ResetPersistStmt{Variable: $3}
+	}
+|	"RESET" "PERSIST" "IF" "EXISTS" VariableName
+	{
+		$$ = &ast.ResetPersistStmt{IfExists: true, Variable: $5}
+	}
+|	"RESET" ReplicaSym ForChannelOpt
+	{
+		stmt := &ast.ResetReplicaStmt{}
+		if $3 != nil {
+			stmt.Channel = $3.(string)
+			stmt.HasChannel = true
+		}
+		$$ = stmt
+	}
+|	"RESET" ReplicaSym "ALL" ForChannelOpt
+	{
+		stmt := &ast.ResetReplicaStmt{All: true}
+		if $4 != nil {
+			stmt.Channel = $4.(string)
+			stmt.HasChannel = true
+		}
+		$$ = stmt
+	}
+|	"RESET" "MASTER"
+	{
+		$$ = &ast.ResetBinaryLogsStmt{}
+	}
+|	"RESET" "MASTER" "TO" NUM
+	{
+		$$ = &ast.ResetBinaryLogsStmt{To: getUint64FromNUM($4), HasTo: true}
+	}
+|	"RESET" "BINARY" "LOGS" "AND" "GTIDS"
+	{
+		$$ = &ast.ResetBinaryLogsStmt{}
+	}
+|	"RESET" "BINARY" "LOGS" "AND" "GTIDS" "TO" NUM
+	{
+		$$ = &ast.ResetBinaryLogsStmt{To: getUint64FromNUM($7), HasTo: true}
 	}
 
 /********************************************************************

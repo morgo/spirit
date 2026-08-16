@@ -530,6 +530,10 @@ type VariableAssignment struct {
 	IsInstance bool
 	IsGlobal   bool
 	IsSystem   bool
+	// IsPersist and IsPersistOnly are the SET PERSIST and
+	// SET PERSIST_ONLY variable scopes.
+	IsPersist     bool
+	IsPersistOnly bool
 
 	// ExtendValue is a way to store extended info.
 	// VariableAssignment should be able to store information for SetCharset/SetPWD Stmt.
@@ -547,6 +551,10 @@ func (n *VariableAssignment) Restore(ctx *format.RestoreCtx) error {
 			ctx.WriteKeyWord("GLOBAL")
 		case n.IsInstance:
 			ctx.WriteKeyWord("INSTANCE")
+		case n.IsPersist:
+			ctx.WriteKeyWord("PERSIST")
+		case n.IsPersistOnly:
+			ctx.WriteKeyWord("PERSIST_ONLY")
 		default:
 			ctx.WriteKeyWord("SESSION")
 		}
