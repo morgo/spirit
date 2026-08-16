@@ -1040,3 +1040,96 @@ func TestJSONTable(t *testing.T) {
 	}
 	RunTest(t, table, false)
 }
+
+func TestAlterTablePartitionMaintenance(t *testing.T) {
+	table := []testCase{
+		// ANALYZE PARTITION is a regular alter spec, so it can carry
+		// NO_WRITE_TO_BINLOG/ALL and combine with other specs by comma.
+		{"ALTER TABLE t1 ANALYZE PARTITION p0", true, "ALTER TABLE `t1` ANALYZE PARTITION `p0`"},
+		{"ALTER TABLE t1 ANALYZE PARTITION NO_WRITE_TO_BINLOG p0, p1", true, "ALTER TABLE `t1` ANALYZE PARTITION NO_WRITE_TO_BINLOG `p0`,`p1`"},
+		{"ALTER TABLE t1 ANALYZE PARTITION ALL", true, "ALTER TABLE `t1` ANALYZE PARTITION ALL"},
+		{"ALTER TABLE t1 ANALYZE PARTITION ALL, CHECK PARTITION ALL", true, "ALTER TABLE `t1` ANALYZE PARTITION ALL, CHECK PARTITION ALL"},
+		{"ALTER TABLE t1 ANALYZE PARTITION", false, ""},
+		// REORGANIZE PARTITION combines with modifier specs by comma.
+		{"ALTER TABLE t1 ALGORITHM=INPLACE, REORGANIZE PARTITION p0 INTO (PARTITION p1 VALUES LESS THAN (10))", true, "ALTER TABLE `t1` ALGORITHM = INPLACE, REORGANIZE PARTITION `p0` INTO (PARTITION `p1` VALUES LESS THAN (10))"},
+		{"ALTER TABLE t1 REORGANIZE PARTITION p0,p1 INTO (PARTITION p2 VALUES LESS THAN MAXVALUE)", true, "ALTER TABLE `t1` REORGANIZE PARTITION `p0`,`p1` INTO (PARTITION `p2` VALUES LESS THAN (MAXVALUE))"},
+		{"ALTER TABLE t1 REORGANIZE PARTITION", true, "ALTER TABLE `t1` REORGANIZE PARTITION"},
+		// SECONDARY_LOAD/UNLOAD accept a partition list in MySQL 9.x.
+		{"ALTER TABLE t1 SECONDARY_LOAD", true, "ALTER TABLE `t1` SECONDARY_LOAD"},
+		{"ALTER TABLE t1 SECONDARY_LOAD PARTITION (p0)", true, "ALTER TABLE `t1` SECONDARY_LOAD PARTITION (`p0`)"},
+		{"ALTER TABLE t1 SECONDARY_UNLOAD PARTITION (p0, p1)", true, "ALTER TABLE `t1` SECONDARY_UNLOAD PARTITION (`p0`,`p1`)"},
+		// A trailing repartition clause still parses after SECONDARY_LOAD's
+		// PARTITION-vs-PARTITION BY shift preference.
+		{"ALTER TABLE t1 ADD COLUMN b INT PARTITION BY HASH (a) PARTITIONS 4", true, "ALTER TABLE `t1` ADD COLUMN `b` INT PARTITION BY HASH (`a`) PARTITIONS 4"},
+	}
+	RunTest(t, table, false)
+}
+
+func TestCreateTableParenQuery(t *testing.T) {
+	table := []testCase{
+		// CREATE TABLE t (query) with no AS keyword and no column list.
+		{"CREATE TABLE t4 (SELECT 1 AS x)", true, "CREATE TABLE `t4` AS (SELECT 1 AS `x`)"},
+		{"CREATE TABLE IF NOT EXISTS t4 (SELECT 1)", true, "CREATE TABLE IF NOT EXISTS `t4` AS (SELECT 1)"},
+		{"CREATE TEMPORARY TABLE t4 (SELECT 1)", true, "CREATE TEMPORARY TABLE `t4` AS (SELECT 1)"},
+		{"CREATE TABLE t4 (SELECT * FROM t1) ORDER BY 1", true, "CREATE TABLE `t4` AS (SELECT * FROM `t1`) ORDER BY 1"},
+		{"CREATE TABLE t4 (SELECT 1) LIMIT 5", true, "CREATE TABLE `t4` AS (SELECT 1) LIMIT 5"},
+		{"CREATE TABLE t4 (SELECT 1 UNION SELECT 2) ORDER BY 1 LIMIT 1", true, "CREATE TABLE `t4` AS (SELECT 1 UNION SELECT 2) ORDER BY 1 LIMIT 1"},
+		{"create table t4 (select a,b from t1) union (select a,b from t2) limit 2", true, "CREATE TABLE `t4` AS (SELECT `a`,`b` FROM `t1`) UNION (SELECT `a`,`b` FROM `t2`) LIMIT 2"},
+		{"CREATE TABLE t5 (SELECT 1) UNION SELECT 2", true, "CREATE TABLE `t5` AS (SELECT 1) UNION SELECT 2"},
+		{"CREATE TABLE t5 (SELECT 1) UNION (SELECT 2) ORDER BY 1 LIMIT 2", true, "CREATE TABLE `t5` AS (SELECT 1) UNION (SELECT 2) ORDER BY 1 LIMIT 2"},
+		// The unparenthesized query forms keep flowing through
+		// CreateTableSelectOpt (TABLE/VALUES operands included).
+		{"CREATE TABLE t6 TABLE t1", true, "CREATE TABLE `t6` AS TABLE `t1`"},
+		{"CREATE TABLE t6 VALUES ROW(1,2)", true, "CREATE TABLE `t6` AS VALUES ROW(1,2)"},
+		{"CREATE TABLE t6 SELECT 1 UNION SELECT 2", true, "CREATE TABLE `t6` AS SELECT 1 UNION SELECT 2"},
+		{"CREATE TABLE t4 (LIKE t1)", true, "CREATE TABLE `t4` LIKE `t1`"},
+	}
+	RunTest(t, table, false)
+}
+
+func TestLoadDataExtensions(t *testing.T) {
+	table := []testCase{
+		// CONCURRENT priority modifier; FROM is optional noise MySQL accepts
+		// before INFILE and drops from the canonical form.
+		{"LOAD DATA CONCURRENT INFILE '/tmp/x' INTO TABLE t1", true, "LOAD DATA CONCURRENT INFILE '/tmp/x' INTO TABLE `t1`"},
+		{"LOAD DATA LOW_PRIORITY FROM INFILE '/tmp/x' INTO TABLE t1", true, "LOAD DATA LOW_PRIORITY INFILE '/tmp/x' INTO TABLE `t1`"},
+		{"LOAD DATA CONCURRENT LOCAL INFILE '/tmp/x' IGNORE INTO TABLE t1", true, "LOAD DATA CONCURRENT LOCAL INFILE '/tmp/x' IGNORE INTO TABLE `t1`"},
+		{"LOAD DATA CONCURRENT LOW_PRIORITY INFILE '/tmp/x' INTO TABLE t1", false, ""},
+		// NDB's IN PRIMARY KEY ORDER hint and target partition list.
+		{"LOAD DATA FROM INFILE '/tmp/x' IN PRIMARY KEY ORDER INTO TABLE t1", true, "LOAD DATA INFILE '/tmp/x' IN PRIMARY KEY ORDER INTO TABLE `t1`"},
+		{"LOAD DATA INFILE '/tmp/x' INTO TABLE t1 PARTITION (p0, p1)", true, "LOAD DATA INFILE '/tmp/x' INTO TABLE `t1` PARTITION(`p0`, `p1`)"},
+		// SET accepts := and the full modifier stack together.
+		{"LOAD DATA INFILE '/tmp/x' REPLACE INTO TABLE t1 PARTITION (p0) CHARACTER SET utf8mb4 FIELDS TERMINATED BY ',' IGNORE 1 LINES (a, @v) SET b := @v + 1", true, "LOAD DATA INFILE '/tmp/x' REPLACE INTO TABLE `t1` PARTITION(`p0`) CHARACTER SET utf8mb4 FIELDS TERMINATED BY ',' IGNORE 1 LINES (`a`,@`v`) SET `b`=@`v`+1"},
+		// CONCURRENT stays usable as an identifier.
+		{"SELECT concurrent FROM t1", true, "SELECT `concurrent` FROM `t1`"},
+	}
+	RunTest(t, table, false)
+}
+
+func TestTableOptionValueForms(t *testing.T) {
+	table := []testCase{
+		// AUTOEXTEND_SIZE takes a plain byte count as well as '4M'-style
+		// strings ("4M" unquoted lexes as an identifier).
+		{"CREATE TABLE t2 (a INT) AUTOEXTEND_SIZE = 4194304", true, "CREATE TABLE `t2` (`a` INT) AUTOEXTEND_SIZE = 4194304"},
+		{"CREATE TABLE t2 (a INT) AUTOEXTEND_SIZE = 4M", true, "CREATE TABLE `t2` (`a` INT) AUTOEXTEND_SIZE = 4M"},
+		// ENCRYPTION values are validated at execution time, not parse time.
+		{"CREATE TABLE t2 (a INT) ENCRYPTION 'foo'", true, "CREATE TABLE `t2` (`a` INT) ENCRYPTION = 'foo'"},
+		{"CREATE TABLE t2 (a INT) ENCRYPTION = 'N'", true, "CREATE TABLE `t2` (`a` INT) ENCRYPTION = 'N'"},
+		// FLOAT/DOUBLE accept (and ignore) a decimal precision.
+		{"CREATE TABLE t3 (f FLOAT(10.3))", true, "CREATE TABLE `t3` (`f` FLOAT)"},
+		{"CREATE TABLE t3 (d DOUBLE(10.3))", true, "CREATE TABLE `t3` (`d` DOUBLE)"},
+		{"CREATE TABLE t3 (f FLOAT(10,3))", true, "CREATE TABLE `t3` (`f` FLOAT(10,3))"},
+	}
+	RunTest(t, table, false)
+}
+
+func TestSelectAliasCurrentRole(t *testing.T) {
+	table := []testCase{
+		// MySQL allows CURRENT_ROLE as a column alias even though it is also
+		// a braces-optional function name.
+		{"SELECT 1 AS CURRENT_ROLE", true, "SELECT 1 AS `CURRENT_ROLE`"},
+		{"SELECT 1 CURRENT_ROLE", true, "SELECT 1 AS `CURRENT_ROLE`"},
+		{"SELECT CURRENT_ROLE", true, "SELECT CURRENT_ROLE()"},
+	}
+	RunTest(t, table, false)
+}

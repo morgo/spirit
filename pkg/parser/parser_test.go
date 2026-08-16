@@ -538,8 +538,11 @@ func TestErrorMsg(t *testing.T) {
 	_, _, err = p.Parse("ALTER DATABASE CHARSET = 'utf8mb4' COLLATE = 'utf8_bin'", "", "")
 	require.EqualError(t, err, "line 1 column 24 near \"= 'utf8mb4' COLLATE = 'utf8_bin'\" ")
 
+	// MySQL enforces Y/N inside its grammar action (ER_WRONG_VALUE 1525, not a
+	// 1064 syntax error); we accept any string at parse time like the TABLE
+	// option, whose value the storage engine validates at execution instead.
 	_, _, err = p.Parse("ALTER DATABASE t ENCRYPTION = ''", "", "")
-	require.EqualError(t, err, "[parser:1525]Incorrect argument (should be Y or N) value: ''")
+	require.NoError(t, err)
 
 	_, _, err = p.Parse("ALTER DATABASE", "", "")
 	require.EqualError(t, err, "line 1 column 14 near \"\" ")

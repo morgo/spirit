@@ -234,6 +234,7 @@ var tokenMap = map[string]int{
 	"COMPRESS":                   compress,
 	"COMPRESSED":                 compressed,
 	"COMPRESSION":                compression,
+	"CONCURRENT":                 concurrent,
 	"CONDITION":                  condition,
 	"CONFIG":                     config,
 	"CONNECTION":                 connection,

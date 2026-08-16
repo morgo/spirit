@@ -2337,7 +2337,11 @@ func (n *TableOption) Restore(ctx *format.RestoreCtx) error {
 	case TableOptionAutoextendSize:
 		ctx.WriteKeyWord("AUTOEXTEND_SIZE ")
 		ctx.WritePlain("= ")
-		ctx.WritePlain(n.StrValue) // e.g. '4M'
+		if n.StrValue != "" {
+			ctx.WritePlain(n.StrValue) // e.g. '4M'
+		} else {
+			ctx.WritePlainf("%d", n.UintValue)
+		}
 
 	default:
 		return fmt.Errorf("invalid TableOption: %d", n.Tp)
@@ -2459,6 +2463,7 @@ const (
 	AlterTableRebuildPartition
 	AlterTableReorganizePartition
 	AlterTableCheckPartitions
+	AlterTableAnalyzePartitions
 	AlterTableExchangePartition
 	AlterTableOptimizePartition
 	AlterTableRepairPartition
@@ -2575,6 +2580,21 @@ func (n *AlterOrderItem) Restore(ctx *format.RestoreCtx) error {
 		ctx.WriteKeyWord(" DESC")
 	}
 	return nil
+}
+
+func restoreSecondaryPartitionList(ctx *format.RestoreCtx, names []CIStr) {
+	if len(names) == 0 {
+		return
+	}
+	ctx.WriteKeyWord(" PARTITION ")
+	ctx.WritePlain("(")
+	for i, name := range names {
+		if i != 0 {
+			ctx.WritePlain(",")
+		}
+		ctx.WriteName(name.O)
+	}
+	ctx.WritePlain(")")
 }
 
 // Restore implements Node interface.
@@ -2815,6 +2835,21 @@ func (n *AlterTableSpec) Restore(ctx *format.RestoreCtx) error {
 			}
 			ctx.WriteName(name.O)
 		}
+	case AlterTableAnalyzePartitions:
+		ctx.WriteKeyWord("ANALYZE PARTITION ")
+		if n.NoWriteToBinlog {
+			ctx.WriteKeyWord("NO_WRITE_TO_BINLOG ")
+		}
+		if n.OnAllPartitions {
+			ctx.WriteKeyWord("ALL")
+			return nil
+		}
+		for i, name := range n.PartitionNames {
+			if i != 0 {
+				ctx.WritePlain(",")
+			}
+			ctx.WriteName(name.O)
+		}
 	case AlterTableOptimizePartition:
 		ctx.WriteKeyWord("OPTIMIZE PARTITION ")
 		if n.NoWriteToBinlog {
@@ -2941,8 +2976,10 @@ func (n *AlterTableSpec) Restore(ctx *format.RestoreCtx) error {
 		}
 	case AlterTableSecondaryLoad:
 		ctx.WriteKeyWord("SECONDARY_LOAD")
+		restoreSecondaryPartitionList(ctx, n.PartitionNames)
 	case AlterTableSecondaryUnload:
 		ctx.WriteKeyWord("SECONDARY_UNLOAD")
+		restoreSecondaryPartitionList(ctx, n.PartitionNames)
 	case AlterTableAlterCheck:
 		ctx.WriteKeyWord("ALTER CHECK ")
 		ctx.WriteName(n.Constraint.Name)

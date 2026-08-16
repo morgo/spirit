@@ -355,6 +355,7 @@ type likeEscapeSpec struct {
 	component                "COMPONENT"
 	compressed               "COMPRESSED"
 	compression              "COMPRESSION"
+	concurrent               "CONCURRENT"
 	condition                "CONDITION"
 	config                   "CONFIG"
 	connection               "CONNECTION"
@@ -1085,6 +1086,8 @@ type likeEscapeSpec struct {
 	LocalOpt                               "Local opt"
 	LockClause                             "Alter table lock clause"
 	LogTypeOpt                             "Optional log type used in FLUSH statements"
+	InPrimaryKeyOrderOpt                   "LOAD DATA IN PRIMARY KEY ORDER or empty"
+	LoadDataPriorityOpt                    "LOAD DATA priority modifier (LOW_PRIORITY or CONCURRENT) or empty"
 	LowPriorityOpt                         "LOAD DATA low priority option"
 	NumLiteral                             "Num/Int/Float/Decimal Literal"
 	NoWriteToBinLogAliasOpt                "NO_WRITE_TO_BINLOG alias LOCAL or empty"
@@ -1420,6 +1423,13 @@ type likeEscapeSpec struct {
 %precedence lowerThanSetKeyword
 %precedence set
 %precedence selectKwd
+
+/* Like selectKwd above: in `CREATE TABLE t ...` a following TABLE/VALUES
+ * query operand must lose to the empty TableElementListOpt reduction
+ * (%prec lowerThanCreateTableSelect) so the query is parsed through
+ * CreateTableSelectOpt, exactly as a plain SELECT is. */
+%precedence tableKwd
+%precedence values
 %precedence lowerThanSelectStmt
 %precedence lowerThanInsertValues
 %precedence insertValues
@@ -1438,6 +1448,14 @@ type likeEscapeSpec struct {
 %precedence lowerThanFunction
 %precedence function library
 %precedence constraint
+
+/* Give PARTITION a precedence so that after SECONDARY_LOAD/SECONDARY_UNLOAD
+ * the parser shifts it (extending the spec with a partition list) instead of
+ * reducing the bare spec and treating PARTITION as the start of a trailing
+ * PARTITION BY clause. MySQL does not allow combining SECONDARY_LOAD with
+ * repartitioning, so nothing valid is lost. */
+%precedence lowerThanPartitionKwd
+%precedence partition
 
 /* A dummy token to force the priority of TableRef production in a join. */
 %left tableRefPriority
@@ -1495,13 +1513,6 @@ AlterTableStmt:
 			Specs: specs,
 		}
 	}
-|	"ALTER" IgnoreOptional "TABLE" TableName "ANALYZE" "PARTITION" PartitionNameList
-	{
-		// MySQL partition maintenance: ALTER TABLE t ANALYZE PARTITION p1 [, p2 ...].
-		// Kept from the TiDB grammar (minus TiDB analyze options), which maps it
-		// to an AnalyzeTableStmt rather than an AlterTableSpec.
-		$$ = &ast.AnalyzeTableStmt{TableNames: []*ast.TableName{$4.(*ast.TableName)}, PartitionNames: $7.([]ast.CIStr)}
-	}
 
 AlterTableSpecSingleOpt:
 	PartitionOpt
@@ -1520,12 +1531,6 @@ AlterTableSpecSingleOpt:
 		$$ = &ast.AlterTableSpec{
 			Tp: ast.AlterTableRemovePartitioning,
 		}
-	}
-|	"REORGANIZE" "PARTITION" NoWriteToBinLogAliasOpt ReorganizePartitionRuleOpt
-	{
-		ret := $4.(*ast.AlterTableSpec)
-		ret.NoWriteToBinlog = $3.(bool)
-		$$ = ret
 	}
 
 AlterTableSpec:
@@ -1637,6 +1642,25 @@ AlterTableSpec:
 		} else {
 			ret.PartitionNames = $3.([]ast.CIStr)
 		}
+		$$ = ret
+	}
+|	"ANALYZE" "PARTITION" NoWriteToBinLogAliasOpt AllOrPartitionNameList
+	{
+		ret := &ast.AlterTableSpec{
+			NoWriteToBinlog: $3.(bool),
+			Tp:              ast.AlterTableAnalyzePartitions,
+		}
+		if $4 == nil {
+			ret.OnAllPartitions = true
+		} else {
+			ret.PartitionNames = $4.([]ast.CIStr)
+		}
+		$$ = ret
+	}
+|	"REORGANIZE" "PARTITION" NoWriteToBinLogAliasOpt ReorganizePartitionRuleOpt
+	{
+		ret := $4.(*ast.AlterTableSpec)
+		ret.NoWriteToBinlog = $3.(bool)
 		$$ = ret
 	}
 |	"COALESCE" "PARTITION" NoWriteToBinLogAliasOpt NUM
@@ -1948,7 +1972,7 @@ AlterTableSpec:
 		}
 	}
 // Added in MySQL 8.0.13, see: https://dev.mysql.com/doc/refman/8.0/en/keywords.html for details
-|	"SECONDARY_LOAD"
+|	"SECONDARY_LOAD" %prec lowerThanPartitionKwd
 	{
 		// Parse it and ignore it. Just for compatibility.
 		$$ = &ast.AlterTableSpec{
@@ -1957,12 +1981,32 @@ AlterTableSpec:
 		yylex.AppendError(yylex.Errorf("The SECONDARY_LOAD clause is parsed but not implement yet."))
 		parser.lastErrorAsWarn()
 	}
+|	"SECONDARY_LOAD" "PARTITION" '(' PartitionNameList ')'
+	{
+		// MySQL 9.x allows loading/unloading individual partitions.
+		$$ = &ast.AlterTableSpec{
+			Tp:             ast.AlterTableSecondaryLoad,
+			PartitionNames: $4.([]ast.CIStr),
+		}
+		yylex.AppendError(yylex.Errorf("The SECONDARY_LOAD clause is parsed but not implement yet."))
+		parser.lastErrorAsWarn()
+	}
 // Added in MySQL 8.0.13, see: https://dev.mysql.com/doc/refman/8.0/en/keywords.html for details
-|	"SECONDARY_UNLOAD"
+|	"SECONDARY_UNLOAD" %prec lowerThanPartitionKwd
 	{
 		// Parse it and ignore it. Just for compatibility.
 		$$ = &ast.AlterTableSpec{
 			Tp: ast.AlterTableSecondaryUnload,
+		}
+		yylex.AppendError(yylex.Errorf("The SECONDARY_UNLOAD VALIDATION clause is parsed but not implement yet."))
+		parser.lastErrorAsWarn()
+	}
+|	"SECONDARY_UNLOAD" "PARTITION" '(' PartitionNameList ')'
+	{
+		// MySQL 9.x allows loading/unloading individual partitions.
+		$$ = &ast.AlterTableSpec{
+			Tp:             ast.AlterTableSecondaryUnload,
+			PartitionNames: $4.([]ast.CIStr),
 		}
 		yylex.AppendError(yylex.Errorf("The SECONDARY_UNLOAD VALIDATION clause is parsed but not implement yet."))
 		parser.lastErrorAsWarn()
@@ -3330,6 +3374,51 @@ CreateTableStmt:
 		stmt.OnDuplicate = $9.(ast.OnDuplicateKeyHandlingType)
 		stmt.Select = $11.(*ast.CreateTableStmt).Select
 		$$ = stmt
+	}
+|	"CREATE" OptTemporary "TABLE" IfNotExists TableName SubSelect
+	{
+		// CREATE TABLE t (SELECT ...): MySQL allows a parenthesized query
+		// expression with no AS keyword and no column list.
+		var sel ast.ResultSetNode
+		switch x := $6.(*ast.SubqueryExpr).Query.(type) {
+		case *ast.SelectStmt:
+			x.IsInBraces = true
+			sel = x
+		case *ast.SetOprStmt:
+			x.IsInBraces = true
+			sel = x
+		}
+		$$ = &ast.CreateTableStmt{
+			Table:            $5.(*ast.TableName),
+			IfNotExists:      $4.(bool),
+			TemporaryKeyword: $2.(ast.TemporaryKeyword),
+			Options:          []*ast.TableOption{},
+			Select:           sel,
+		}
+	}
+|	"CREATE" OptTemporary "TABLE" IfNotExists TableName SetOprStmtWithLimitOrderBy
+	{
+		// CREATE TABLE t (SELECT ...) ORDER BY/LIMIT, or a set operation with
+		// a parenthesized first operand, again with no AS keyword. A leading
+		// plain SELECT still parses through CreateTableSelectOpt because the
+		// empty TableElementListOpt reduction outranks shifting `selectKwd`.
+		$$ = &ast.CreateTableStmt{
+			Table:            $5.(*ast.TableName),
+			IfNotExists:      $4.(bool),
+			TemporaryKeyword: $2.(ast.TemporaryKeyword),
+			Options:          []*ast.TableOption{},
+			Select:           $6.(ast.ResultSetNode),
+		}
+	}
+|	"CREATE" OptTemporary "TABLE" IfNotExists TableName SetOprStmtWoutLimitOrderBy
+	{
+		$$ = &ast.CreateTableStmt{
+			Table:            $5.(*ast.TableName),
+			IfNotExists:      $4.(bool),
+			TemporaryKeyword: $2.(ast.TemporaryKeyword),
+			Options:          []*ast.TableOption{},
+			Select:           $6.(ast.ResultSetNode),
+		}
 	}
 |	"CREATE" OptTemporary "TABLE" IfNotExists TableName TableElementListOpt CreateTableOptionListOpt PartitionOpt "START" "TRANSACTION"
 	{
@@ -4730,6 +4819,15 @@ FieldAsName:
 	{
 		$$ = $2
 	}
+|	"CURRENT_ROLE"
+	{
+		// MySQL allows CURRENT_ROLE as a column alias.
+		$$ = "CURRENT_ROLE"
+	}
+|	"AS" "CURRENT_ROLE"
+	{
+		$$ = "CURRENT_ROLE"
+	}
 
 FieldList:
 	Field
@@ -5254,6 +5352,7 @@ UnReservedKeyword:
 |	"SERVER"
 |	"SOCKET"
 |	"SONAME"
+|	"CONCURRENT"
 |	"NESTED"
 |	"ORDINALITY"
 |	"PATH"
@@ -10836,6 +10935,13 @@ TableOption:
 		yylex.AppendError(yylex.Errorf("The AUTOEXTEND_SIZE option is parsed but ignored by all storage engines."))
 		parser.lastErrorAsWarn()
 	}
+|	"AUTOEXTEND_SIZE" EqOpt LengthNum
+	{
+		// Parse it but will ignore it
+		$$ = &ast.TableOption{Tp: ast.TableOptionAutoextendSize, UintValue: $3.(uint64)}
+		yylex.AppendError(yylex.Errorf("The AUTOEXTEND_SIZE option is parsed but ignored by all storage engines."))
+		parser.lastErrorAsWarn()
+	}
 
 ForceOpt:
 	/* empty */
@@ -11606,6 +11712,12 @@ FloatOpt:
 |	FieldLen
 	{
 		$$ = &ast.FloatOpt{Flen: $1.(int), Decimal: types.UnspecifiedLength}
+	}
+|	'(' decLit ')'
+	{
+		// MySQL accepts a decimal precision like FLOAT(10.3) and ignores it,
+		// creating a plain FLOAT column.
+		$$ = &ast.FloatOpt{Flen: types.UnspecifiedLength, Decimal: types.UnspecifiedLength}
 	}
 |	Precision
 
@@ -13554,22 +13666,27 @@ IgnoreUnknownUserOpt:
  * See https://dev.mysql.com/doc/refman/5.7/en/load-data.html
  *******************************************************************************************/
 LoadDataStmt:
-	"LOAD" "DATA" LowPriorityOpt LocalOpt "INFILE" stringLit DuplicateOpt "INTO" "TABLE" TableName CharsetOpt Fields Lines IgnoreLines ColumnNameOrUserVarListOptWithBrackets LoadDataSetSpecOpt
+	"LOAD" "DATA" LoadDataPriorityOpt FromKwdOpt LocalOpt "INFILE" stringLit InPrimaryKeyOrderOpt DuplicateOpt "INTO" "TABLE" TableName PartitionNameListOpt CharsetOpt Fields Lines IgnoreLines ColumnNameOrUserVarListOptWithBrackets LoadDataSetSpecOpt
 	{
 		x := &ast.LoadDataStmt{
-			LowPriority:        $3.(bool),
+			LowPriority:        $3.(int) == 1,
+			Concurrent:         $3.(int) == 2,
+			InPrimaryKeyOrder:  $8.(bool),
 			FileLocRef:         ast.FileLocServer,
-			Path:               $6,
-			OnDuplicate:        $7.(ast.OnDuplicateKeyHandlingType),
-			Table:              $10.(*ast.TableName),
-			Charset:            $11.(*string),
-			FieldsInfo:         $12.(*ast.FieldsClause),
-			LinesInfo:          $13.(*ast.LinesClause),
-			IgnoreLines:        $14.(*uint64),
-			ColumnsAndUserVars: $15.([]*ast.ColumnNameOrUserVar),
-			ColumnAssignments:  $16.([]*ast.Assignment),
+			Path:               $7,
+			OnDuplicate:        $9.(ast.OnDuplicateKeyHandlingType),
+			Table:              $12.(*ast.TableName),
+			Charset:            $14.(*string),
+			FieldsInfo:         $15.(*ast.FieldsClause),
+			LinesInfo:          $16.(*ast.LinesClause),
+			IgnoreLines:        $17.(*uint64),
+			ColumnsAndUserVars: $18.([]*ast.ColumnNameOrUserVar),
+			ColumnAssignments:  $19.([]*ast.Assignment),
 		}
-		if $4 != nil {
+		if names := $13.([]ast.CIStr); len(names) > 0 {
+			x.Table.PartitionNames = names
+		}
+		if $5 != nil {
 			x.FileLocRef = ast.FileLocClient
 			// See https://dev.mysql.com/doc/refman/5.7/en/load-data.html#load-data-duplicate-key-handling
 			// If you do not specify IGNORE or REPLACE modifier , then we set default behavior to IGNORE when LOCAL modifier is specified
@@ -13626,6 +13743,34 @@ LowPriorityOpt:
 	}
 |	"LOW_PRIORITY"
 	{
+		$$ = true
+	}
+
+LoadDataPriorityOpt:
+	{
+		$$ = 0
+	}
+|	"LOW_PRIORITY"
+	{
+		$$ = 1
+	}
+|	"CONCURRENT"
+	{
+		$$ = 2
+	}
+
+FromKwdOpt:
+	{}
+|	"FROM"
+	{}
+
+InPrimaryKeyOrderOpt:
+	{
+		$$ = false
+	}
+|	"IN" "PRIMARY" "KEY" "ORDER"
+	{
+		// NDB-only load ordering hint; parsed and ignored by other engines.
 		$$ = true
 	}
 
@@ -13836,7 +13981,7 @@ LoadDataSetList:
 	}
 
 LoadDataSetItem:
-	SimpleIdent "=" ExprOrDefault
+	SimpleIdent EqOrAssignmentEq ExprOrDefault
 	{
 		$$ = &ast.Assignment{
 			Column: $1.(*ast.ColumnNameExpr).Name,
@@ -15045,16 +15190,14 @@ SignedNum:
 EncryptionOpt:
 	stringLit
 	{
-		// Parse it but will ignore it
+		// Any string is grammatically valid; MySQL validates the value at
+		// execution time (ER_INVALID_ENCRYPTION_OPTION), not at parse time.
 		switch $1 {
-		case "Y", "y":
-			yylex.AppendError(yylex.Errorf("The ENCRYPTION clause is parsed but ignored by all storage engines."))
-			parser.lastErrorAsWarn()
 		case "N", "n":
 			break
 		default:
-			yylex.AppendError(ErrWrongValue.GenByArgs("argument (should be Y or N)", $1))
-			return 1
+			yylex.AppendError(yylex.Errorf("The ENCRYPTION clause is parsed but ignored by all storage engines."))
+			parser.lastErrorAsWarn()
 		}
 		$$ = $1
 	}

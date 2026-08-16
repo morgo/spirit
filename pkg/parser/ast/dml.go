@@ -2023,6 +2023,8 @@ type LoadDataStmt struct {
 	Xml               bool   // LOAD XML instead of LOAD DATA.
 	XmlRowTag         string // ROWS IDENTIFIED BY '<tag>' of LOAD XML; empty when absent.
 	LowPriority       bool
+	Concurrent        bool
+	InPrimaryKeyOrder bool // NDB-only IN PRIMARY KEY ORDER load hint.
 	FileLocRef        FileLocRefTp
 	Path              string
 	OnDuplicate       OnDuplicateKeyHandlingType
@@ -2047,6 +2049,9 @@ func (n *LoadDataStmt) Restore(ctx *format.RestoreCtx) error {
 	if n.LowPriority {
 		ctx.WriteKeyWord("LOW_PRIORITY ")
 	}
+	if n.Concurrent {
+		ctx.WriteKeyWord("CONCURRENT ")
+	}
 	switch n.FileLocRef {
 	case FileLocServer:
 	case FileLocClient:
@@ -2054,6 +2059,9 @@ func (n *LoadDataStmt) Restore(ctx *format.RestoreCtx) error {
 	}
 	ctx.WriteKeyWord("INFILE ")
 	ctx.WriteString(n.Path)
+	if n.InPrimaryKeyOrder {
+		ctx.WriteKeyWord(" IN PRIMARY KEY ORDER")
+	}
 	switch n.OnDuplicate { //nolint:exhaustive
 	case OnDuplicateKeyHandlingReplace:
 		ctx.WriteKeyWord(" REPLACE")
