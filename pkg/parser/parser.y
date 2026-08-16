@@ -120,6 +120,27 @@ type likeEscapeSpec struct {
 	defaultKwd        "DEFAULT"
 	delayed           "DELAYED"
 	deleteKwd         "DELETE"
+	declare           "DECLARE"
+	deterministic     "DETERMINISTIC"
+	continueKwd       "CONTINUE"
+	cursor            "CURSOR"
+	each              "EACH"
+	elseifKwd         "ELSEIF"
+	exit              "EXIT"
+	inout             "INOUT"
+	iterate           "ITERATE"
+	leave             "LEAVE"
+	loop              "LOOP"
+	modifies          "MODIFIES"
+	out               "OUT"
+	reads             "READS"
+	resignal          "RESIGNAL"
+	returnKwd         "RETURN"
+	signal            "SIGNAL"
+	sqlexception      "SQLEXCEPTION"
+	sqlstate          "SQLSTATE"
+	sqlwarning        "SQLWARNING"
+	while             "WHILE"
 	denseRank         "DENSE_RANK"
 	desc              "DESC"
 	describe          "DESCRIBE"
@@ -562,6 +583,18 @@ type likeEscapeSpec struct {
 	relaylog                 "RELAYLOG"
 	duality                  "DUALITY"
 	relational               "RELATIONAL"
+	returns                  "RETURNS"
+	contains                 "CONTAINS"
+	follows                  "FOLLOWS"
+	precedes                 "PRECEDES"
+	schedule                 "SCHEDULE"
+	completion               "COMPLETION"
+	preserve                 "PRESERVE"
+	starts                   "STARTS"
+	ends                     "ENDS"
+	every                    "EVERY"
+	stringKwd                "STRING"
+	aggregate                "AGGREGATE"
 	reload                   "RELOAD"
 	remove                   "REMOVE"
 	reorganize               "REORGANIZE"
@@ -877,6 +910,27 @@ type likeEscapeSpec struct {
 	SetDefaultRoleStmt         "Set default statement for some user"
 	ShowStmt                   "Show engines/databases/tables/user/columns/warnings/status statement"
 	Statement                  "statement"
+	SimpleStatement            "statement other than BEGIN"
+	ProcedureBodyStmt          "statement in a stored program body"
+	CreateProcedureStmt        "CREATE PROCEDURE statement"
+	CreateFunctionStmt         "CREATE FUNCTION statement"
+	CreateTriggerStmt          "CREATE TRIGGER statement"
+	CreateEventStmt            "CREATE EVENT statement"
+	AlterProcedureStmt         "ALTER PROCEDURE statement"
+	AlterFunctionStmt          "ALTER FUNCTION statement"
+	AlterEventStmt             "ALTER EVENT statement"
+	DropRoutineStmt            "DROP PROCEDURE/FUNCTION/TRIGGER/EVENT statement"
+	SignalStmt                 "SIGNAL statement"
+	ResignalStmt               "RESIGNAL statement"
+	BeginEndStmt               "BEGIN ... END compound statement"
+	ProcLabeledStmt            "labeled compound statement"
+	ProcIfStmt                 "procedure IF statement"
+	ProcCaseStmt               "procedure CASE statement"
+	ProcWhileStmt              "WHILE loop statement"
+	ProcRepeatStmt             "REPEAT loop statement"
+	ProcLoopStmt               "LOOP statement"
+	DeclareStmt                "DECLARE statement"
+	ProcFlowStmt               "RETURN/LEAVE/ITERATE/cursor statement"
 	TruncateTableStmt          "TRUNCATE TABLE statement"
 	UnlockTablesStmt           "Unlock tables statement"
 	UpdateStmt                 "UPDATE statement"
@@ -923,6 +977,53 @@ type likeEscapeSpec struct {
 	CacheTableIndex                        "CACHE INDEX table entry"
 	CacheTableIndexList                    "CACHE INDEX table entry list"
 	CacheIndexNames                        "CACHE INDEX index names"
+	RoutineCreatePrefix                    "CREATE routine statement prefix"
+	ProcParamListOpt                       "procedure parameter list"
+	ProcParamList                          "procedure parameters"
+	ProcParam                              "procedure parameter"
+	ProcParamDirection                     "procedure parameter direction"
+	FuncParamListOpt                       "function parameter list"
+	FuncParamList                          "function parameters"
+	FuncParam                              "function parameter"
+	RoutineOptListOpt                      "routine characteristics"
+	RoutineOptItem                         "routine characteristic"
+	RoutineLibListOpt                      "USING library list"
+	RoutineLibList                         "USING libraries"
+	RoutineLib                             "USING library"
+	RoutineBodyTail                        "routine body"
+	UDFReturnTypeKwd                       "loadable function return type"
+	ProcStmtListOpt                        "compound statement list"
+	ProcStmtListNonEmpty                   "non-empty compound statement list"
+	ProcIfTail                             "IF statement tail"
+	ProcIfElseTail                         "IF statement ELSE tail"
+	ProcCaseExprOpt                        "CASE statement operand"
+	ProcCaseWhenList                       "CASE statement WHEN list"
+	ProcCaseWhen                           "CASE statement WHEN arm"
+	ProcCaseElseOpt                        "CASE statement ELSE arm"
+	DeclareIdentList                       "DECLARE variable names"
+	DeclareDefaultOpt                      "DECLARE DEFAULT value"
+	HandlerActionKwd                       "handler action"
+	HandlerConditionList                   "handler condition list"
+	HandlerConditionItem                   "handler condition"
+	ConditionBasic                         "error code or SQLSTATE condition"
+	SignalConditionValue                   "SIGNAL condition value"
+	SignalSetOpt                           "SIGNAL SET clause"
+	SignalItems                            "SIGNAL SET items"
+	SignalItemEntry                        "SIGNAL SET item"
+	FetchVarList                           "FETCH INTO targets"
+	FetchVar                               "FETCH INTO target"
+	EventScheduleClause                    "event schedule"
+	EventStartsOpt                         "event STARTS clause"
+	EventEndsOpt                           "event ENDS clause"
+	OnCompletionOpt                        "event ON COMPLETION clause"
+	EventStatusOpt                         "event status"
+	EventCommentOpt                        "event comment"
+	EventRenameOpt                         "event RENAME TO clause"
+	AlterEventSchedComplOpt                "ALTER EVENT schedule/completion clause"
+	EventDoOpt                             "ALTER EVENT DO clause"
+	TriggerTimeKwd                         "trigger action time"
+	TriggerEventKwd                        "trigger event"
+	TriggerOrderOpt                        "trigger order clause"
 	RelationalOpt                          "optional RELATIONAL keyword"
 	DualityWithOpt                         "optional JSON_DUALITY_OBJECT WITH annotation"
 	DualityOpList                          "JSON_DUALITY_OBJECT WITH operation list"
@@ -1414,6 +1515,7 @@ type likeEscapeSpec struct {
 	CacheIndexName                  "CACHE INDEX index name (identifier or PRIMARY)"
 	LibraryBody                     "CREATE LIBRARY body literal"
 	DualityOp                       "JSON_DUALITY_OBJECT WITH operation"
+	EndLabelOpt                     "optional end label"
 	PasswordOpt                     "Password option"
 	RoleNameString                  "role name string"
 	ShowDatabaseNameOpt             "Show tables/columns statement database name option"
@@ -3954,6 +4056,893 @@ DualityKeyValue:
 		$$ = &ast.JSONDualityObjectPair{Key: $1, Value: $3}
 	}
 
+// RoutineCreatePrefix shares the exact shape of the CREATE VIEW prefix so
+// the grammar stays LALR(1); OR REPLACE, ALGORITHM and SQL SECURITY are not
+// meaningful for routines and are discarded.
+RoutineCreatePrefix:
+	"CREATE" OrReplace ViewAlgorithm ViewDefiner ViewSQLSecurity
+	{
+		$$ = $4
+	}
+
+CreateProcedureStmt:
+	RoutineCreatePrefix "PROCEDURE" IfNotExists TableName '(' ProcParamListOpt ')' RoutineOptListOpt RoutineBodyTail
+	{
+		x := &ast.CreateProcedureStmt{
+			IfNotExists: $3.(bool),
+			Definer:     $1.(*auth.UserIdentity),
+			Name:        $4.(*ast.TableName),
+			Params:      $6.([]*ast.RoutineParam),
+			Options:     $8.([]*ast.RoutineOption),
+		}
+		if s, ok := $9.(string); ok {
+			x.BodyStr = s
+			x.HasBodyStr = true
+		} else {
+			x.Body = $9.(ast.StmtNode)
+		}
+		$$ = x
+	}
+
+CreateFunctionStmt:
+	RoutineCreatePrefix "FUNCTION" IfNotExists TableName '(' FuncParamListOpt ')' "RETURNS" Type RoutineOptListOpt RoutineBodyTail
+	{
+		x := &ast.CreateFunctionStmt{
+			IfNotExists: $3.(bool),
+			Definer:     $1.(*auth.UserIdentity),
+			Name:        $4.(*ast.TableName),
+			Params:      $6.([]*ast.RoutineParam),
+			ReturnType:  $9.(*types.FieldType),
+			Options:     $10.([]*ast.RoutineOption),
+		}
+		if s, ok := $11.(string); ok {
+			x.BodyStr = s
+			x.HasBodyStr = true
+		} else {
+			x.Body = $11.(ast.StmtNode)
+		}
+		$$ = x
+	}
+|	RoutineCreatePrefix "FUNCTION" IfNotExists TableName "RETURNS" UDFReturnTypeKwd "SONAME" stringLit
+	{
+		// The loadable (UDF) function form has no parameter list.
+		$$ = &ast.CreateLoadableFunctionStmt{
+			IfNotExists: $3.(bool),
+			Name:        $4.(*ast.TableName),
+			ReturnType:  $6.(string),
+			Soname:      $8,
+		}
+	}
+|	RoutineCreatePrefix "AGGREGATE" "FUNCTION" IfNotExists TableName "RETURNS" UDFReturnTypeKwd "SONAME" stringLit
+	{
+		$$ = &ast.CreateLoadableFunctionStmt{
+			IfNotExists: $4.(bool),
+			Aggregate:   true,
+			Name:        $5.(*ast.TableName),
+			ReturnType:  $7.(string),
+			Soname:      $9,
+		}
+	}
+
+UDFReturnTypeKwd:
+	"STRING"
+	{
+		$$ = "STRING"
+	}
+|	"INT"
+	{
+		$$ = "INTEGER"
+	}
+|	"INTEGER"
+	{
+		$$ = "INTEGER"
+	}
+|	"REAL"
+	{
+		$$ = "REAL"
+	}
+|	"DECIMAL"
+	{
+		$$ = "DECIMAL"
+	}
+
+ProcParamListOpt:
+	/* EMPTY */
+	{
+		$$ = []*ast.RoutineParam(nil)
+	}
+|	ProcParamList
+
+ProcParamList:
+	ProcParam
+	{
+		$$ = []*ast.RoutineParam{$1.(*ast.RoutineParam)}
+	}
+|	ProcParamList ',' ProcParam
+	{
+		$$ = append($1.([]*ast.RoutineParam), $3.(*ast.RoutineParam))
+	}
+
+ProcParam:
+	ProcParamDirection Identifier Type
+	{
+		$$ = &ast.RoutineParam{
+			Name:      ast.NewCIStr($2),
+			Direction: $1.(ast.RoutineParamDirection),
+			Type:      $3.(*types.FieldType),
+		}
+	}
+
+ProcParamDirection:
+	/* EMPTY */
+	{
+		$$ = ast.RoutineParamIn
+	}
+|	"IN"
+	{
+		$$ = ast.RoutineParamIn
+	}
+|	"OUT"
+	{
+		$$ = ast.RoutineParamOut
+	}
+|	"INOUT"
+	{
+		$$ = ast.RoutineParamInOut
+	}
+
+FuncParamListOpt:
+	/* EMPTY */
+	{
+		$$ = []*ast.RoutineParam(nil)
+	}
+|	FuncParamList
+
+FuncParamList:
+	FuncParam
+	{
+		$$ = []*ast.RoutineParam{$1.(*ast.RoutineParam)}
+	}
+|	FuncParamList ',' FuncParam
+	{
+		$$ = append($1.([]*ast.RoutineParam), $3.(*ast.RoutineParam))
+	}
+
+FuncParam:
+	Identifier Type
+	{
+		$$ = &ast.RoutineParam{Name: ast.NewCIStr($1), Type: $2.(*types.FieldType)}
+	}
+
+RoutineOptListOpt:
+	/* EMPTY */
+	{
+		$$ = []*ast.RoutineOption(nil)
+	}
+|	RoutineOptListOpt RoutineOptItem
+	{
+		$$ = append($1.([]*ast.RoutineOption), $2.(*ast.RoutineOption))
+	}
+
+RoutineOptItem:
+	"COMMENT" stringLit
+	{
+		$$ = &ast.RoutineOption{Tp: ast.RoutineOptionComment, StrValue: $2}
+	}
+|	"LANGUAGE" "SQL"
+	{
+		$$ = &ast.RoutineOption{Tp: ast.RoutineOptionLanguageSQL}
+	}
+|	"LANGUAGE" Identifier
+	{
+		$$ = &ast.RoutineOption{Tp: ast.RoutineOptionLanguage, StrValue: strings.ToUpper($2)}
+	}
+|	"NOT" "DETERMINISTIC"
+	{
+		$$ = &ast.RoutineOption{Tp: ast.RoutineOptionNotDeterministic}
+	}
+|	"DETERMINISTIC"
+	{
+		$$ = &ast.RoutineOption{Tp: ast.RoutineOptionDeterministic}
+	}
+|	"CONTAINS" "SQL"
+	{
+		$$ = &ast.RoutineOption{Tp: ast.RoutineOptionContainsSQL}
+	}
+|	"NO" "SQL"
+	{
+		$$ = &ast.RoutineOption{Tp: ast.RoutineOptionNoSQL}
+	}
+|	"READS" "SQL" "DATA"
+	{
+		$$ = &ast.RoutineOption{Tp: ast.RoutineOptionReadsSQLData}
+	}
+|	"MODIFIES" "SQL" "DATA"
+	{
+		$$ = &ast.RoutineOption{Tp: ast.RoutineOptionModifiesSQLData}
+	}
+|	"SQL" "SECURITY" "DEFINER"
+	{
+		$$ = &ast.RoutineOption{Tp: ast.RoutineOptionSecurityDefiner}
+	}
+|	"SQL" "SECURITY" "INVOKER"
+	{
+		$$ = &ast.RoutineOption{Tp: ast.RoutineOptionSecurityInvoker}
+	}
+|	"DROP" "COMMENT"
+	{
+		// ALTER routine only; accepted uniformly for grammar simplicity.
+		$$ = &ast.RoutineOption{Tp: ast.RoutineOptionDropComment}
+	}
+|	"USING" '(' RoutineLibListOpt ')'
+	{
+		$$ = &ast.RoutineOption{Tp: ast.RoutineOptionUsing, Libraries: $3.([]*ast.RoutineLibrary)}
+	}
+
+RoutineLibListOpt:
+	/* EMPTY */
+	{
+		$$ = []*ast.RoutineLibrary{}
+	}
+|	RoutineLibList
+
+RoutineLibList:
+	RoutineLib
+	{
+		$$ = []*ast.RoutineLibrary{$1.(*ast.RoutineLibrary)}
+	}
+|	RoutineLibList ',' RoutineLib
+	{
+		$$ = append($1.([]*ast.RoutineLibrary), $3.(*ast.RoutineLibrary))
+	}
+
+RoutineLib:
+	TableName
+	{
+		$$ = &ast.RoutineLibrary{Name: $1.(*ast.TableName)}
+	}
+|	TableName "AS" Identifier
+	{
+		$$ = &ast.RoutineLibrary{Name: $1.(*ast.TableName), Alias: ast.NewCIStr($3)}
+	}
+
+RoutineBodyTail:
+	ProcedureBodyStmt
+	{
+		$$ = $1
+	}
+|	"AS" stringLit
+	{
+		// External language routine body: AS 'code' or AS $$code$$.
+		$$ = $2
+	}
+
+CreateTriggerStmt:
+	RoutineCreatePrefix "TRIGGER" IfNotExists TableName TriggerTimeKwd TriggerEventKwd "ON" TableName "FOR" "EACH" "ROW" TriggerOrderOpt ProcedureBodyStmt
+	{
+		x := &ast.CreateTriggerStmt{
+			IfNotExists: $3.(bool),
+			Definer:     $1.(*auth.UserIdentity),
+			Name:        $4.(*ast.TableName),
+			Time:        $5.(ast.TriggerTime),
+			Event:       $6.(ast.TriggerEvent),
+			Table:       $8.(*ast.TableName),
+			Body:        $13,
+		}
+		if $12 != nil {
+			order := $12.(*ast.CreateTriggerStmt)
+			x.Order = order.Order
+			x.OtherTrigger = order.OtherTrigger
+		}
+		$$ = x
+	}
+
+TriggerTimeKwd:
+	"BEFORE"
+	{
+		$$ = ast.TriggerTimeBefore
+	}
+|	"AFTER"
+	{
+		$$ = ast.TriggerTimeAfter
+	}
+
+TriggerEventKwd:
+	"INSERT"
+	{
+		$$ = ast.TriggerEventInsert
+	}
+|	"UPDATE"
+	{
+		$$ = ast.TriggerEventUpdate
+	}
+|	"DELETE"
+	{
+		$$ = ast.TriggerEventDelete
+	}
+
+TriggerOrderOpt:
+	/* EMPTY */
+	{
+		$$ = nil
+	}
+|	"FOLLOWS" Identifier
+	{
+		$$ = &ast.CreateTriggerStmt{Order: ast.TriggerOrderFollows, OtherTrigger: ast.NewCIStr($2)}
+	}
+|	"PRECEDES" Identifier
+	{
+		$$ = &ast.CreateTriggerStmt{Order: ast.TriggerOrderPrecedes, OtherTrigger: ast.NewCIStr($2)}
+	}
+
+CreateEventStmt:
+	RoutineCreatePrefix "EVENT" IfNotExists TableName "ON" "SCHEDULE" EventScheduleClause OnCompletionOpt EventStatusOpt EventCommentOpt "DO" ProcedureBodyStmt
+	{
+		x := &ast.CreateEventStmt{
+			IfNotExists: $3.(bool),
+			Definer:     $1.(*auth.UserIdentity),
+			Name:        $4.(*ast.TableName),
+			Schedule:    $7.(*ast.EventSchedule),
+			Completion:  $8.(ast.EventCompletion),
+			Status:      $9.(ast.EventStatus),
+			Body:        $12,
+		}
+		if $10 != nil {
+			x.HasComment = true
+			x.Comment = $10.(string)
+		}
+		$$ = x
+	}
+
+EventScheduleClause:
+	"AT" Expression
+	{
+		$$ = &ast.EventSchedule{At: $2}
+	}
+|	"EVERY" Expression TimeUnit EventStartsOpt EventEndsOpt
+	{
+		sched := &ast.EventSchedule{Every: $2, Unit: $3.(ast.TimeUnitType)}
+		if $4 != nil {
+			sched.Starts = $4.(ast.ExprNode)
+		}
+		if $5 != nil {
+			sched.Ends = $5.(ast.ExprNode)
+		}
+		$$ = sched
+	}
+
+EventStartsOpt:
+	/* EMPTY */
+	{
+		$$ = nil
+	}
+|	"STARTS" Expression
+	{
+		$$ = $2
+	}
+
+EventEndsOpt:
+	/* EMPTY */
+	{
+		$$ = nil
+	}
+|	"ENDS" Expression
+	{
+		$$ = $2
+	}
+
+OnCompletionOpt:
+	/* EMPTY */
+	{
+		$$ = ast.EventCompletionDefault
+	}
+|	"ON" "COMPLETION" "PRESERVE"
+	{
+		$$ = ast.EventCompletionPreserve
+	}
+|	"ON" "COMPLETION" "NOT" "PRESERVE"
+	{
+		$$ = ast.EventCompletionNotPreserve
+	}
+
+EventStatusOpt:
+	/* EMPTY */
+	{
+		$$ = ast.EventStatusDefault
+	}
+|	"ENABLE"
+	{
+		$$ = ast.EventStatusEnable
+	}
+|	"DISABLE"
+	{
+		$$ = ast.EventStatusDisable
+	}
+|	"DISABLE" "ON" "SLAVE"
+	{
+		$$ = ast.EventStatusDisableOnReplica
+	}
+|	"DISABLE" "ON" "REPLICA"
+	{
+		$$ = ast.EventStatusDisableOnReplica
+	}
+
+EventCommentOpt:
+	/* EMPTY */
+	{
+		$$ = nil
+	}
+|	"COMMENT" stringLit
+	{
+		$$ = $2
+	}
+
+AlterProcedureStmt:
+	"ALTER" "PROCEDURE" TableName RoutineOptListOpt
+	{
+		$$ = &ast.AlterProcedureStmt{Name: $3.(*ast.TableName), Options: $4.([]*ast.RoutineOption)}
+	}
+
+AlterFunctionStmt:
+	"ALTER" "FUNCTION" TableName RoutineOptListOpt
+	{
+		$$ = &ast.AlterFunctionStmt{Name: $3.(*ast.TableName), Options: $4.([]*ast.RoutineOption)}
+	}
+
+AlterEventStmt:
+	"ALTER" ViewAlgorithm ViewDefiner ViewSQLSecurity "EVENT" TableName AlterEventSchedComplOpt EventRenameOpt EventStatusOpt EventCommentOpt EventDoOpt
+	{
+		x := $7.(*ast.AlterEventStmt)
+		x.Definer = $3.(*auth.UserIdentity)
+		x.Name = $6.(*ast.TableName)
+		x.Status = $9.(ast.EventStatus)
+		if $8 != nil {
+			x.RenameTo = $8.(*ast.TableName)
+		}
+		if $10 != nil {
+			x.HasComment = true
+			x.Comment = $10.(string)
+		}
+		if $11 != nil {
+			x.Body = $11.(ast.StmtNode)
+		}
+		$$ = x
+	}
+
+// ON SCHEDULE and ON COMPLETION are folded into one clause so both can
+// begin with ON without an LALR(1) conflict.
+AlterEventSchedComplOpt:
+	/* EMPTY */
+	{
+		$$ = &ast.AlterEventStmt{Completion: ast.EventCompletionDefault}
+	}
+|	"ON" "SCHEDULE" EventScheduleClause OnCompletionOpt
+	{
+		$$ = &ast.AlterEventStmt{Schedule: $3.(*ast.EventSchedule), Completion: $4.(ast.EventCompletion)}
+	}
+|	"ON" "COMPLETION" "PRESERVE"
+	{
+		$$ = &ast.AlterEventStmt{Completion: ast.EventCompletionPreserve}
+	}
+|	"ON" "COMPLETION" "NOT" "PRESERVE"
+	{
+		$$ = &ast.AlterEventStmt{Completion: ast.EventCompletionNotPreserve}
+	}
+
+EventRenameOpt:
+	/* EMPTY */
+	{
+		$$ = nil
+	}
+|	"RENAME" "TO" TableName
+	{
+		$$ = $3
+	}
+
+EventDoOpt:
+	/* EMPTY */
+	{
+		$$ = nil
+	}
+|	"DO" ProcedureBodyStmt
+	{
+		$$ = $2
+	}
+
+DropRoutineStmt:
+	"DROP" "PROCEDURE" IfExists TableName
+	{
+		$$ = &ast.DropRoutineStmt{Tp: ast.RoutineTypeProcedure, IfExists: $3.(bool), Name: $4.(*ast.TableName)}
+	}
+|	"DROP" "FUNCTION" IfExists TableName
+	{
+		$$ = &ast.DropRoutineStmt{Tp: ast.RoutineTypeFunction, IfExists: $3.(bool), Name: $4.(*ast.TableName)}
+	}
+|	"DROP" "TRIGGER" IfExists TableName
+	{
+		$$ = &ast.DropRoutineStmt{Tp: ast.RoutineTypeTrigger, IfExists: $3.(bool), Name: $4.(*ast.TableName)}
+	}
+|	"DROP" "EVENT" IfExists TableName
+	{
+		$$ = &ast.DropRoutineStmt{Tp: ast.RoutineTypeEvent, IfExists: $3.(bool), Name: $4.(*ast.TableName)}
+	}
+
+/*
+ * The compound statement language of stored program bodies.
+ * See https://dev.mysql.com/doc/refman/8.4/en/sql-compound-statements.html
+ */
+ProcedureBodyStmt:
+	SimpleStatement
+|	BeginEndStmt
+|	ProcLabeledStmt
+|	ProcIfStmt
+|	ProcCaseStmt
+|	ProcWhileStmt
+|	ProcRepeatStmt
+|	ProcLoopStmt
+|	DeclareStmt
+|	ProcFlowStmt
+
+ProcStmtListOpt:
+	/* EMPTY */
+	{
+		$$ = []ast.StmtNode(nil)
+	}
+|	ProcStmtListNonEmpty
+
+ProcStmtListNonEmpty:
+	ProcedureBodyStmt ';'
+	{
+		$$ = []ast.StmtNode{$1}
+	}
+|	ProcStmtListNonEmpty ProcedureBodyStmt ';'
+	{
+		$$ = append($1.([]ast.StmtNode), $2)
+	}
+
+BeginEndStmt:
+	"BEGIN" ProcStmtListOpt "END"
+	{
+		$$ = &ast.BeginEndStmt{Stmts: $2.([]ast.StmtNode)}
+	}
+
+ProcWhileStmt:
+	"WHILE" Expression "DO" ProcStmtListOpt "END" "WHILE"
+	{
+		$$ = &ast.WhileStmt{Cond: $2, Stmts: $4.([]ast.StmtNode)}
+	}
+
+ProcRepeatStmt:
+	"REPEAT" ProcStmtListOpt "UNTIL" Expression "END" "REPEAT"
+	{
+		$$ = &ast.RepeatStmt{Stmts: $2.([]ast.StmtNode), Until: $4}
+	}
+
+ProcLoopStmt:
+	"LOOP" ProcStmtListOpt "END" "LOOP"
+	{
+		$$ = &ast.LoopStmt{Stmts: $2.([]ast.StmtNode)}
+	}
+
+// Labels use the raw identifier token: like label_keyword in MySQL, none of
+// the keywords that can begin a body statement may label one.
+ProcLabeledStmt:
+	identifier ':' "BEGIN" ProcStmtListOpt "END" EndLabelOpt
+	{
+		$$ = &ast.BeginEndStmt{Label: ast.NewCIStr($1), Stmts: $4.([]ast.StmtNode), HasEndLabel: $6 != ""}
+	}
+|	identifier ':' "WHILE" Expression "DO" ProcStmtListOpt "END" "WHILE" EndLabelOpt
+	{
+		$$ = &ast.WhileStmt{Label: ast.NewCIStr($1), Cond: $4, Stmts: $6.([]ast.StmtNode), HasEndLabel: $9 != ""}
+	}
+|	identifier ':' "REPEAT" ProcStmtListOpt "UNTIL" Expression "END" "REPEAT" EndLabelOpt
+	{
+		$$ = &ast.RepeatStmt{Label: ast.NewCIStr($1), Stmts: $4.([]ast.StmtNode), Until: $6, HasEndLabel: $9 != ""}
+	}
+|	identifier ':' "LOOP" ProcStmtListOpt "END" "LOOP" EndLabelOpt
+	{
+		$$ = &ast.LoopStmt{Label: ast.NewCIStr($1), Stmts: $4.([]ast.StmtNode), HasEndLabel: $7 != ""}
+	}
+
+EndLabelOpt:
+	/* EMPTY */
+	{
+		$$ = ""
+	}
+|	identifier
+
+ProcIfStmt:
+	"IF" ProcIfTail "END" "IF"
+	{
+		$$ = $2.(*ast.ProcIfStmt)
+	}
+
+ProcIfTail:
+	Expression "THEN" ProcStmtListOpt ProcIfElseTail
+	{
+		tail := $4.(*ast.ProcIfStmt)
+		branches := append([]*ast.ProcIfBranch{{Cond: $1, Stmts: $3.([]ast.StmtNode)}}, tail.Branches...)
+		$$ = &ast.ProcIfStmt{Branches: branches, Else: tail.Else}
+	}
+
+ProcIfElseTail:
+	/* EMPTY */
+	{
+		$$ = &ast.ProcIfStmt{}
+	}
+|	"ELSE" ProcStmtListNonEmpty
+	{
+		$$ = &ast.ProcIfStmt{Else: $2.([]ast.StmtNode)}
+	}
+|	"ELSEIF" ProcIfTail
+	{
+		$$ = $2
+	}
+
+ProcCaseStmt:
+	"CASE" ProcCaseExprOpt ProcCaseWhenList ProcCaseElseOpt "END" "CASE"
+	{
+		x := &ast.ProcCaseStmt{WhenClauses: $3.([]*ast.ProcWhenClause)}
+		if $2 != nil {
+			x.Expr = $2.(ast.ExprNode)
+		}
+		if $4 != nil {
+			x.Else = $4.([]ast.StmtNode)
+		}
+		$$ = x
+	}
+
+ProcCaseExprOpt:
+	/* EMPTY */
+	{
+		$$ = nil
+	}
+|	Expression
+	{
+		$$ = $1
+	}
+
+ProcCaseWhenList:
+	ProcCaseWhen
+	{
+		$$ = []*ast.ProcWhenClause{$1.(*ast.ProcWhenClause)}
+	}
+|	ProcCaseWhenList ProcCaseWhen
+	{
+		$$ = append($1.([]*ast.ProcWhenClause), $2.(*ast.ProcWhenClause))
+	}
+
+ProcCaseWhen:
+	"WHEN" Expression "THEN" ProcStmtListNonEmpty
+	{
+		$$ = &ast.ProcWhenClause{Expr: $2, Stmts: $4.([]ast.StmtNode)}
+	}
+
+ProcCaseElseOpt:
+	/* EMPTY */
+	{
+		$$ = nil
+	}
+|	"ELSE" ProcStmtListNonEmpty
+	{
+		$$ = $2
+	}
+
+DeclareStmt:
+	"DECLARE" DeclareIdentList Type DeclareDefaultOpt
+	{
+		x := &ast.DeclareVarStmt{Names: $2.([]ast.CIStr), Type: $3.(*types.FieldType)}
+		if $4 != nil {
+			x.Default = $4.(ast.ExprNode)
+		}
+		$$ = x
+	}
+|	"DECLARE" Identifier "CURSOR" "FOR" CreateViewSelectOpt
+	{
+		$$ = &ast.DeclareCursorStmt{Name: ast.NewCIStr($2), Select: $5.(ast.StmtNode)}
+	}
+|	"DECLARE" Identifier "CONDITION" "FOR" ConditionBasic
+	{
+		$$ = &ast.DeclareConditionStmt{Name: ast.NewCIStr($2), Condition: $5.(*ast.HandlerCondition)}
+	}
+|	"DECLARE" HandlerActionKwd "HANDLER" "FOR" HandlerConditionList ProcedureBodyStmt
+	{
+		$$ = &ast.DeclareHandlerStmt{
+			Action:     $2.(ast.HandlerAction),
+			Conditions: $5.([]*ast.HandlerCondition),
+			Handler:    $6,
+		}
+	}
+
+DeclareIdentList:
+	Identifier
+	{
+		$$ = []ast.CIStr{ast.NewCIStr($1)}
+	}
+|	DeclareIdentList ',' Identifier
+	{
+		$$ = append($1.([]ast.CIStr), ast.NewCIStr($3))
+	}
+
+DeclareDefaultOpt:
+	/* EMPTY */
+	{
+		$$ = nil
+	}
+|	"DEFAULT" Expression
+	{
+		$$ = $2
+	}
+
+HandlerActionKwd:
+	"CONTINUE"
+	{
+		$$ = ast.HandlerActionContinue
+	}
+|	"EXIT"
+	{
+		$$ = ast.HandlerActionExit
+	}
+|	"UNDO"
+	{
+		$$ = ast.HandlerActionUndo
+	}
+
+HandlerConditionList:
+	HandlerConditionItem
+	{
+		$$ = []*ast.HandlerCondition{$1.(*ast.HandlerCondition)}
+	}
+|	HandlerConditionList ',' HandlerConditionItem
+	{
+		$$ = append($1.([]*ast.HandlerCondition), $3.(*ast.HandlerCondition))
+	}
+
+HandlerConditionItem:
+	ConditionBasic
+|	Identifier
+	{
+		$$ = &ast.HandlerCondition{Tp: ast.HandlerConditionName, Name: ast.NewCIStr($1)}
+	}
+|	"SQLWARNING"
+	{
+		$$ = &ast.HandlerCondition{Tp: ast.HandlerConditionSQLWarning}
+	}
+|	"NOT" "FOUND"
+	{
+		$$ = &ast.HandlerCondition{Tp: ast.HandlerConditionNotFound}
+	}
+|	"SQLEXCEPTION"
+	{
+		$$ = &ast.HandlerCondition{Tp: ast.HandlerConditionSQLException}
+	}
+
+ConditionBasic:
+	NUM
+	{
+		$$ = &ast.HandlerCondition{Tp: ast.HandlerConditionErrorCode, Code: getUint64FromNUM($1)}
+	}
+|	"SQLSTATE" stringLit
+	{
+		$$ = &ast.HandlerCondition{Tp: ast.HandlerConditionSQLState, State: $2}
+	}
+|	"SQLSTATE" "VALUE" stringLit
+	{
+		$$ = &ast.HandlerCondition{Tp: ast.HandlerConditionSQLState, State: $3}
+	}
+
+ProcFlowStmt:
+	"RETURN" Expression
+	{
+		$$ = &ast.ReturnStmt{Expr: $2}
+	}
+|	"LEAVE" Identifier
+	{
+		$$ = &ast.LeaveStmt{Label: ast.NewCIStr($2)}
+	}
+|	"ITERATE" Identifier
+	{
+		$$ = &ast.IterateStmt{Label: ast.NewCIStr($2)}
+	}
+|	"OPEN" Identifier
+	{
+		$$ = &ast.OpenCursorStmt{Name: ast.NewCIStr($2)}
+	}
+|	"CLOSE" Identifier
+	{
+		$$ = &ast.CloseCursorStmt{Name: ast.NewCIStr($2)}
+	}
+|	"FETCH" Identifier "INTO" FetchVarList
+	{
+		$$ = &ast.FetchCursorStmt{Name: ast.NewCIStr($2), Vars: $4.([]ast.ExprNode)}
+	}
+|	"FETCH" "FROM" Identifier "INTO" FetchVarList
+	{
+		$$ = &ast.FetchCursorStmt{Name: ast.NewCIStr($3), Vars: $5.([]ast.ExprNode)}
+	}
+|	"FETCH" "NEXT" "FROM" Identifier "INTO" FetchVarList
+	{
+		$$ = &ast.FetchCursorStmt{Name: ast.NewCIStr($4), Vars: $6.([]ast.ExprNode)}
+	}
+
+FetchVarList:
+	FetchVar
+	{
+		$$ = []ast.ExprNode{$1.(ast.ExprNode)}
+	}
+|	FetchVarList ',' FetchVar
+	{
+		$$ = append($1.([]ast.ExprNode), $3.(ast.ExprNode))
+	}
+
+FetchVar:
+	Identifier
+	{
+		$$ = &ast.ColumnNameExpr{Name: &ast.ColumnName{Name: ast.NewCIStr($1)}}
+	}
+|	UserVariable
+	{
+		$$ = $1
+	}
+
+SignalStmt:
+	"SIGNAL" SignalConditionValue SignalSetOpt
+	{
+		$$ = &ast.SignalStmt{Condition: $2.(*ast.SignalCondition), Items: $3.([]*ast.SignalItem)}
+	}
+
+ResignalStmt:
+	"RESIGNAL" SignalSetOpt
+	{
+		$$ = &ast.ResignalStmt{Items: $2.([]*ast.SignalItem)}
+	}
+|	"RESIGNAL" SignalConditionValue SignalSetOpt
+	{
+		$$ = &ast.ResignalStmt{Condition: $2.(*ast.SignalCondition), Items: $3.([]*ast.SignalItem)}
+	}
+
+SignalConditionValue:
+	"SQLSTATE" stringLit
+	{
+		$$ = &ast.SignalCondition{IsSQLState: true, State: $2}
+	}
+|	"SQLSTATE" "VALUE" stringLit
+	{
+		$$ = &ast.SignalCondition{IsSQLState: true, State: $3}
+	}
+|	Identifier
+	{
+		$$ = &ast.SignalCondition{Name: ast.NewCIStr($1)}
+	}
+
+SignalSetOpt:
+	/* EMPTY */
+	{
+		$$ = []*ast.SignalItem(nil)
+	}
+|	"SET" SignalItems
+	{
+		$$ = $2
+	}
+
+SignalItems:
+	SignalItemEntry
+	{
+		$$ = []*ast.SignalItem{$1.(*ast.SignalItem)}
+	}
+|	SignalItems ',' SignalItemEntry
+	{
+		$$ = append($1.([]*ast.SignalItem), $3.(*ast.SignalItem))
+	}
+
+SignalItemEntry:
+	Identifier eq Expression
+	{
+		// Condition information item names (MESSAGE_TEXT, MYSQL_ERRNO, ...)
+		// are ordinary identifiers, like in GET DIAGNOSTICS.
+		$$ = &ast.SignalItem{Name: strings.ToUpper($1), Value: $3}
+	}
+
 /* See https://dev.mysql.com/doc/refman/8.4/en/alter-view.html */
 AlterViewStmt:
 	"ALTER" ViewAlgorithm ViewDefiner ViewSQLSecurity "VIEW" ViewName ViewFieldList "AS" CreateViewSelectOpt ViewCheckOption
@@ -5440,6 +6429,18 @@ UnReservedKeyword:
 |	"RELAYLOG"
 |	"DUALITY"
 |	"RELATIONAL"
+|	"RETURNS"
+|	"CONTAINS"
+|	"FOLLOWS"
+|	"PRECEDES"
+|	"SCHEDULE"
+|	"COMPLETION"
+|	"PRESERVE"
+|	"STARTS"
+|	"ENDS"
+|	"EVERY"
+|	"STRING"
+|	"AGGREGATE"
 |	"CONCURRENT"
 |	"NESTED"
 |	"ORDINALITY"
@@ -5576,7 +6577,7 @@ CallStmt:
 	}
 
 ProcedureCall:
-	identifier
+	Identifier
 	{
 		$$ = &ast.FuncCallExpr{
 			Tp:     ast.FuncCallExprTypeGeneric,
@@ -5593,7 +6594,7 @@ ProcedureCall:
 			Args:   []ast.ExprNode{},
 		}
 	}
-|	identifier '(' ExpressionListOpt ')'
+|	Identifier '(' ExpressionListOpt ')'
 	{
 		$$ = &ast.FuncCallExpr{
 			Tp:     ast.FuncCallExprTypeGeneric,
@@ -10792,13 +11793,20 @@ WithReadLockOpt:
 	}
 
 Statement:
+	SimpleStatement
+|	BeginTransactionStmt
+
+// SimpleStatement is every statement except the bare BEGIN [WORK]
+// transaction spelling. Stored program bodies use this rule: inside a body
+// BEGIN always opens a compound block (like statement vs
+// simple_statement_or_begin in MySQL sql_yacc.yy).
+SimpleStatement:
 	EmptyStmt
 |	AlterDatabaseStmt
 |	AlterTableStmt
 |	AlterUserStmt
 |	AlterInstanceStmt
 |	AnalyzeTableStmt
-|	BeginTransactionStmt
 |	BinlogStmt
 |	CommitStmt
 |	DeallocateStmt
@@ -10904,6 +11912,16 @@ Statement:
 |	StartReplicaStmt
 |	StopReplicaStmt
 |	ResetStmt
+|	CreateProcedureStmt
+|	CreateFunctionStmt
+|	CreateTriggerStmt
+|	CreateEventStmt
+|	AlterProcedureStmt
+|	AlterFunctionStmt
+|	AlterEventStmt
+|	DropRoutineStmt
+|	SignalStmt
+|	ResignalStmt
 
 ExplainableStmt:
 	DeleteFromStmt
@@ -11903,6 +12921,7 @@ FieldLen:
 	}
 
 OptFieldLen:
+	/* EMPTY */ %prec lowerThanParenthese
 	{
 		$$ = types.UnspecifiedLength
 	}
@@ -11932,6 +12951,7 @@ FieldOpts:
 	}
 
 FloatOpt:
+	/* EMPTY */ %prec lowerThanParenthese
 	{
 		$$ = &ast.FloatOpt{Flen: types.UnspecifiedLength, Decimal: types.UnspecifiedLength}
 	}
@@ -11963,6 +12983,7 @@ OptBinMod:
 	}
 
 OptBinary:
+	/* EMPTY */ %prec lowerThanParenthese
 	{
 		$$ = &ast.OptBinary{
 			IsBinary: false,

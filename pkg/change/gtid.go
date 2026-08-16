@@ -789,9 +789,9 @@ func (c *gtidClient) processQueryEvent(event *replication.QueryEvent) {
 	}
 	ddlTables, opensTransaction, err := extractTablesFromDDLStmts(string(event.Schema), string(event.Query))
 	if err != nil {
-		// The parser does not understand all syntax (stored programs:
-		// CREATE/DROP TRIGGER, procedure deploys, etc.) — these are
-		// expected misses, not bugs. We include the parser error and
+		// The parser does not understand all syntax (mode-dependent SQL
+		// such as ANSI_QUOTES quoting, or syntax newer than the grammar)
+		// — these are expected misses, not bugs. We include the parser error and
 		// the schema so an operator can diagnose unexpected payloads,
 		// but deliberately omit the query itself: it can contain user
 		// data and ends up in logs. (Same rationale as the binlog
@@ -801,8 +801,8 @@ func (c *gtidClient) processQueryEvent(event *replication.QueryEvent) {
 			"schema", string(event.Schema),
 			"gtid", c.getBufferedGTID().String())
 		// An unparseable statement is usually a standalone
-		// single-statement transaction (CREATE TRIGGER, a stored
-		// procedure deploy) whose QueryEvent is also its group
+		// single-statement transaction (e.g. DDL logged under
+		// ANSI_QUOTES) whose QueryEvent is also its group
 		// terminator — but not always: since 8.0.21 the server logs
 		// CREATE TABLE ... SELECT as GTIDEvent → Query(BEGIN) →
 		// Query("CREATE TABLE ... START TRANSACTION") → row events →
@@ -823,8 +823,8 @@ func (c *gtidClient) processQueryEvent(event *replication.QueryEvent) {
 		// can time out — loud and retryable, unlike a corrupted
 		// resume coordinate. Note the schema filter only applies
 		// after parsing, so *any* unparseable statement on the server
-		// (e.g. a stored procedure deploy in an unrelated schema)
-		// takes this path.
+		// (e.g. ANSI_QUOTES DDL in an unrelated schema) takes this
+		// path.
 		return
 	}
 	// MySQL emits a synthetic GTID for DDL statements too, but the

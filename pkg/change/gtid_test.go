@@ -415,8 +415,9 @@ func TestGTIDResumeAfterGTIDHistoryRegression(t *testing.T) {
 }
 
 // TestGTIDClientUnparseableDDL is a regression test: a QueryEvent the
-// parser cannot parse (CREATE TRIGGER, stored procedure bodies, ...)
-// must still get the transaction's
+// parser cannot parse (mode-dependent SQL — here DDL logged under
+// ANSI_QUOTES, which the server binlogs verbatim with its double-quoted
+// identifiers) must still get the transaction's
 // pending GTID into bufferedGTID — not at the QueryEvent itself (it
 // could sit mid-group; see
 // TestGTIDClientQueryPromotionOrdering), but at the next
@@ -429,8 +430,10 @@ func TestGTIDResumeAfterGTIDHistoryRegression(t *testing.T) {
 // statement in a *completely unrelated schema* left bufferedGTID
 // permanently behind gtid_executed: BlockWait timed out forever, Flush
 // looped indefinitely, and a GTID-mode migration was wedged until
-// cancelled. The INSERT below doubles as the next-GTIDEvent promotion
-// trigger for the trigger-DDL's deferred GTID.
+// cancelled. The trigger DDL after it doubles as the next-GTIDEvent
+// promotion for the deferred GTID (stored programs parse nowadays, so
+// the trigger's own group promotes at its QueryEvent — the prompt path
+// — keeping both paths covered end-to-end here).
 func TestGTIDClientUnparseableDDL(t *testing.T) {
 	skipUnlessGTIDEnabled(t)
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
@@ -462,10 +465,25 @@ func TestGTIDClientUnparseableDDL(t *testing.T) {
 	require.NoError(t, client.Start(t.Context()))
 	defer client.Close()
 
-	// CREATE TRIGGER is binlogged as a QueryEvent that the TiDB parser
-	// rejects (it is also recorded with a DEFINER clause, which fails the
-	// parse on its own). The statement is its own server transaction with
-	// its own GTID, terminated without an XIDEvent.
+	// The parser always runs with default quoting, so this statement is
+	// binlogged verbatim (double quotes and all) and fails to parse. It
+	// is its own server transaction with its own GTID, terminated without
+	// an XIDEvent. The SET and the CREATE must share one connection for
+	// the session mode to apply, hence the pinned sql.Conn.
+	ansiDB, err := sql.Open("mysql", testutils.DSNForDatabase(otherSchema))
+	require.NoError(t, err)
+	defer utils.CloseAndLog(ansiDB)
+	ansiConn, err := ansiDB.Conn(t.Context())
+	require.NoError(t, err)
+	_, err = ansiConn.ExecContext(t.Context(), "SET SESSION sql_mode = 'ANSI_QUOTES'")
+	require.NoError(t, err)
+	_, err = ansiConn.ExecContext(t.Context(), `CREATE TABLE "unrelated2" ("a" int)`)
+	require.NoError(t, err)
+	require.NoError(t, ansiConn.Close())
+
+	// Stored program DDL parses these days: this group promotes at its
+	// own QueryEvent, and its GTIDEvent is also what proves the
+	// ANSI_QUOTES group above ended, promoting the deferred GTID.
 	testutils.RunSQLInDatabase(t, otherSchema,
 		"CREATE TRIGGER gtidunparse_trg BEFORE INSERT ON unrelated FOR EACH ROW SET @gtid_unparse_test = 1")
 
@@ -1242,7 +1260,7 @@ func TestGTIDClientSavepointTransaction(t *testing.T) {
 // understands the START TRANSACTION suffix, so the parsed path defers via
 // extractTablesFromDDLStmts's opensTransaction (group 1 below); the GTID
 // advances at the group's own terminator, the XIDEvent. An unparseable
-// QueryEvent (group 2: CREATE TRIGGER — stored programs still don't
+// QueryEvent (group 2: ANSI_QUOTES DDL, which the parser does not
 // parse) never promotes either, because it could equally sit mid-group;
 // for a genuinely standalone statement the next GTIDEvent, which proves
 // the group ended, promotes instead.
@@ -1355,14 +1373,16 @@ func TestGTIDClientQueryPromotionOrdering(t *testing.T) {
 	require.Eventually(t, func() bool { return buffered(300) },
 		5*time.Second, 5*time.Millisecond, "the XIDEvent must promote the pending GTID")
 
-	// Group 2: a genuinely standalone unparseable statement (CREATE
-	// TRIGGER — stored programs still don't parse). Its QueryEvent is its
-	// group terminator, but an unparseable statement could equally sit
-	// mid-group (as the CTAS form did before the parser understood it),
-	// so it must not promote either. (The row event is purely an ordering
-	// barrier — a real standalone-DDL group has none.)
+	// Group 2: a genuinely standalone unparseable statement. The server
+	// binlogs DDL verbatim, so under ANSI_QUOTES the double-quoted
+	// identifiers reach the parser (which always runs with default
+	// quoting) and fail. Its QueryEvent is its group terminator, but an
+	// unparseable statement could equally sit mid-group (as the CTAS form
+	// did before the parser understood it), so it must not promote
+	// either. (The row event is purely an ordering barrier — a real
+	// standalone-DDL group has none.)
 	inject(gtidEvent(301),
-		queryEvent("CREATE DEFINER=`root`@`localhost` TRIGGER trg BEFORE INSERT ON gtidunpsyn1 FOR EACH ROW SET @x = 1"),
+		queryEvent(`CREATE TABLE "gtidunpsyn1" ("a" int)`),
 		rowEvent(2))
 	require.Eventually(t, func() bool { return client.GetDeltaLen() == 2 },
 		5*time.Second, 5*time.Millisecond, "row event after the trigger DDL was not processed")
@@ -1388,6 +1408,15 @@ func TestGTIDClientQueryPromotionOrdering(t *testing.T) {
 	})
 	require.Eventually(t, func() bool { return buffered(302) },
 		5*time.Second, 5*time.Millisecond, "the follow-up transaction's XIDEvent must promote its GTID")
+
+	// Group 4: stored program DDL now parses (CREATE TRIGGER here), so it
+	// takes the parsed non-transaction-opening path and promotes at its
+	// own QueryEvent — no follow-up event needed. This is the prompt
+	// variant of the deferred promotion group 2 exercised.
+	inject(gtidEvent(303),
+		queryEvent("CREATE DEFINER=`root`@`localhost` TRIGGER trg BEFORE INSERT ON gtidunpsyn1 FOR EACH ROW SET @x = 1"))
+	require.Eventually(t, func() bool { return buffered(303) },
+		5*time.Second, 5*time.Millisecond, "parsed standalone DDL must promote at its own QueryEvent")
 }
 
 // TestGTIDClientCreateTableAsSelect drives a real CREATE TABLE ... SELECT

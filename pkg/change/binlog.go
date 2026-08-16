@@ -735,9 +735,9 @@ func (c *binlogClient) readStream(ctx context.Context) {
 			// in which case we need to notify the caller.
 			ddlTables, _, err := extractTablesFromDDLStmts(string(event.Schema), string(event.Query))
 			if err != nil {
-				// The parser does not understand all syntax — stored
-				// programs ([CREATE|DROP] TRIGGER, procedure deploys)
-				// are the main remaining class.
+				// The parser does not understand all syntax — the
+				// remaining classes are mode-dependent SQL (ANSI_QUOTES
+				// quoting) and syntax newer than the grammar.
 				// This behavior is copied from canal:
 				// https://github.com/go-mysql-org/go-mysql/blob/ee9447d96b48783abb05ab76a12501e5f1161e47/canal/sync.go#L144C1-L150C1
 				// We can't print the statement because it could contain user-data.

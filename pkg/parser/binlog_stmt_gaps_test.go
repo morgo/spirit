@@ -1379,3 +1379,112 @@ func TestJSONDualityObject(t *testing.T) {
 	}
 	RunTest(t, table, false)
 }
+
+// TestDropAlterRoutine covers DROP and ALTER for all four routine kinds.
+func TestDropAlterRoutine(t *testing.T) {
+	table := []testCase{
+		{"DROP PROCEDURE bulk_insert_dest", true, "DROP PROCEDURE `bulk_insert_dest`"},
+		{"DROP PROCEDURE IF EXISTS p1", true, "DROP PROCEDURE IF EXISTS `p1`"},
+		{"DROP FUNCTION IF EXISTS test.f1", true, "DROP FUNCTION IF EXISTS `test`.`f1`"},
+		{"DROP TRIGGER IF EXISTS t1_bi", true, "DROP TRIGGER IF EXISTS `t1_bi`"},
+		{"DROP EVENT IF EXISTS e1", true, "DROP EVENT IF EXISTS `e1`"},
+		{"alter procedure bar comment 'foo'", true, "ALTER PROCEDURE `bar` COMMENT 'foo'"},
+		{"ALTER PROCEDURE p1", true, "ALTER PROCEDURE `p1`"},
+		{"ALTER FUNCTION sf1 SQL SECURITY INVOKER CONTAINS SQL", true, "ALTER FUNCTION `sf1` SQL SECURITY INVOKER CONTAINS SQL"},
+		{"ALTER FUNCTION f1 USING (lib1, lib2 AS l2)", true, "ALTER FUNCTION `f1` USING (`lib1`, `lib2` AS `l2`)"},
+		{"ALTER FUNCTION f1 DROP COMMENT", true, "ALTER FUNCTION `f1` DROP COMMENT"},
+		{"ALTER EVENT e1 ON SCHEDULE EVERY 5 MINUTE", true, "ALTER EVENT `e1` ON SCHEDULE EVERY 5 MINUTE"},
+		{"ALTER EVENT e1 ON COMPLETION NOT PRESERVE", true, "ALTER EVENT `e1` ON COMPLETION NOT PRESERVE"},
+		{"ALTER EVENT e1 RENAME TO e2 ENABLE", true, "ALTER EVENT `e1` RENAME TO `e2` ENABLE"},
+		{"ALTER EVENT e1 DO SELECT 2", true, "ALTER EVENT `e1` DO SELECT 2"},
+		// A CURRENT_USER definer matches what an absent clause parses to, so
+		// it is not written back.
+		{"ALTER DEFINER = CURRENT_USER EVENT e1 COMMENT 'x'", true, "ALTER EVENT `e1` COMMENT 'x'"},
+		{"ALTER DEFINER = u@h EVENT e1 DISABLE ON SLAVE", true, "ALTER DEFINER = `u`@`h` EVENT `e1` DISABLE ON REPLICA"},
+	}
+	RunTest(t, table, false)
+}
+
+// TestCreateProcedureFunction covers stored and loadable routine creation.
+func TestCreateProcedureFunction(t *testing.T) {
+	table := []testCase{
+		{"CREATE PROCEDURE p1() SELECT 1", true, "CREATE PROCEDURE `p1`() SELECT 1"},
+		{"CREATE PROCEDURE p2(IN a INT, OUT b VARCHAR(10), INOUT c DECIMAL(10,2)) BEGIN SELECT a; END", true, "CREATE PROCEDURE `p2`(IN `a` INT, OUT `b` VARCHAR(10), INOUT `c` DECIMAL(10,2)) BEGIN SELECT `a`; END"},
+		{"CREATE DEFINER=root@localhost PROCEDURE p3() COMMENT 'hi' DETERMINISTIC READS SQL DATA SQL SECURITY INVOKER BEGIN END", true, "CREATE DEFINER = `root`@`localhost` PROCEDURE `p3`() COMMENT 'hi' DETERMINISTIC READS SQL DATA SQL SECURITY INVOKER BEGIN END"},
+		{"CREATE PROCEDURE IF NOT EXISTS p4() NOT DETERMINISTIC NO SQL MODIFIES SQL DATA LANGUAGE SQL SELECT 1", true, "CREATE PROCEDURE IF NOT EXISTS `p4`() NOT DETERMINISTIC NO SQL MODIFIES SQL DATA LANGUAGE SQL SELECT 1"},
+		{"CREATE FUNCTION f1(a INT) RETURNS INT RETURN a + 1", true, "CREATE FUNCTION `f1`(`a` INT) RETURNS INT RETURN `a`+1"},
+		{"CREATE FUNCTION f2() RETURNS VARCHAR(20) CHARSET utf8mb4 BEGIN RETURN 'x'; END", true, "CREATE FUNCTION `f2`() RETURNS VARCHAR(20) CHARACTER SET UTF8MB4 BEGIN RETURN _UTF8MB4'x'; END"},
+		// Loadable (UDF) functions: no parameter list, keyword return type.
+		{"CREATE AGGREGATE FUNCTION udf_sum RETURNS REAL SONAME 'udf.so'", true, "CREATE AGGREGATE FUNCTION `udf_sum` RETURNS REAL SONAME 'udf.so'"},
+		{"CREATE FUNCTION metaphon RETURNS STRING SONAME 'udf_example.so'", true, "CREATE FUNCTION `metaphon` RETURNS STRING SONAME 'udf_example.so'"},
+		{"CREATE FUNCTION udf_i RETURNS INT SONAME 'u.so'", true, "CREATE FUNCTION `udf_i` RETURNS INTEGER SONAME 'u.so'"},
+		// External language bodies: AS 'string' and AS $tag$...$tag$.
+		{"CREATE FUNCTION js_f(n INT) RETURNS INT LANGUAGE JAVASCRIPT AS $$ return n * 2 $$", true, "CREATE FUNCTION `js_f`(`n` INT) RETURNS INT LANGUAGE JAVASCRIPT AS ' return n * 2 '"},
+		{"CREATE PROCEDURE js_p() LANGUAGE JAVASCRIPT AS 'console.log(1)'", true, "CREATE PROCEDURE `js_p`() LANGUAGE JAVASCRIPT AS 'console.log(1)'"},
+		// The routine keywords stay usable where MySQL keeps them unreserved.
+		{"SELECT returns, contains, schedule, every FROM t", true, "SELECT `returns`,`contains`,`schedule`,`every` FROM `t`"},
+		{"CALL work(10000)", true, "CALL `work`(10000)"},
+		{"call avg ()", true, "CALL `avg`()"},
+		// DECLARE is reserved in MySQL.
+		{"CREATE TABLE declare (a INT)", false, ""},
+	}
+	RunTest(t, table, false)
+}
+
+// TestCreateTriggerEvent covers trigger and event creation.
+func TestCreateTriggerEvent(t *testing.T) {
+	table := []testCase{
+		// new.a is written lowercase: the SET restore goes through the
+		// @@SESSION spelling, which case-folds variable names on reparse.
+		{"CREATE TRIGGER t1_bi BEFORE INSERT ON t1 FOR EACH ROW SET new.a = 1", true, "CREATE TRIGGER `t1_bi` BEFORE INSERT ON `t1` FOR EACH ROW SET @@SESSION.`new.a`=1"},
+		{"CREATE TRIGGER t1_au AFTER UPDATE ON t1 FOR EACH ROW FOLLOWS t1_au0 BEGIN INSERT INTO log VALUES (OLD.a, NEW.a); END", true, "CREATE TRIGGER `t1_au` AFTER UPDATE ON `t1` FOR EACH ROW FOLLOWS `t1_au0` BEGIN INSERT INTO `log` VALUES (`OLD`.`a`,`NEW`.`a`); END"},
+		{"CREATE DEFINER=u@h TRIGGER IF NOT EXISTS t1_bd BEFORE DELETE ON t1 FOR EACH ROW PRECEDES o BEGIN END", true, "CREATE DEFINER = `u`@`h` TRIGGER IF NOT EXISTS `t1_bd` BEFORE DELETE ON `t1` FOR EACH ROW PRECEDES `o` BEGIN END"},
+		{"CREATE EVENT e1 ON SCHEDULE AT '2026-01-01 00:00:00' DO UPDATE t SET a = a + 1", true, "CREATE EVENT `e1` ON SCHEDULE AT _UTF8MB4'2026-01-01 00:00:00' DO UPDATE `t` SET `a`=`a`+1"},
+		{"CREATE EVENT IF NOT EXISTS e2 ON SCHEDULE EVERY 1 DAY STARTS '2026-01-01' ENDS '2027-01-01' ON COMPLETION PRESERVE DISABLE ON SLAVE COMMENT 'nightly' DO BEGIN CALL p1(); END", true, "CREATE EVENT IF NOT EXISTS `e2` ON SCHEDULE EVERY 1 DAY STARTS _UTF8MB4'2026-01-01' ENDS _UTF8MB4'2027-01-01' ON COMPLETION PRESERVE DISABLE ON REPLICA COMMENT 'nightly' DO BEGIN CALL `p1`(); END"},
+		{"CREATE EVENT e3 ON SCHEDULE EVERY 5 MINUTE ENABLE DO SELECT 1", true, "CREATE EVENT `e3` ON SCHEDULE EVERY 5 MINUTE ENABLE DO SELECT 1"},
+	}
+	RunTest(t, table, false)
+}
+
+// TestSignalResignal covers SIGNAL and RESIGNAL, valid both at top level and
+// in stored program bodies.
+func TestSignalResignal(t *testing.T) {
+	table := []testCase{
+		{"SIGNAL SQLSTATE '01000'", true, "SIGNAL SQLSTATE '01000'"},
+		{"SIGNAL SQLSTATE VALUE '45000'", true, "SIGNAL SQLSTATE '45000'"},
+		{"SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'oops', MYSQL_ERRNO = 1000", true, "SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = _UTF8MB4'oops', MYSQL_ERRNO = 1000"},
+		{"SIGNAL my_cond", true, "SIGNAL `my_cond`"},
+		{"RESIGNAL", true, "RESIGNAL"},
+		{"RESIGNAL SET MYSQL_ERRNO = 5", true, "RESIGNAL SET MYSQL_ERRNO = 5"},
+		{"RESIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'e'", true, "RESIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = _UTF8MB4'e'"},
+	}
+	RunTest(t, table, false)
+}
+
+// TestStoredProgramBody covers the compound statement language.
+func TestStoredProgramBody(t *testing.T) {
+	table := []testCase{
+		{"CREATE PROCEDURE wh() BEGIN DECLARE i INT DEFAULT 0; WHILE i < 10 DO SET i = i + 1; END WHILE; END", true, "CREATE PROCEDURE `wh`() BEGIN DECLARE `i` INT DEFAULT 0; WHILE `i`<10 DO SET @@SESSION.`i`=`i`+1; END WHILE; END"},
+		{"CREATE PROCEDURE rp() BEGIN REPEAT SELECT 1; UNTIL done END REPEAT; END", true, "CREATE PROCEDURE `rp`() BEGIN REPEAT SELECT 1; UNTIL `done` END REPEAT; END"},
+		{"CREATE PROCEDURE ifp(x INT) BEGIN IF x = 1 THEN SELECT 1; ELSEIF x = 2 THEN SELECT 2; ELSE SELECT 0; END IF; END", true, "CREATE PROCEDURE `ifp`(IN `x` INT) BEGIN IF `x`=1 THEN SELECT 1; ELSEIF `x`=2 THEN SELECT 2; ELSE SELECT 0; END IF; END"},
+		{"CREATE PROCEDURE lbl() lab: BEGIN ITERATE lab; LEAVE lab; END lab", true, "CREATE PROCEDURE `lbl`() `lab`: BEGIN ITERATE `lab`; LEAVE `lab`; END `lab`"},
+		{"CREATE PROCEDURE dcl() BEGIN DECLARE a, b BIGINT UNSIGNED DEFAULT 0; DECLARE my_cond CONDITION FOR SQLSTATE '45000'; DECLARE c2 CONDITION FOR 1062; SIGNAL my_cond; END", true, "CREATE PROCEDURE `dcl`() BEGIN DECLARE `a`, `b` BIGINT UNSIGNED DEFAULT 0; DECLARE `my_cond` CONDITION FOR SQLSTATE '45000'; DECLARE `c2` CONDITION FOR 1062; SIGNAL `my_cond`; END"},
+		{"CREATE PROCEDURE hnd() BEGIN DECLARE CONTINUE HANDLER FOR SQLEXCEPTION, SQLWARNING, 1062, SQLSTATE '23000', my_cond BEGIN END; DECLARE EXIT HANDLER FOR NOT FOUND SELECT 'gone'; END", true, "CREATE PROCEDURE `hnd`() BEGIN DECLARE CONTINUE HANDLER FOR SQLEXCEPTION, SQLWARNING, 1062, SQLSTATE '23000', `my_cond` BEGIN END; DECLARE EXIT HANDLER FOR NOT FOUND SELECT _UTF8MB4'gone'; END"},
+		{"CREATE PROCEDURE cur() BEGIN DECLARE cur CURSOR FOR SELECT a FROM t1; OPEN cur; FETCH NEXT FROM cur INTO a, @b; FETCH FROM cur INTO a; FETCH cur INTO a; CLOSE cur; END", true, "CREATE PROCEDURE `cur`() BEGIN DECLARE `cur` CURSOR FOR SELECT `a` FROM `t1`; OPEN `cur`; FETCH `cur` INTO `a`, @`b`; FETCH `cur` INTO `a`; FETCH `cur` INTO `a`; CLOSE `cur`; END"},
+		// A cursor may be named next; FETCH NEXT FROM still parses.
+		{"CREATE PROCEDURE fnx() BEGIN FETCH next INTO a; FETCH NEXT FROM next INTO a; END", true, "CREATE PROCEDURE `fnx`() BEGIN FETCH `next` INTO `a`; FETCH `next` INTO `a`; END"},
+		{"CREATE PROCEDURE nst() BEGIN BEGIN SELECT 1; END; lp: WHILE 1 = 1 DO LEAVE lp; END WHILE lp; END", true, "CREATE PROCEDURE `nst`() BEGIN BEGIN SELECT 1; END; `lp`: WHILE 1=1 DO LEAVE `lp`; END WHILE `lp`; END"},
+		{"CREATE FUNCTION rf() RETURNS INT BEGIN RETURN 1; END", true, "CREATE FUNCTION `rf`() RETURNS INT BEGIN RETURN 1; END"},
+	}
+	RunTest(t, table, false)
+}
+
+// TestStoredProgramCase pins the CASE statement forms separately because the
+// restore spacing around WHEN arms is load-bearing for the reparse.
+func TestStoredProgramCase(t *testing.T) {
+	table := []testCase{
+		{"CREATE PROCEDURE cs(x INT) BEGIN CASE x WHEN 1 THEN SELECT 'one'; ELSE SELECT 'many'; END CASE; END", true, "CREATE PROCEDURE `cs`(IN `x` INT) BEGIN CASE `x` WHEN 1 THEN SELECT _UTF8MB4'one';  ELSE SELECT _UTF8MB4'many';  END CASE; END"},
+		{"CREATE PROCEDURE cw(x INT) BEGIN CASE WHEN x > 0 THEN SELECT '+'; END CASE; END", true, "CREATE PROCEDURE `cw`(IN `x` INT) BEGIN CASE WHEN `x`>0 THEN SELECT _UTF8MB4'+';  END CASE; END"},
+	}
+	RunTest(t, table, false)
+}
