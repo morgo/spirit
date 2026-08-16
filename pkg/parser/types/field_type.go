@@ -635,7 +635,7 @@ func (ft *FieldType) RestoreAsCastType(ctx *format.RestoreCtx, explicitCharset b
 	case mysql.TypeYear:
 		ctx.WriteKeyWord("YEAR")
 	case mysql.TypeGeometry:
-		switch ft.geo {
+		switch ft.geo { //nolint:exhaustive // GeomGeometry is the default branch
 		case GeomPoint:
 			ctx.WriteKeyWord("POINT")
 		case GeomLineString:

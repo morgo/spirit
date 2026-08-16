@@ -116,7 +116,7 @@ type RoutineParam struct {
 // Restore implements Node interface.
 func (n *RoutineParam) Restore(ctx *format.RestoreCtx, withDirection bool) error {
 	if withDirection {
-		switch n.Direction {
+		switch n.Direction { //nolint:exhaustive // RoutineParamIn is the default branch
 		case RoutineParamOut:
 			ctx.WriteKeyWord("OUT ")
 		case RoutineParamInOut:
@@ -480,7 +480,7 @@ func (n *CreateTriggerStmt) Restore(ctx *format.RestoreCtx) error {
 		return fmt.Errorf("an error occurred while restore CreateTriggerStmt.Table: %w", err)
 	}
 	ctx.WriteKeyWord(" FOR EACH ROW")
-	switch n.Order {
+	switch n.Order { //nolint:exhaustive // TriggerOrderNone restores nothing
 	case TriggerOrderFollows:
 		ctx.WriteKeyWord(" FOLLOWS ")
 		ctx.WriteName(n.OtherTrigger.O)
@@ -581,7 +581,7 @@ const (
 )
 
 func restoreEventCompletion(ctx *format.RestoreCtx, c EventCompletion) {
-	switch c {
+	switch c { //nolint:exhaustive // EventCompletionDefault restores nothing
 	case EventCompletionPreserve:
 		ctx.WriteKeyWord(" ON COMPLETION PRESERVE")
 	case EventCompletionNotPreserve:
@@ -601,7 +601,7 @@ const (
 )
 
 func restoreEventStatus(ctx *format.RestoreCtx, s EventStatus) {
-	switch s {
+	switch s { //nolint:exhaustive // EventStatusDefault restores nothing
 	case EventStatusEnable:
 		ctx.WriteKeyWord(" ENABLE")
 	case EventStatusDisable:
