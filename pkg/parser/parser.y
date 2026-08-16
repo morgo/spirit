@@ -698,34 +698,34 @@ type likeEscapeSpec struct {
 
 %token not2
 %type	<expr>
-	Expression                      "expression"
-	MaxValueOrExpression            "maxvalue or expression"
-	BoolPri                         "boolean primary expression"
-	ExprOrDefault                   "expression or default"
-	PredicateExpr                   "Predicate expression factor"
-	SetExpr                         "Set variable statement value's expression"
-	BitExpr                         "bit expression"
-	SimpleExpr                      "simple expression"
-	SimpleIdent                     "Simple Identifier expression"
-	SumExpr                         "aggregate functions"
-	FunctionCallGeneric             "Function call with Identifier"
-	FunctionCallKeyword             "Function call with keyword as function name"
-	FunctionCallNonKeyword          "Function call with nonkeyword as function name"
-	Literal                         "literal value"
-	Variable                        "User or system variable"
-	SystemVariable                  "System defined variable name"
-	UserVariable                    "User defined variable name"
-	SubSelect                       "Sub Select"
-	StringLiteral                   "text literal"
-	ExpressionOpt                   "Optional expression"
-	SignedLiteral                   "Literal or NumLiteral with sign"
-	DefaultValueExpr                "DefaultValueExpr(Now or Signed Literal)"
-	NowSymOptionFraction            "NowSym with optional fraction part"
-	NowSymOptionFractionParentheses "NowSym with optional fraction part within potential parentheses"
-	CharsetNameOrDefault            "Character set name or default"
-	BuiltinFunction                 "Default builtin functions for columns"
-	WindowFuncCall                  "WINDOW function call"
-	ProcedureCall                   "Procedure call with Identifier or identifier"
+	Expression             "expression"
+	MaxValueOrExpression   "maxvalue or expression"
+	BoolPri                "boolean primary expression"
+	ExprOrDefault          "expression or default"
+	PredicateExpr          "Predicate expression factor"
+	SetExpr                "Set variable statement value's expression"
+	BitExpr                "bit expression"
+	SimpleExpr             "simple expression"
+	SimpleIdent            "Simple Identifier expression"
+	SumExpr                "aggregate functions"
+	FunctionCallGeneric    "Function call with Identifier"
+	FunctionCallKeyword    "Function call with keyword as function name"
+	FunctionCallNonKeyword "Function call with nonkeyword as function name"
+	Literal                "literal value"
+	Variable               "User or system variable"
+	SystemVariable         "System defined variable name"
+	UserVariable           "User defined variable name"
+	SubSelect              "Sub Select"
+	StringLiteral          "text literal"
+	ExpressionOpt          "Optional expression"
+	SignedLiteral          "Literal or NumLiteral with sign"
+	DefaultValueExpr       "DefaultValueExpr(Now or Signed Literal)"
+	NowSymOptionFraction   "NowSym with optional fraction part"
+	CharsetNameOrDefault   "Character set name or default"
+	BuiltinFunction        "Default builtin functions for columns"
+	BareBuiltinFunction    "Builtin function call without enclosing parentheses"
+	WindowFuncCall         "WINDOW function call"
+	ProcedureCall          "Procedure call with Identifier or identifier"
 
 %type	<statement>
 	AlterDatabaseStmt          "Alter database statement"
@@ -2821,21 +2821,17 @@ ReferOpt:
  *     https://dev.mysql.com/doc/refman/8.0/en/data-type-defaults.html
  */
 DefaultValueExpr:
-	NowSymOptionFractionParentheses
+	NowSymOptionFraction
 |	SignedLiteral
-|	BuiltinFunction
-|	'(' Identifier ')'
+|	BareBuiltinFunction
+|	'(' Expression ')'
 	{
-		$$ = &ast.ColumnNameExpr{Name: &ast.ColumnName{
-			Name: ast.NewCIStr($2),
-		}}
-	}
-|	'(' SignedLiteral ')'
-	{
-		// MySQL 8.0.13+ distinguishes literal defaults (DEFAULT '{}') from
-		// expression defaults (DEFAULT ('{}')): BLOB/TEXT/JSON/GEOMETRY
-		// columns only accept the parenthesized form. Keep the parentheses
-		// in the AST so restoring the statement preserves the distinction.
+		// MySQL 8.0.13+ expression defaults: DEFAULT (expr) accepts a full
+		// expression (sql_yacc.yy uses expr here too; invalid constructs such
+		// as subqueries are rejected semantically, not by the grammar). Keep
+		// the parentheses in the AST: MySQL distinguishes literal defaults
+		// (DEFAULT '{}') from expression defaults (DEFAULT ('{}')), and
+		// BLOB/TEXT/JSON/GEOMETRY columns only accept the latter.
 		$$ = &ast.ParenthesesExpr{Expr: $2}
 	}
 
@@ -2844,7 +2840,10 @@ BuiltinFunction:
 	{
 		$$ = $2.(*ast.FuncCallExpr)
 	}
-|	identifier '(' ')'
+|	BareBuiltinFunction
+
+BareBuiltinFunction:
+	identifier '(' ')'
 	{
 		$$ = &ast.FuncCallExpr{
 			FnName: ast.NewCIStr($1),
@@ -2864,20 +2863,13 @@ BuiltinFunction:
 		// expression defaults — DEFAULT (POINT(0,0)) is the manual's own
 		// example — and SHOW CREATE TABLE emits them, so without this a
 		// table using one is unparseable (block/spirit#1128). NOW is
-		// excluded: DEFAULT (NOW()) must keep resolving through
-		// NowSymOptionFractionParentheses to CURRENT_TIMESTAMP.
+		// excluded: DEFAULT NOW() must keep resolving through
+		// NowSymOptionFraction to CURRENT_TIMESTAMP.
 		$$ = &ast.FuncCallExpr{
 			FnName: ast.NewCIStr($1),
 			Args:   $3.([]ast.ExprNode),
 		}
 	}
-
-NowSymOptionFractionParentheses:
-	'(' NowSymOptionFractionParentheses ')'
-	{
-		$$ = $2.(*ast.FuncCallExpr)
-	}
-|	NowSymOptionFraction
 
 NowSymOptionFraction:
 	NowSym
@@ -5821,7 +5813,7 @@ FunctionNameConflict:
 // FunctionNameConflictNonNow is split out so that BuiltinFunction (the
 // DEFAULT-expression grammar) can accept keyword-named functions without
 // swallowing NOW(), which DefaultValueExpr folds to CURRENT_TIMESTAMP via
-// NowSymOptionFractionParentheses.
+// NowSymOptionFraction.
 FunctionNameConflictNonNow:
 	"ASCII"
 |	"CHARSET"

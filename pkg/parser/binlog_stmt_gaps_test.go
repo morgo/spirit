@@ -303,3 +303,34 @@ func TestACLGrantRevoke(t *testing.T) {
 	}
 	RunTest(t, table, false)
 }
+
+func TestDefaultExpression(t *testing.T) {
+	// MySQL 8.0.13+ DEFAULT (expr) takes a full expression; the parentheses
+	// are part of the statement's meaning and must survive the round trip.
+	table := []testCase{
+		{"CREATE TABLE ct06 (a INT, b INT DEFAULT (a + 1))", true, "CREATE TABLE `ct06` (`a` INT,`b` INT DEFAULT (`a`+1))"},
+		{"CREATE TABLE ct07 (a INT, b INT DEFAULT (a * a))", true, "CREATE TABLE `ct07` (`a` INT,`b` INT DEFAULT (`a`*`a`))"},
+		{`CREATE TABLE ct09 (j JSON DEFAULT (CAST('["x"]' AS JSON)))`, true, "CREATE TABLE `ct09` (`j` JSON DEFAULT (CAST(_UTF8MB4'[\"x\"]' AS JSON)))"},
+		{"CREATE TABLE ct10 (d DATE DEFAULT (CURRENT_DATE + INTERVAL 1 YEAR))", true, "CREATE TABLE `ct10` (`d` DATE DEFAULT (DATE_ADD(CURRENT_DATE(), INTERVAL 1 YEAR)))"},
+		{"ALTER TABLE t1 ADD COLUMN y INT DEFAULT (a + 1)", true, "ALTER TABLE `t1` ADD COLUMN `y` INT DEFAULT (`a`+1)"},
+		{"CREATE TABLE lx07 (a DATE DEFAULT (DATE '2020-01-01'))", true, "CREATE TABLE `lx07` (`a` DATE DEFAULT (DATE '2020-01-01'))"},
+		{"CREATE TABLE lx08 (a TIMESTAMP DEFAULT (TIMESTAMP '2020-01-01 00:00:00'))", true, "CREATE TABLE `lx08` (`a` TIMESTAMP DEFAULT (TIMESTAMP '2020-01-01 00:00:00'))"},
+		// Nested parentheses stay nested: MySQL prints DEFAULT ((1 + 2)).
+		{"CREATE TABLE t (b INT DEFAULT ((1+2)))", true, "CREATE TABLE `t` (`b` INT DEFAULT ((1+2)))"},
+		{"CREATE TABLE t (u VARCHAR(36) DEFAULT (UUID()))", true, "CREATE TABLE `t` (`u` VARCHAR(36) DEFAULT (UUID()))"},
+		{"CREATE TABLE t (j JSON DEFAULT ('{}'))", true, "CREATE TABLE `t` (`j` JSON DEFAULT (_UTF8MB4'{}'))"},
+		{"CREATE TABLE t (a INT, b INT DEFAULT (a))", true, "CREATE TABLE `t` (`a` INT,`b` INT DEFAULT (`a`))"},
+		// Parenthesized NOW is an expression default and keeps its shape;
+		// the bare timestamp-default form still folds to CURRENT_TIMESTAMP.
+		{"CREATE TABLE t (ts DATETIME DEFAULT (NOW()))", true, "CREATE TABLE `t` (`ts` DATETIME DEFAULT (NOW()))"},
+		{"CREATE TABLE t (ts DATETIME DEFAULT NOW())", true, "CREATE TABLE `t` (`ts` DATETIME DEFAULT CURRENT_TIMESTAMP())"},
+		{"CREATE TABLE t (g POINT DEFAULT (POINT(0, 0)))", true, "CREATE TABLE `t` (`g` POINT DEFAULT (POINT(0, 0)))"},
+		// KILL shares the builtin-function production; keep it working.
+		{"KILL CONNECTION_ID()", true, "KILL CONNECTION_ID()"},
+		// A bare SELECT is a syntax error in MySQL's expr too; a doubly
+		// parenthesized subquery parses and is rejected semantically.
+		{"CREATE TABLE t (b INT DEFAULT (SELECT 1))", false, ""},
+		{"CREATE TABLE t (b INT DEFAULT ((SELECT 1)))", true, "CREATE TABLE `t` (`b` INT DEFAULT ((SELECT 1)))"},
+	}
+	RunTest(t, table, false)
+}

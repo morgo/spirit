@@ -386,10 +386,15 @@ func TestKeywordFunctionCalls(t *testing.T) {
 			"alter table t add constraint c check (st_length(linestring(p, q)) > 0)",
 			"ALTER TABLE `t` ADD CONSTRAINT `c` CHECK(ST_LENGTH(LINESTRING(`p`, `q`))>0) ENFORCED",
 		},
-		// NOW is deliberately excluded from the DEFAULT-context rule:
-		// DEFAULT (now()) must keep folding to CURRENT_TIMESTAMP.
+		// Parenthesized NOW is an expression default and keeps its shape
+		// (MySQL prints DEFAULT (now()) for it); only the bare form folds
+		// to CURRENT_TIMESTAMP.
 		{
 			"create table t (ts datetime default (now()))",
+			"CREATE TABLE `t` (`ts` DATETIME DEFAULT (NOW()))",
+		},
+		{
+			"create table t (ts datetime default now())",
 			"CREATE TABLE `t` (`ts` DATETIME DEFAULT CURRENT_TIMESTAMP())",
 		},
 		// Keyword function names still work as plain identifiers.
