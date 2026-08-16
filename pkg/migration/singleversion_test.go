@@ -1,6 +1,6 @@
 //go:build singleversion
 
-// This file (together with resume_test.go and lint_test.go) makes up the
+// This file (together with resume_test.go) makes up the
 // "single-version" test suite: tests that exercise Spirit's own logic and do
 // not depend on the MySQL server version, so there is no value in re-running
 // them against every MySQL version in the CI matrix. They are gated behind the
@@ -11,13 +11,13 @@
 // runs without the tag and therefore excludes these files.
 //
 // The dedicated job selects the suite with
-// `-run 'Resume|Checkpoint|UniqueOnNonUniqueData|ChunkerPrefetching|Unparsable|Lint'`,
+// `-run 'Resume|Checkpoint|UniqueOnNonUniqueData|ChunkerPrefetching|Unparsable'`,
 // so a new single-version test must either match that pattern by name or be
 // added to it.
 //
 // To run the suite locally:
 //
-//	go test -tags singleversion -run 'Resume|Checkpoint|UniqueOnNonUniqueData|ChunkerPrefetching|Unparsable|Lint' ./pkg/migration/...
+//	go test -tags singleversion -run 'Resume|Checkpoint|UniqueOnNonUniqueData|ChunkerPrefetching|Unparsable' ./pkg/migration/...
 //
 // A plain `go test ./...` (no tag) skips these files.
 package migration
@@ -39,7 +39,7 @@ func TestUniqueOnNonUniqueData(t *testing.T) {
 	testutils.RunSQL(t, `UPDATE uniquet1 SET b = id`)
 	testutils.RunSQL(t, `UPDATE uniquet1 SET b = 12345 ORDER BY RAND() LIMIT 2`)
 
-	m := NewTestMigration(t, WithTable("uniquet1"), WithAlter("ADD UNIQUE (b)"))
+	m := NewTestMigration(t, WithStatement("ALTER TABLE uniquet1 ADD UNIQUE (b)"))
 	err := m.Run()
 	require.Error(t, err)
 	require.ErrorContains(t, err, "checksum failed after several attempts. This is likely related to your statement adding a UNIQUE index on non-unique data")
@@ -66,10 +66,13 @@ func TestUnparsableStatements(t *testing.T) {
 	m = NewTestMigration(t, WithStatement("ALTER TABLE t1parse ADD COLUMN c BLOB DEFAULT ('abc')"))
 	require.NoError(t, m.Run())
 
-	// The same thing via --table/--alter (this path always worked: the
-	// alter clause is passed through without a parser round trip).
-	m = NewTestMigration(t, WithTable("t1parse"),
-		WithAlter("ADD COLUMN c2 BLOB DEFAULT ('abc')"))
+	// The same thing via the legacy --table/--alter path (this path always
+	// worked: the alter clause is executed verbatim, without a parser round
+	// trip). Adds c2 since the --statement run above already added c.
+	// Dies with the legacy path.
+	m = NewTestMigration(t)
+	m.Table = "t1parse"
+	m.Alter = "ADD COLUMN c2 BLOB DEFAULT ('abc')"
 	require.NoError(t, m.Run())
 
 	// CREATE TRIGGER — not supported.
@@ -79,8 +82,10 @@ func TestUnparsableStatements(t *testing.T) {
 	require.ErrorContains(t, err, "line 1 column 14 near \"TRIGGER")
 
 	// https://github.com/pingcap/tidb/pull/61498
-	m = NewTestMigration(t, WithTable("t1parse"),
-		WithAlter(`ADD COLUMN src_col timestamp NULL DEFAULT NULL, add column new_col timestamp NULL DEFAULT(src_col)`))
+	// Legacy --table/--alter path for the same reason as above.
+	m = NewTestMigration(t)
+	m.Table = "t1parse"
+	m.Alter = `ADD COLUMN src_col timestamp NULL DEFAULT NULL, add column new_col timestamp NULL DEFAULT(src_col)`
 	require.NoError(t, m.Run())
 
 	// Cleanup

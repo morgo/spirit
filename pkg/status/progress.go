@@ -130,11 +130,41 @@ type ChecksumProgress struct {
 // String renders the checksum progress for the human-readable summary line,
 // e.g. "71436/221193 32.30%".
 func (c ChecksumProgress) String() string {
-	pct := float64(0)
-	if c.RowsTotal > 0 {
-		pct = float64(c.RowsChecked) / float64(c.RowsTotal) * 100
+	return fmt.Sprintf("%d/%d %.2f%%", c.RowsChecked, c.RowsTotal, fraction(c.RowsChecked, c.RowsTotal)*100)
+}
+
+// Fraction returns progress in 0..1, for callers that need the ratio rather
+// than the rendered percentage. 0 before the row estimate is known.
+func (c ChecksumProgress) Fraction() float64 {
+	return fraction(c.RowsChecked, c.RowsTotal)
+}
+
+// CopyProgress tracks progress of the row copy. It is the numeric form of what
+// the copier used to report only as a preformatted string, so the status block
+// can lay the percentage and the counts out as separate fields.
+type CopyProgress struct {
+	RowsCopied uint64 // rows copied so far
+	RowsTotal  uint64 // estimated total rows to copy
+}
+
+// String renders the copy progress, e.g. "1031251/16370180 6.30%".
+func (c CopyProgress) String() string {
+	return fmt.Sprintf("%d/%d %.2f%%", c.RowsCopied, c.RowsTotal, fraction(c.RowsCopied, c.RowsTotal)*100)
+}
+
+// Fraction returns progress in 0..1, for callers that need the ratio rather
+// than the rendered percentage. 0 before the row estimate is known.
+func (c CopyProgress) Fraction() float64 {
+	return fraction(c.RowsCopied, c.RowsTotal)
+}
+
+// fraction guards the divide: the row total comes from table statistics, which
+// are 0 until the table has been opened.
+func fraction(done, total uint64) float64 {
+	if total == 0 {
+		return 0
 	}
-	return fmt.Sprintf("%d/%d %.2f%%", c.RowsChecked, c.RowsTotal, pct)
+	return float64(done) / float64(total)
 }
 
 // TableProgress tracks progress for a single table in the migration.

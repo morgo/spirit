@@ -132,7 +132,7 @@ m.Alter = "ENGINE=InnoDB"
 require.NoError(t, m.Run())
 ```
 
-Available options: `WithThreads(n)`, `WithTargetChunkTime(d)`, `WithBuffered(b)`, `WithTable(name)`, `WithAlter(stmt)`, `WithStatement(sql)`, `WithTestThrottler()`, `WithDeferCutOver()`, `WithSkipDropAfterCutover()`, `WithDBName(name)`, `WithRespectSentinel()`, `WithLint()`, `WithLintOnly()`, `WithHost(host)`, `WithReplicaDSN(dsn)`, `WithReplicaMaxLag(d)`, `WithConfFile(t, content)`.
+Available options: `WithThreads(n)`, `WithTargetChunkTime(d)`, `WithBuffered(b)`, `WithTable(name)`, `WithAlter(stmt)`, `WithStatement(sql)`, `WithTestThrottler()`, `WithDeferCutOver()`, `WithSkipDropAfterCutover()`, `WithDBName(name)`, `WithRespectSentinel()`, `WithHost(host)`, `WithReplicaDSN(dsn)`, `WithReplicaMaxLag(d)`, `WithConfFile(t, content)`.
 
 **General test patterns:**
 - Integration tests connect to real MySQL — there are no mocked database tests for core logic
@@ -329,5 +329,8 @@ GitHub Actions workflows (`.github/workflows/`):
 - **mysql8.0.42-docker.yml** — integration tests against MySQL 8.0.42
 - **mysql84-docker.yml** — integration tests against MySQL 8.4
 - **mysql97-docker.yml** — integration tests against MySQL 9.7
+- **mysql8.0.45-singleversion-docker.yml** — runs the version-agnostic "single-version" suite (build tag `singleversion`) once, against MySQL 8.0.45. It selects tests with a `-run` regex defined in the `singleversion-test` service in `compose/compose.yml`, so a new `singleversion` test must either match that pattern by name or be added to it — `go test` exits 0 when `-run` matches nothing, so a mismatch silently skips the test.
+- **mysql-semisync-docker.yml** — integration tests against MySQL 8.0.45 with semi-sync replication and a delayed replica
+- **govulncheck.yml** — scans dependencies for known vulnerabilities
 - **buildandrun-docker.yml** — build and run smoke test
 - **release.yml** — release automation

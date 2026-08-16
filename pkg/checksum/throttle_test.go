@@ -126,9 +126,12 @@ func checksumFixture(t *testing.T, name string, rows int, cfg *CheckerConfig) Ch
 
 	dsn, err := mysql.ParseDSN(testutils.DSN())
 	require.NoError(t, err)
-	feed := change.NewBinlogClient(db, dsn.Addr, dsn.User, dsn.Passwd,
-		applier.NewSingleTargetForTest(t, db), change.NewClientDefaultConfig())
+	app := applier.NewSingleTargetForTest(t, db)
+	feed := change.NewBinlogClient(db, dsn.Addr, dsn.User, dsn.Passwd, app, change.NewClientDefaultConfig())
 	t.Cleanup(feed.Close)
+	// The single-server checker requires a repair applier even when the fixture
+	// never produces a mismatch; the callers here only care about pacing.
+	cfg.RepairApplier = app
 
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
 	require.NoError(t, err)
@@ -351,13 +354,13 @@ func TestStatusSuffixReportsPacing(t *testing.T) {
 
 	// Before the first pass the limiter does not exist yet, so Threads falls
 	// back to the configured concurrency rather than reporting zero.
-	assert.Equal(t, " checksum-threads=3 checksum-is-throttled=false", StatusSuffix(checker))
+	assert.Equal(t, "  chunk-size=0  threads=3  throttled=false", StatusSuffix(checker))
 
 	// A throttled checker must say so, which is the whole point of the field.
 	// The stub carries a continuous signal because a checksum only reacts to
 	// load throttlers; throttler.Mock is binary and would be narrowed away.
 	checker.(ThrottleAware).SetThrottler(&alwaysLoaded{})
-	assert.Contains(t, StatusSuffix(checker), "checksum-is-throttled=true")
+	assert.Contains(t, StatusSuffix(checker), "throttled=true")
 }
 
 func TestStatusSuffixEmptyForUnpacedChecker(t *testing.T) {

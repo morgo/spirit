@@ -91,7 +91,7 @@ Our internal goal for Spirit is to be able to migrate a 10TiB table in under 5 d
 For proof of how fast Spirit is, here is the final output from a 1.43 TiB `finch.xfers` table on an `r8g.8xlarge` Aurora instance using `--enable-experimental-autoscaling`, which sized the pools from the instance's 32 vCPUs (write threads `30 → 60`, read threads `8 → 16`):
 
 ```
-2026/07/31 05:01:03 INFO apply complete instant-ddl=false inplace-ddl=false total-chunks=76593 copy-rows-time=5h55m44s checksum-time=39m34s total-time=6h35m54s conns-in-use=0
+2026/07/31 05:01:03 INFO apply complete instant-ddl=false inplace-ddl=false total-chunks=76593 copy-rows-time=5h55m44s checksum-time=39m34s total-time=6h35m54s
 ```
 
 That works out to about 247 GiB/hour of copying and 2,200 GiB/hour of checksumming, on a table that [has some secondary indexes](https://github.com/square/finch/blob/65fef3da97cfb24892ef283bc93ab8f09c4fb732/test/workload/xfer/schema.sql#L39-L62) and was under light write load throughout.
