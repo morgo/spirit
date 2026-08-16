@@ -351,6 +351,7 @@ type likeEscapeSpec struct {
 	component                "COMPONENT"
 	compressed               "COMPRESSED"
 	compression              "COMPRESSION"
+	condition                "CONDITION"
 	config                   "CONFIG"
 	connection               "CONNECTION"
 	consistent               "CONSISTENT"
@@ -368,6 +369,7 @@ type likeEscapeSpec struct {
 	definition               "DEFINITION"
 	delayKeyWrite            "DELAY_KEY_WRITE"
 	description              "DESCRIPTION"
+	diagnostics              "DIAGNOSTICS"
 	directory                "DIRECTORY"
 	disable                  "DISABLE"
 	discard                  "DISCARD"
@@ -418,12 +420,14 @@ type likeEscapeSpec struct {
 	geomCollection           "GEOMCOLLECTION"
 	geometry                 "GEOMETRY"
 	geometryCollection       "GEOMETRYCOLLECTION"
+	get                      "GET"
 	global                   "GLOBAL"
 	grants                   "GRANTS"
 	groupReplication         "GROUP_REPLICATION"
 	gtids                    "GTIDS"
 	handler                  "HANDLER"
 	hash                     "HASH"
+	help                     "HELP"
 	histogram                "HISTOGRAM"
 	history                  "HISTORY"
 	host                     "HOST"
@@ -484,6 +488,7 @@ type likeEscapeSpec struct {
 	multiLineString          "MULTILINESTRING"
 	multiPoint               "MULTIPOINT"
 	multiPolygon             "MULTIPOLYGON"
+	mutex                    "MUTEX"
 	nameKwd                  "NAME"
 	names                    "NAMES"
 	national                 "NATIONAL"
@@ -609,6 +614,7 @@ type likeEscapeSpec struct {
 	sqlTsiWeek               "SQL_TSI_WEEK"
 	sqlTsiYear               "SQL_TSI_YEAR"
 	srid                     "SRID"
+	stacked                  "STACKED"
 	start                    "START"
 	statsAutoRecalc          "STATS_AUTO_RECALC"
 	statsPersistent          "STATS_PERSISTENT"
@@ -670,6 +676,7 @@ type likeEscapeSpec struct {
 	x509                     "X509"
 	xa                       "XA"
 	xid                      "XID"
+	xml                      "XML"
 	yearType                 "YEAR"
 
 	/* The following tokens belong to NotKeywordToken. Notice: make sure these tokens are contained in NotKeywordToken. */
@@ -748,34 +755,35 @@ type likeEscapeSpec struct {
 
 %token not2
 %type	<expr>
-	Expression             "expression"
-	MaxValueOrExpression   "maxvalue or expression"
-	BoolPri                "boolean primary expression"
-	ExprOrDefault          "expression or default"
-	PredicateExpr          "Predicate expression factor"
-	SetExpr                "Set variable statement value's expression"
-	BitExpr                "bit expression"
-	SimpleExpr             "simple expression"
-	SimpleIdent            "Simple Identifier expression"
-	SumExpr                "aggregate functions"
-	FunctionCallGeneric    "Function call with Identifier"
-	FunctionCallKeyword    "Function call with keyword as function name"
-	FunctionCallNonKeyword "Function call with nonkeyword as function name"
-	Literal                "literal value"
-	Variable               "User or system variable"
-	SystemVariable         "System defined variable name"
-	UserVariable           "User defined variable name"
-	SubSelect              "Sub Select"
-	StringLiteral          "text literal"
-	ExpressionOpt          "Optional expression"
-	SignedLiteral          "Literal or NumLiteral with sign"
-	DefaultValueExpr       "DefaultValueExpr(Now or Signed Literal)"
-	NowSymOptionFraction   "NowSym with optional fraction part"
-	CharsetNameOrDefault   "Character set name or default"
-	BuiltinFunction        "Default builtin functions for columns"
-	BareBuiltinFunction    "Builtin function call without enclosing parentheses"
-	WindowFuncCall         "WINDOW function call"
-	ProcedureCall          "Procedure call with Identifier or identifier"
+	Expression                    "expression"
+	MaxValueOrExpression          "maxvalue or expression"
+	BoolPri                       "boolean primary expression"
+	ExprOrDefault                 "expression or default"
+	PredicateExpr                 "Predicate expression factor"
+	SetExpr                       "Set variable statement value's expression"
+	BitExpr                       "bit expression"
+	SimpleExpr                    "simple expression"
+	SimpleIdent                   "Simple Identifier expression"
+	SumExpr                       "aggregate functions"
+	FunctionCallGeneric           "Function call with Identifier"
+	FunctionCallKeyword           "Function call with keyword as function name"
+	FunctionCallNonKeyword        "Function call with nonkeyword as function name"
+	Literal                       "literal value"
+	Variable                      "User or system variable"
+	SystemVariable                "System defined variable name"
+	UserVariable                  "User defined variable name"
+	GetDiagnosticsConditionNumber "GET DIAGNOSTICS condition number"
+	SubSelect                     "Sub Select"
+	StringLiteral                 "text literal"
+	ExpressionOpt                 "Optional expression"
+	SignedLiteral                 "Literal or NumLiteral with sign"
+	DefaultValueExpr              "DefaultValueExpr(Now or Signed Literal)"
+	NowSymOptionFraction          "NowSym with optional fraction part"
+	CharsetNameOrDefault          "Character set name or default"
+	BuiltinFunction               "Default builtin functions for columns"
+	BareBuiltinFunction           "Builtin function call without enclosing parentheses"
+	WindowFuncCall                "WINDOW function call"
+	ProcedureCall                 "Procedure call with Identifier or identifier"
 
 %type	<statement>
 	AlterDatabaseStmt          "Alter database statement"
@@ -814,6 +822,8 @@ type likeEscapeSpec struct {
 	InsertIntoStmt             "INSERT INTO statement"
 	CallStmt                   "CALL statement"
 	KillStmt                   "Kill statement"
+	HelpStmt                   "HELP statement"
+	GetDiagnosticsStmt         "GET DIAGNOSTICS statement"
 	LoadDataStmt               "Load data statement"
 	LockTablesStmt             "Lock tables statement"
 	OptimizeTableStmt          "OPTIMIZE statement"
@@ -925,6 +935,9 @@ type likeEscapeSpec struct {
 	SpaceSepOptionList                     "space-separated replication options"
 	SpaceSepOption                         "single space-separated replication option"
 	BinlogInOpt                            "optional SHOW BINLOG EVENTS IN clause"
+	GetDiagnosticsScopeOpt                 "optional GET DIAGNOSTICS scope (CURRENT or STACKED)"
+	GetDiagnosticsItem                     "GET DIAGNOSTICS information item"
+	GetDiagnosticsItemList                 "GET DIAGNOSTICS information item list"
 	JsonValueReturningOpt                  "optional JSON_VALUE RETURNING clause"
 	JsonValueOnEmptyOrErrorOpt             "optional JSON_VALUE ON EMPTY/ON ERROR clauses"
 	JsonValueBehavior                      "JSON_VALUE ON EMPTY/ON ERROR behavior"
@@ -1354,6 +1367,8 @@ type likeEscapeSpec struct {
 	CollationName                   "Collation name"
 	ColumnFormat                    "Column format"
 	DBName                          "Database Name"
+	ExplainForDB                    "SCHEMA or DATABASE keyword of EXPLAIN FOR"
+	XmlRowsIdentifiedByOpt          "optional LOAD XML ROWS IDENTIFIED BY clause"
 	ResourceGroupName               "Resource Group Name"
 	ExplainFormatType               "explain format type"
 	FieldAsName                     "Field alias name"
@@ -3701,24 +3716,25 @@ LikeTableWithOrWithoutParen:
  *          as select Col1,Col2 from table WITH LOCAL CHECK OPTION
  *******************************************************************/
 CreateViewStmt:
-	"CREATE" OrReplace ViewAlgorithm ViewDefiner ViewSQLSecurity "VIEW" ViewName ViewFieldList "AS" CreateViewSelectOpt ViewCheckOption
+	"CREATE" OrReplace ViewAlgorithm ViewDefiner ViewSQLSecurity "VIEW" IfNotExists ViewName ViewFieldList "AS" CreateViewSelectOpt ViewCheckOption
 	{
 		startOffset := parser.startOffset(&yyS[yypt-1])
 		endOffset := parser.yylval.offset
-		selStmt := $10.(ast.StmtNode)
+		selStmt := $11.(ast.StmtNode)
 		x := &ast.CreateViewStmt{
-			OrReplace: $2.(bool),
-			ViewName:  $7.(*ast.TableName),
-			Select:    selStmt,
-			Algorithm: $3.(ast.ViewAlgorithm),
-			Definer:   $4.(*auth.UserIdentity),
-			Security:  $5.(ast.ViewSecurity),
+			OrReplace:   $2.(bool),
+			IfNotExists: $7.(bool),
+			ViewName:    $8.(*ast.TableName),
+			Select:      selStmt,
+			Algorithm:   $3.(ast.ViewAlgorithm),
+			Definer:     $4.(*auth.UserIdentity),
+			Security:    $5.(ast.ViewSecurity),
 		}
-		if $8 != nil {
-			x.Cols = $8.([]ast.CIStr)
+		if $9 != nil {
+			x.Cols = $9.([]ast.CIStr)
 		}
-		if $11 != nil {
-			x.CheckOption = $11.(ast.ViewCheckOption)
+		if $12 != nil {
+			x.CheckOption = $12.(ast.ViewCheckOption)
 			endOffset = parser.startOffset(&yyS[yypt])
 		} else {
 			x.CheckOption = ast.CheckOptionCascaded
@@ -4189,11 +4205,56 @@ ExplainStmt:
 			IntoVar: "@" + $7,
 		}
 	}
+|	ExplainSym "FOR" ExplainForDB Identifier ExplainableStmt
+	{
+		$$ = &ast.ExplainStmt{
+			Stmt:      $5,
+			Format:    "row",
+			ForSchema: $4,
+		}
+	}
+|	ExplainSym "FORMAT" "=" ExplainFormatType "FOR" ExplainForDB Identifier ExplainableStmt
+	{
+		$$ = &ast.ExplainStmt{
+			Stmt:      $8,
+			Format:    $4,
+			ForSchema: $7,
+		}
+	}
+|	ExplainSym "FORMAT" "=" stringLit "FOR" ExplainForDB Identifier ExplainableStmt
+	{
+		$$ = &ast.ExplainStmt{
+			Stmt:      $8,
+			Format:    $4,
+			ForSchema: $7,
+		}
+	}
+|	ExplainSym "FORMAT" "=" ExplainFormatType "INTO" singleAtIdentifier "FOR" ExplainForDB Identifier ExplainableStmt
+	{
+		$$ = &ast.ExplainStmt{
+			Stmt:      $10,
+			Format:    $4,
+			IntoVar:   "@" + $6,
+			ForSchema: $9,
+		}
+	}
+|	ExplainSym "FORMAT" "=" stringLit "INTO" singleAtIdentifier "FOR" ExplainForDB Identifier ExplainableStmt
+	{
+		$$ = &ast.ExplainStmt{
+			Stmt:      $10,
+			Format:    $4,
+			IntoVar:   "@" + $6,
+			ForSchema: $9,
+		}
+	}
 
 ExplainFormatType:
 	"TRADITIONAL"
 |	"JSON"
 |	"TREE"
+
+ExplainForDB:
+	"DATABASE"
 
 SavepointStmt:
 	"SAVEPOINT" Identifier
@@ -5094,6 +5155,13 @@ UnReservedKeyword:
 |	"SERVER"
 |	"SOCKET"
 |	"SONAME"
+|	"CONDITION"
+|	"DIAGNOSTICS"
+|	"GET"
+|	"HELP"
+|	"MUTEX"
+|	"STACKED"
+|	"XML"
 |	"UNICODE"
 |	"SQL_TSI_DAY"
 |	"SQL_TSI_HOUR"
@@ -9124,6 +9192,18 @@ SetExpr:
 	{
 		$$ = ast.NewValueExpr("BINARY", parser.charset, parser.collation)
 	}
+|	"ALL"
+	{
+		$$ = ast.NewValueExpr("ALL", parser.charset, parser.collation)
+	}
+|	"ROW"
+	{
+		$$ = ast.NewValueExpr("ROW", parser.charset, parser.collation)
+	}
+|	"SYSTEM"
+	{
+		$$ = ast.NewValueExpr("SYSTEM", parser.charset, parser.collation)
+	}
 |	ExprOrDefault
 
 EqOrAssignmentEq:
@@ -9361,6 +9441,11 @@ AuthString:
 RoleNameString:
 	stringLit
 |	identifier
+|	"SKIP"
+|	"LOCKED"
+|	"NOWAIT"
+|	"BINLOG"
+|	"ROLE"
 
 RolenameComposed:
 	StringName '@' StringName
@@ -9415,6 +9500,27 @@ ShowStmt:
 			}
 		}
 		$$ = stmt
+	}
+|	"SHOW" "ENGINE" Identifier "STATUS"
+	{
+		$$ = &ast.ShowStmt{
+			Tp:         ast.ShowEngineStatus,
+			EngineName: $3,
+		}
+	}
+|	"SHOW" "ENGINE" Identifier "LOGS"
+	{
+		$$ = &ast.ShowStmt{
+			Tp:         ast.ShowEngineLogs,
+			EngineName: $3,
+		}
+	}
+|	"SHOW" "ENGINE" Identifier "MUTEX"
+	{
+		$$ = &ast.ShowStmt{
+			Tp:         ast.ShowEngineMutex,
+			EngineName: $3,
+		}
 	}
 |	"SHOW" "CREATE" "TABLE" TableName
 	{
@@ -9811,6 +9917,32 @@ ShowTargetFilterable:
 			Extended: true,
 		}
 	}
+|	"EXTENDED" OptFull "TABLES" ShowDatabaseNameOpt
+	{
+		$$ = &ast.ShowStmt{
+			Tp:       ast.ShowTables,
+			DBName:   $4,
+			Full:     $2.(bool),
+			Extended: true,
+		}
+	}
+|	"EXTENDED" ShowIndexKwd FromOrIn TableName
+	{
+		$$ = &ast.ShowStmt{
+			Tp:       ast.ShowIndex,
+			Table:    $4.(*ast.TableName),
+			Extended: true,
+		}
+	}
+|	"EXTENDED" ShowIndexKwd FromOrIn Identifier FromOrIn Identifier
+	{
+		show := &ast.ShowStmt{
+			Tp:       ast.ShowIndex,
+			Table:    &ast.TableName{Name: ast.NewCIStr($4), Schema: ast.NewCIStr($6)},
+			Extended: true,
+		}
+		$$ = show
+	}
 |	GlobalScope "VARIABLES"
 	{
 		$$ = &ast.ShowStmt{
@@ -10132,6 +10264,8 @@ Statement:
 |	CallStmt
 |	InsertIntoStmt
 |	KillStmt
+|	HelpStmt
+|	GetDiagnosticsStmt
 |	LoadDataStmt
 |	PreparedStmt
 |	RollbackStmt
@@ -13216,6 +13350,38 @@ LoadDataStmt:
 
 		$$ = x
 	}
+|	"LOAD" "XML" LowPriorityOpt LocalOpt "INFILE" stringLit DuplicateOpt "INTO" "TABLE" TableName CharsetOpt XmlRowsIdentifiedByOpt IgnoreLines ColumnNameOrUserVarListOptWithBrackets LoadDataSetSpecOpt
+	{
+		x := &ast.LoadDataStmt{
+			Xml:                true,
+			LowPriority:        $3.(bool),
+			FileLocRef:         ast.FileLocServer,
+			Path:               $6,
+			OnDuplicate:        $7.(ast.OnDuplicateKeyHandlingType),
+			Table:              $10.(*ast.TableName),
+			Charset:            $11.(*string),
+			XmlRowTag:          $12,
+			IgnoreLines:        $13.(*uint64),
+			ColumnsAndUserVars: $14.([]*ast.ColumnNameOrUserVar),
+			ColumnAssignments:  $15.([]*ast.Assignment),
+		}
+		if $4 != nil {
+			x.FileLocRef = ast.FileLocClient
+			// LOCAL mode defaults duplicate handling to IGNORE, same as LOAD DATA.
+			if x.OnDuplicate == ast.OnDuplicateKeyHandlingError {
+				x.OnDuplicate = ast.OnDuplicateKeyHandlingIgnore
+			}
+		}
+		columns := []*ast.ColumnName{}
+		for _, v := range x.ColumnsAndUserVars {
+			if v.ColumnName != nil {
+				columns = append(columns, v.ColumnName)
+			}
+		}
+		x.Columns = columns
+
+		$$ = x
+	}
 
 LowPriorityOpt:
 	{
@@ -13234,6 +13400,20 @@ IgnoreLines:
 	{
 		v := getUint64FromNUM($2)
 		$$ = &v
+	}
+|	"IGNORE" NUM "ROWS"
+	{
+		v := getUint64FromNUM($2)
+		$$ = &v
+	}
+
+XmlRowsIdentifiedByOpt:
+	{
+		$$ = ""
+	}
+|	"ROWS" "IDENTIFIED" "BY" stringLit
+	{
+		$$ = $4
 	}
 
 CharsetOpt:
@@ -14510,6 +14690,99 @@ KillStmt:
 		$$ = &ast.KillStmt{
 			Expr: $2,
 		}
+	}
+|	"KILL" UserVariable
+	{
+		$$ = &ast.KillStmt{
+			Expr: $2,
+		}
+	}
+|	"KILL" "CONNECTION" UserVariable
+	{
+		$$ = &ast.KillStmt{
+			Expr: $3,
+		}
+	}
+|	"KILL" "QUERY" UserVariable
+	{
+		$$ = &ast.KillStmt{
+			Expr:  $3,
+			Query: true,
+		}
+	}
+
+HelpStmt:
+	"HELP" stringLit
+	{
+		$$ = &ast.HelpStmt{Topic: $2}
+	}
+
+/********************************************************************
+ * GET DIAGNOSTICS Statement
+ * See https://dev.mysql.com/doc/refman/8.0/en/get-diagnostics.html
+ *******************************************************************/
+GetDiagnosticsStmt:
+	"GET" GetDiagnosticsScopeOpt "DIAGNOSTICS" GetDiagnosticsItemList
+	{
+		items := $4.([]*ast.DiagnosticsItem)
+		for _, item := range items {
+			if !ast.IsStatementInformationItem(item.Name) {
+				yylex.AppendError(yylex.Errorf("Unknown statement information item '%s' in GET DIAGNOSTICS", item.Name))
+				return 1
+			}
+		}
+		$$ = &ast.GetDiagnosticsStmt{
+			Scope: $2.(ast.DiagnosticsScope),
+			Items: items,
+		}
+	}
+|	"GET" GetDiagnosticsScopeOpt "DIAGNOSTICS" "CONDITION" GetDiagnosticsConditionNumber GetDiagnosticsItemList
+	{
+		items := $6.([]*ast.DiagnosticsItem)
+		for _, item := range items {
+			if !ast.IsConditionInformationItem(item.Name) {
+				yylex.AppendError(yylex.Errorf("Unknown condition information item '%s' in GET DIAGNOSTICS", item.Name))
+				return 1
+			}
+		}
+		$$ = &ast.GetDiagnosticsStmt{
+			Scope:           $2.(ast.DiagnosticsScope),
+			ConditionNumber: $5,
+			Items:           items,
+		}
+	}
+
+GetDiagnosticsScopeOpt:
+	{
+		$$ = ast.DiagnosticsScopeNone
+	}
+|	"CURRENT"
+	{
+		$$ = ast.DiagnosticsScopeCurrent
+	}
+|	"STACKED"
+	{
+		$$ = ast.DiagnosticsScopeStacked
+	}
+
+GetDiagnosticsConditionNumber:
+	SignedLiteral
+|	UserVariable
+
+GetDiagnosticsItemList:
+	GetDiagnosticsItem
+	{
+		$$ = []*ast.DiagnosticsItem{$1.(*ast.DiagnosticsItem)}
+	}
+|	GetDiagnosticsItemList ',' GetDiagnosticsItem
+	{
+		$$ = append($1.([]*ast.DiagnosticsItem), $3.(*ast.DiagnosticsItem))
+	}
+
+GetDiagnosticsItem:
+	UserVariable "=" Identifier
+	{
+		$$ = &ast.DiagnosticsItem{Target: $1, Name: strings.ToUpper($3)}
 	}
 
 SignedNum:

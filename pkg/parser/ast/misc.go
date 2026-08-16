@@ -44,6 +44,8 @@ var (
 	_ StmtNode = &UseStmt{}
 	_ StmtNode = &FlushStmt{}
 	_ StmtNode = &KillStmt{}
+	_ StmtNode = &HelpStmt{}
+	_ StmtNode = &GetDiagnosticsStmt{}
 	_ StmtNode = &ShutdownStmt{}
 	_ StmtNode = &RestartStmt{}
 	_ StmtNode = &RenameUserStmt{}
@@ -170,6 +172,10 @@ type ExplainStmt struct {
 	// including the leading '@'. Empty when no INTO clause was given.
 	IntoVar string
 
+	// ForSchema is the schema name of `EXPLAIN ... FOR {SCHEMA|DATABASE} name`.
+	// Empty when no FOR SCHEMA clause was given.
+	ForSchema string
+
 	// Explore indicates whether to use EXPLAIN EXPLORE.
 	Explore bool
 	// SQLDigest to explain, used in `EXPLAIN EXPLORE <sql_digest>`.
@@ -211,6 +217,11 @@ func (n *ExplainStmt) Restore(ctx *format.RestoreCtx) error {
 	if n.IntoVar != "" {
 		ctx.WriteKeyWord("INTO ")
 		ctx.WritePlain(n.IntoVar)
+		ctx.WritePlain(" ")
+	}
+	if n.ForSchema != "" {
+		ctx.WriteKeyWord("FOR SCHEMA ")
+		ctx.WriteName(n.ForSchema)
 		ctx.WritePlain(" ")
 	}
 	if n.PlanDigest != "" {
@@ -787,6 +798,156 @@ func (n *KillStmt) Accept(v Visitor) (Node, bool) {
 		return v.Leave(newNode)
 	}
 	n = newNode.(*KillStmt)
+	if n.Expr != nil {
+		node, ok := n.Expr.Accept(v)
+		if !ok {
+			return n, false
+		}
+		n.Expr = node.(ExprNode)
+	}
+	return v.Leave(n)
+}
+
+// HelpStmt is the HELP statement.
+// See https://dev.mysql.com/doc/refman/8.0/en/help.html
+type HelpStmt struct {
+	stmtNode
+
+	Topic string
+}
+
+// Restore implements Node interface.
+func (n *HelpStmt) Restore(ctx *format.RestoreCtx) error {
+	ctx.WriteKeyWord("HELP ")
+	ctx.WriteString(n.Topic)
+	return nil
+}
+
+// Accept implements Node Accept interface.
+func (n *HelpStmt) Accept(v Visitor) (Node, bool) {
+	newNode, skipChildren := v.Enter(n)
+	if skipChildren {
+		return v.Leave(newNode)
+	}
+	n = newNode.(*HelpStmt)
+	return v.Leave(n)
+}
+
+// DiagnosticsScope is the optional scope of a GET DIAGNOSTICS statement.
+type DiagnosticsScope int
+
+// DiagnosticsScope values.
+const (
+	DiagnosticsScopeNone DiagnosticsScope = iota
+	DiagnosticsScopeCurrent
+	DiagnosticsScopeStacked
+)
+
+// DiagnosticsItem is one `target = item_name` element of GET DIAGNOSTICS.
+type DiagnosticsItem struct {
+	Target ExprNode
+	Name   string
+}
+
+var statementInformationItems = map[string]struct{}{
+	"NUMBER":    {},
+	"ROW_COUNT": {},
+}
+
+var conditionInformationItems = map[string]struct{}{
+	"CLASS_ORIGIN":       {},
+	"SUBCLASS_ORIGIN":    {},
+	"RETURNED_SQLSTATE":  {},
+	"MESSAGE_TEXT":       {},
+	"MYSQL_ERRNO":        {},
+	"CONSTRAINT_CATALOG": {},
+	"CONSTRAINT_SCHEMA":  {},
+	"CONSTRAINT_NAME":    {},
+	"CATALOG_NAME":       {},
+	"SCHEMA_NAME":        {},
+	"TABLE_NAME":         {},
+	"COLUMN_NAME":        {},
+	"CURSOR_NAME":        {},
+}
+
+// IsStatementInformationItem reports whether name is a valid GET DIAGNOSTICS
+// statement information item. MySQL keeps the statement and condition item
+// sets disjoint and rejects mixing them with a syntax error.
+func IsStatementInformationItem(name string) bool {
+	_, ok := statementInformationItems[name]
+	return ok
+}
+
+// IsConditionInformationItem reports whether name is a valid GET DIAGNOSTICS
+// condition information item.
+func IsConditionInformationItem(name string) bool {
+	_, ok := conditionInformationItems[name]
+	return ok
+}
+
+// GetDiagnosticsStmt is the GET [CURRENT|STACKED] DIAGNOSTICS statement.
+// See https://dev.mysql.com/doc/refman/8.0/en/get-diagnostics.html
+type GetDiagnosticsStmt struct {
+	stmtNode
+
+	Scope DiagnosticsScope
+	// ConditionNumber is non-nil for the CONDITION form.
+	ConditionNumber ExprNode
+	Items           []*DiagnosticsItem
+}
+
+// Restore implements Node interface.
+func (n *GetDiagnosticsStmt) Restore(ctx *format.RestoreCtx) error {
+	ctx.WriteKeyWord("GET ")
+	switch n.Scope {
+	case DiagnosticsScopeCurrent:
+		ctx.WriteKeyWord("CURRENT ")
+	case DiagnosticsScopeStacked:
+		ctx.WriteKeyWord("STACKED ")
+	case DiagnosticsScopeNone:
+	}
+	ctx.WriteKeyWord("DIAGNOSTICS")
+	if n.ConditionNumber != nil {
+		ctx.WriteKeyWord(" CONDITION ")
+		if err := n.ConditionNumber.Restore(ctx); err != nil {
+			return fmt.Errorf("an error occurred while restore GetDiagnosticsStmt.ConditionNumber: %w", err)
+		}
+	}
+	for i, item := range n.Items {
+		if i != 0 {
+			ctx.WritePlain(",")
+		}
+		ctx.WritePlain(" ")
+		if err := item.Target.Restore(ctx); err != nil {
+			return fmt.Errorf("an error occurred while restore GetDiagnosticsStmt.Items: %w", err)
+		}
+		ctx.WritePlain(" = ")
+		ctx.WriteKeyWord(item.Name)
+	}
+	return nil
+}
+
+// Accept implements Node Accept interface.
+func (n *GetDiagnosticsStmt) Accept(v Visitor) (Node, bool) {
+	newNode, skipChildren := v.Enter(n)
+	if skipChildren {
+		return v.Leave(newNode)
+	}
+	n = newNode.(*GetDiagnosticsStmt)
+	if n.ConditionNumber != nil {
+		node, ok := n.ConditionNumber.Accept(v)
+		if !ok {
+			return n, false
+		}
+		n.ConditionNumber = node.(ExprNode)
+	}
+	for _, item := range n.Items {
+		node, ok := item.Target.Accept(v)
+		if !ok {
+			return n, false
+		}
+		item.Target = node.(ExprNode)
+	}
 	return v.Leave(n)
 }
 

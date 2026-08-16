@@ -1820,6 +1820,8 @@ const (
 type LoadDataStmt struct {
 	dmlNode
 
+	Xml               bool   // LOAD XML instead of LOAD DATA.
+	XmlRowTag         string // ROWS IDENTIFIED BY '<tag>' of LOAD XML; empty when absent.
 	LowPriority       bool
 	FileLocRef        FileLocRefTp
 	Path              string
@@ -1837,7 +1839,11 @@ type LoadDataStmt struct {
 
 // Restore implements Node interface.
 func (n *LoadDataStmt) Restore(ctx *format.RestoreCtx) error {
-	ctx.WriteKeyWord("LOAD DATA ")
+	if n.Xml {
+		ctx.WriteKeyWord("LOAD XML ")
+	} else {
+		ctx.WriteKeyWord("LOAD DATA ")
+	}
 	if n.LowPriority {
 		ctx.WriteKeyWord("LOW_PRIORITY ")
 	}
@@ -1861,6 +1867,10 @@ func (n *LoadDataStmt) Restore(ctx *format.RestoreCtx) error {
 	if n.Charset != nil {
 		ctx.WriteKeyWord(" CHARACTER SET ")
 		ctx.WritePlain(*n.Charset)
+	}
+	if n.XmlRowTag != "" {
+		ctx.WriteKeyWord(" ROWS IDENTIFIED BY ")
+		ctx.WriteString(n.XmlRowTag)
 	}
 	if n.FieldsInfo != nil {
 		if err := n.FieldsInfo.Restore(ctx); err != nil {
@@ -2748,6 +2758,9 @@ const (
 	ShowProcedureCode
 	ShowFunctionCode
 	ShowParseTree
+	ShowEngineStatus
+	ShowEngineLogs
+	ShowEngineMutex
 )
 
 const (
@@ -2770,6 +2783,7 @@ type ShowStmt struct {
 
 	Tp          ShowStmtType // Databases/Tables/Columns/....
 	DBName      string
+	EngineName  string      // Used for SHOW ENGINE <engine> {STATUS|LOGS|MUTEX}.
 	Table       *TableName  // Used for showing columns.
 	Partition   CIStr       // Used for showing partition.
 	Column      *ColumnName // Used for `desc table column`.
@@ -2997,11 +3011,26 @@ func (n *ShowStmt) Restore(ctx *format.RestoreCtx) error {
 		switch n.Tp {
 		case ShowEngines:
 			ctx.WriteKeyWord("ENGINES")
+		case ShowEngineStatus:
+			ctx.WriteKeyWord("ENGINE ")
+			ctx.WriteName(n.EngineName)
+			ctx.WriteKeyWord(" STATUS")
+		case ShowEngineLogs:
+			ctx.WriteKeyWord("ENGINE ")
+			ctx.WriteName(n.EngineName)
+			ctx.WriteKeyWord(" LOGS")
+		case ShowEngineMutex:
+			ctx.WriteKeyWord("ENGINE ")
+			ctx.WriteName(n.EngineName)
+			ctx.WriteKeyWord(" MUTEX")
 		case ShowDatabases:
 			ctx.WriteKeyWord("DATABASES")
 		case ShowCharset:
 			ctx.WriteKeyWord("CHARSET")
 		case ShowTables:
+			if n.Extended {
+				ctx.WriteKeyWord("EXTENDED ")
+			}
 			restoreOptFull()
 			ctx.WriteKeyWord("TABLES")
 			restoreShowDatabaseNameOpt()
@@ -3014,6 +3043,9 @@ func (n *ShowStmt) Restore(ctx *format.RestoreCtx) error {
 		case ShowIndex:
 			// here can be INDEX INDEXES KEYS
 			// FROM or IN
+			if n.Extended {
+				ctx.WriteKeyWord("EXTENDED ")
+			}
 			ctx.WriteKeyWord("INDEX IN ")
 			if err := n.Table.Restore(ctx); err != nil {
 				return fmt.Errorf("an error occurred while restore ShowStmt.Table: %w", err)

@@ -1396,6 +1396,7 @@ type CreateViewStmt struct {
 	ddlNode
 
 	OrReplace   bool
+	IfNotExists bool
 	ViewName    *TableName
 	Cols        []CIStr
 	Select      StmtNode
@@ -1432,6 +1433,9 @@ func (n *CreateViewStmt) Restore(ctx *format.RestoreCtx) error {
 	ctx.WriteKeyWord(" SQL SECURITY ")
 	ctx.WriteKeyWord(n.Security.String())
 	ctx.WriteKeyWord(" VIEW ")
+	if n.IfNotExists {
+		ctx.WriteKeyWord("IF NOT EXISTS ")
+	}
 
 	if err := n.ViewName.Restore(ctx); err != nil {
 		return fmt.Errorf("an error occurred while create CreateViewStmt.ViewName: %w", err)

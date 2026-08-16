@@ -813,3 +813,105 @@ func TestExpressionGaps(t *testing.T) {
 	}
 	RunTest(t, table, false)
 }
+
+func TestKillUserVariable(t *testing.T) {
+	table := []testCase{
+		{"KILL @id", true, "KILL @`id`"},
+		{"KILL QUERY @thread_id", true, "KILL QUERY @`thread_id`"},
+		{"KILL CONNECTION @id", true, "KILL @`id`"},
+		{"KILL QUERY 42", true, "KILL QUERY 42"},
+	}
+	RunTest(t, table, false)
+}
+
+func TestHelpStatement(t *testing.T) {
+	table := []testCase{
+		{"HELP 'contents'", true, "HELP 'contents'"},
+		{"help '%function_1'", true, "HELP '%function_1'"},
+		{"HELP contents", false, ""},
+	}
+	RunTest(t, table, false)
+}
+
+func TestGetDiagnostics(t *testing.T) {
+	table := []testCase{
+		{"GET DIAGNOSTICS @var = NUMBER", true, "GET DIAGNOSTICS @`var` = NUMBER"},
+		{"GET DIAGNOSTICS @var1 = NUMBER, @var2 = ROW_COUNT", true, "GET DIAGNOSTICS @`var1` = NUMBER, @`var2` = ROW_COUNT"},
+		{"GET DIAGNOSTICS @v = row_count", true, "GET DIAGNOSTICS @`v` = ROW_COUNT"},
+		{"GET CURRENT DIAGNOSTICS @v = ROW_COUNT", true, "GET CURRENT DIAGNOSTICS @`v` = ROW_COUNT"},
+		{"GET STACKED DIAGNOSTICS CONDITION 1 @e = MYSQL_ERRNO, @m = MESSAGE_TEXT", true, "GET STACKED DIAGNOSTICS CONDITION 1 @`e` = MYSQL_ERRNO, @`m` = MESSAGE_TEXT"},
+		{"GET DIAGNOSTICS CONDITION NULL @var = CLASS_ORIGIN", true, "GET DIAGNOSTICS CONDITION NULL @`var` = CLASS_ORIGIN"},
+		{"GET DIAGNOSTICS CONDITION @c @var = RETURNED_SQLSTATE", true, "GET DIAGNOSTICS CONDITION @`c` @`var` = RETURNED_SQLSTATE"},
+		// MySQL keeps statement and condition information items disjoint.
+		{"GET DIAGNOSTICS @v = MESSAGE_TEXT", false, ""},
+		{"GET DIAGNOSTICS CONDITION 1 @v = NUMBER", false, ""},
+	}
+	RunTest(t, table, false)
+}
+
+func TestSetValueKeywords(t *testing.T) {
+	table := []testCase{
+		{"SET GLOBAL delay_key_write = ALL", true, "SET @@GLOBAL.`delay_key_write`=_UTF8MB4'ALL'"},
+		{"SET @@SESSION.binlog_format = ROW", true, "SET @@SESSION.`binlog_format`=_UTF8MB4'ROW'"},
+		{"SET GLOBAL log_timestamps = SYSTEM", true, "SET @@GLOBAL.`log_timestamps`=_UTF8MB4'SYSTEM'"},
+		{"SET PERSIST innodb_monitor_enable = all", true, "SET @@PERSIST.`innodb_monitor_enable`=_UTF8MB4'ALL'"},
+	}
+	RunTest(t, table, false)
+}
+
+func TestShowEngineAndExtended(t *testing.T) {
+	table := []testCase{
+		{"SHOW ENGINE csv STATUS", true, "SHOW ENGINE `csv` STATUS"},
+		{"SHOW ENGINE csv LOGS", true, "SHOW ENGINE `csv` LOGS"},
+		{"SHOW ENGINE MYISAM MUTEX", true, "SHOW ENGINE `MYISAM` MUTEX"},
+		{"SHOW ENGINE InnoDB STATUS", true, "SHOW ENGINE `InnoDB` STATUS"},
+		{"SHOW EXTENDED TABLES FROM test", true, "SHOW EXTENDED TABLES IN `test`"},
+		{"SHOW EXTENDED FULL TABLES FROM test", true, "SHOW EXTENDED FULL TABLES IN `test`"},
+		{"SHOW EXTENDED INDEX FROM t1", true, "SHOW EXTENDED INDEX IN `t1`"},
+		{"SHOW EXTENDED FULL COLUMNS FROM t1", true, "SHOW EXTENDED FULL COLUMNS IN `t1`"},
+	}
+	RunTest(t, table, false)
+}
+
+func TestExplainForSchema(t *testing.T) {
+	table := []testCase{
+		{"EXPLAIN FORMAT=JSON INTO @x FOR SCHEMA s1 SELECT 1", true, "EXPLAIN FORMAT = 'JSON' INTO @x FOR SCHEMA `s1` SELECT 1"},
+		{"EXPLAIN FORMAT=TREE FOR SCHEMA s1 SELECT * FROM t1", true, "EXPLAIN FORMAT = 'TREE' FOR SCHEMA `s1` SELECT * FROM `t1`"},
+		{"EXPLAIN FORMAT=JSON FOR DATABASE s1 SELECT 1", true, "EXPLAIN FORMAT = 'JSON' FOR SCHEMA `s1` SELECT 1"},
+		{"EXPLAIN FOR SCHEMA s1 SELECT 1", true, "EXPLAIN FORMAT = 'row' FOR SCHEMA `s1` SELECT 1"},
+		{"EXPLAIN FORMAT=JSON INTO @x FOR SCHEMA s1 UPDATE t1 SET c1 = 1", true, "EXPLAIN FORMAT = 'JSON' INTO @x FOR SCHEMA `s1` UPDATE `t1` SET `c1`=1"},
+	}
+	RunTest(t, table, false)
+}
+
+func TestCreateViewIfNotExists(t *testing.T) {
+	table := []testCase{
+		{"CREATE VIEW IF NOT EXISTS v1 AS SELECT 1", true, "CREATE ALGORITHM = UNDEFINED DEFINER = CURRENT_USER SQL SECURITY DEFINER VIEW IF NOT EXISTS `v1` AS SELECT 1"},
+		{"CREATE VIEW IF NOT EXISTS v1 (v1_a) AS SELECT a FROM t1", true, "CREATE ALGORITHM = UNDEFINED DEFINER = CURRENT_USER SQL SECURITY DEFINER VIEW IF NOT EXISTS `v1` (`v1_a`) AS SELECT `a` FROM `t1`"},
+	}
+	RunTest(t, table, false)
+}
+
+func TestKeywordRoleNames(t *testing.T) {
+	table := []testCase{
+		{"CREATE ROLE skip", true, "CREATE ROLE `skip`@`%`"},
+		{"CREATE ROLE skip, locked, nowait", true, "CREATE ROLE `skip`@`%`, `locked`@`%`, `nowait`@`%`"},
+		{"CREATE ROLE binlog", true, "CREATE ROLE `binlog`@`%`"},
+		{"DROP ROLE role", true, "DROP ROLE `role`@`%`"},
+		{"DROP ROLE skip, locked, nowait", true, "DROP ROLE `skip`@`%`, `locked`@`%`, `nowait`@`%`"},
+	}
+	RunTest(t, table, false)
+}
+
+func TestLoadXML(t *testing.T) {
+	table := []testCase{
+		{"LOAD XML INFILE 'x.dat' INTO TABLE t1", true, "LOAD XML INFILE 'x.dat' INTO TABLE `t1`"},
+		{"LOAD XML INFILE 'x.dat' INTO TABLE t1 ROWS IDENTIFIED BY '<row>'", true, "LOAD XML INFILE 'x.dat' INTO TABLE `t1` ROWS IDENTIFIED BY '<row>'"},
+		{"LOAD XML LOCAL INFILE 'x.dat' INTO TABLE t1 ROWS IDENTIFIED BY '<row>' IGNORE 4 ROWS", true, "LOAD XML LOCAL INFILE 'x.dat' IGNORE INTO TABLE `t1` ROWS IDENTIFIED BY '<row>' IGNORE 4 LINES"},
+		{"LOAD XML INFILE 'x.dat' INTO TABLE t1 ROWS IDENTIFIED BY '<row>' (a, @b) SET b = concat('!', @b)", true, "LOAD XML INFILE 'x.dat' INTO TABLE `t1` ROWS IDENTIFIED BY '<row>' (`a`,@`b`) SET `b`=CONCAT(_UTF8MB4'!', @`b`)"},
+		{"LOAD DATA INFILE 'x.dat' INTO TABLE t1 IGNORE 2 ROWS", true, "LOAD DATA INFILE 'x.dat' INTO TABLE `t1` IGNORE 2 LINES"},
+		// LOAD XML takes no FIELDS/LINES clauses.
+		{"LOAD XML INFILE 'x.dat' INTO TABLE t1 FIELDS TERMINATED BY ','", false, ""},
+	}
+	RunTest(t, table, false)
+}
