@@ -123,6 +123,12 @@ func formatColumnDefinition(col *Column) string {
 	if col.Default != nil && col.GeneratedExpr == nil {
 		defaultVal := *col.Default
 		switch {
+		case col.DefaultIsExpr && col.DefaultIsString:
+			// Expression default whose expression is a string literal,
+			// e.g. DEFAULT ('{}') — the only default form MySQL accepts on
+			// BLOB/TEXT/JSON/GEOMETRY columns. The stored value is raw, so
+			// quote+escape it inside the parentheses.
+			parts = append(parts, fmt.Sprintf("DEFAULT ('%s')", sqlescape.EscapeString(defaultVal)))
 		case col.DefaultIsExpr:
 			// Expression defaults must be wrapped in parentheses, e.g. DEFAULT (json_object())
 			parts = append(parts, fmt.Sprintf("DEFAULT (%s)", defaultVal))

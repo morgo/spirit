@@ -4,9 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/pingcap/tidb/pkg/parser/ast"
-	"github.com/pingcap/tidb/pkg/parser/format"
-	driver "github.com/pingcap/tidb/pkg/parser/test_driver"
+	"github.com/block/spirit/pkg/parser/ast"
+	"github.com/block/spirit/pkg/parser/format"
 )
 
 // This file holds low-level, stateless parsing helpers used by the CreateTable
@@ -31,7 +30,7 @@ import (
 // also accepts; the doubled and backslash forms are equivalent in the
 // default sql_mode.
 func stringLiteralValue(expr ast.ExprNode) (string, bool) {
-	if v, ok := expr.(*driver.ValueExpr); ok && v.Kind() == driver.KindString {
+	if v, ok := expr.(*ast.ValueExpr); ok && v.Kind() == ast.KindString {
 		return v.GetString(), true
 	}
 	return "", false
@@ -47,6 +46,11 @@ func isExpressionDefault(expr ast.ExprNode) bool {
 		return false
 	}
 	switch e := expr.(type) {
+	case *ast.ParenthesesExpr:
+		// The parser preserves the parentheses of DEFAULT ('{}') — MySQL's
+		// expression-default form, required on BLOB/TEXT/JSON/GEOMETRY
+		// columns — as a ParenthesesExpr wrapper.
+		return true
 	case *ast.FuncCallExpr:
 		// CURRENT_TIMESTAMP (and aliases NOW, LOCALTIME, etc.) are literal-style defaults
 		// that don't need parens. Everything else is an expression default.
@@ -59,6 +63,20 @@ func isExpressionDefault(expr ast.ExprNode) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+// unwrapParenExpr removes any ParenthesesExpr wrappers, returning the
+// innermost expression. Used where the parenthesized/bare distinction has
+// already been captured (e.g. in DefaultIsExpr) and only the value inside
+// the parentheses is needed.
+func unwrapParenExpr(expr ast.ExprNode) ast.ExprNode {
+	for {
+		paren, ok := expr.(*ast.ParenthesesExpr)
+		if !ok {
+			return expr
+		}
+		expr = paren.Expr
 	}
 }
 

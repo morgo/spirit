@@ -6,8 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/pingcap/tidb/pkg/parser/ast"
-	_ "github.com/pingcap/tidb/pkg/parser/test_driver"
+	"github.com/block/spirit/pkg/parser/ast"
 )
 
 // Not tagged ScopeStatement: MySQL's native DDL, which Spirit attempts before
