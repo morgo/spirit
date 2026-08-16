@@ -787,10 +787,10 @@ func (c *gtidClient) processQueryEvent(event *replication.QueryEvent) {
 		c.promotePendingGTID()
 		return
 	}
-	ddlTables, err := extractTablesFromDDLStmts(string(event.Schema), string(event.Query))
+	ddlTables, opensTransaction, err := extractTablesFromDDLStmts(string(event.Schema), string(event.Query))
 	if err != nil {
-		// The TiDB parser does not understand all syntax (CREATE/DROP
-		// TRIGGER, certain ALTER USER variants, etc.) — these are
+		// The parser does not understand all syntax (stored programs:
+		// CREATE/DROP TRIGGER, procedure deploys, etc.) — these are
 		// expected misses, not bugs. We include the parser error and
 		// the schema so an operator can diagnose unexpected payloads,
 		// but deliberately omit the query itself: it can contain user
@@ -833,7 +833,18 @@ func (c *gtidClient) processQueryEvent(event *replication.QueryEvent) {
 	// set. This is best-effort — if the caller cancels on DDL we
 	// won't actually resume, but the position is consistent for
 	// non-cancelling filters.
-	c.promotePendingGTID()
+	//
+	// The exception is a statement that *opens* its group: the parsed
+	// CREATE TABLE ... START TRANSACTION form of CTAS (its row events
+	// are still to come, exactly like BEGIN above — the XIDEvent that
+	// ends the group promotes), or a hypothetical spelled-out
+	// START TRANSACTION the BEGIN fast-path above didn't catch.
+	// Promoting here would let a concurrent flush publish the GTID as
+	// a resume coordinate before the group's row events are buffered,
+	// silently losing them on resume.
+	if !opensTransaction {
+		c.promotePendingGTID()
+	}
 	for _, ddlTable := range ddlTables {
 		c.processDDLNotification(ddlTable.schema, ddlTable.table)
 	}
