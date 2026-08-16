@@ -99,8 +99,9 @@ make parser
 ```
 
 The build fails if the grammar introduces shift/reduce or reduce/reduce
-conflicts. Generated files are checked in; CI verifies they are in sync
-with the grammar.
+conflicts. Generated files are checked in; the `parser-regen` CI job
+deletes them, regenerates from the grammar, and fails on any diff, so a
+`.y` edit cannot ship without its regenerated output.
 
 ## Testing against real MySQL
 
