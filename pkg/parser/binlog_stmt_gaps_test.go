@@ -170,3 +170,33 @@ func TestAlterInstance(t *testing.T) {
 	}
 	RunTest(t, table, false)
 }
+
+func TestColumnVisibility(t *testing.T) {
+	table := []testCase{
+		{"CREATE TABLE t (a INT, b INT INVISIBLE)", true, "CREATE TABLE `t` (`a` INT,`b` INT INVISIBLE)"},
+		{"CREATE TABLE t (a INT, b INT VISIBLE)", true, "CREATE TABLE `t` (`a` INT,`b` INT VISIBLE)"},
+		{"CREATE TABLE t (a INT, b INT INVISIBLE NOT NULL DEFAULT 5)", true, "CREATE TABLE `t` (`a` INT,`b` INT INVISIBLE NOT NULL DEFAULT 5)"},
+		// SHOW CREATE TABLE emits the attribute inside a versioned comment.
+		{"CREATE TABLE t (a INT, b INT /*!80023 INVISIBLE */ DEFAULT NULL)", true, "CREATE TABLE `t` (`a` INT,`b` INT INVISIBLE DEFAULT NULL)"},
+		{"CREATE TABLE t (a INT, b INT GENERATED ALWAYS AS (a + 1) VIRTUAL INVISIBLE)", true, "CREATE TABLE `t` (`a` INT,`b` INT GENERATED ALWAYS AS(`a`+1) VIRTUAL INVISIBLE)"},
+		{"CREATE TABLE t (a INT, b INT GENERATED ALWAYS AS (a + 1) STORED INVISIBLE)", true, "CREATE TABLE `t` (`a` INT,`b` INT GENERATED ALWAYS AS(`a`+1) STORED INVISIBLE)"},
+		{"ALTER TABLE t1 ADD COLUMN x INT INVISIBLE", true, "ALTER TABLE `t1` ADD COLUMN `x` INT INVISIBLE"},
+		{"ALTER TABLE t1 MODIFY a INT INVISIBLE", true, "ALTER TABLE `t1` MODIFY COLUMN `a` INT INVISIBLE"},
+		{"ALTER TABLE t1 MODIFY a INT VISIBLE", true, "ALTER TABLE `t1` MODIFY COLUMN `a` INT VISIBLE"},
+		{"ALTER TABLE t1 ALTER COLUMN a SET VISIBLE", true, "ALTER TABLE `t1` ALTER COLUMN `a` SET VISIBLE"},
+		{"ALTER TABLE t1 ALTER COLUMN a SET INVISIBLE", true, "ALTER TABLE `t1` ALTER COLUMN `a` SET INVISIBLE"},
+		{"ALTER TABLE t1 ALTER a SET INVISIBLE", true, "ALTER TABLE `t1` ALTER COLUMN `a` SET INVISIBLE"},
+	}
+	RunTest(t, table, false)
+}
+
+func TestEngineAttribute(t *testing.T) {
+	table := []testCase{
+		{`CREATE TABLE t (c INT ENGINE_ATTRIBUTE '{"x":1}')`, true, "CREATE TABLE `t` (`c` INT ENGINE_ATTRIBUTE = '{\"x\":1}')"},
+		{`CREATE TABLE t (c INT ENGINE_ATTRIBUTE = '{"x":1}' SECONDARY_ENGINE_ATTRIBUTE = '{"y":2}')`, true, "CREATE TABLE `t` (`c` INT ENGINE_ATTRIBUTE = '{\"x\":1}' SECONDARY_ENGINE_ATTRIBUTE = '{\"y\":2}')"},
+		{`CREATE TABLE t (a VARCHAR(200), UNIQUE KEY k (a) VISIBLE ENGINE_ATTRIBUTE '{"a":1}')`, true, "CREATE TABLE `t` (`a` VARCHAR(200),UNIQUE `k`(`a`) VISIBLE ENGINE_ATTRIBUTE = '{\"a\":1}')"},
+		{`CREATE INDEX i ON t1 ((a + b)) INVISIBLE ENGINE_ATTRIBUTE '{"x":1}'`, true, "CREATE INDEX `i` ON `t1` ((`a`+`b`)) INVISIBLE ENGINE_ATTRIBUTE = '{\"x\":1}'"},
+		{`ALTER TABLE t1 ADD INDEX i (a) ENGINE_ATTRIBUTE '{"x":1}'`, true, "ALTER TABLE `t1` ADD INDEX `i`(`a`) ENGINE_ATTRIBUTE = '{\"x\":1}'"},
+	}
+	RunTest(t, table, false)
+}

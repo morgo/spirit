@@ -438,6 +438,8 @@ const (
 	ColumnOptionStorage
 	ColumnOptionSecondaryEngineAttribute
 	ColumnOptionSrid
+	ColumnOptionVisibility
+	ColumnOptionEngineAttribute
 )
 
 var (
@@ -575,6 +577,13 @@ func (n *ColumnOption) Restore(ctx *format.RestoreCtx) error {
 		ctx.WriteString(n.StrValue)
 	case ColumnOptionSrid:
 		ctx.WritePlainf("/*!80003 SRID %d */", n.Srid)
+	case ColumnOptionVisibility:
+		// VISIBLE or INVISIBLE (MySQL 8.0.23+ invisible columns).
+		ctx.WriteKeyWord(n.StrValue)
+	case ColumnOptionEngineAttribute:
+		ctx.WriteKeyWord("ENGINE_ATTRIBUTE")
+		ctx.WritePlain(" = ")
+		ctx.WriteString(n.StrValue)
 	default:
 		return errors.New("an error occurred while splicing ColumnOption")
 	}
@@ -626,6 +635,7 @@ type IndexOption struct {
 	Comment             string
 	ParserName          CIStr
 	Visibility          IndexVisibility
+	EngineAttr          string
 	SecondaryEngineAttr string
 }
 
@@ -637,6 +647,7 @@ func (n *IndexOption) IsEmpty() bool {
 		len(n.ParserName.O) > 0 ||
 		n.Comment != "" ||
 		n.Visibility != IndexVisibilityDefault ||
+		len(n.EngineAttr) > 0 ||
 		len(n.SecondaryEngineAttr) > 0 {
 		return false
 	}
@@ -693,6 +704,16 @@ func (n *IndexOption) Restore(ctx *format.RestoreCtx) error {
 		case IndexVisibilityInvisible:
 			ctx.WriteKeyWord("INVISIBLE")
 		}
+		hasPrevOption = true
+	}
+
+	if n.EngineAttr != "" {
+		if hasPrevOption {
+			ctx.WritePlain(" ")
+		}
+		ctx.WriteKeyWord("ENGINE_ATTRIBUTE")
+		ctx.WritePlain(" = ")
+		ctx.WriteString(n.EngineAttr)
 		hasPrevOption = true
 	}
 
@@ -2306,6 +2327,7 @@ const (
 	AlterTableImportTablespace
 	AlterTableDiscardTablespace
 	AlterTableIndexInvisible
+	AlterTableAlterColumnVisibility
 	// TODO: Add more actions
 	AlterTableOrderByColumns
 )
@@ -2801,6 +2823,17 @@ func (n *AlterTableSpec) Restore(ctx *format.RestoreCtx) error {
 			ctx.WriteKeyWord(" VISIBLE")
 		case IndexVisibilityInvisible:
 			ctx.WriteKeyWord(" INVISIBLE")
+		}
+	case AlterTableAlterColumnVisibility:
+		ctx.WriteKeyWord("ALTER COLUMN ")
+		if err := n.OldColumnName.Restore(ctx); err != nil {
+			return fmt.Errorf("an error occurred while restore AlterTableSpec.OldColumnName: %w", err)
+		}
+		switch n.Visibility { //nolint:exhaustive // the grammar only produces VISIBLE or INVISIBLE
+		case IndexVisibilityVisible:
+			ctx.WriteKeyWord(" SET VISIBLE")
+		case IndexVisibilityInvisible:
+			ctx.WriteKeyWord(" SET INVISIBLE")
 		}
 	default:
 		// TODO: not support

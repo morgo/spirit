@@ -1681,6 +1681,16 @@ AlterTableSpec:
 			NewColumns: []*ast.ColumnDef{colDef},
 		}
 	}
+|	"ALTER" ColumnKeywordOpt ColumnName "SET" IndexInvisible
+	{
+		// ALTER TABLE t ALTER COLUMN c SET {VISIBLE | INVISIBLE} (MySQL
+		// 8.0.23+). Column and index visibility share ast.IndexVisibility.
+		$$ = &ast.AlterTableSpec{
+			Tp:            ast.AlterTableAlterColumnVisibility,
+			OldColumnName: $3.(*ast.ColumnName),
+			Visibility:    $5.(ast.IndexVisibility),
+		}
+	}
 |	"RENAME" "COLUMN" Identifier "TO" Identifier
 	{
 		oldColName := &ast.ColumnName{Name: ast.NewCIStr($3)}
@@ -2464,6 +2474,13 @@ ColumnOption:
 		yylex.AppendError(yylex.Errorf("The STORAGE clause is parsed but ignored by all storage engines."))
 		parser.lastErrorAsWarn()
 	}
+|	"ENGINE_ATTRIBUTE" EqOpt stringLit
+	{
+		$$ = &ast.ColumnOption{
+			Tp:       ast.ColumnOptionEngineAttribute,
+			StrValue: $3,
+		}
+	}
 |	"SECONDARY_ENGINE_ATTRIBUTE" EqOpt stringLit
 	{
 		$$ = &ast.ColumnOption{
@@ -2480,6 +2497,16 @@ ColumnOption:
 			return 1
 		}
 		$$ = &ast.ColumnOption{Tp: ast.ColumnOptionSrid, Srid: uint32(srid)}
+	}
+|	"VISIBLE"
+	{
+		$$ = &ast.ColumnOption{Tp: ast.ColumnOptionVisibility, StrValue: "VISIBLE"}
+	}
+|	"INVISIBLE"
+	{
+		// Invisible columns (MySQL 8.0.23+). SHOW CREATE TABLE emits this as
+		// /*!80023 INVISIBLE */, which the lexer unwraps.
+		$$ = &ast.ColumnOption{Tp: ast.ColumnOptionVisibility, StrValue: "INVISIBLE"}
 	}
 
 StorageMedia:
@@ -4486,6 +4513,8 @@ IndexOptionList:
 				opt1.ParserName = opt2.ParserName
 			} else if opt2.Visibility != ast.IndexVisibilityDefault {
 				opt1.Visibility = opt2.Visibility
+			} else if len(opt2.EngineAttr) > 0 {
+				opt1.EngineAttr = opt2.EngineAttr
 			} else if len(opt2.SecondaryEngineAttr) > 0 {
 				opt1.SecondaryEngineAttr = opt2.SecondaryEngineAttr
 			}
@@ -4523,6 +4552,10 @@ IndexOption:
 		$$ = &ast.IndexOption{
 			Visibility: $1.(ast.IndexVisibility),
 		}
+	}
+|	"ENGINE_ATTRIBUTE" EqOpt stringLit
+	{
+		$$ = &ast.IndexOption{EngineAttr: $3}
 	}
 |	"SECONDARY_ENGINE_ATTRIBUTE" EqOpt stringLit
 	{
