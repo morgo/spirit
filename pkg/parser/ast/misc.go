@@ -100,12 +100,13 @@ func (n *AuthOption) Restore(ctx *format.RestoreCtx) error {
 		ctx.WriteKeyWord(" WITH ")
 		ctx.WriteString(n.AuthPlugin)
 	}
-	if n.ByRandomPassword {
+	switch {
+	case n.ByRandomPassword:
 		ctx.WriteKeyWord(" BY RANDOM PASSWORD")
-	} else if n.ByAuthString {
+	case n.ByAuthString:
 		ctx.WriteKeyWord(" BY ")
 		ctx.WriteString(n.AuthString)
-	} else if n.ByHashString {
+	case n.ByHashString:
 		ctx.WriteKeyWord(" AS ")
 		ctx.WriteString(n.HashString)
 	}
