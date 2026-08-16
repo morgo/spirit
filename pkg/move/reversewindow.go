@@ -254,7 +254,7 @@ func (w *reverseWindow) buildFeed(ctx context.Context) error {
 		cfg.Target = applier.Target{DB: src.db}
 	}
 
-	feed, err := NewReverseFeed(cfg)
+	feed, err := NewReverseFeed(ctx, cfg)
 	if err != nil {
 		return err
 	}
