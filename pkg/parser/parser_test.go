@@ -505,8 +505,11 @@ func TestErrorMsg(t *testing.T) {
 	_, _, err = p.Parse("create table ` `.t (id int);", "", "")
 	require.EqualError(t, err, "[parser:1102]Incorrect database name ' '")
 
+	// Multi-character ESCAPE arguments are grammatically valid in MySQL
+	// (rejected with ER_WRONG_ARGUMENTS at execution time, not 1064), so the
+	// parser keeps them as expressions instead of erroring.
 	_, _, err = p.Parse("select ifnull(a,0) & ifnull(a,0) like '55' ESCAPE '\\\\a' from t;", "", "")
-	require.EqualError(t, err, "[parser:1210]Incorrect arguments to ESCAPE")
+	require.NoError(t, err)
 
 	_, _, err = p.Parse("load data infile 'aaa' into table aaa FIELDS  Enclosed by '\\\\b';", "", "")
 	require.EqualError(t, err, "[parser:1083]Field separator argument is not what is expected; check the manual")

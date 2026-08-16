@@ -175,6 +175,7 @@ var tokenMap = map[string]int{
 	"AS":                         as,
 	"ASC":                        asc,
 	"ASCII":                      ascii,
+	"AT":                         at,
 	"ATTRIBUTE":                  attribute,
 	"AUTHENTICATION":             authentication,
 	"AUTO":                       auto,
@@ -305,6 +306,7 @@ var tokenMap = map[string]int{
 	"FILE_BLOCK_SIZE":            fileBlockSize,
 	"FINISH":                     finish,
 	"GET":                        get,
+	"GROUPING":                   grouping,
 	"HELP":                       help,
 	"INACTIVE":                   inactive,
 	"INITIAL_SIZE":               initialSize,
@@ -320,6 +322,7 @@ var tokenMap = map[string]int{
 	"OPTIMIZER_COSTS":            optimizerCosts,
 	"ORGANIZATION":               organization,
 	"PHASE":                      phase,
+	"QUALIFY":                    qualify,
 	"RECOVER":                    recover,
 	"REFERENCE":                  reference,
 	"REGISTRATION":               registration,
@@ -504,6 +507,8 @@ var tokenMap = map[string]int{
 	"NOWAIT":                     nowait,
 	"NO_WAIT":                    noWaitTablespace,
 	"REDO_BUFFER_SIZE":           redoBufferSize,
+	"SETS":                       sets,
+	"SOUNDS":                     sounds,
 	"STACKED":                    stacked,
 	"UNDO_BUFFER_SIZE":           undoBufferSize,
 	"NULL":                       null,
@@ -761,6 +766,7 @@ var tokenMap = map[string]int{
 	"PASSWORD_LOCK_TIME":         passwordLockTime,
 	"RETURNING":                  returning,
 	"REUSE":                      reuse,
+	"ZONE":                       zone,
 }
 
 // See https://dev.mysql.com/doc/refman/8.0/en/function-resolution.html for details.
@@ -789,6 +795,7 @@ var btFuncTokenMap = map[string]int{
 	"STDDEV":                builtinStddevPop,
 	"STDDEV_POP":            builtinStddevPop,
 	"STDDEV_SAMP":           builtinStddevSamp,
+	"ST_COLLECT":            builtinStCollect,
 	"SUBSTR":                builtinSubstring,
 	"SUBSTRING":             builtinSubstring,
 	"SUM":                   builtinSum,

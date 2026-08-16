@@ -915,3 +915,108 @@ func TestLoadXML(t *testing.T) {
 	}
 	RunTest(t, table, false)
 }
+
+func TestDoStatementAlias(t *testing.T) {
+	table := []testCase{
+		{"DO 1", true, "DO 1"},
+		// MySQL accepts (and discards) aliases on DO expressions.
+		{"DO 1 AS x", true, "DO 1"},
+		{"DO 1 x", true, "DO 1"},
+		{"DO 1 AS 'xyz'", true, "DO 1"},
+		{"DO 1 + 2, SLEEP(0) AS s", true, "DO 1+2, SLEEP(0)"},
+	}
+	RunTest(t, table, false)
+}
+
+func TestLikeEscapeExpression(t *testing.T) {
+	table := []testCase{
+		// Single-character string literals keep the legacy byte representation.
+		{"SELECT 'a' LIKE 'b' ESCAPE '|'", true, "SELECT _UTF8MB4'a' LIKE _UTF8MB4'b' ESCAPE '|'"},
+		{"SELECT 'a' LIKE 'b' ESCAPE ''", true, "SELECT _UTF8MB4'a' LIKE _UTF8MB4'b' ESCAPE ''"},
+		// Everything else is kept as an expression; MySQL validates the
+		// one-character requirement at execution time.
+		{"SELECT a LIKE b ESCAPE 0x5C FROM t", true, "SELECT `a` LIKE `b` ESCAPE x'5c' FROM `t`"},
+		{"SELECT 'x' LIKE 'y' ESCAPE 'ñ'", true, "SELECT _UTF8MB4'x' LIKE _UTF8MB4'y' ESCAPE _UTF8MB4'ñ'"},
+		{"SELECT a LIKE b ESCAPE EXPORT_SET(1,'a','b') FROM t", true, "SELECT `a` LIKE `b` ESCAPE EXPORT_SET(1, _UTF8MB4'a', _UTF8MB4'b') FROM `t`"},
+		{"SELECT a LIKE b ESCAPE (SELECT c FROM u LIMIT 1) FROM t", true, "SELECT `a` LIKE `b` ESCAPE (SELECT `c` FROM `u` LIMIT 1) FROM `t`"},
+		{"SELECT 'a' NOT LIKE 'b' ESCAPE @e", true, "SELECT _UTF8MB4'a' NOT LIKE _UTF8MB4'b' ESCAPE @`e`"},
+	}
+	RunTest(t, table, false)
+}
+
+func TestSelectNoFromHaving(t *testing.T) {
+	table := []testCase{
+		{"SELECT 1 HAVING 1", true, "SELECT 1 HAVING 1"},
+		{"SELECT 1 WHERE 1 HAVING 1", true, "SELECT 1 FROM DUAL WHERE 1 HAVING 1"},
+		{"SELECT 1 WHERE 1 GROUP BY 1 HAVING 1", true, "SELECT 1 FROM DUAL WHERE 1 GROUP BY 1 HAVING 1"},
+		{"SELECT 1 GROUP BY 1 HAVING 1 ORDER BY 1 LIMIT 1", true, "SELECT 1 GROUP BY 1 HAVING 1 ORDER BY 1 LIMIT 1"},
+		{"SELECT 1 FROM DUAL HAVING 1", true, "SELECT 1 HAVING 1"},
+		{"SELECT 1 FROM DUAL WHERE 1 GROUP BY 1 HAVING 1 ORDER BY 1 FOR UPDATE", true, "SELECT 1 FROM DUAL WHERE 1 GROUP BY 1 HAVING 1 ORDER BY 1 FOR UPDATE"},
+	}
+	RunTest(t, table, false)
+}
+
+func TestQualifyClause(t *testing.T) {
+	table := []testCase{
+		{"SELECT c FROM t QUALIFY ROW_NUMBER() OVER (PARTITION BY p ORDER BY o) = 1", true, "SELECT `c` FROM `t` QUALIFY ROW_NUMBER() OVER (PARTITION BY `p` ORDER BY `o`)=1"},
+		{"SELECT c, ROW_NUMBER() OVER w AS rn FROM t WINDOW w AS (ORDER BY c) QUALIFY rn = 1", true, "SELECT `c`,ROW_NUMBER() OVER `w` AS `rn` FROM `t` WINDOW `w` AS (ORDER BY `c`) QUALIFY `rn`=1"},
+		{"SELECT c FROM t WHERE a = 1 GROUP BY c HAVING COUNT(*) > 1 QUALIFY RANK() OVER (ORDER BY c) < 3 ORDER BY c LIMIT 5", true, "SELECT `c` FROM `t` WHERE `a`=1 GROUP BY `c` HAVING COUNT(1)>1 QUALIFY RANK() OVER (ORDER BY `c`)<3 ORDER BY `c` LIMIT 5"},
+		{"SELECT * FROM t QUALIFY ROW_NUMBER() OVER () = 1 INTO OUTFILE '/tmp/x'", true, "SELECT * FROM `t` QUALIFY ROW_NUMBER() OVER ()=1 INTO OUTFILE '/tmp/x'"},
+		// QUALIFY is a reserved word in MySQL 9.7.
+		{"SELECT qualify FROM t", false, ""},
+	}
+	RunTest(t, table, true)
+}
+
+func TestGroupingSets(t *testing.T) {
+	table := []testCase{
+		{"SELECT a, b, SUM(c) FROM t GROUP BY GROUPING SETS ((a), (b), (a, b), ())", true, "SELECT `a`,`b`,SUM(`c`) FROM `t` GROUP BY GROUPING SETS ((`a`),(`b`),(`a`,`b`),())"},
+		{"SELECT a FROM t GROUP BY GROUPING SETS ((a))", true, "SELECT `a` FROM `t` GROUP BY GROUPING SETS ((`a`))"},
+		// GROUPING remains callable as a function and usable as an identifier.
+		{"SELECT GROUPING(a) FROM t GROUP BY a WITH ROLLUP", true, "SELECT GROUPING(`a`) FROM `t` GROUP BY `a` WITH ROLLUP"},
+		{"SELECT grouping FROM t", true, "SELECT `grouping` FROM `t`"},
+		{"SELECT sets FROM t", true, "SELECT `sets` FROM `t`"},
+	}
+	RunTest(t, table, false)
+}
+
+func TestStCollectAggregate(t *testing.T) {
+	table := []testCase{
+		{"SELECT ST_COLLECT(g) FROM t", true, "SELECT ST_COLLECT(`g`) FROM `t`"},
+		{"SELECT ST_COLLECT(DISTINCT g) FROM t", true, "SELECT ST_COLLECT(DISTINCT `g`) FROM `t`"},
+		{"SELECT ST_COLLECT(g) OVER (PARTITION BY p) FROM t", true, "SELECT ST_COLLECT(`g`) OVER (PARTITION BY `p`) FROM `t`"},
+		{"SELECT st_collect FROM t", true, "SELECT `st_collect` FROM `t`"},
+	}
+	RunTest(t, table, true)
+}
+
+func TestCastAtTimeZone(t *testing.T) {
+	table := []testCase{
+		{"SELECT CAST(NULL AT TIME ZONE 'UTC' AS DATETIME)", true, "SELECT CAST(NULL AT TIME ZONE 'UTC' AS DATETIME)"},
+		{"SELECT CAST(TIMESTAMP'2019-10-10 10:11:12' AT TIME ZONE '+00:00' AS DATETIME)", true, "SELECT CAST(TIMESTAMP '2019-10-10 10:11:12' AT TIME ZONE '+00:00' AS DATETIME)"},
+		{"SELECT CAST(a AT TIME ZONE '+00:00' AS DATETIME) FROM t1", true, "SELECT CAST(`a` AT TIME ZONE '+00:00' AS DATETIME) FROM `t1`"},
+		// AT and ZONE remain usable as identifiers.
+		{"SELECT at FROM t", true, "SELECT `at` FROM `t`"},
+		{"SELECT zone FROM t", true, "SELECT `zone` FROM `t`"},
+	}
+	RunTest(t, table, false)
+}
+
+func TestJSONValueTemporalDefault(t *testing.T) {
+	table := []testCase{
+		{"SELECT JSON_VALUE(j, '$.a' RETURNING DATE DEFAULT DATE'2020-01-01' ON ERROR) FROM t", true, "SELECT JSON_VALUE(`j`, _UTF8MB4'$.a' RETURNING DATE DEFAULT DATE '2020-01-01' ON ERROR) FROM `t`"},
+		{"SELECT JSON_VALUE(j, '$.a' RETURNING TIME DEFAULT TIME'10:00:00' ON EMPTY) FROM t", true, "SELECT JSON_VALUE(`j`, _UTF8MB4'$.a' RETURNING TIME DEFAULT TIME '10:00:00' ON EMPTY) FROM `t`"},
+		{"SELECT JSON_VALUE(j, '$.a' RETURNING DATETIME DEFAULT TIMESTAMP'2020-01-01 10:00:00' ON ERROR) FROM t", true, "SELECT JSON_VALUE(`j`, _UTF8MB4'$.a' RETURNING DATETIME DEFAULT TIMESTAMP '2020-01-01 10:00:00' ON ERROR) FROM `t`"},
+	}
+	RunTest(t, table, false)
+}
+
+func TestSoundsLike(t *testing.T) {
+	// MySQL defines `a SOUNDS LIKE b` as `SOUNDEX(a) = SOUNDEX(b)`; the parser
+	// desugars it the same way.
+	table := []testCase{
+		{"SELECT a SOUNDS LIKE b FROM t", true, "SELECT SOUNDEX(`a`)=SOUNDEX(`b`) FROM `t`"},
+		{"SELECT 'x' SOUNDS LIKE 'y'", true, "SELECT SOUNDEX(_UTF8MB4'x')=SOUNDEX(_UTF8MB4'y')"},
+	}
+	RunTest(t, table, false)
+}

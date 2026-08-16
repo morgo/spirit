@@ -775,6 +775,10 @@ type PatternLikeExpr struct {
 	Not bool
 
 	Escape byte
+	// EscapeExpr is a non-literal ESCAPE expression (MySQL accepts any simple
+	// expression and validates the one-character requirement at execution
+	// time). When set, Escape is 0 and the expression is restored verbatim.
+	EscapeExpr ExprNode
 	// EscapeExplicit indicates whether ESCAPE clause is specified explicitly.
 	EscapeExplicit bool
 
@@ -798,7 +802,12 @@ func (n *PatternLikeExpr) Restore(ctx *format.RestoreCtx) error {
 		return fmt.Errorf("an error occurred while restore PatternLikeExpr.Pattern: %w", err)
 	}
 
-	if n.EscapeExplicit && n.Escape != '\\' {
+	if n.EscapeExpr != nil {
+		ctx.WriteKeyWord(" ESCAPE ")
+		if err := n.EscapeExpr.Restore(ctx); err != nil {
+			return fmt.Errorf("an error occurred while restore PatternLikeExpr.EscapeExpr: %w", err)
+		}
+	} else if n.EscapeExplicit && n.Escape != '\\' {
 		ctx.WriteKeyWord(" ESCAPE ")
 		if n.Escape == 0 {
 			// ESCAPE '' means no escape character
@@ -830,6 +839,13 @@ func (n *PatternLikeExpr) Accept(v Visitor) (Node, bool) {
 			return n, false
 		}
 		n.Pattern = node.(ExprNode)
+	}
+	if n.EscapeExpr != nil {
+		node, ok := n.EscapeExpr.Accept(v)
+		if !ok {
+			return n, false
+		}
+		n.EscapeExpr = node.(ExprNode)
 	}
 	return v.Leave(n)
 }

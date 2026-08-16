@@ -584,6 +584,8 @@ type FuncCastExpr struct {
 	FunctionType CastFunctionType
 	// ExplicitCharSet is true when charset is explicit indicated.
 	ExplicitCharSet bool
+	// AtTimeZone is the time zone of CAST(expr AT TIME ZONE 'tz' AS DATETIME).
+	AtTimeZone string
 }
 
 // Restore implements Node interface.
@@ -594,6 +596,10 @@ func (n *FuncCastExpr) Restore(ctx *format.RestoreCtx) error {
 		ctx.WritePlain("(")
 		if err := n.Expr.Restore(ctx); err != nil {
 			return fmt.Errorf("an error occurred while restore FuncCastExpr.Expr: %w", err)
+		}
+		if n.AtTimeZone != "" {
+			ctx.WriteKeyWord(" AT TIME ZONE ")
+			ctx.WriteString(n.AtTimeZone)
 		}
 		ctx.WriteKeyWord(" AS ")
 		n.Tp.RestoreAsCastType(ctx, n.ExplicitCharSet)

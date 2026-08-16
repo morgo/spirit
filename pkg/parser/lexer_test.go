@@ -53,7 +53,7 @@ type testLiteralValue struct {
 
 func TestSingleCharOther(t *testing.T) {
 	table := []testCaseItem{
-		{"AT", identifier},
+		{"AT", at},
 		{"?", paramMarker},
 		{"PLACEHOLDER", identifier},
 		{"=", eq},

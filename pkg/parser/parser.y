@@ -44,6 +44,7 @@ type insertRowAlias struct {
 type likeEscapeSpec struct {
 	escape   string
 	explicit bool
+	expr     ast.ExprNode
 }
 %}
 
@@ -228,6 +229,7 @@ type likeEscapeSpec struct {
 	primary           "PRIMARY"
 	procedure         "PROCEDURE"
 	purge             "PURGE"
+	qualify           "QUALIFY"
 	rangeKwd          "RANGE"
 	rank              "RANK"
 	read              "READ"
@@ -252,6 +254,7 @@ type likeEscapeSpec struct {
 	set               "SET"
 	show              "SHOW"
 	smallIntType      "SMALLINT"
+	sounds            "SOUNDS"
 	spatial           "SPATIAL"
 	sql               "SQL"
 	sqlBigResult      "SQL_BIG_RESULT"
@@ -310,6 +313,7 @@ type likeEscapeSpec struct {
 	always                   "ALWAYS"
 	any                      "ANY"
 	ascii                    "ASCII"
+	at                       "AT"
 	attribute                "ATTRIBUTE"
 	authentication           "AUTHENTICATION"
 	auto                     "AUTO"
@@ -423,6 +427,7 @@ type likeEscapeSpec struct {
 	get                      "GET"
 	global                   "GLOBAL"
 	grants                   "GRANTS"
+	grouping                 "GROUPING"
 	groupReplication         "GROUP_REPLICATION"
 	gtids                    "GTIDS"
 	handler                  "HANDLER"
@@ -589,6 +594,7 @@ type likeEscapeSpec struct {
 	serializable             "SERIALIZABLE"
 	server                   "SERVER"
 	session                  "SESSION"
+	sets                     "SETS"
 	share                    "SHARE"
 	shutdown                 "SHUTDOWN"
 	signed                   "SIGNED"
@@ -678,6 +684,7 @@ type likeEscapeSpec struct {
 	xid                      "XID"
 	xml                      "XML"
 	yearType                 "YEAR"
+	zone                     "ZONE"
 
 	/* The following tokens belong to NotKeywordToken. Notice: make sure these tokens are contained in NotKeywordToken. */
 	addDate                    "ADDDATE"
@@ -699,6 +706,7 @@ type likeEscapeSpec struct {
 	builtinApproxCountDistinct
 	builtinApproxPercentile
 	builtinBitAnd
+	builtinStCollect
 	builtinBitOr
 	builtinBitXor
 	builtinCast
@@ -773,6 +781,7 @@ type likeEscapeSpec struct {
 	SystemVariable                "System defined variable name"
 	UserVariable                  "User defined variable name"
 	GetDiagnosticsConditionNumber "GET DIAGNOSTICS condition number"
+	DoExpression                  "DO statement expression"
 	SubSelect                     "Sub Select"
 	StringLiteral                 "text literal"
 	ExpressionOpt                 "Optional expression"
@@ -938,6 +947,10 @@ type likeEscapeSpec struct {
 	GetDiagnosticsScopeOpt                 "optional GET DIAGNOSTICS scope (CURRENT or STACKED)"
 	GetDiagnosticsItem                     "GET DIAGNOSTICS information item"
 	GetDiagnosticsItemList                 "GET DIAGNOSTICS information item list"
+	QualifyClauseOptional                  "optional QUALIFY clause"
+	DoExpressionList                       "DO statement expression list"
+	GroupingSet                            "grouping set (expression list in parens)"
+	GroupingSetList                        "grouping set list"
 	JsonValueReturningOpt                  "optional JSON_VALUE RETURNING clause"
 	JsonValueOnEmptyOrErrorOpt             "optional JSON_VALUE ON EMPTY/ON ERROR clauses"
 	JsonValueBehavior                      "JSON_VALUE ON EMPTY/ON ERROR behavior"
@@ -1369,6 +1382,7 @@ type likeEscapeSpec struct {
 	DBName                          "Database Name"
 	ExplainForDB                    "SCHEMA or DATABASE keyword of EXPLAIN FOR"
 	XmlRowsIdentifiedByOpt          "optional LOAD XML ROWS IDENTIFIED BY clause"
+	DoAliasOpt                      "optional DO expression alias"
 	ResourceGroupName               "Resource Group Name"
 	ExplainFormatType               "explain format type"
 	FieldAsName                     "Field alias name"
@@ -3868,11 +3882,43 @@ ViewCheckOption:
  * See https://dev.mysql.com/doc/refman/5.7/en/do.html
  ******************************************************************/
 DoStmt:
-	"DO" ExpressionList
+	"DO" DoExpressionList
 	{
 		$$ = &ast.DoStmt{
 			Exprs: $2.([]ast.ExprNode),
 		}
+	}
+
+DoExpressionList:
+	DoExpression
+	{
+		$$ = []ast.ExprNode{$1}
+	}
+|	DoExpressionList ',' DoExpression
+	{
+		$$ = append($1.([]ast.ExprNode), $3)
+	}
+
+DoExpression:
+	Expression DoAliasOpt
+	{
+		// MySQL parses DO through the SELECT item list, so aliases are
+		// accepted; they have no effect and are dropped.
+		$$ = $1
+	}
+
+DoAliasOpt:
+	{
+		$$ = ""
+	}
+|	Identifier
+|	"AS" Identifier
+	{
+		$$ = $2
+	}
+|	"AS" stringLit
+	{
+		$$ = $2
 	}
 
 /*******************************************************************
@@ -4573,9 +4619,12 @@ PredicateExpr:
 		escapeSpec := $4.(*likeEscapeSpec)
 		escape := escapeSpec.escape
 		explicit := escapeSpec.explicit
-		if len(escape) > 1 {
-			yylex.AppendError(ErrWrongArguments.GenByArgs("ESCAPE"))
-			return 1
+		escapeExpr := escapeSpec.expr
+		if escapeExpr == nil && len(escape) > 1 {
+			// Multi-byte escape characters are kept as an expression; MySQL
+			// validates the one-character requirement at execution time.
+			escapeExpr = ast.NewValueExpr(escape, parser.charset, parser.collation)
+			escape = ""
 		}
 		// When ESCAPE empty string is specified, escape is empty and explicit is true.
 		// This means no escape character should be used (Escape = 0).
@@ -4588,6 +4637,7 @@ PredicateExpr:
 			Pattern:        $3,
 			Not:            !$2.(bool),
 			Escape:         escapeChar,
+			EscapeExpr:     escapeExpr,
 			EscapeExplicit: explicit,
 		}
 	}
@@ -4598,6 +4648,13 @@ PredicateExpr:
 |	BitExpr memberof '(' SimpleExpr ')'
 	{
 		$$ = &ast.FuncCallExpr{FnName: ast.NewCIStr(ast.JSONMemberOf), Args: []ast.ExprNode{$1, $4}}
+	}
+|	BitExpr "SOUNDS" "LIKE" BitExpr
+	{
+		// MySQL defines `a SOUNDS LIKE b` as `SOUNDEX(a) = SOUNDEX(b)`.
+		l := &ast.FuncCallExpr{FnName: ast.NewCIStr("soundex"), Args: []ast.ExprNode{$1}}
+		r := &ast.FuncCallExpr{FnName: ast.NewCIStr("soundex"), Args: []ast.ExprNode{$4}}
+		$$ = &ast.BinaryOperationExpr{Op: opcode.EQ, L: l, R: r}
 	}
 |	BitExpr
 
@@ -4610,9 +4667,21 @@ LikeEscapeOpt:
 	{
 		$$ = &likeEscapeSpec{escape: "\\", explicit: false}
 	}
-|	"ESCAPE" stringLit
+|	"ESCAPE" SimpleExpr
 	{
-		$$ = &likeEscapeSpec{escape: $2, explicit: true}
+		// MySQL accepts any simple expression here and validates the
+		// one-character requirement at execution time.
+		spec := &likeEscapeSpec{explicit: true}
+		if ve, ok := $2.(*ast.ValueExpr); ok {
+			if s, isStr := ve.GetValue().(string); isStr {
+				spec.escape = s
+			} else {
+				spec.expr = $2
+			}
+		} else {
+			spec.expr = $2
+		}
+		$$ = spec
 	}
 
 Field:
@@ -4693,6 +4762,30 @@ GroupByClause:
 	"GROUP" "BY" ByList WithRollupClause
 	{
 		$$ = &ast.GroupByClause{Items: $3.([]*ast.ByItem), Rollup: $4.(bool)}
+	}
+|	"GROUP" "BY" "GROUPING" "SETS" '(' GroupingSetList ')'
+	{
+		$$ = &ast.GroupByClause{GroupingSets: $6.([][]ast.ExprNode)}
+	}
+
+GroupingSetList:
+	GroupingSet
+	{
+		$$ = [][]ast.ExprNode{$1.([]ast.ExprNode)}
+	}
+|	GroupingSetList ',' GroupingSet
+	{
+		$$ = append($1.([][]ast.ExprNode), $3.([]ast.ExprNode))
+	}
+
+GroupingSet:
+	'(' ')'
+	{
+		$$ = []ast.ExprNode{}
+	}
+|	'(' ExpressionList ')'
+	{
+		$$ = $2
 	}
 
 HavingClause:
@@ -5155,6 +5248,10 @@ UnReservedKeyword:
 |	"SERVER"
 |	"SOCKET"
 |	"SONAME"
+|	"AT"
+|	"GROUPING"
+|	"SETS"
+|	"ZONE"
 |	"CONDITION"
 |	"DIAGNOSTICS"
 |	"GET"
@@ -5986,6 +6083,33 @@ SimpleExpr:
 			FunctionType: ast.CastBinaryOperator,
 		}
 	}
+|	builtinCast '(' Expression "AT" "TIME" "ZONE" stringLit "AS" CastType ArrayKwdOpt ')'
+	{
+		/* CAST(expr AT TIME ZONE 'tz' AS DATETIME): datetime with time zone conversion. */
+		tp := $9.(*types.FieldType)
+		defaultFlen, defaultDecimal := mysql.GetDefaultFieldLengthAndDecimalForCast(tp.GetType())
+		if tp.GetFlen() == types.UnspecifiedLength {
+			tp.SetFlen(defaultFlen)
+		}
+		if tp.GetDecimal() == types.UnspecifiedLength {
+			tp.SetDecimal(defaultDecimal)
+		}
+		isArray := $10.(bool)
+		tp.SetArray(isArray)
+		explicitCharset := parser.explicitCharset
+		if isArray && !explicitCharset && tp.GetCharset() != charset.CharsetBin {
+			tp.SetCharset(charset.CharsetUTF8MB4)
+			tp.SetCollate(charset.CollationUTF8MB4)
+		}
+		parser.explicitCharset = false
+		$$ = &ast.FuncCastExpr{
+			Expr:            $3,
+			Tp:              tp,
+			FunctionType:    ast.CastFunction,
+			ExplicitCharSet: explicitCharset,
+			AtTimeZone:      $7,
+		}
+	}
 |	builtinCast '(' Expression "AS" CastType ArrayKwdOpt ')'
 	{
 		/* See https://dev.mysql.com/doc/refman/5.7/en/cast-functions.html#function_cast */
@@ -6156,6 +6280,7 @@ FunctionNameConflictNonNow:
 |	"DAY"
 |	"GEOMETRYCOLLECTION"
 |	"GEOMCOLLECTION"
+|	"GROUPING"
 |	"HOUR"
 |	"IF"
 |	"INTERVAL"
@@ -6602,6 +6727,14 @@ SumExpr:
 		}
 	}
 |	builtinMax '(' BuggyDefaultFalseDistinctOpt Expression ')' OptWindowingClause
+	{
+		if $6 != nil {
+			$$ = &ast.WindowFuncExpr{Name: $1, Args: []ast.ExprNode{$4}, Distinct: $3.(bool), Spec: *($6.(*ast.WindowSpec))}
+		} else {
+			$$ = &ast.AggregateFuncExpr{F: $1, Args: []ast.ExprNode{$4}, Distinct: $3.(bool)}
+		}
+	}
+|	builtinStCollect '(' BuggyDefaultFalseDistinctOpt Expression ')' OptWindowingClause
 	{
 		if $6 != nil {
 			$$ = &ast.WindowFuncExpr{Name: $1, Args: []ast.ExprNode{$4}, Distinct: $3.(bool), Spec: *($6.(*ast.WindowSpec))}
@@ -7193,6 +7326,24 @@ JsonValueBehavior:
 	{
 		$$ = &ast.JSONValueOnBehavior{Tp: ast.JSONValueBehaviorDefault, Default: $2}
 	}
+|	"DEFAULT" "DATE" stringLit
+	{
+		expr := ast.NewValueExpr($3, "", "")
+		def := &ast.FuncCallExpr{FnName: ast.NewCIStr(ast.DateLiteral), Args: []ast.ExprNode{expr}}
+		$$ = &ast.JSONValueOnBehavior{Tp: ast.JSONValueBehaviorDefault, Default: def}
+	}
+|	"DEFAULT" "TIME" stringLit
+	{
+		expr := ast.NewValueExpr($3, "", "")
+		def := &ast.FuncCallExpr{FnName: ast.NewCIStr(ast.TimeLiteral), Args: []ast.ExprNode{expr}}
+		$$ = &ast.JSONValueOnBehavior{Tp: ast.JSONValueBehaviorDefault, Default: def}
+	}
+|	"DEFAULT" "TIMESTAMP" stringLit
+	{
+		expr := ast.NewValueExpr($3, "", "")
+		def := &ast.FuncCallExpr{FnName: ast.NewCIStr(ast.TimestampLiteral), Args: []ast.ExprNode{expr}}
+		$$ = &ast.JSONValueOnBehavior{Tp: ast.JSONValueBehaviorDefault, Default: def}
+	}
 
 // MySQL requires ON EMPTY to precede ON ERROR when both are given.
 JsonValueOnEmptyOrErrorOpt:
@@ -7488,13 +7639,13 @@ SelectStmtFromDualTable:
 	}
 
 SelectStmtFromTable:
-	SelectStmtBasic "FROM" TableRefsClause WhereClauseOptional SelectStmtGroup HavingClause WindowClauseOptional
+	SelectStmtBasic "FROM" TableRefsClause WhereClauseOptional SelectStmtGroup HavingClause WindowClauseOptional QualifyClauseOptional
 	{
 		st := $1.(*ast.SelectStmt)
 		st.From = $3.(*ast.TableRefsClause)
 		lastField := st.Fields.Fields[len(st.Fields.Fields)-1]
 		if lastField.Expr != nil && lastField.AsName.O == "" {
-			lastEnd := parser.endOffset(&yyS[yypt-5])
+			lastEnd := parser.endOffset(&yyS[yypt-6])
 			parser.setNodeText(lastField, parser.src[lastField.Offset:lastEnd])
 		}
 		if $4 != nil {
@@ -7509,9 +7660,12 @@ SelectStmtFromTable:
 		if $7 != nil {
 			st.WindowSpecs = ($7.([]ast.WindowSpec))
 		}
+		if $8 != nil {
+			st.Qualify = $8.(ast.ExprNode)
+		}
 		$$ = st
 	}
-|	SelectStmtBasic IntoClause "FROM" TableRefsClause WhereClauseOptional SelectStmtGroup HavingClause WindowClauseOptional
+|	SelectStmtBasic IntoClause "FROM" TableRefsClause WhereClauseOptional SelectStmtGroup HavingClause WindowClauseOptional QualifyClauseOptional
 	{
 		// SELECT ... INTO ... FROM t: MySQL also allows the INTO clause
 		// directly after the select item list.
@@ -7520,7 +7674,7 @@ SelectStmtFromTable:
 		st.From = $4.(*ast.TableRefsClause)
 		lastField := st.Fields.Fields[len(st.Fields.Fields)-1]
 		if lastField.Expr != nil && lastField.AsName.O == "" {
-			lastEnd := parser.endOffset(&yyS[yypt-6])
+			lastEnd := parser.endOffset(&yyS[yypt-7])
 			parser.setNodeText(lastField, parser.src[lastField.Offset:lastEnd])
 		}
 		if $5 != nil {
@@ -7535,7 +7689,19 @@ SelectStmtFromTable:
 		if $8 != nil {
 			st.WindowSpecs = ($8.([]ast.WindowSpec))
 		}
+		if $9 != nil {
+			st.Qualify = $9.(ast.ExprNode)
+		}
 		$$ = st
+	}
+
+QualifyClauseOptional:
+	{
+		$$ = nil
+	}
+|	"QUALIFY" Expression
+	{
+		$$ = $2
 	}
 
 SelectStmt:
@@ -7569,12 +7735,35 @@ SelectStmt:
 		}
 		$$ = st
 	}
-|	SelectStmtBasic WhereClause SelectStmtGroup OrderByOptional SelectStmtLimitOpt SelectLockIntoOpt
+|	SelectStmtBasic WhereClause SelectStmtGroup HavingClause OrderByOptional SelectStmtLimitOpt SelectLockIntoOpt
 	{
 		st := $1.(*ast.SelectStmt)
 		st.Where = $2.(ast.ExprNode)
 		if $3 != nil {
 			st.GroupBy = $3.(*ast.GroupByClause)
+		}
+		if $4 != nil {
+			st.Having = $4.(*ast.HavingClause)
+		}
+		if $5 != nil {
+			st.OrderBy = $5.(*ast.OrderByClause)
+		}
+		if $6 != nil {
+			st.Limit = $6.(*ast.Limit)
+		}
+		if $7 != nil {
+			h := $7.(*selectLockIntoHolder)
+			st.LockInfos = h.locks
+			st.SelectIntoOpt = h.into
+		}
+		$$ = st
+	}
+|	SelectStmtBasic GroupByClause HavingClause OrderByOptional SelectStmtLimitOpt SelectLockIntoOpt
+	{
+		st := $1.(*ast.SelectStmt)
+		st.GroupBy = $2.(*ast.GroupByClause)
+		if $3 != nil {
+			st.Having = $3.(*ast.HavingClause)
 		}
 		if $4 != nil {
 			st.OrderBy = $4.(*ast.OrderByClause)
@@ -7584,23 +7773,6 @@ SelectStmt:
 		}
 		if $6 != nil {
 			h := $6.(*selectLockIntoHolder)
-			st.LockInfos = h.locks
-			st.SelectIntoOpt = h.into
-		}
-		$$ = st
-	}
-|	SelectStmtBasic GroupByClause OrderByOptional SelectStmtLimitOpt SelectLockIntoOpt
-	{
-		st := $1.(*ast.SelectStmt)
-		st.GroupBy = $2.(*ast.GroupByClause)
-		if $3 != nil {
-			st.OrderBy = $3.(*ast.OrderByClause)
-		}
-		if $4 != nil {
-			st.Limit = $4.(*ast.Limit)
-		}
-		if $5 != nil {
-			h := $5.(*selectLockIntoHolder)
 			st.LockInfos = h.locks
 			st.SelectIntoOpt = h.into
 		}
@@ -7631,20 +7803,23 @@ SelectStmt:
 		}
 		$$ = st
 	}
-|	SelectStmtFromDualTable SelectStmtGroup OrderByOptional SelectStmtLimitOpt SelectLockIntoOpt
+|	SelectStmtFromDualTable SelectStmtGroup HavingClause OrderByOptional SelectStmtLimitOpt SelectLockIntoOpt
 	{
 		st := $1.(*ast.SelectStmt)
 		if $2 != nil {
 			st.GroupBy = $2.(*ast.GroupByClause)
 		}
 		if $3 != nil {
-			st.OrderBy = $3.(*ast.OrderByClause)
+			st.Having = $3.(*ast.HavingClause)
 		}
 		if $4 != nil {
-			st.Limit = $4.(*ast.Limit)
+			st.OrderBy = $4.(*ast.OrderByClause)
 		}
 		if $5 != nil {
-			h := $5.(*selectLockIntoHolder)
+			st.Limit = $5.(*ast.Limit)
+		}
+		if $6 != nil {
+			h := $6.(*selectLockIntoHolder)
 			st.LockInfos = h.locks
 			if h.into != nil {
 				if st.SelectIntoOpt != nil {

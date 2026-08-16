@@ -870,11 +870,35 @@ type GroupByClause struct {
 	node
 	Items  []*ByItem
 	Rollup bool
+	// GroupingSets is non-nil for GROUP BY GROUPING SETS ((...), ...);
+	// Items is empty in that case. An empty inner slice is the empty set ().
+	GroupingSets [][]ExprNode
 }
 
 // Restore implements Node interface.
 func (n *GroupByClause) Restore(ctx *format.RestoreCtx) error {
 	ctx.WriteKeyWord("GROUP BY ")
+	if n.GroupingSets != nil {
+		ctx.WriteKeyWord("GROUPING SETS ")
+		ctx.WritePlain("(")
+		for i, set := range n.GroupingSets {
+			if i != 0 {
+				ctx.WritePlain(",")
+			}
+			ctx.WritePlain("(")
+			for j, expr := range set {
+				if j != 0 {
+					ctx.WritePlain(",")
+				}
+				if err := expr.Restore(ctx); err != nil {
+					return fmt.Errorf("an error occurred while restore GroupByClause.GroupingSets[%d][%d]: %w", i, j, err)
+				}
+			}
+			ctx.WritePlain(")")
+		}
+		ctx.WritePlain(")")
+		return nil
+	}
 	for i, v := range n.Items {
 		if i != 0 {
 			ctx.WritePlain(",")
@@ -902,6 +926,15 @@ func (n *GroupByClause) Accept(v Visitor) (Node, bool) {
 			return n, false
 		}
 		n.Items[i] = node.(*ByItem)
+	}
+	for i, set := range n.GroupingSets {
+		for j, expr := range set {
+			node, ok := expr.Accept(v)
+			if !ok {
+				return n, false
+			}
+			n.GroupingSets[i][j] = node.(ExprNode)
+		}
 	}
 	return v.Leave(n)
 }
@@ -1078,6 +1111,8 @@ type SelectStmt struct {
 	Having *HavingClause
 	// WindowSpecs is the window specification list.
 	WindowSpecs []WindowSpec
+	// Qualify is the QUALIFY window-filter condition (MySQL 9.7+).
+	Qualify ExprNode
 	// OrderBy is the ordering expression list.
 	OrderBy *OrderByClause
 	// Limit is the limit clause.
@@ -1265,6 +1300,13 @@ func (n *SelectStmt) Restore(ctx *format.RestoreCtx) error {
 				if err := windowsSpec.Restore(ctx); err != nil {
 					return fmt.Errorf("an error occurred while restore SelectStmt.WindowSpec[%d]: %w", i, err)
 				}
+			}
+		}
+
+		if n.Qualify != nil {
+			ctx.WriteKeyWord(" QUALIFY ")
+			if err := n.Qualify.Restore(ctx); err != nil {
+				return fmt.Errorf("an error occurred while restore SelectStmt.Qualify: %w", err)
 			}
 		}
 	case SelectStmtKindTable:
@@ -1468,6 +1510,13 @@ func (n *SelectStmt) Accept(v Visitor) (Node, bool) {
 			return n, false
 		}
 		n.WindowSpecs[i] = *node.(*WindowSpec)
+	}
+	if n.Qualify != nil {
+		node, ok := n.Qualify.Accept(v)
+		if !ok {
+			return n, false
+		}
+		n.Qualify = node.(ExprNode)
 	}
 
 	if n.OrderBy != nil {
