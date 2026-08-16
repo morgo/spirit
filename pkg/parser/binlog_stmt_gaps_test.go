@@ -334,3 +334,49 @@ func TestDefaultExpression(t *testing.T) {
 	}
 	RunTest(t, table, false)
 }
+
+// TestCharsetRegistry covers parse-level acceptance of every character set
+// MySQL knows (not just the handful TiDB could store), the utf8mb3_* collation
+// spellings, the utf8mb4 locale collations (IDs 310-323), and the
+// BYTE/ASCII/UNICODE column-attribute shorthands from
+// opt_charset_with_opt_binary. Restore shapes were verified against MySQL
+// 8.0.46 SHOW CREATE TABLE.
+func TestCharsetRegistry(t *testing.T) {
+	table := []testCase{
+		// BYTE/ASCII/UNICODE shorthands: BYTE means the binary charset (MySQL
+		// prints binary(10)), ASCII means latin1, UNICODE means ucs2.
+		{"CREATE TABLE t (a CHAR(10) BYTE)", true, "CREATE TABLE `t` (`a` BINARY(10))"},
+		{"CREATE TABLE t (a CHAR(10) ASCII)", true, "CREATE TABLE `t` (`a` CHAR(10) CHARACTER SET LATIN1)"},
+		{"CREATE TABLE t (a CHAR(10) UNICODE)", true, "CREATE TABLE `t` (`a` CHAR(10) CHARACTER SET UCS2)"},
+		{"CREATE TABLE t (a CHAR ASCII)", true, "CREATE TABLE `t` (`a` CHAR CHARACTER SET LATIN1)"},
+		{"CREATE TABLE t (a VARCHAR(10) ASCII)", true, "CREATE TABLE `t` (`a` VARCHAR(10) CHARACTER SET LATIN1)"},
+		{"CREATE TABLE t (a VARCHAR(10) BYTE)", true, "CREATE TABLE `t` (`a` VARBINARY(10))"},
+		{"SELECT CAST('a' AS CHAR(5) UNICODE)", true, "SELECT CAST(_UTF8MB4'a' AS CHAR(5) CHARSET UCS2)"},
+		{"SELECT CAST('a' AS CHAR(5) BYTE)", true, "SELECT CAST(_UTF8MB4'a' AS BINARY(5))"},
+		// Charset name clauses accept the full registry.
+		{"CREATE TABLE t (a TEXT CHARACTER SET ucs2)", true, "CREATE TABLE `t` (`a` TEXT CHARACTER SET UCS2)"},
+		{"CREATE TABLE t (a CHAR(10) CHARACTER SET latin2 COLLATE latin2_general_ci)", true, "CREATE TABLE `t` (`a` CHAR(10) CHARACTER SET LATIN2 COLLATE latin2_general_ci)"},
+		{"CREATE TABLE t (a CHAR(10)) DEFAULT CHARSET=koi8r", true, "CREATE TABLE `t` (`a` CHAR(10)) DEFAULT CHARACTER SET = KOI8R"},
+		{"CREATE DATABASE d CHARACTER SET ucs2", true, "CREATE DATABASE `d` CHARACTER SET = ucs2"},
+		{"ALTER TABLE t CONVERT TO CHARACTER SET ucs2", true, "ALTER TABLE `t` CONVERT TO CHARACTER SET UCS2"},
+		{"SELECT CONVERT('a' USING ucs2)", true, "SELECT CONVERT(_UTF8MB4'a' USING 'ucs2')"},
+		{"SET NAMES ucs2", true, "SET NAMES 'ucs2'"},
+		// String-literal introducers work for any known charset.
+		{"SELECT _ucs2 X'0078'", true, "SELECT _UCS2 x'0078'"},
+		{"SELECT _latin2'abc'", true, "SELECT _LATIN2'abc'"},
+		{"SELECT _utf16 B'01111000'", true, "SELECT _UTF16 b'1111000'"},
+		// utf8mb3_* spellings alias to the registry's utf8_* names, matching
+		// the existing utf8mb3 -> utf8 charset canonicalization.
+		{"CREATE TABLE t (a TEXT COLLATE utf8mb3_danish_ci)", true, "CREATE TABLE `t` (`a` TEXT COLLATE utf8_danish_ci)"},
+		{"SELECT 'a' COLLATE utf8mb3_czech_ci", true, "SELECT _UTF8MB4'a' COLLATE utf8_czech_ci"},
+		{"CREATE TABLE t (a TEXT CHARACTER SET utf8mb3)", true, "CREATE TABLE `t` (`a` TEXT CHARACTER SET UTF8)"},
+		// utf8mb4 locale collations.
+		{"CREATE TABLE t (a TEXT COLLATE utf8mb4_nb_0900_ai_ci)", true, "CREATE TABLE `t` (`a` TEXT COLLATE utf8mb4_nb_0900_ai_ci)"},
+		{"CREATE TABLE t (a TEXT COLLATE utf8mb4_mn_cyrl_0900_as_cs)", true, "CREATE TABLE `t` (`a` TEXT COLLATE utf8mb4_mn_cyrl_0900_as_cs)"},
+		{"SET NAMES utf8mb4 COLLATE utf8mb4_sr_latn_0900_ai_ci", true, "SET NAMES 'utf8mb4' COLLATE 'utf8mb4_sr_latn_0900_ai_ci'"},
+		// Names MySQL does not know are still rejected.
+		{"CREATE TABLE t (a CHAR(10) CHARACTER SET nosuch)", false, ""},
+		{"CREATE TABLE t (a TEXT COLLATE nosuch_ci)", false, ""},
+	}
+	RunTest(t, table, false)
+}

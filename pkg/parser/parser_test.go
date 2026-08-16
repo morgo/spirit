@@ -571,17 +571,19 @@ func TestErrorMsg(t *testing.T) {
 	_, _, err = p.Parse("alter table t lock = randomStr123", "", "")
 	require.EqualError(t, err, "[parser:1801]Unknown LOCK type 'randomStr123'")
 
+	// The UNICODE column attribute means CHARACTER SET ucs2; every charset
+	// MySQL knows is accepted at parse level.
 	_, _, err = p.Parse("create table t (a longtext unicode)", "", "")
-	require.EqualError(t, err, "[parser:1115]Unknown character set: 'ucs2'")
+	require.NoError(t, err)
 
 	_, _, err = p.Parse("create table t (a long byte, b text unicode)", "", "")
-	require.EqualError(t, err, "[parser:1115]Unknown character set: 'ucs2'")
+	require.NoError(t, err)
 
 	_, _, err = p.Parse("create table t (a long ascii, b long unicode)", "", "")
-	require.EqualError(t, err, "[parser:1115]Unknown character set: 'ucs2'")
+	require.NoError(t, err)
 
 	_, _, err = p.Parse("create table t (a text unicode, b mediumtext ascii, c int)", "", "")
-	require.EqualError(t, err, "[parser:1115]Unknown character set: 'ucs2'")
+	require.NoError(t, err)
 
 	_, _, err = p.Parse("select 1 collate some_unknown_collation", "", "")
 	require.EqualError(t, err, "[ddl:1273]Unknown collation: 'some_unknown_collation'")
@@ -1136,23 +1138,25 @@ func TestUnderscoreCharset(t *testing.T) {
 	tests := []struct {
 		cs        string
 		parseFail bool
-		unSupport bool
 	}{
-		{"utf8", false, false},
-		{"gbk", false, true},
-		{"ujis", false, true},
-		{"gbk1", true, true},
-		{"ujisx", true, true},
+		// Every charset MySQL knows works as an introducer; a name the lexer
+		// does not recognize is just an identifier, so the string literal
+		// after it is a syntax error.
+		{"utf8", false},
+		{"gbk", false},
+		{"ujis", false},
+		{"ucs2", false},
+		{"latin2", false},
+		{"utf16le", false},
+		{"gbk1", true},
+		{"ujisx", true},
 	}
 	for _, tt := range tests {
 		sql := fmt.Sprintf("select hex(_%s '3F')", tt.cs)
 		_, err := p.ParseOneStmt(sql, "", "")
-		switch {
-		case tt.parseFail:
+		if tt.parseFail {
 			require.EqualError(t, err, fmt.Sprintf("line 1 column %d near \"'3F')\" ", len(tt.cs)+17))
-		case tt.unSupport:
-			require.EqualError(t, err, ast.ErrUnknownCharacterSet.GenByFormat("Unsupported character introducer: '%-.64s'", tt.cs).Error())
-		default:
+		} else {
 			require.NoError(t, err)
 		}
 	}
@@ -1523,15 +1527,16 @@ func TestInsertStatementMemoryAllocation(t *testing.T) {
 
 func TestCharsetIntroducer(t *testing.T) {
 	p := parser.New()
-	// `_gbk` is a valid character set name, but introducers are restricted
-	// to the charsets with a default legacy collation (see
-	// charset.GetDefaultCollationLegacy).
+	// Any character set MySQL knows works as an introducer, on all three
+	// literal forms (string, hex, bit).
 	_, _, err := p.Parse("select _gbk 'a';", "", "")
-	require.EqualError(t, err, "[ddl:1115]Unsupported character introducer: 'gbk'")
+	require.NoError(t, err)
 	_, _, err = p.Parse("select _gbk 0x1234;", "", "")
-	require.EqualError(t, err, "[ddl:1115]Unsupported character introducer: 'gbk'")
+	require.NoError(t, err)
 	_, _, err = p.Parse("select _gbk 0b101001;", "", "")
-	require.EqualError(t, err, "[ddl:1115]Unsupported character introducer: 'gbk'")
+	require.NoError(t, err)
+	_, _, err = p.Parse("select _ucs2 0x0078;", "", "")
+	require.NoError(t, err)
 }
 
 func TestIssue45898(t *testing.T) {

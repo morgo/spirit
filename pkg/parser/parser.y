@@ -6577,7 +6577,7 @@ CastType:
 		tp.AddFlag(mysql.BinaryFlag)
 		$$ = tp
 	}
-|	Char OptFieldLen OptBinary
+|	Char OptFieldLen OptCharsetWithOptBinary
 	{
 		tp := types.NewFieldType(mysql.TypeVarString)
 		tp.SetFlen($2.(int)) // TODO: Flen should be the flen of expression
@@ -6585,6 +6585,15 @@ CastType:
 		if $3.(*ast.OptBinary).IsBinary {
 			tp.AddFlag(mysql.BinaryFlag)
 			tp.SetCharset(charset.CharsetBin)
+			tp.SetCollate(charset.CollationBin)
+		} else if tp.GetCharset() == charset.CharsetBin {
+			// CHAR(n) BYTE is the binary charset: match what the BINARY
+			// cast target parses to so the restored form re-parses
+			// identically, including its flen-dependent type switch.
+			if tp.GetFlen() != types.UnspecifiedLength {
+				tp.SetType(mysql.TypeString)
+			}
+			tp.AddFlag(mysql.BinaryFlag)
 			tp.SetCollate(charset.CollationBin)
 		} else if tp.GetCharset() != "" {
 			co, err := charset.GetDefaultCollation(tp.GetCharset())
@@ -9949,59 +9958,85 @@ BitValueType:
 	}
 
 StringType:
-	Char FieldLen OptBinary
+	Char FieldLen OptCharsetWithOptBinary
 	{
 		tp := types.NewFieldType(mysql.TypeString)
 		tp.SetFlen($2.(int))
 		tp.SetCharset($3.(*ast.OptBinary).Charset)
+		if $3.(*ast.OptBinary).Charset == charset.CharsetBin {
+			// CHAR(n) BYTE is the binary charset: match what BINARY(n)
+			// parses to so the restored form re-parses identically.
+			tp.AddFlag(mysql.BinaryFlag)
+			tp.SetCollate(charset.CollationBin)
+		}
 		if $3.(*ast.OptBinary).IsBinary {
 			tp.AddFlag(mysql.BinaryFlag)
 		}
 		$$ = tp
 	}
-|	Char OptBinary
+|	Char OptCharsetWithOptBinary
 	{
 		tp := types.NewFieldType(mysql.TypeString)
 		tp.SetCharset($2.(*ast.OptBinary).Charset)
+		if $2.(*ast.OptBinary).Charset == charset.CharsetBin {
+			tp.AddFlag(mysql.BinaryFlag)
+			tp.SetCollate(charset.CollationBin)
+		}
 		if $2.(*ast.OptBinary).IsBinary {
 			tp.AddFlag(mysql.BinaryFlag)
 		}
 		$$ = tp
 	}
-|	NChar FieldLen OptBinary
+|	NChar FieldLen OptCharsetWithOptBinary
 	{
 		tp := types.NewFieldType(mysql.TypeString)
 		tp.SetFlen($2.(int))
 		tp.SetCharset($3.(*ast.OptBinary).Charset)
+		if $3.(*ast.OptBinary).Charset == charset.CharsetBin {
+			tp.AddFlag(mysql.BinaryFlag)
+			tp.SetCollate(charset.CollationBin)
+		}
 		if $3.(*ast.OptBinary).IsBinary {
 			tp.AddFlag(mysql.BinaryFlag)
 		}
 		$$ = tp
 	}
-|	NChar OptBinary
+|	NChar OptCharsetWithOptBinary
 	{
 		tp := types.NewFieldType(mysql.TypeString)
 		tp.SetCharset($2.(*ast.OptBinary).Charset)
+		if $2.(*ast.OptBinary).Charset == charset.CharsetBin {
+			tp.AddFlag(mysql.BinaryFlag)
+			tp.SetCollate(charset.CollationBin)
+		}
 		if $2.(*ast.OptBinary).IsBinary {
 			tp.AddFlag(mysql.BinaryFlag)
 		}
 		$$ = tp
 	}
-|	Varchar FieldLen OptBinary
+|	Varchar FieldLen OptCharsetWithOptBinary
 	{
 		tp := types.NewFieldType(mysql.TypeVarchar)
 		tp.SetFlen($2.(int))
 		tp.SetCharset($3.(*ast.OptBinary).Charset)
+		if $3.(*ast.OptBinary).Charset == charset.CharsetBin {
+			tp.AddFlag(mysql.BinaryFlag)
+			tp.SetCollate(charset.CollationBin)
+		}
 		if $3.(*ast.OptBinary).IsBinary {
 			tp.AddFlag(mysql.BinaryFlag)
 		}
 		$$ = tp
 	}
-|	NVarchar FieldLen OptBinary
+|	NVarchar FieldLen OptCharsetWithOptBinary
 	{
 		tp := types.NewFieldType(mysql.TypeVarchar)
 		tp.SetFlen($2.(int))
 		tp.SetCharset($3.(*ast.OptBinary).Charset)
+		if $3.(*ast.OptBinary).Charset == charset.CharsetBin {
+			tp.AddFlag(mysql.BinaryFlag)
+			tp.SetCollate(charset.CollationBin)
+		}
 		if $3.(*ast.OptBinary).IsBinary {
 			tp.AddFlag(mysql.BinaryFlag)
 		}
