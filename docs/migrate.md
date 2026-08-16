@@ -181,9 +181,9 @@ At 90% of the `lock-wait-timeout` (i.e. after 27 seconds with the default of 30 
 - It refuses to kill connections if they have a transaction open that has modified a large number of rows (>1 million).
 - It refuses to kill connections that hold an explicit `LOCK TABLE`, since unlike transactions these are not always retryable.
 
-This force-kill behavior is always enabled and can not be disabled. Attempting to acquire MDL locks over and over while they are being blocked is not safe — it can bring down production systems. The force-kill behavior of _targeted killing_ is safer for real systems.
+This force-kill behavior is always enabled and cannot be disabled. Attempting to acquire MDL locks over and over while they are being blocked is not safe — it can bring down production systems. The force-kill behavior of _targeted killing_ is safer for real systems.
 
-If you can not tolerate a potential `30s` stall during cutover, consider lowering the `lock_wait_timeout`. The main downside of doing this, is the potential for more connections to be killed by the force kill operation. Before considering increasing the `lock-wait-timeout`, it is almost always better to investigate why you have long running transactions that are preventing Spirit from acquiring the metadata lock. A good starting point is `select * from information_schema.INNODB_TRX`.
+If you cannot tolerate a potential `30s` stall during cutover, consider lowering the `lock_wait_timeout`. The main downside of doing this, is the potential for more connections to be killed by the force kill operation. Before considering increasing the `lock-wait-timeout`, it is almost always better to investigate why you have long running transactions that are preventing Spirit from acquiring the metadata lock. A good starting point is `select * from information_schema.INNODB_TRX`.
 
 ### password
 

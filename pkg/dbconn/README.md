@@ -26,7 +26,7 @@ An important subtlety is that `RetryableTransaction` inspects `SHOW WARNINGS` af
 
 ## Force Kill
 
-Both `ForceExec` and `NewTableLock` implement a timer-based force-kill pattern. They wait for 90% of `LockWaitTimeout`, then query `performance_schema` to identify and kill transactions that are blocking metadata lock acquisition. This is always enabled for migrations; programmatic callers that never take locks (e.g. datasync's read-only source) can disable it via `DBConfig.ForceKill`.
+Both `ForceExec` and `NewTableLock` implement a timer-based force-kill pattern. They wait for 90% of `LockWaitTimeout`, then query `performance_schema` to identify and kill transactions that are blocking metadata lock acquisition. `ForceExec` always arms the kill timer; for `NewTableLock` it is gated on `DBConfig.ForceKill` (default true), which programmatic callers such as datasync's read-only source disable for connections that must never kill.
 
 There are two important safety constraints:
 
