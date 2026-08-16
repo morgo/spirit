@@ -215,3 +215,91 @@ func TestVectorType(t *testing.T) {
 	}
 	RunTest(t, table, false)
 }
+
+func TestACLCreateUser(t *testing.T) {
+	table := []testCase{
+		// IDENTIFIED BY RANDOM PASSWORD (MySQL 8.0.18+).
+		{"CREATE USER pu4@localhost IDENTIFIED BY RANDOM PASSWORD", true, "CREATE USER `pu4`@`localhost` IDENTIFIED BY RANDOM PASSWORD"},
+		{"CREATE USER u1@localhost IDENTIFIED WITH caching_sha2_password BY RANDOM PASSWORD", true, "CREATE USER `u1`@`localhost` IDENTIFIED WITH 'caching_sha2_password' BY RANDOM PASSWORD"},
+		// Multi-factor authentication chains (MySQL 8.0.27+).
+		{"CREATE USER u2@localhost IDENTIFIED BY 'pw1' AND IDENTIFIED WITH authentication_ldap_simple", true, "CREATE USER `u2`@`localhost` IDENTIFIED BY 'pw1' AND IDENTIFIED WITH 'authentication_ldap_simple'"},
+		{"CREATE USER u3@localhost IDENTIFIED BY 'pw1' AND IDENTIFIED WITH authentication_ldap_simple AS 'cn=u3' AND IDENTIFIED WITH authentication_fido", true, "CREATE USER `u3`@`localhost` IDENTIFIED BY 'pw1' AND IDENTIFIED WITH 'authentication_ldap_simple' AS 'cn=u3' AND IDENTIFIED WITH 'authentication_fido'"},
+		// IDENTIFIED WITH plugin AS 'hash' must not lose to GRANT's AS clause.
+		{"CREATE USER x@l IDENTIFIED WITH 'p' AS 'h'", true, "CREATE USER `x`@`l` IDENTIFIED WITH 'p' AS 'h'"},
+		// DEFAULT ROLE clause.
+		{"CREATE USER u4 DEFAULT ROLE r1, r2", true, "CREATE USER `u4`@`%` DEFAULT ROLE `r1`@`%`, `r2`@`%`"},
+		{"CREATE USER u10 IDENTIFIED BY 'x' DEFAULT ROLE r1 REQUIRE SSL PASSWORD EXPIRE NEVER", true, "CREATE USER `u10`@`%` IDENTIFIED BY 'x' DEFAULT ROLE `r1`@`%` REQUIRE SSL PASSWORD EXPIRE NEVER"},
+		// INITIAL AUTHENTICATION (MySQL 8.0.27+ passwordless setup).
+		{"CREATE USER u5@localhost IDENTIFIED WITH authentication_webauthn INITIAL AUTHENTICATION IDENTIFIED BY 'boot'", true, "CREATE USER `u5`@`localhost` IDENTIFIED WITH 'authentication_webauthn' INITIAL AUTHENTICATION IDENTIFIED BY 'boot'"},
+		{"CREATE USER u6@localhost IDENTIFIED WITH authentication_webauthn INITIAL AUTHENTICATION IDENTIFIED BY RANDOM PASSWORD", true, "CREATE USER `u6`@`localhost` IDENTIFIED WITH 'authentication_webauthn' INITIAL AUTHENTICATION IDENTIFIED BY RANDOM PASSWORD"},
+		// PASSWORD REQUIRE CURRENT [OPTIONAL | DEFAULT] (MySQL 8.0.13+).
+		{"CREATE USER u7@localhost IDENTIFIED BY 'p' PASSWORD REQUIRE CURRENT", true, "CREATE USER `u7`@`localhost` IDENTIFIED BY 'p' PASSWORD REQUIRE CURRENT"},
+		{"CREATE USER u8@localhost IDENTIFIED BY 'p' PASSWORD REQUIRE CURRENT OPTIONAL", true, "CREATE USER `u8`@`localhost` IDENTIFIED BY 'p' PASSWORD REQUIRE CURRENT OPTIONAL"},
+		{"CREATE USER u9@localhost IDENTIFIED BY 'p' PASSWORD REQUIRE CURRENT DEFAULT", true, "CREATE USER `u9`@`localhost` IDENTIFIED BY 'p' PASSWORD REQUIRE CURRENT DEFAULT"},
+	}
+	RunTest(t, table, false)
+}
+
+func TestACLAlterUser(t *testing.T) {
+	table := []testCase{
+		// REPLACE 'current' password verification (MySQL 8.0.14+).
+		{"ALTER USER u1@localhost IDENTIFIED BY 'new' REPLACE 'old' RETAIN CURRENT PASSWORD", true, "ALTER USER `u1`@`localhost` IDENTIFIED BY 'new' REPLACE 'old' RETAIN CURRENT PASSWORD"},
+		{"ALTER USER u2@localhost IDENTIFIED BY RANDOM PASSWORD RETAIN CURRENT PASSWORD", true, "ALTER USER `u2`@`localhost` IDENTIFIED BY RANDOM PASSWORD RETAIN CURRENT PASSWORD"},
+		{"ALTER USER u3@localhost IDENTIFIED BY 'new' REPLACE 'old'", true, "ALTER USER `u3`@`localhost` IDENTIFIED BY 'new' REPLACE 'old'"},
+		// DEFAULT ROLE management.
+		{"ALTER USER u4@localhost DEFAULT ROLE ALL", true, "ALTER USER `u4`@`localhost` DEFAULT ROLE ALL"},
+		{"ALTER USER u5@localhost DEFAULT ROLE NONE", true, "ALTER USER `u5`@`localhost` DEFAULT ROLE NONE"},
+		{"ALTER USER IF EXISTS u6@localhost DEFAULT ROLE r1, r2", true, "ALTER USER IF EXISTS `u6`@`localhost` DEFAULT ROLE `r1`@`%`, `r2`@`%`"},
+		// Multi-factor management (MySQL 8.0.27+).
+		{"ALTER USER u7@localhost ADD 2 FACTOR IDENTIFIED WITH authentication_ldap_simple", true, "ALTER USER `u7`@`localhost` ADD 2 FACTOR IDENTIFIED WITH 'authentication_ldap_simple'"},
+		{"ALTER USER u8@localhost MODIFY 3 FACTOR IDENTIFIED WITH authentication_fido", true, "ALTER USER `u8`@`localhost` MODIFY 3 FACTOR IDENTIFIED WITH 'authentication_fido'"},
+		{"ALTER USER u9@localhost DROP 2 FACTOR", true, "ALTER USER `u9`@`localhost` DROP 2 FACTOR"},
+		{"ALTER USER u13@localhost IDENTIFIED BY 'a' AND IDENTIFIED WITH authentication_ldap_simple", true, "ALTER USER `u13`@`localhost` IDENTIFIED BY 'a' AND IDENTIFIED WITH 'authentication_ldap_simple'"},
+		// WebAuthn device registration (MySQL 8.0.27+).
+		{"ALTER USER u10@localhost 2 FACTOR INITIATE REGISTRATION", true, "ALTER USER `u10`@`localhost` 2 FACTOR INITIATE REGISTRATION"},
+		{"ALTER USER u11@localhost 2 FACTOR FINISH REGISTRATION SET CHALLENGE_RESPONSE AS 'blob'", true, "ALTER USER `u11`@`localhost` 2 FACTOR FINISH REGISTRATION SET CHALLENGE_RESPONSE AS 'blob'"},
+		{"ALTER USER u12@localhost 2 FACTOR FINISH REGISTRATION", true, "ALTER USER `u12`@`localhost` 2 FACTOR FINISH REGISTRATION"},
+		{"ALTER USER u14@localhost 2 FACTOR UNREGISTER", true, "ALTER USER `u14`@`localhost` 2 FACTOR UNREGISTER"},
+	}
+	RunTest(t, table, false)
+}
+
+func TestACLSetPassword(t *testing.T) {
+	table := []testCase{
+		{"SET PASSWORD TO RANDOM", true, "SET PASSWORD TO RANDOM"},
+		{"SET PASSWORD = 'new' REPLACE 'old'", true, "SET PASSWORD='new' REPLACE 'old'"},
+		{"SET PASSWORD TO RANDOM REPLACE 'old'", true, "SET PASSWORD TO RANDOM REPLACE 'old'"},
+		{"SET PASSWORD FOR u1@localhost TO RANDOM RETAIN CURRENT PASSWORD", true, "SET PASSWORD FOR `u1`@`localhost` TO RANDOM RETAIN CURRENT PASSWORD"},
+		{"SET PASSWORD FOR u1@localhost = 'new' REPLACE 'old' RETAIN CURRENT PASSWORD", true, "SET PASSWORD FOR `u1`@`localhost`='new' REPLACE 'old' RETAIN CURRENT PASSWORD"},
+		{"SET PASSWORD = 'new'", true, "SET PASSWORD='new'"},
+	}
+	RunTest(t, table, false)
+}
+
+func TestACLGrantRevoke(t *testing.T) {
+	table := []testCase{
+		// GRANT role ... WITH ADMIN OPTION (MySQL 8.0+).
+		{"GRANT r1, r2 TO u1@localhost WITH ADMIN OPTION", true, "GRANT `r1`@`%`, `r2`@`%` TO `u1`@`localhost` WITH ADMIN OPTION"},
+		// GRANT ... AS user [WITH ROLE ...] (MySQL 8.0.16+).
+		{"GRANT SELECT ON db1.* TO u1@localhost AS u2@localhost", true, "GRANT SELECT ON `db1`.* TO `u1`@`localhost` AS `u2`@`localhost`"},
+		{"GRANT SELECT ON db1.* TO u1@localhost AS u2@localhost WITH ROLE ALL", true, "GRANT SELECT ON `db1`.* TO `u1`@`localhost` AS `u2`@`localhost` WITH ROLE ALL"},
+		{"GRANT SELECT ON db1.* TO u1@localhost AS u2@localhost WITH ROLE NONE", true, "GRANT SELECT ON `db1`.* TO `u1`@`localhost` AS `u2`@`localhost` WITH ROLE NONE"},
+		{"GRANT SELECT ON db1.* TO u1@localhost AS u2@localhost WITH ROLE DEFAULT", true, "GRANT SELECT ON `db1`.* TO `u1`@`localhost` AS `u2`@`localhost` WITH ROLE DEFAULT"},
+		{"GRANT SELECT ON db1.* TO u1@localhost AS u2@localhost WITH ROLE ALL EXCEPT r1", true, "GRANT SELECT ON `db1`.* TO `u1`@`localhost` AS `u2`@`localhost` WITH ROLE ALL EXCEPT `r1`@`%`"},
+		{"GRANT SELECT ON db1.* TO u1@localhost AS u2@localhost WITH ROLE r1, r2", true, "GRANT SELECT ON `db1`.* TO `u1`@`localhost` AS `u2`@`localhost` WITH ROLE `r1`@`%`, `r2`@`%`"},
+		{"GRANT SELECT ON db1.* TO u1@localhost WITH GRANT OPTION AS u2@localhost WITH ROLE ALL", true, "GRANT SELECT ON `db1`.* TO `u1`@`localhost` WITH GRANT OPTION AS `u2`@`localhost` WITH ROLE ALL"},
+		// The 5.7-era GRANT auth-hash form must keep AS bound to the plugin.
+		{"GRANT SELECT ON db1.* TO u1 IDENTIFIED WITH 'p' AS 'hash57'", true, "GRANT SELECT ON `db1`.* TO `u1`@`%` IDENTIFIED WITH 'p' AS 'hash57'"},
+		// REVOKE [IF EXISTS] ... [IGNORE UNKNOWN USER] (MySQL 8.0.30+).
+		{"REVOKE IF EXISTS SELECT ON db1.t1 FROM u1@localhost", true, "REVOKE IF EXISTS SELECT ON `db1`.`t1` FROM `u1`@`localhost`"},
+		{"REVOKE IF EXISTS SELECT ON db1.t1 FROM u1@localhost IGNORE UNKNOWN USER", true, "REVOKE IF EXISTS SELECT ON `db1`.`t1` FROM `u1`@`localhost` IGNORE UNKNOWN USER"},
+		{"REVOKE SELECT ON db1.t1 FROM u1@localhost IGNORE UNKNOWN USER", true, "REVOKE SELECT ON `db1`.`t1` FROM `u1`@`localhost` IGNORE UNKNOWN USER"},
+		{"REVOKE IF EXISTS r1 FROM u1@localhost IGNORE UNKNOWN USER", true, "REVOKE IF EXISTS `r1`@`%` FROM `u1`@`localhost` IGNORE UNKNOWN USER"},
+		{"REVOKE ALL PRIVILEGES, GRANT OPTION FROM u1@localhost", true, "REVOKE ALL, GRANT OPTION ON *.* FROM `u1`@`localhost`"},
+		{"REVOKE IF EXISTS ALL PRIVILEGES, GRANT OPTION FROM u1@localhost IGNORE UNKNOWN USER", true, "REVOKE IF EXISTS ALL, GRANT OPTION ON *.* FROM `u1`@`localhost` IGNORE UNKNOWN USER"},
+		// REVOKE PROXY mirrors GRANT PROXY.
+		{"REVOKE PROXY ON u1@localhost FROM u2@localhost", true, "REVOKE PROXY ON `u1`@`localhost` FROM `u2`@`localhost`"},
+		{"REVOKE IF EXISTS PROXY ON u1@localhost FROM u2@localhost, u3@localhost IGNORE UNKNOWN USER", true, "REVOKE IF EXISTS PROXY ON `u1`@`localhost` FROM `u2`@`localhost`, `u3`@`localhost` IGNORE UNKNOWN USER"},
+	}
+	RunTest(t, table, false)
+}

@@ -300,6 +300,7 @@ type likeEscapeSpec struct {
 	account                  "ACCOUNT"
 	action                   "ACTION"
 	active                   "ACTIVE"
+	admin                    "ADMIN"
 	after                    "AFTER"
 	against                  "AGAINST"
 	algorithm                "ALGORITHM"
@@ -307,6 +308,7 @@ type likeEscapeSpec struct {
 	any                      "ANY"
 	ascii                    "ASCII"
 	attribute                "ATTRIBUTE"
+	authentication           "AUTHENTICATION"
 	auto                     "AUTO"
 	autoextendSize           "AUTOEXTEND_SIZE"
 	autoIncrement            "AUTO_INCREMENT"
@@ -323,6 +325,7 @@ type likeEscapeSpec struct {
 	byteType                 "BYTE"
 	cascaded                 "CASCADED"
 	chain                    "CHAIN"
+	challengeResponse        "CHALLENGE_RESPONSE"
 	channel                  "CHANNEL"
 	charsetKwd               "CHARSET"
 	checksum                 "CHECKSUM"
@@ -382,11 +385,13 @@ type likeEscapeSpec struct {
 	export                   "EXPORT"
 	extended                 "EXTENDED"
 	extentSize               "EXTENT_SIZE"
+	factor                   "FACTOR"
 	failedLoginAttempts      "FAILED_LOGIN_ATTEMPTS"
 	faultsSym                "FAULTS"
 	fields                   "FIELDS"
 	file                     "FILE"
 	fileBlockSize            "FILE_BLOCK_SIZE"
+	finish                   "FINISH"
 	first                    "FIRST"
 	fixed                    "FIXED"
 	flush                    "FLUSH"
@@ -409,7 +414,9 @@ type likeEscapeSpec struct {
 	importKwd                "IMPORT"
 	inactive                 "INACTIVE"
 	indexes                  "INDEXES"
+	initial                  "INITIAL"
 	initialSize              "INITIAL_SIZE"
+	initiate                 "INITIATE"
 	insertMethod             "INSERT_METHOD"
 	instance                 "INSTANCE"
 	invisible                "INVISIBLE"
@@ -470,6 +477,7 @@ type likeEscapeSpec struct {
 	one                      "ONE"
 	only                     "ONLY"
 	open                     "OPEN"
+	optional                 "OPTIONAL"
 	organization             "ORGANIZATION"
 	packKeys                 "PACK_KEYS"
 	pageSym                  "PAGE"
@@ -495,11 +503,13 @@ type likeEscapeSpec struct {
 	quarter                  "QUARTER"
 	query                    "QUERY"
 	quick                    "QUICK"
+	random                   "RANDOM"
 	rebuild                  "REBUILD"
 	recover                  "RECOVER"
 	redoBufferSize           "REDO_BUFFER_SIZE"
 	redundant                "REDUNDANT"
 	reference                "REFERENCE"
+	registration             "REGISTRATION"
 	relay                    "RELAY"
 	reload                   "RELOAD"
 	remove                   "REMOVE"
@@ -591,6 +601,7 @@ type likeEscapeSpec struct {
 	undoBufferSize           "UNDO_BUFFER_SIZE"
 	unicodeSym               "UNICODE"
 	unknown                  "UNKNOWN"
+	unregister               "UNREGISTER"
 	user                     "USER"
 	useFrm                   "USE_FRM"
 	userResources            "USER_RESOURCES"
@@ -775,6 +786,7 @@ type likeEscapeSpec struct {
 	ReplaceIntoStmt            "REPLACE INTO statement"
 	RevokeStmt                 "Revoke statement"
 	RevokeRoleStmt             "Revoke role statement"
+	RevokeProxyStmt            "Revoke proxy statement"
 	RollbackStmt               "ROLLBACK statement"
 	ReleaseSavepointStmt       "RELEASE SAVEPOINT statement"
 	SavepointStmt              "SAVEPOINT statement"
@@ -811,6 +823,13 @@ type likeEscapeSpec struct {
 	Assignment                             "assignment"
 	AssignmentList                         "assignment list"
 	AuthOption                             "User auth option"
+	IdentifiedOption                       "One authentication factor (IDENTIFIED ...)"
+	InitialAuthOption                      "INITIAL AUTHENTICATION auth option"
+	ReplacePasswordOpt                     "Optional REPLACE 'current password' clause"
+	RetainCurrentPasswordOpt               "Optional RETAIN CURRENT PASSWORD clause"
+	DefaultRoleClauseOpt                   "Optional DEFAULT ROLE clause of CREATE USER"
+	IgnoreUnknownUserOpt                   "Optional IGNORE UNKNOWN USER clause of REVOKE"
+	GrantAsOpt                             "Optional AS user WITH ROLE clause of GRANT"
 	OptionalBraces                         "optional braces"
 	CastType                               "Cast function target type"
 	CharsetOpt                             "CHARACTER SET option in LOAD DATA"
@@ -4878,6 +4897,17 @@ UnReservedKeyword:
 |	"TYPE"
 |	"NOWAIT"
 |	"INSTANCE"
+|	"ADMIN"
+|	"AUTHENTICATION"
+|	"CHALLENGE_RESPONSE"
+|	"FACTOR"
+|	"FINISH"
+|	"INITIAL"
+|	"INITIATE"
+|	"OPTIONAL"
+|	"RANDOM"
+|	"REGISTRATION"
+|	"UNREGISTER"
 |	"REPLICA"
 |	"LOGS"
 |	"HOSTS"
@@ -8340,21 +8370,42 @@ SetStmt:
 	{
 		$$ = &ast.SetStmt{Variables: $2.([]*ast.VariableAssignment)}
 	}
-|	"SET" "PASSWORD" EqOrAssignmentEq PasswordOpt
+|	"SET" "PASSWORD" EqOrAssignmentEq PasswordOpt ReplacePasswordOpt RetainCurrentPasswordOpt
 	{
-		$$ = &ast.SetPwdStmt{Password: $4}
+		stmt := &ast.SetPwdStmt{Password: $4, RetainCurrentPassword: $6.(bool)}
+		if $5 != nil {
+			stmt.HasReplace = true
+			stmt.ReplaceString = $5.(string)
+		}
+		$$ = stmt
 	}
-|	"SET" "PASSWORD" EqOrAssignmentEq PasswordOpt "RETAIN" "CURRENT" "PASSWORD"
+|	"SET" "PASSWORD" "TO" "RANDOM" ReplacePasswordOpt RetainCurrentPasswordOpt
 	{
-		$$ = &ast.SetPwdStmt{Password: $4, RetainCurrentPassword: true}
+		// SET PASSWORD TO RANDOM (MySQL 8.0.18+).
+		stmt := &ast.SetPwdStmt{Random: true, RetainCurrentPassword: $6.(bool)}
+		if $5 != nil {
+			stmt.HasReplace = true
+			stmt.ReplaceString = $5.(string)
+		}
+		$$ = stmt
 	}
-|	"SET" "PASSWORD" "FOR" Username EqOrAssignmentEq PasswordOpt
+|	"SET" "PASSWORD" "FOR" Username EqOrAssignmentEq PasswordOpt ReplacePasswordOpt RetainCurrentPasswordOpt
 	{
-		$$ = &ast.SetPwdStmt{User: $4.(*auth.UserIdentity), Password: $6}
+		stmt := &ast.SetPwdStmt{User: $4.(*auth.UserIdentity), Password: $6, RetainCurrentPassword: $8.(bool)}
+		if $7 != nil {
+			stmt.HasReplace = true
+			stmt.ReplaceString = $7.(string)
+		}
+		$$ = stmt
 	}
-|	"SET" "PASSWORD" "FOR" Username EqOrAssignmentEq PasswordOpt "RETAIN" "CURRENT" "PASSWORD"
+|	"SET" "PASSWORD" "FOR" Username "TO" "RANDOM" ReplacePasswordOpt RetainCurrentPasswordOpt
 	{
-		$$ = &ast.SetPwdStmt{User: $4.(*auth.UserIdentity), Password: $6, RetainCurrentPassword: true}
+		stmt := &ast.SetPwdStmt{User: $4.(*auth.UserIdentity), Random: true, RetainCurrentPassword: $8.(bool)}
+		if $7 != nil {
+			stmt.HasReplace = true
+			stmt.ReplaceString = $7.(string)
+		}
+		$$ = stmt
 	}
 |	"SET" "GLOBAL" "TRANSACTION" TransactionChars
 	{
@@ -9337,6 +9388,7 @@ Statement:
 |	ReleaseSavepointStmt
 |	RevokeStmt
 |	RevokeRoleStmt
+|	RevokeProxyStmt
 |	SavepointStmt
 |	SetOprStmt
 |	SelectStmt
@@ -10935,24 +10987,36 @@ WhereClauseOptional:
  *  https://dev.mysql.com/doc/refman/5.7/en/account-management-sql.html
  ************************************************************************************/
 CreateUserStmt:
-	"CREATE" "USER" IfNotExists UserSpecList RequireClauseOpt ConnectionOptions PasswordOrLockOptions CommentOrAttributeOption ResourceGroupNameOption
+	"CREATE" "USER" IfNotExists UserSpecList DefaultRoleClauseOpt RequireClauseOpt ConnectionOptions PasswordOrLockOptions CommentOrAttributeOption ResourceGroupNameOption
 	{
 		// See https://dev.mysql.com/doc/refman/8.0/en/create-user.html
 		ret := &ast.CreateUserStmt{
 			IsCreateRole:          false,
 			IfNotExists:           $3.(bool),
 			Specs:                 $4.([]*ast.UserSpec),
-			AuthTokenOrTLSOptions: $5.([]*ast.AuthTokenOrTLSOption),
-			ResourceOptions:       $6.([]*ast.ResourceOption),
-			PasswordOrLockOptions: $7.([]*ast.PasswordOrLockOption),
+			AuthTokenOrTLSOptions: $6.([]*ast.AuthTokenOrTLSOption),
+			ResourceOptions:       $7.([]*ast.ResourceOption),
+			PasswordOrLockOptions: $8.([]*ast.PasswordOrLockOption),
 		}
-		if $8 != nil {
-			ret.CommentOrAttributeOption = $8.(*ast.CommentOrAttributeOption)
+		if $5 != nil {
+			ret.DefaultRoles = $5.([]*auth.RoleIdentity)
 		}
 		if $9 != nil {
-			ret.ResourceGroupNameOption = $9.(*ast.ResourceGroupNameOption)
+			ret.CommentOrAttributeOption = $9.(*ast.CommentOrAttributeOption)
+		}
+		if $10 != nil {
+			ret.ResourceGroupNameOption = $10.(*ast.ResourceGroupNameOption)
 		}
 		$$ = ret
+	}
+
+DefaultRoleClauseOpt:
+	{
+		$$ = nil
+	}
+|	"DEFAULT" "ROLE" RolenameList
+	{
+		$$ = $3
 	}
 
 CreateRoleStmt:
@@ -11017,6 +11081,86 @@ AlterUserStmt:
 		$$ = &ast.AlterUserStmt{
 			IfExists:                  $3.(bool),
 			CurrentDualPasswordOption: ast.DualPasswordDiscardOld,
+		}
+	}
+|	"ALTER" "USER" IfExists Username "DEFAULT" "ROLE" SetDefaultRoleOpt
+	{
+		// ALTER USER ... DEFAULT ROLE {NONE | ALL | role [, role]...}
+		tmp := $7.(*ast.SetRoleStmt)
+		$$ = &ast.AlterUserDefaultRoleStmt{
+			IfExists:   $3.(bool),
+			User:       $4.(*auth.UserIdentity),
+			SetRoleOpt: tmp.SetRoleOpt,
+			RoleList:   tmp.RoleList,
+		}
+	}
+|	"ALTER" "USER" IfExists Username "ADD" NUM "FACTOR" IdentifiedOption
+	{
+		// Multi-factor authentication management (MySQL 8.0.27+).
+		$$ = &ast.AlterUserFactorStmt{
+			IfExists: $3.(bool),
+			User:     $4.(*auth.UserIdentity),
+			Op:       ast.FactorOpAdd,
+			Factor:   getUint64FromNUM($6),
+			AuthOpt:  $8.(*ast.AuthOption),
+		}
+	}
+|	"ALTER" "USER" IfExists Username "MODIFY" NUM "FACTOR" IdentifiedOption
+	{
+		$$ = &ast.AlterUserFactorStmt{
+			IfExists: $3.(bool),
+			User:     $4.(*auth.UserIdentity),
+			Op:       ast.FactorOpModify,
+			Factor:   getUint64FromNUM($6),
+			AuthOpt:  $8.(*ast.AuthOption),
+		}
+	}
+|	"ALTER" "USER" IfExists Username "DROP" NUM "FACTOR"
+	{
+		$$ = &ast.AlterUserFactorStmt{
+			IfExists: $3.(bool),
+			User:     $4.(*auth.UserIdentity),
+			Op:       ast.FactorOpDrop,
+			Factor:   getUint64FromNUM($6),
+		}
+	}
+|	"ALTER" "USER" IfExists Username NUM "FACTOR" "INITIATE" "REGISTRATION"
+	{
+		// WebAuthn device registration (MySQL 8.0.27+).
+		$$ = &ast.AlterUserFactorStmt{
+			IfExists: $3.(bool),
+			User:     $4.(*auth.UserIdentity),
+			Op:       ast.FactorOpInitiateRegistration,
+			Factor:   getUint64FromNUM($5),
+		}
+	}
+|	"ALTER" "USER" IfExists Username NUM "FACTOR" "FINISH" "REGISTRATION"
+	{
+		$$ = &ast.AlterUserFactorStmt{
+			IfExists: $3.(bool),
+			User:     $4.(*auth.UserIdentity),
+			Op:       ast.FactorOpFinishRegistration,
+			Factor:   getUint64FromNUM($5),
+		}
+	}
+|	"ALTER" "USER" IfExists Username NUM "FACTOR" "FINISH" "REGISTRATION" "SET" "CHALLENGE_RESPONSE" "AS" AuthString
+	{
+		$$ = &ast.AlterUserFactorStmt{
+			IfExists:             $3.(bool),
+			User:                 $4.(*auth.UserIdentity),
+			Op:                   ast.FactorOpFinishRegistration,
+			Factor:               getUint64FromNUM($5),
+			HasChallengeResponse: true,
+			ChallengeResponse:    $12,
+		}
+	}
+|	"ALTER" "USER" IfExists Username NUM "FACTOR" "UNREGISTER"
+	{
+		$$ = &ast.AlterUserFactorStmt{
+			IfExists: $3.(bool),
+			User:     $4.(*auth.UserIdentity),
+			Op:       ast.FactorOpUnregister,
+			Factor:   getUint64FromNUM($5),
 		}
 	}
 
@@ -11103,6 +11247,24 @@ UserSpec:
 		}
 		$$ = userSpec
 	}
+|	Username IdentifiedOption "AND" IdentifiedOption
+	{
+		// Two-factor authentication spec (MySQL 8.0.27+).
+		$$ = &ast.UserSpec{
+			User:             $1.(*auth.UserIdentity),
+			AuthOpt:          $2.(*ast.AuthOption),
+			ExtraAuthFactors: []*ast.AuthOption{$4.(*ast.AuthOption)},
+		}
+	}
+|	Username IdentifiedOption "AND" IdentifiedOption "AND" IdentifiedOption
+	{
+		// Three-factor authentication spec (MySQL 8.0.27+).
+		$$ = &ast.UserSpec{
+			User:             $1.(*auth.UserIdentity),
+			AuthOpt:          $2.(*ast.AuthOption),
+			ExtraAuthFactors: []*ast.AuthOption{$4.(*ast.AuthOption), $6.(*ast.AuthOption)},
+		}
+	}
 
 UserSpecList:
 	UserSpec
@@ -11138,6 +11300,24 @@ AlterUserSpec:
 		}
 		$$ = userSpec
 	}
+|	Username IdentifiedOption "AND" IdentifiedOption
+	{
+		// Two-factor authentication spec (MySQL 8.0.27+).
+		$$ = &ast.UserSpec{
+			User:             $1.(*auth.UserIdentity),
+			AuthOpt:          $2.(*ast.AuthOption),
+			ExtraAuthFactors: []*ast.AuthOption{$4.(*ast.AuthOption)},
+		}
+	}
+|	Username IdentifiedOption "AND" IdentifiedOption "AND" IdentifiedOption
+	{
+		// Three-factor authentication spec (MySQL 8.0.27+).
+		$$ = &ast.UserSpec{
+			User:             $1.(*auth.UserIdentity),
+			AuthOpt:          $2.(*ast.AuthOption),
+			ExtraAuthFactors: []*ast.AuthOption{$4.(*ast.AuthOption), $6.(*ast.AuthOption)},
+		}
+	}
 |	Username AuthOptionWithPassword "RETAIN" "CURRENT" "PASSWORD"
 	{
 		$$ = &ast.UserSpec{
@@ -11172,20 +11352,51 @@ AlterUserSpecList:
  * option at all).
  */
 AuthOptionWithPassword:
-	"IDENTIFIED" "BY" AuthString
+	"IDENTIFIED" "BY" AuthString ReplacePasswordOpt
 	{
-		$$ = &ast.AuthOption{
+		opt := &ast.AuthOption{
 			AuthString:   $3,
 			ByAuthString: true,
 		}
+		if $4 != nil {
+			opt.HasReplace = true
+			opt.ReplaceString = $4.(string)
+		}
+		$$ = opt
 	}
-|	"IDENTIFIED" "WITH" AuthPlugin "BY" AuthString
+|	"IDENTIFIED" "BY" "RANDOM" "PASSWORD" ReplacePasswordOpt
 	{
-		$$ = &ast.AuthOption{
+		opt := &ast.AuthOption{ByRandomPassword: true}
+		if $5 != nil {
+			opt.HasReplace = true
+			opt.ReplaceString = $5.(string)
+		}
+		$$ = opt
+	}
+|	"IDENTIFIED" "WITH" AuthPlugin "BY" AuthString ReplacePasswordOpt
+	{
+		opt := &ast.AuthOption{
 			AuthPlugin:   $3,
 			AuthString:   $5,
 			ByAuthString: true,
 		}
+		if $6 != nil {
+			opt.HasReplace = true
+			opt.ReplaceString = $6.(string)
+		}
+		$$ = opt
+	}
+|	"IDENTIFIED" "WITH" AuthPlugin "BY" "RANDOM" "PASSWORD" ReplacePasswordOpt
+	{
+		opt := &ast.AuthOption{
+			AuthPlugin:       $3,
+			ByRandomPassword: true,
+		}
+		if $7 != nil {
+			opt.HasReplace = true
+			opt.ReplaceString = $7.(string)
+		}
+		$$ = opt
 	}
 
 ConnectionOptions:
@@ -11461,31 +11672,85 @@ PasswordOrLockOption:
 			Type: ast.PasswordRequireCurrentDefault,
 		}
 	}
+|	"PASSWORD" "REQUIRE" "CURRENT"
+	{
+		$$ = &ast.PasswordOrLockOption{
+			Type: ast.PasswordRequireCurrent,
+		}
+	}
+|	"PASSWORD" "REQUIRE" "CURRENT" "OPTIONAL"
+	{
+		$$ = &ast.PasswordOrLockOption{
+			Type: ast.PasswordRequireCurrentOptional,
+		}
+	}
 
 AuthOption:
 	{
 		$$ = nil
 	}
-|	"IDENTIFIED" "BY" AuthString
+|	IdentifiedOption
+
+/*
+ * IdentifiedOption is one authentication factor. MySQL 8.0.27+ multi-factor
+ * specs chain up to three of these with AND (see UserSpec / AlterUserSpec).
+ */
+IdentifiedOption:
+	"IDENTIFIED" "BY" AuthString ReplacePasswordOpt
 	{
-		$$ = &ast.AuthOption{
+		opt := &ast.AuthOption{
 			AuthString:   $3,
 			ByAuthString: true,
 		}
+		if $4 != nil {
+			opt.HasReplace = true
+			opt.ReplaceString = $4.(string)
+		}
+		$$ = opt
 	}
-|	"IDENTIFIED" "WITH" AuthPlugin
+|	"IDENTIFIED" "BY" "RANDOM" "PASSWORD" ReplacePasswordOpt
 	{
+		opt := &ast.AuthOption{ByRandomPassword: true}
+		if $5 != nil {
+			opt.HasReplace = true
+			opt.ReplaceString = $5.(string)
+		}
+		$$ = opt
+	}
+|	"IDENTIFIED" "WITH" AuthPlugin %prec empty
+	{
+		// %prec empty: GrantAsOpt puts AS in the follow set of a GRANT user
+		// spec, which LALR-merges into this state. Prefer shifting AS so
+		// IDENTIFIED WITH plugin AS 'hash' parses as the hash form; the rule's
+		// implicit precedence (from WITH) would otherwise win and reduce here.
 		$$ = &ast.AuthOption{
 			AuthPlugin: $3,
 		}
 	}
-|	"IDENTIFIED" "WITH" AuthPlugin "BY" AuthString
+|	"IDENTIFIED" "WITH" AuthPlugin "BY" AuthString ReplacePasswordOpt
 	{
-		$$ = &ast.AuthOption{
+		opt := &ast.AuthOption{
 			AuthPlugin:   $3,
 			AuthString:   $5,
 			ByAuthString: true,
 		}
+		if $6 != nil {
+			opt.HasReplace = true
+			opt.ReplaceString = $6.(string)
+		}
+		$$ = opt
+	}
+|	"IDENTIFIED" "WITH" AuthPlugin "BY" "RANDOM" "PASSWORD" ReplacePasswordOpt
+	{
+		opt := &ast.AuthOption{
+			AuthPlugin:       $3,
+			ByRandomPassword: true,
+		}
+		if $7 != nil {
+			opt.HasReplace = true
+			opt.ReplaceString = $7.(string)
+		}
+		$$ = opt
 	}
 |	"IDENTIFIED" "WITH" AuthPlugin "AS" HashString
 	{
@@ -11495,6 +11760,14 @@ AuthOption:
 			ByHashString: true,
 		}
 	}
+|	"IDENTIFIED" "WITH" AuthPlugin "INITIAL" "AUTHENTICATION" InitialAuthOption
+	{
+		// Passwordless authentication setup (MySQL 8.0.27+).
+		$$ = &ast.AuthOption{
+			AuthPlugin:  $3,
+			InitialAuth: $6.(*ast.AuthOption),
+		}
+	}
 |	"IDENTIFIED" "BY" "PASSWORD" HashString
 	{
 		$$ = &ast.AuthOption{
@@ -11502,6 +11775,46 @@ AuthOption:
 			HashString:   $4,
 			ByHashString: true,
 		}
+	}
+
+InitialAuthOption:
+	"IDENTIFIED" "BY" AuthString
+	{
+		$$ = &ast.AuthOption{
+			AuthString:   $3,
+			ByAuthString: true,
+		}
+	}
+|	"IDENTIFIED" "BY" "RANDOM" "PASSWORD"
+	{
+		$$ = &ast.AuthOption{ByRandomPassword: true}
+	}
+|	"IDENTIFIED" "WITH" AuthPlugin "AS" HashString
+	{
+		$$ = &ast.AuthOption{
+			AuthPlugin:   $3,
+			HashString:   $5,
+			ByHashString: true,
+		}
+	}
+
+ReplacePasswordOpt:
+	{
+		$$ = nil
+	}
+|	"REPLACE" AuthString
+	{
+		// REPLACE 'current password' for password verification (8.0.14+).
+		$$ = $2
+	}
+
+RetainCurrentPasswordOpt:
+	{
+		$$ = false
+	}
+|	"RETAIN" "CURRENT" "PASSWORD"
+	{
+		$$ = true
 	}
 
 AuthPlugin:
@@ -11539,20 +11852,46 @@ RoleSpecList:
 	}
 
 GrantStmt:
-	"GRANT" RoleOrPrivElemList "ON" ObjectType PrivLevel "TO" UserSpecList RequireClauseOpt WithGrantOptionOpt
+	"GRANT" RoleOrPrivElemList "ON" ObjectType PrivLevel "TO" UserSpecList RequireClauseOpt WithGrantOptionOpt GrantAsOpt
 	{
 		p, err := convertToPriv($2.([]*ast.RoleOrPriv))
 		if err != nil {
 			yylex.AppendError(err)
 			return 1
 		}
-		$$ = &ast.GrantStmt{
+		ret := &ast.GrantStmt{
 			Privs:                 p,
 			ObjectType:            $4.(ast.ObjectTypeType),
 			Level:                 $5.(*ast.GrantLevel),
 			Users:                 $7.([]*ast.UserSpec),
 			AuthTokenOrTLSOptions: $8.([]*ast.AuthTokenOrTLSOption),
 			WithGrant:             $9.(bool),
+		}
+		if $10 != nil {
+			ret.As = $10.(*ast.GrantAsClause)
+		}
+		$$ = ret
+	}
+
+GrantAsOpt:
+	{
+		$$ = nil
+	}
+|	"AS" Username
+	{
+		// GRANT ... AS user [WITH ROLE ...] (MySQL 8.0.16+).
+		$$ = &ast.GrantAsClause{
+			User: $2.(*auth.UserIdentity),
+		}
+	}
+|	"AS" Username "WITH" "ROLE" SetRoleOpt
+	{
+		tmp := $5.(*ast.SetRoleStmt)
+		$$ = &ast.GrantAsClause{
+			User:       $2.(*auth.UserIdentity),
+			WithRole:   true,
+			SetRoleOpt: tmp.SetRoleOpt,
+			RoleList:   tmp.RoleList,
 		}
 	}
 
@@ -11577,6 +11916,19 @@ GrantRoleStmt:
 		$$ = &ast.GrantRoleStmt{
 			Roles: r,
 			Users: $4.([]*auth.UserIdentity),
+		}
+	}
+|	"GRANT" RoleOrPrivElemList "TO" UsernameList "WITH" "ADMIN" "OPTION"
+	{
+		r, err := convertToRole($2.([]*ast.RoleOrPriv))
+		if err != nil {
+			yylex.AppendError(err)
+			return 1
+		}
+		$$ = &ast.GrantRoleStmt{
+			Roles:           r,
+			Users:           $4.([]*auth.UserIdentity),
+			WithAdminOption: true,
 		}
 	}
 
@@ -11872,53 +12224,80 @@ PrivLevel:
  * See https://dev.mysql.com/doc/refman/5.7/en/revoke.html
  *******************************************************************************************/
 RevokeStmt:
-	"REVOKE" RoleOrPrivElemList "ON" ObjectType PrivLevel "FROM" UserSpecList
+	"REVOKE" IfExists RoleOrPrivElemList "ON" ObjectType PrivLevel "FROM" UserSpecList IgnoreUnknownUserOpt
 	{
-		p, err := convertToPriv($2.([]*ast.RoleOrPriv))
+		p, err := convertToPriv($3.([]*ast.RoleOrPriv))
 		if err != nil {
 			yylex.AppendError(err)
 			return 1
 		}
 		$$ = &ast.RevokeStmt{
-			Privs:      p,
-			ObjectType: $4.(ast.ObjectTypeType),
-			Level:      $5.(*ast.GrantLevel),
-			Users:      $7.([]*ast.UserSpec),
+			IfExists:          $2.(bool),
+			Privs:             p,
+			ObjectType:        $5.(ast.ObjectTypeType),
+			Level:             $6.(*ast.GrantLevel),
+			Users:             $8.([]*ast.UserSpec),
+			IgnoreUnknownUser: $9.(bool),
 		}
 	}
 
 RevokeRoleStmt:
-	"REVOKE" RoleOrPrivElemList "FROM" UsernameList
+	"REVOKE" IfExists RoleOrPrivElemList "FROM" UsernameList IgnoreUnknownUserOpt
 	{
 		// MySQL has special syntax for REVOKE ALL [PRIVILEGES], GRANT OPTION
 		// which uses the RevokeRoleStmt syntax but is of type RevokeStmt.
 		// It is documented at https://dev.mysql.com/doc/refman/5.7/en/revoke.html
 		// as the "second syntax" for REVOKE. It is only valid if *both*
 		// ALL PRIVILEGES + GRANT OPTION are specified in that order.
-		if isRevokeAllGrant($2.([]*ast.RoleOrPriv)) {
+		if isRevokeAllGrant($3.([]*ast.RoleOrPriv)) {
 			var users []*ast.UserSpec
-			for _, u := range $4.([]*auth.UserIdentity) {
+			for _, u := range $5.([]*auth.UserIdentity) {
 				users = append(users, &ast.UserSpec{
 					User: u,
 				})
 			}
 			$$ = &ast.RevokeStmt{
-				Privs:      []*ast.PrivElem{{Priv: mysql.AllPriv}, {Priv: mysql.GrantPriv}},
-				ObjectType: ast.ObjectTypeNone,
-				Level:      &ast.GrantLevel{Level: ast.GrantLevelGlobal},
-				Users:      users,
+				IfExists:          $2.(bool),
+				Privs:             []*ast.PrivElem{{Priv: mysql.AllPriv}, {Priv: mysql.GrantPriv}},
+				ObjectType:        ast.ObjectTypeNone,
+				Level:             &ast.GrantLevel{Level: ast.GrantLevelGlobal},
+				Users:             users,
+				IgnoreUnknownUser: $6.(bool),
 			}
 		} else {
-			r, err := convertToRole($2.([]*ast.RoleOrPriv))
+			r, err := convertToRole($3.([]*ast.RoleOrPriv))
 			if err != nil {
 				yylex.AppendError(err)
 				return 1
 			}
 			$$ = &ast.RevokeRoleStmt{
-				Roles: r,
-				Users: $4.([]*auth.UserIdentity),
+				IfExists:          $2.(bool),
+				Roles:             r,
+				Users:             $5.([]*auth.UserIdentity),
+				IgnoreUnknownUser: $6.(bool),
 			}
 		}
+	}
+
+RevokeProxyStmt:
+	"REVOKE" IfExists "PROXY" "ON" Username "FROM" UsernameList IgnoreUnknownUserOpt
+	{
+		$$ = &ast.RevokeProxyStmt{
+			IfExists:          $2.(bool),
+			LocalUser:         $5.(*auth.UserIdentity),
+			ExternalUsers:     $7.([]*auth.UserIdentity),
+			IgnoreUnknownUser: $8.(bool),
+		}
+	}
+
+IgnoreUnknownUserOpt:
+	{
+		$$ = false
+	}
+|	"IGNORE" "UNKNOWN" "USER"
+	{
+		// REVOKE ... IGNORE UNKNOWN USER (MySQL 8.0.30+).
+		$$ = true
 	}
 
 /**************************************LoadDataStmt*****************************************
