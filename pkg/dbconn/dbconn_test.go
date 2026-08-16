@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/block/spirit/pkg/dbconn/sqlescape"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
@@ -332,11 +333,11 @@ func TestExecRawVerb(t *testing.T) {
 	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
 
-	err = Exec(t.Context(), db, "DROP TABLE IF EXISTS execraw_percent")
+	err = Exec(t.Context(), db, "DROP TABLE IF EXISTS execraw_percent, execraw_percent2")
 	require.NoError(t, err)
 	err = Exec(t.Context(), db, "CREATE TABLE %n (id INT NOT NULL PRIMARY KEY, %r)",
 		"execraw_percent",
-		"b VARCHAR(20) NOT NULL DEFAULT '50%% off' COMMENT '100%new, a%?b'")
+		sqlescape.RawSQL("b VARCHAR(20) NOT NULL DEFAULT '50%% off' COMMENT '100%new, a%?b'"))
 	require.NoError(t, err)
 	defer func() {
 		require.NoError(t, Exec(context.Background(), db, "DROP TABLE IF EXISTS execraw_percent"))
@@ -350,10 +351,17 @@ func TestExecRawVerb(t *testing.T) {
 	require.Contains(t, createStmt, "COMMENT '100%new, a%?b'")
 
 	// The same text placed in the format string itself is misinterpreted:
-	// %n and %? try to consume arguments that don't exist.
+	// %n and %? try to consume arguments that don't exist. Pin the message so
+	// a leftover execraw_percent2 ("table already exists") can never satisfy
+	// this assertion for the wrong reason.
 	err = Exec(t.Context(), db,
 		"CREATE TABLE execraw_percent2 (id INT NOT NULL PRIMARY KEY, b VARCHAR(20) NOT NULL COMMENT '100%new')")
-	require.Error(t, err)
+	require.ErrorContains(t, err, "missing arguments")
+
+	// A plain string is not accepted for %r: the sqlescape.RawSQL conversion
+	// is the explicit assertion that the text is safe to splice.
+	err = Exec(t.Context(), db, "ALTER TABLE %n %r", "execraw_percent", "ADD COLUMN c INT")
+	require.ErrorContains(t, err, "expect sqlescape.RawSQL")
 }
 
 // TestForceExecRawVerb tests that ForceExec supports the %r verb, while
@@ -390,7 +398,7 @@ func TestForceExecRawVerb(t *testing.T) {
 	// force-killed.
 	err = ForceExec(t.Context(), db, []*table.TableInfo{ti}, config, slog.Default(),
 		"ALTER TABLE %n ALGORITHM=INSTANT, %r", ti.TableName,
-		"ADD COLUMN colc VARCHAR(20) NOT NULL DEFAULT '50%% off' COMMENT '100%new'")
+		sqlescape.RawSQL("ADD COLUMN colc VARCHAR(20) NOT NULL DEFAULT '50%% off' COMMENT '100%new'"))
 	require.NoError(t, err)
 
 	var tbl, createStmt string

@@ -98,6 +98,14 @@ func EscapeIdentifier(identifier string) string {
 	return string(appendEscapedIdentifier(make([]byte, 0, len(identifier)+2), identifier))
 }
 
+// RawSQL marks a string as trusted raw SQL for the %r verb. Converting a
+// value to RawSQL is an explicit assertion that it is safe to execute
+// verbatim (e.g. the operator's own --alter / --statement text): %r performs
+// no quoting and no format interpretation. The conversion is deliberately
+// required — a plain string is rejected — so that `grep -rn 'RawSQL('` is a
+// complete audit list of every raw splice in the tree.
+type RawSQL string
+
 // appendEscapedIdentifier appends identifier to buf as a backtick-quoted MySQL
 // identifier, doubling any embedded backtick. It is the single implementation
 // of identifier quoting — both EscapeIdentifier and the EscapeSQL %n verb use
@@ -258,13 +266,16 @@ func escapeSQL(sql string, args ...any) ([]byte, error) {
 			arg := args[argPos]
 			argPos++
 
-			v, ok := arg.(string)
+			v, ok := arg.(RawSQL)
 			if !ok {
-				return nil, errors.Errorf("expect a raw SQL string for %%r, got %v", arg)
+				// A plain string is rejected on purpose: the RawSQL conversion
+				// at the call site is the explicit, greppable assertion that
+				// this text is safe to splice verbatim.
+				return nil, errors.Errorf("expect sqlescape.RawSQL for %%r, got %T", arg)
 			}
 			// Spliced verbatim: buf is never re-scanned, so %-sequences inside
 			// v (e.g. COMMENT '100%new') are data, not format specifiers.
-			buf = append(buf, v...)
+			buf = append(buf, string(v)...)
 			i++ // skip specifier
 		case '%':
 			buf = append(buf, '%')
@@ -295,11 +306,12 @@ func appendSQLArgString(buf []byte, s string) []byte {
 // 1. %?: automatic conversion by the type of arguments. E.g. []string -> ('s1','s2'..)
 // 2. %%: output %
 // 3. %n: for identifiers, for example ("use %n", db)
-// 4. %r: (spirit extension) splices a string argument in verbatim, with no
-// quoting and no format interpretation. Use it to embed raw user-provided SQL
-// (such as an ALTER clause) into a trusted format string; never concatenate
-// user SQL into the format string itself, where its %n/%?/%% sequences would
-// be misinterpreted.
+// 4. %r: (spirit extension) splices a RawSQL argument in verbatim, with no
+// quoting and no format interpretation; any other type (including a plain
+// string) is an error. Use it to embed raw user-provided SQL (such as an
+// ALTER clause) into a trusted format string; never concatenate user SQL
+// into the format string itself, where its %n/%?/%% sequences would be
+// misinterpreted.
 // But it does not prevent you from doing:
 /*
 	EscapeSQL("select '%?", ";SQL injection!;") => "select '';SQL injection!;'".

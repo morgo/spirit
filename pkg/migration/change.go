@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/block/spirit/pkg/dbconn"
+	"github.com/block/spirit/pkg/dbconn/sqlescape"
 	"github.com/block/spirit/pkg/statement"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/utils"
@@ -53,11 +54,11 @@ func (c *tableChange) alterNewTable(ctx context.Context) error {
 	// legitimately contain % characters (e.g. COMMENT '100%new'), which must
 	// not be interpreted as format specifiers.
 	if err := dbconn.Exec(ctx, c.runner.db, "ALTER TABLE %n %r, ALGORITHM=COPY",
-		c.newTable.TableName, c.stmt.TrimAlter()); err != nil {
+		c.newTable.TableName, sqlescape.RawSQL(c.stmt.TrimAlter())); err != nil {
 		// Retry without the ALGORITHM=COPY. If there is a second error, then the DDL itself
 		// is not supported. It could be a syntax error, in which case we return the second error,
 		// which will probably be easier to read because it is unaltered.
-		if err := dbconn.Exec(ctx, c.runner.db, "ALTER TABLE %n %r", c.newTable.TableName, c.stmt.Alter); err != nil {
+		if err := dbconn.Exec(ctx, c.runner.db, "ALTER TABLE %n %r", c.newTable.TableName, sqlescape.RawSQL(c.stmt.Alter)); err != nil {
 			return err
 		}
 	}
@@ -139,10 +140,10 @@ func (c *tableChange) attemptInstantDDL(ctx context.Context) error {
 			c.runner.logger,
 			"ALTER TABLE %n ALGORITHM=INSTANT, %r",
 			c.table.TableName,
-			c.stmt.Alter,
+			sqlescape.RawSQL(c.stmt.Alter),
 		)
 	}
-	return dbconn.Exec(ctx, c.runner.db, "ALTER TABLE %n ALGORITHM=INSTANT, %r", c.table.TableName, c.stmt.Alter)
+	return dbconn.Exec(ctx, c.runner.db, "ALTER TABLE %n ALGORITHM=INSTANT, %r", c.table.TableName, sqlescape.RawSQL(c.stmt.Alter))
 }
 
 func (c *tableChange) attemptInplaceDDL(ctx context.Context) error {
@@ -156,10 +157,10 @@ func (c *tableChange) attemptInplaceDDL(ctx context.Context) error {
 			c.runner.logger,
 			"ALTER TABLE %n ALGORITHM=INPLACE, LOCK=NONE, %r",
 			c.table.TableName,
-			c.stmt.Alter,
+			sqlescape.RawSQL(c.stmt.Alter),
 		)
 	}
-	return dbconn.Exec(ctx, c.runner.db, "ALTER TABLE %n ALGORITHM=INPLACE, LOCK=NONE, %r", c.table.TableName, c.stmt.Alter)
+	return dbconn.Exec(ctx, c.runner.db, "ALTER TABLE %n ALGORITHM=INPLACE, LOCK=NONE, %r", c.table.TableName, sqlescape.RawSQL(c.stmt.Alter))
 }
 
 func (c *tableChange) cleanup(ctx context.Context) error {

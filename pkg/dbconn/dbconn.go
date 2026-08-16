@@ -308,8 +308,8 @@ func backoff(attempt int) {
 // ForceExec is like Exec but it has some added logic to force kill
 // any connections that are holding up metadata locks preventing this from
 // succeeding. Like Exec, stmt is a sqlescape format string: embed raw user
-// SQL (such as an ALTER clause) with the %r verb, never by concatenating it
-// into stmt.
+// SQL (such as an ALTER clause) with the %r verb and a sqlescape.RawSQL
+// argument, never by concatenating it into stmt.
 func ForceExec(ctx context.Context, db *sql.DB, tables []*table.TableInfo, dbConfig *DBConfig, logger *slog.Logger, stmt string, args ...any) error {
 	// Escape before the kill timer below is armed: a bad format string must
 	// fail fast here, not while a timer that kills other connections is
@@ -377,8 +377,9 @@ func shouldRetryForceExecAfterKill(err error, killTimerFired bool) bool {
 // This makes it a little bit easier to use in error handling.
 // It accepts args which are escaped client side using the sqlescape library.
 // i.e. %n is an identifier, %? is automatic type conversion on a variable,
-// and %r splices a string in verbatim (for raw user SQL such as an ALTER
-// clause, which must never be concatenated into the format string).
+// and %r splices a sqlescape.RawSQL argument in verbatim (for raw user SQL
+// such as an ALTER clause, which must never be concatenated into the format
+// string).
 func Exec(ctx context.Context, db *sql.DB, stmt string, args ...any) error {
 	stmt, err := sqlescape.EscapeSQL(stmt, args...)
 	if err != nil {

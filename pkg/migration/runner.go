@@ -22,6 +22,7 @@ import (
 	"github.com/block/spirit/pkg/checksum"
 	"github.com/block/spirit/pkg/copier"
 	"github.com/block/spirit/pkg/dbconn"
+	"github.com/block/spirit/pkg/dbconn/sqlescape"
 	"github.com/block/spirit/pkg/metrics"
 	"github.com/block/spirit/pkg/migration/check"
 	"github.com/block/spirit/pkg/sentinel"
@@ -297,7 +298,7 @@ func (r *Runner) Run(ctx context.Context) error {
 			// The statement is the user's own SQL and is spliced in with %r:
 			// it may contain % characters in literals (e.g. COMMENT
 			// '100%new') that must not be format-interpreted.
-			err := dbconn.Exec(ctx, r.db, "%r", r.changes[0].stmt.Statement)
+			err := dbconn.Exec(ctx, r.db, "%r", sqlescape.RawSQL(r.changes[0].stmt.Statement))
 			if err != nil {
 				return err
 			}
