@@ -774,3 +774,42 @@ func TestSelectIntoAndLocking(t *testing.T) {
 	}
 	RunTest(t, table, false)
 }
+
+func TestJSONValueFunction(t *testing.T) {
+	table := []testCase{
+		{"SELECT JSON_VALUE(doc, '$.x') FROM t", true, "SELECT JSON_VALUE(`doc`, _UTF8MB4'$.x') FROM `t`"},
+		{"SELECT JSON_VALUE(doc, '$.x' RETURNING SIGNED) FROM t", true, "SELECT JSON_VALUE(`doc`, _UTF8MB4'$.x' RETURNING SIGNED) FROM `t`"},
+		{"SELECT JSON_VALUE(doc, '$.x' RETURNING DECIMAL(6,4)) FROM t", true, "SELECT JSON_VALUE(`doc`, _UTF8MB4'$.x' RETURNING DECIMAL(6, 4)) FROM `t`"},
+		{"SELECT JSON_VALUE(doc, '$.x' RETURNING CHAR(4) CHARSET ascii) FROM t", true, "SELECT JSON_VALUE(`doc`, _UTF8MB4'$.x' RETURNING CHAR(4) CHARSET ASCII) FROM `t`"},
+		{"SELECT JSON_VALUE(doc, '$.x' RETURNING DATETIME NULL ON EMPTY) FROM t", true, "SELECT JSON_VALUE(`doc`, _UTF8MB4'$.x' RETURNING DATETIME NULL ON EMPTY) FROM `t`"},
+		{"SELECT JSON_VALUE(doc, '$.x' DEFAULT 456 ON ERROR) FROM t", true, "SELECT JSON_VALUE(`doc`, _UTF8MB4'$.x' DEFAULT 456 ON ERROR) FROM `t`"},
+		{"SELECT JSON_VALUE(doc, '$.x' NULL ON EMPTY ERROR ON ERROR) FROM t", true, "SELECT JSON_VALUE(`doc`, _UTF8MB4'$.x' NULL ON EMPTY ERROR ON ERROR) FROM `t`"},
+		// MySQL requires ON EMPTY before ON ERROR.
+		{"SELECT JSON_VALUE(doc, '$.x' ERROR ON ERROR NULL ON EMPTY) FROM t", false, ""},
+		// JSON_VALUE stays usable as an identifier.
+		{"SELECT json_value FROM t", true, "SELECT `json_value` FROM `t`"},
+	}
+	RunTest(t, table, false)
+}
+
+func TestExpressionGaps(t *testing.T) {
+	table := []testCase{
+		// WEIGHT_STRING debug form.
+		{"SELECT WEIGHT_STRING(a, 1, 2, 0xC0) FROM t", true, "SELECT WEIGHT_STRING(`a`, 1, 2, x'c0') FROM `t`"},
+		// MATCH as a simple expression (comparison operand) and without parens.
+		{"SELECT * FROM t WHERE MATCH(a) AGAINST('q') > 0.5", true, "SELECT * FROM `t` WHERE MATCH (`a`) AGAINST (_UTF8MB4'q')>0.5"},
+		{"SELECT MATCH a AGAINST('q') FROM t", true, "SELECT MATCH (`a`) AGAINST (_UTF8MB4'q') FROM `t`"},
+		{"SELECT MATCH a, b AGAINST('q' IN BOOLEAN MODE) FROM t", true, "SELECT MATCH (`a`,`b`) AGAINST (_UTF8MB4'q' IN BOOLEAN MODE) FROM `t`"},
+		// Spatial cast targets, including the GEOMCOLLECTION synonym.
+		{"SELECT CAST(x AS POINT) FROM t", true, "SELECT CAST(`x` AS POINT) FROM `t`"},
+		{"SELECT CAST(x AS GEOMCOLLECTION) FROM t", true, "SELECT CAST(`x` AS GEOMETRYCOLLECTION) FROM `t`"},
+		{"SELECT CONVERT(x, MULTIPOLYGON) FROM t", true, "SELECT CONVERT(`x`, MULTIPOLYGON) FROM `t`"},
+		{"CREATE TABLE g (a GEOMCOLLECTION)", true, "CREATE TABLE `g` (`a` GEOMETRYCOLLECTION)"},
+		// GEOMCOLLECTION also names the spatial constructor function.
+		{"SELECT GEOMCOLLECTION(POINT(0, 0))", true, "SELECT GEOMCOLLECTION(POINT(0, 0))"},
+		// New keywords stay usable as identifiers; EMPTY is reserved in MySQL 8.0.4+.
+		{"SELECT returning, geomcollection FROM t", true, "SELECT `returning`,`geomcollection` FROM `t`"},
+		{"CREATE TABLE empty (a INT)", false, ""},
+	}
+	RunTest(t, table, false)
+}

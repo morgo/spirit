@@ -289,6 +289,7 @@ var tokenMap = map[string]int{
 	"DUPLICATE":                  duplicate,
 	"DYNAMIC":                    dynamic,
 	"ELSE":                       elseKwd,
+	"EMPTY":                      empty,
 	"ENABLE":                     enable,
 	"ENCLOSED":                   enclosed,
 	"ENCRYPTION":                 encryption,
@@ -364,6 +365,7 @@ var tokenMap = map[string]int{
 	"GENERAL":                    general,
 	"GENERATED":                  generated,
 	"GEOMETRY":                   geometry,
+	"GEOMCOLLECTION":             geomCollection,
 	"GEOMETRYCOLLECTION":         geometryCollection,
 	"GET_FORMAT":                 getFormat,
 	"GLOBAL":                     global,
@@ -422,6 +424,7 @@ var tokenMap = map[string]int{
 	"JSON_ARRAYAGG":              jsonArrayagg,
 	"JSON_OBJECTAGG":             jsonObjectAgg,
 	"JSON_SUM_CRC32":             jsonSumCrc32,
+	"JSON_VALUE":                 jsonValue,
 	"JSON":                       jsonType,
 	"KEY_BLOCK_SIZE":             keyBlockSize,
 	"KEY":                        key,
@@ -749,6 +752,7 @@ var tokenMap = map[string]int{
 	"WAIT":                       wait,
 	"FAILED_LOGIN_ATTEMPTS":      failedLoginAttempts,
 	"PASSWORD_LOCK_TIME":         passwordLockTime,
+	"RETURNING":                  returning,
 	"REUSE":                      reuse,
 }
 

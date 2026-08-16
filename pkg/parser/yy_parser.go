@@ -493,3 +493,17 @@ type selectLockIntoHolder struct {
 	locks []*ast.SelectLockInfo
 	into  *ast.SelectIntoOption
 }
+
+// jsonValueReturningHolder carries the RETURNING clause of JSON_VALUE while
+// the grammar reduces it; it never appears in the final AST.
+type jsonValueReturningHolder struct {
+	tp              *types.FieldType
+	explicitCharset bool
+}
+
+// jsonValueOnHolder carries the ON EMPTY/ON ERROR clauses of JSON_VALUE while
+// the grammar reduces them; it never appears in the final AST.
+type jsonValueOnHolder struct {
+	onEmpty *ast.JSONValueOnBehavior
+	onError *ast.JSONValueOnBehavior
+}

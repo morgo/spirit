@@ -129,6 +129,7 @@ type likeEscapeSpec struct {
 	drop              "DROP"
 	dual              "DUAL"
 	elseKwd           "ELSE"
+	empty             "EMPTY"
 	enclosed          "ENCLOSED"
 	escaped           "ESCAPED"
 	except            "EXCEPT"
@@ -414,6 +415,7 @@ type likeEscapeSpec struct {
 	full                     "FULL"
 	function                 "FUNCTION"
 	general                  "GENERAL"
+	geomCollection           "GEOMCOLLECTION"
 	geometry                 "GEOMETRY"
 	geometryCollection       "GEOMETRYCOLLECTION"
 	global                   "GLOBAL"
@@ -445,6 +447,7 @@ type likeEscapeSpec struct {
 	isolation                "ISOLATION"
 	issuer                   "ISSUER"
 	jsonType                 "JSON"
+	jsonValue                "JSON_VALUE"
 	keyring                  "KEYRING"
 	keyBlockSize             "KEY_BLOCK_SIZE"
 	language                 "LANGUAGE"
@@ -556,6 +559,7 @@ type likeEscapeSpec struct {
 	restart                  "RESTART"
 	resume                   "RESUME"
 	retain                   "RETAIN"
+	returning                "RETURNING"
 	reuse                    "REUSE"
 	reverse                  "REVERSE"
 	role                     "ROLE"
@@ -921,6 +925,9 @@ type likeEscapeSpec struct {
 	SpaceSepOptionList                     "space-separated replication options"
 	SpaceSepOption                         "single space-separated replication option"
 	BinlogInOpt                            "optional SHOW BINLOG EVENTS IN clause"
+	JsonValueReturningOpt                  "optional JSON_VALUE RETURNING clause"
+	JsonValueOnEmptyOrErrorOpt             "optional JSON_VALUE ON EMPTY/ON ERROR clauses"
+	JsonValueBehavior                      "JSON_VALUE ON EMPTY/ON ERROR behavior"
 	BinlogFromOpt                          "optional SHOW BINLOG EVENTS FROM position"
 	AllOrPartitionNameList                 "All or partition name list"
 	AlgorithmClause                        "Alter table algorithm"
@@ -4262,14 +4269,6 @@ Expression:
 			$$ = &ast.UnaryOperationExpr{Op: opcode.Not, V: $2}
 		}
 	}
-|	"MATCH" '(' ColumnNameList ')' "AGAINST" '(' BitExpr FulltextSearchModifierOpt ')'
-	{
-		$$ = &ast.MatchAgainst{
-			ColumnNames: $3.([]*ast.ColumnName),
-			Against:     $7,
-			Modifier:    ast.FulltextSearchModifier($8.(int)),
-		}
-	}
 |	BoolPri IsOrNotOp trueKwd %prec is
 	{
 		$$ = &ast.IsTruthExpr{Expr: $1, Not: !$2.(bool), True: int64(1)}
@@ -4949,6 +4948,9 @@ UnReservedKeyword:
 |	"MODE"
 |	"WEEK"
 |	"WEIGHT_STRING"
+|	"RETURNING"
+|	"GEOMCOLLECTION"
+|	"JSON_VALUE"
 |	"ANY"
 |	"SOME"
 |	"USER"
@@ -5783,6 +5785,41 @@ SimpleExpr:
 |	FunctionCallKeyword
 |	FunctionCallNonKeyword
 |	FunctionCallGeneric
+|	"MATCH" '(' ColumnNameList ')' "AGAINST" '(' BitExpr FulltextSearchModifierOpt ')'
+	{
+		$$ = &ast.MatchAgainst{
+			ColumnNames: $3.([]*ast.ColumnName),
+			Against:     $7,
+			Modifier:    ast.FulltextSearchModifier($8.(int)),
+		}
+	}
+|	"MATCH" ColumnNameList "AGAINST" '(' BitExpr FulltextSearchModifierOpt ')'
+	{
+		// MySQL also accepts the MATCH column list without parentheses.
+		$$ = &ast.MatchAgainst{
+			ColumnNames: $2.([]*ast.ColumnName),
+			Against:     $5,
+			Modifier:    ast.FulltextSearchModifier($6.(int)),
+		}
+	}
+|	jsonValue '(' Expression ',' Expression JsonValueReturningOpt JsonValueOnEmptyOrErrorOpt ')'
+	{
+		x := &ast.JSONValueExpr{
+			Doc:  $3,
+			Path: $5,
+		}
+		if $6 != nil {
+			r := $6.(*jsonValueReturningHolder)
+			x.ReturningType = r.tp
+			x.ReturningExplicitCharset = r.explicitCharset
+		}
+		if $7 != nil {
+			h := $7.(*jsonValueOnHolder)
+			x.OnEmpty = h.onEmpty
+			x.OnError = h.onError
+		}
+		$$ = x
+	}
 |	SimpleExpr "COLLATE" CollationName
 	{
 		$$ = &ast.SetCollationExpr{Expr: $1, Collate: $3}
@@ -6050,6 +6087,7 @@ FunctionNameConflictNonNow:
 |	"DATABASE"
 |	"DAY"
 |	"GEOMETRYCOLLECTION"
+|	"GEOMCOLLECTION"
 |	"HOUR"
 |	"IF"
 |	"INTERVAL"
@@ -6325,6 +6363,14 @@ FunctionCallNonKeyword:
 		$$ = &ast.FuncCallExpr{
 			FnName: ast.NewCIStr($1),
 			Args:   []ast.ExprNode{$3, ast.NewValueExpr("BINARY", parser.charset, parser.collation), ast.NewValueExpr($6, parser.charset, parser.collation)},
+		}
+	}
+|	weightString '(' Expression ',' Expression ',' Expression ',' Expression ')'
+	{
+		// Undocumented debug form: WEIGHT_STRING(str, retlen, maxlen, flags).
+		$$ = &ast.FuncCallExpr{
+			FnName: ast.NewCIStr($1),
+			Args:   []ast.ExprNode{$3, $5, $7, $9},
 		}
 	}
 |	builtinTranslate '(' Expression ',' Expression ',' Expression ')'
@@ -6968,6 +7014,138 @@ CastType:
 		tp.SetCharset(charset.CharsetBin)
 		tp.SetCollate(charset.CollationBin)
 		$$ = tp
+	}
+|	"GEOMETRY"
+	{
+		tp := types.NewFieldType(mysql.TypeGeometry)
+		tp.SetGeometryType(types.GeomGeometry)
+		tp.AddFlag(mysql.BinaryFlag)
+		tp.SetCharset(charset.CharsetBin)
+		tp.SetCollate(charset.CollationBin)
+		$$ = tp
+	}
+|	"GEOMETRYCOLLECTION"
+	{
+		tp := types.NewFieldType(mysql.TypeGeometry)
+		tp.SetGeometryType(types.GeomGeometryCollection)
+		tp.AddFlag(mysql.BinaryFlag)
+		tp.SetCharset(charset.CharsetBin)
+		tp.SetCollate(charset.CollationBin)
+		$$ = tp
+	}
+|	"GEOMCOLLECTION"
+	{
+		tp := types.NewFieldType(mysql.TypeGeometry)
+		tp.SetGeometryType(types.GeomGeometryCollection)
+		tp.AddFlag(mysql.BinaryFlag)
+		tp.SetCharset(charset.CharsetBin)
+		tp.SetCollate(charset.CollationBin)
+		$$ = tp
+	}
+|	"LINESTRING"
+	{
+		tp := types.NewFieldType(mysql.TypeGeometry)
+		tp.SetGeometryType(types.GeomLineString)
+		tp.AddFlag(mysql.BinaryFlag)
+		tp.SetCharset(charset.CharsetBin)
+		tp.SetCollate(charset.CollationBin)
+		$$ = tp
+	}
+|	"MULTILINESTRING"
+	{
+		tp := types.NewFieldType(mysql.TypeGeometry)
+		tp.SetGeometryType(types.GeomMultiLineString)
+		tp.AddFlag(mysql.BinaryFlag)
+		tp.SetCharset(charset.CharsetBin)
+		tp.SetCollate(charset.CollationBin)
+		$$ = tp
+	}
+|	"MULTIPOINT"
+	{
+		tp := types.NewFieldType(mysql.TypeGeometry)
+		tp.SetGeometryType(types.GeomMultiPoint)
+		tp.AddFlag(mysql.BinaryFlag)
+		tp.SetCharset(charset.CharsetBin)
+		tp.SetCollate(charset.CollationBin)
+		$$ = tp
+	}
+|	"MULTIPOLYGON"
+	{
+		tp := types.NewFieldType(mysql.TypeGeometry)
+		tp.SetGeometryType(types.GeomMultiPolygon)
+		tp.AddFlag(mysql.BinaryFlag)
+		tp.SetCharset(charset.CharsetBin)
+		tp.SetCollate(charset.CollationBin)
+		$$ = tp
+	}
+|	"POINT"
+	{
+		tp := types.NewFieldType(mysql.TypeGeometry)
+		tp.SetGeometryType(types.GeomPoint)
+		tp.AddFlag(mysql.BinaryFlag)
+		tp.SetCharset(charset.CharsetBin)
+		tp.SetCollate(charset.CollationBin)
+		$$ = tp
+	}
+|	"POLYGON"
+	{
+		tp := types.NewFieldType(mysql.TypeGeometry)
+		tp.SetGeometryType(types.GeomPolygon)
+		tp.AddFlag(mysql.BinaryFlag)
+		tp.SetCharset(charset.CharsetBin)
+		tp.SetCollate(charset.CollationBin)
+		$$ = tp
+	}
+
+JsonValueReturningOpt:
+	/* empty */
+	{
+		$$ = nil
+	}
+|	"RETURNING" CastType
+	{
+		explicit := parser.explicitCharset
+		parser.explicitCharset = false
+		$$ = &jsonValueReturningHolder{
+			tp:              $2.(*types.FieldType),
+			explicitCharset: explicit,
+		}
+	}
+
+JsonValueBehavior:
+	"NULL"
+	{
+		$$ = &ast.JSONValueOnBehavior{Tp: ast.JSONValueBehaviorNull}
+	}
+|	"ERROR"
+	{
+		$$ = &ast.JSONValueOnBehavior{Tp: ast.JSONValueBehaviorError}
+	}
+|	"DEFAULT" SignedLiteral
+	{
+		$$ = &ast.JSONValueOnBehavior{Tp: ast.JSONValueBehaviorDefault, Default: $2}
+	}
+
+// MySQL requires ON EMPTY to precede ON ERROR when both are given.
+JsonValueOnEmptyOrErrorOpt:
+	/* empty */
+	{
+		$$ = nil
+	}
+|	JsonValueBehavior "ON" "EMPTY"
+	{
+		$$ = &jsonValueOnHolder{onEmpty: $1.(*ast.JSONValueOnBehavior)}
+	}
+|	JsonValueBehavior "ON" "ERROR"
+	{
+		$$ = &jsonValueOnHolder{onError: $1.(*ast.JSONValueOnBehavior)}
+	}
+|	JsonValueBehavior "ON" "EMPTY" JsonValueBehavior "ON" "ERROR"
+	{
+		$$ = &jsonValueOnHolder{
+			onEmpty: $1.(*ast.JSONValueOnBehavior),
+			onError: $4.(*ast.JSONValueOnBehavior),
+		}
 	}
 
 Priority:
@@ -10787,6 +10965,16 @@ StringType:
 	}
 |	"GEOMETRYCOLLECTION"
 	{
+		tp := types.NewFieldType(mysql.TypeGeometry)
+		tp.SetGeometryType(types.GeomGeometryCollection)
+		tp.AddFlag(mysql.BinaryFlag)
+		tp.SetCharset(charset.CharsetBin)
+		tp.SetCollate(charset.CollationBin)
+		$$ = tp
+	}
+|	"GEOMCOLLECTION"
+	{
+		// Synonym for GEOMETRYCOLLECTION (MySQL 8.0.24+).
 		tp := types.NewFieldType(mysql.TypeGeometry)
 		tp.SetGeometryType(types.GeomGeometryCollection)
 		tp.AddFlag(mysql.BinaryFlag)

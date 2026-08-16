@@ -634,6 +634,25 @@ func (ft *FieldType) RestoreAsCastType(ctx *format.RestoreCtx, explicitCharset b
 		ctx.WriteKeyWord("FLOAT")
 	case mysql.TypeYear:
 		ctx.WriteKeyWord("YEAR")
+	case mysql.TypeGeometry:
+		switch ft.geo {
+		case GeomPoint:
+			ctx.WriteKeyWord("POINT")
+		case GeomLineString:
+			ctx.WriteKeyWord("LINESTRING")
+		case GeomPolygon:
+			ctx.WriteKeyWord("POLYGON")
+		case GeomMultiPoint:
+			ctx.WriteKeyWord("MULTIPOINT")
+		case GeomMultiLineString:
+			ctx.WriteKeyWord("MULTILINESTRING")
+		case GeomMultiPolygon:
+			ctx.WriteKeyWord("MULTIPOLYGON")
+		case GeomGeometryCollection:
+			ctx.WriteKeyWord("GEOMETRYCOLLECTION")
+		default:
+			ctx.WriteKeyWord("GEOMETRY")
+		}
 	}
 	if ft.array {
 		ctx.WritePlain(" ")
