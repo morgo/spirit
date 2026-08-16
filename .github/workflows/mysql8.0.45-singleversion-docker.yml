@@ -24,7 +24,7 @@ jobs:
               - '!docs/**'
 
       # Runs the version-agnostic "single-version" suite
-      # (pkg/migration/{resume,singleversion,lint}_test.go, behind
+      # (pkg/migration/{resume,singleversion}_test.go, behind
       # `//go:build singleversion`) once, against the base 8.0.45 image. The
       # other version-matrix jobs omit the `singleversion` build tag and so skip
       # these files. See the singleversion-test service in compose/compose.yml

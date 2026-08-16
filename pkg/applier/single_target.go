@@ -482,7 +482,7 @@ func (a *SingleTargetApplier) writeWorker(ctx context.Context, quit <-chan struc
 			// callback inline), not on the target, and while blocked it is not
 			// pulling from chunkletBuffer either. Folding it into writeTime
 			// would attribute a completion-path stall to the database, and
-			// leaving it untimed — as it was — hides it from the status line
+			// leaving it untimed — as it was — hides it from the status block
 			// altogether, which is the shape of "more write workers changed
 			// nothing" that is otherwise very hard to see.
 			handoffStart := time.Now()

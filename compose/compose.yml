@@ -36,7 +36,7 @@ services:
       MYSQL_DSN: tsandbox:msandbox@tcp(mysql)/test
 
   # Dedicated runner for the version-agnostic "single-version" suite
-  # (pkg/migration/{resume,singleversion,lint}_test.go, behind
+  # (pkg/migration/{resume,singleversion}_test.go, behind
   # `//go:build singleversion`). It is gated to this one service so it isn't
   # re-run against every MySQL version in the matrix — these tests exercise
   # Spirit's own logic and don't vary by server version. Invoked by
@@ -46,7 +46,7 @@ services:
   singleversion-test:
     build:
       context: ../
-    command: bash -c "go test -json -race -v -tags singleversion -run 'Resume|Checkpoint|UniqueOnNonUniqueData|ChunkerPrefetching|Unparsable|Lint' -timeout=10m -parallel=4 ./pkg/migration/... | tee /proc/1/fd/1 | tparse -all"
+    command: bash -c "go test -json -race -v -tags singleversion -run 'Resume|Checkpoint|UniqueOnNonUniqueData|ChunkerPrefetching|Unparsable' -timeout=10m -parallel=4 ./pkg/migration/... | tee /proc/1/fd/1 | tparse -all"
     depends_on:
       mysql:
         condition: service_healthy

@@ -73,8 +73,6 @@ type Migration struct {
 	DeferCutOver         bool          `name:"defer-cutover" help:"Defer cutover (and checksum) until sentinel table is dropped" optional:"" default:"false"`
 	SkipForceKill        bool          `name:"skip-force-kill" help:"Disable killing long-running transactions in order to acquire metadata lock (MDL) at checksum and cutover time" optional:"" default:"false"`
 	Statement            string        `name:"statement" help:"The SQL statement to run (replaces --table and --alter)" optional:"" default:""`
-	Lint                 bool          `name:"lint" help:"Run lint checks before running migration" optional:""`
-	LintOnly             bool          `name:"lint-only" help:"Run lint checks and exit without performing migration" optional:""`
 
 	// TLS Configuration
 	TLSMode            string `name:"tls-mode" help:"TLS connection mode (case insensitive): DISABLED, PREFERRED (default), REQUIRED, VERIFY_CA, VERIFY_IDENTITY" optional:""`
@@ -113,14 +111,11 @@ type Migration struct {
 	useTestThrottler bool
 }
 
-// Validate is called by Kong after parsing to check for invalid flag combinations.
+// Validate is called by Kong after parsing to reject invalid flag values.
 // Zero values mean "use the default" (normalizeOptions fills them in), so they
 // are not rejected here; only explicitly-negative or otherwise invalid values
-// are caught.
+// are caught. There are currently no cross-flag combination checks.
 func (m *Migration) Validate() error {
-	if m.Lint && m.LintOnly {
-		return errors.New("--lint and --lint-only cannot be used together")
-	}
 	if m.Threads < 0 {
 		return fmt.Errorf("--threads must be non-negative, got %d", m.Threads)
 	}
