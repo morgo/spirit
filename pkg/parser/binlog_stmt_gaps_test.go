@@ -674,3 +674,66 @@ func TestSetPersist(t *testing.T) {
 	}
 	RunTest(t, table, false)
 }
+
+func TestExplainVariants(t *testing.T) {
+	table := []testCase{
+		{"EXPLAIN FORMAT=TREE SELECT * FROM t1", true, "EXPLAIN FORMAT = 'TREE' SELECT * FROM `t1`"},
+		{"EXPLAIN FORMAT = TREE INSERT INTO t1 VALUES (1)", true, "EXPLAIN FORMAT = 'TREE' INSERT INTO `t1` VALUES (1)"},
+		{"EXPLAIN ANALYZE FORMAT=TREE SELECT 1", true, "EXPLAIN ANALYZE FORMAT = 'TREE' SELECT 1"},
+		{"EXPLAIN ANALYZE FORMAT='TREE' SELECT 1", true, "EXPLAIN ANALYZE FORMAT = 'TREE' SELECT 1"},
+		{"EXPLAIN FORMAT=JSON INTO @e SELECT 1", true, "EXPLAIN FORMAT = 'JSON' INTO @e SELECT 1"},
+		{"EXPLAIN ANALYZE FORMAT=JSON INTO @e SELECT a FROM t", true, "EXPLAIN ANALYZE FORMAT = 'JSON' INTO @e SELECT `a` FROM `t`"},
+		{"EXPLAIN INTO @e SELECT 1", false, ""},
+	}
+	RunTest(t, table, false)
+}
+
+func TestShowRoutineStatements(t *testing.T) {
+	table := []testCase{
+		{"SHOW CREATE PROCEDURE db1.p1", true, "SHOW CREATE PROCEDURE `db1`.`p1`"},
+		{"SHOW CREATE FUNCTION f1", true, "SHOW CREATE FUNCTION `f1`"},
+		{"SHOW CREATE TRIGGER trg1", true, "SHOW CREATE TRIGGER `trg1`"},
+		{"SHOW CREATE EVENT db1.ev1", true, "SHOW CREATE EVENT `db1`.`ev1`"},
+		{"SHOW CREATE LIBRARY db1.lib1", true, "SHOW CREATE LIBRARY `db1`.`lib1`"},
+		{"SHOW PROCEDURE STATUS LIKE 'p%'", true, "SHOW PROCEDURE STATUS LIKE _UTF8MB4'p%'"},
+		{"SHOW FUNCTION STATUS WHERE Db='test'", true, "SHOW FUNCTION STATUS WHERE `Db`=_UTF8MB4'test'"},
+		{"SHOW LIBRARY STATUS", true, "SHOW LIBRARY STATUS"},
+		{"SHOW PROCEDURE CODE p1", true, "SHOW PROCEDURE CODE `p1`"},
+		{"SHOW FUNCTION CODE db1.f1", true, "SHOW FUNCTION CODE `db1`.`f1`"},
+		{"SHOW PARSE_TREE SELECT 1", true, "SHOW PARSE_TREE SELECT 1"},
+		{"SHOW CREATE PROCEDURE", false, ""},
+	}
+	RunTest(t, table, false)
+}
+
+func TestShowBinlogAndReplicaStatements(t *testing.T) {
+	table := []testCase{
+		{"SHOW BINARY LOGS", true, "SHOW BINARY LOGS"},
+		{"SHOW MASTER LOGS", true, "SHOW BINARY LOGS"},
+		{"SHOW BINLOG EVENTS", true, "SHOW BINLOG EVENTS"},
+		{"SHOW BINLOG EVENTS IN 'master-bin.000001'", true, "SHOW BINLOG EVENTS IN 'master-bin.000001'"},
+		{"SHOW BINLOG EVENTS IN 'x' FROM 4 LIMIT 2,1", true, "SHOW BINLOG EVENTS IN 'x' FROM 4 LIMIT 2,1"},
+		{"SHOW REPLICAS", true, "SHOW REPLICAS"},
+		{"SHOW SLAVE HOSTS", true, "SHOW REPLICAS"},
+		{"SHOW REPLICA STATUS FOR CHANNEL 'ch'", true, "SHOW REPLICA STATUS FOR CHANNEL 'ch'"},
+		{"SHOW SLAVE STATUS", true, "SHOW REPLICA STATUS"},
+	}
+	RunTest(t, table, false)
+}
+
+func TestShowFilterVariants(t *testing.T) {
+	table := []testCase{
+		{"SHOW WARNINGS LIMIT 1", true, "SHOW WARNINGS LIMIT 1"},
+		{"SHOW WARNINGS LIMIT 2, 1", true, "SHOW WARNINGS LIMIT 2,1"},
+		{"SHOW ERRORS LIMIT 0, 10", true, "SHOW ERRORS LIMIT 0,10"},
+		{"SHOW COUNT(*) WARNINGS", true, "SHOW COUNT(*) WARNINGS"},
+		{"SHOW COUNT(*) ERRORS", true, "SHOW COUNT(*) ERRORS"},
+		{"SHOW LOCAL VARIABLES LIKE 'sql_mode'", true, "SHOW SESSION VARIABLES LIKE _UTF8MB4'sql_mode'"},
+		{"SHOW STORAGE ENGINES", true, "SHOW ENGINES"},
+		// MySQL does not allow LIKE/WHERE on SHOW WARNINGS.
+		{"SHOW WARNINGS LIKE 'x'", false, ""},
+		// New keywords must keep working as identifiers.
+		{"SELECT tree, code, replicas, parse_tree FROM t", true, "SELECT `tree`,`code`,`replicas`,`parse_tree` FROM `t`"},
+	}
+	RunTest(t, table, false)
+}

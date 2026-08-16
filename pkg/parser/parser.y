@@ -339,6 +339,7 @@ type likeEscapeSpec struct {
 	clone                    "CLONE"
 	closeKwd                 "CLOSE"
 	coalesce                 "COALESCE"
+	code                     "CODE"
 	collation                "COLLATION"
 	columns                  "COLUMNS"
 	columnFormat             "COLUMN_FORMAT"
@@ -505,6 +506,7 @@ type likeEscapeSpec struct {
 	pageSym                  "PAGE"
 	parser                   "PARSER"
 	partial                  "PARTIAL"
+	parseTree                "PARSE_TREE"
 	partitioning             "PARTITIONING"
 	partitions               "PARTITIONS"
 	password                 "PASSWORD"
@@ -545,6 +547,7 @@ type likeEscapeSpec struct {
 	repair                   "REPAIR"
 	repeatable               "REPEATABLE"
 	replica                  "REPLICA"
+	replicas                 "REPLICAS"
 	replication              "REPLICATION"
 	reset                    "RESET"
 	resource                 "RESOURCE"
@@ -626,6 +629,7 @@ type likeEscapeSpec struct {
 	timestampType            "TIMESTAMP"
 	tokenIssuer              "TOKEN_ISSUER"
 	traditional              "TRADITIONAL"
+	tree                     "TREE"
 	transaction              "TRANSACTION"
 	triggers                 "TRIGGERS"
 	truncate                 "TRUNCATE"
@@ -915,6 +919,8 @@ type likeEscapeSpec struct {
 	SpaceSepOptionListOpt                  "optional space-separated replication options"
 	SpaceSepOptionList                     "space-separated replication options"
 	SpaceSepOption                         "single space-separated replication option"
+	BinlogInOpt                            "optional SHOW BINLOG EVENTS IN clause"
+	BinlogFromOpt                          "optional SHOW BINLOG EVENTS FROM position"
 	AllOrPartitionNameList                 "All or partition name list"
 	AlgorithmClause                        "Alter table algorithm"
 	AlterTableSpecSingleOpt                "Alter table single option"
@@ -4130,10 +4136,53 @@ ExplainStmt:
 			Analyze: true,
 		}
 	}
+|	ExplainSym "ANALYZE" "FORMAT" "=" stringLit ExplainableStmt
+	{
+		$$ = &ast.ExplainStmt{
+			Stmt:    $6,
+			Format:  $5,
+			Analyze: true,
+		}
+	}
+|	ExplainSym "FORMAT" "=" ExplainFormatType "INTO" singleAtIdentifier ExplainableStmt
+	{
+		$$ = &ast.ExplainStmt{
+			Stmt:    $7,
+			Format:  $4,
+			IntoVar: "@" + $6,
+		}
+	}
+|	ExplainSym "FORMAT" "=" stringLit "INTO" singleAtIdentifier ExplainableStmt
+	{
+		$$ = &ast.ExplainStmt{
+			Stmt:    $7,
+			Format:  $4,
+			IntoVar: "@" + $6,
+		}
+	}
+|	ExplainSym "ANALYZE" "FORMAT" "=" ExplainFormatType "INTO" singleAtIdentifier ExplainableStmt
+	{
+		$$ = &ast.ExplainStmt{
+			Stmt:    $8,
+			Format:  $5,
+			Analyze: true,
+			IntoVar: "@" + $7,
+		}
+	}
+|	ExplainSym "ANALYZE" "FORMAT" "=" stringLit "INTO" singleAtIdentifier ExplainableStmt
+	{
+		$$ = &ast.ExplainStmt{
+			Stmt:    $8,
+			Format:  $5,
+			Analyze: true,
+			IntoVar: "@" + $7,
+		}
+	}
 
 ExplainFormatType:
 	"TRADITIONAL"
 |	"JSON"
+|	"TREE"
 
 SavepointStmt:
 	"SAVEPOINT" Identifier
@@ -4951,6 +5000,7 @@ UnReservedKeyword:
 |	"STATS_AUTO_RECALC"
 |	"ROW_COUNT"
 |	"COALESCE"
+|	"CODE"
 |	"MONTH"
 |	"PROCESS"
 |	"PROFILE"
@@ -5005,6 +5055,7 @@ UnReservedKeyword:
 |	"SWAPS"
 |	"SOURCE"
 |	"TRADITIONAL"
+|	"TREE"
 |	"SQL_BUFFER_RESULT"
 |	"DIRECTORY"
 |	"HISTOGRAM"
@@ -5012,6 +5063,7 @@ UnReservedKeyword:
 |	"LIST"
 |	"NODEGROUP"
 |	"PARTIAL"
+|	"PARSE_TREE"
 |	"SIMPLE"
 |	"REMOVE"
 |	"PARTITIONING"
@@ -5064,6 +5116,7 @@ UnReservedKeyword:
 |	"UNREGISTER"
 |	"UNTIL"
 |	"REPLICA"
+|	"REPLICAS"
 |	"LOGS"
 |	"HOSTS"
 |	"AGAINST"
@@ -9039,6 +9092,41 @@ ShowStmt:
 			User: $4.(*auth.UserIdentity),
 		}
 	}
+|	"SHOW" "CREATE" "PROCEDURE" TableName
+	{
+		$$ = &ast.ShowStmt{
+			Tp:    ast.ShowCreateProcedure,
+			Table: $4.(*ast.TableName),
+		}
+	}
+|	"SHOW" "CREATE" "FUNCTION" TableName
+	{
+		$$ = &ast.ShowStmt{
+			Tp:    ast.ShowCreateFunction,
+			Table: $4.(*ast.TableName),
+		}
+	}
+|	"SHOW" "CREATE" "TRIGGER" TableName
+	{
+		$$ = &ast.ShowStmt{
+			Tp:    ast.ShowCreateTrigger,
+			Table: $4.(*ast.TableName),
+		}
+	}
+|	"SHOW" "CREATE" "EVENT" TableName
+	{
+		$$ = &ast.ShowStmt{
+			Tp:    ast.ShowCreateEvent,
+			Table: $4.(*ast.TableName),
+		}
+	}
+|	"SHOW" "CREATE" "LIBRARY" TableName
+	{
+		$$ = &ast.ShowStmt{
+			Tp:    ast.ShowCreateLibrary,
+			Table: $4.(*ast.TableName),
+		}
+	}
 |	"SHOW" "GRANTS"
 	{
 		// See https://dev.mysql.com/doc/refman/5.7/en/show-grants.html
@@ -9074,14 +9162,50 @@ ShowStmt:
 			Tp: ast.ShowBinlogStatus,
 		}
 	}
-|	"SHOW" Replica "STATUS"
+|	"SHOW" "BINARY" "LOGS"
+	{
+		$$ = &ast.ShowStmt{Tp: ast.ShowBinaryLogs}
+	}
+|	"SHOW" "MASTER" "LOGS"
+	{
+		$$ = &ast.ShowStmt{Tp: ast.ShowBinaryLogs}
+	}
+|	"SHOW" "BINLOG" "EVENTS" BinlogInOpt BinlogFromOpt SelectStmtLimitOpt
+	{
+		stmt := &ast.ShowStmt{Tp: ast.ShowBinlogEvents}
+		if $4 != nil {
+			stmt.LogName = $4.(string)
+		}
+		if $5 != nil {
+			stmt.Pos = $5.(uint64)
+			stmt.HasPos = true
+		}
+		if $6 != nil {
+			stmt.Limit = $6.(*ast.Limit)
+		}
+		$$ = stmt
+	}
+|	"SHOW" "REPLICAS"
+	{
+		$$ = &ast.ShowStmt{Tp: ast.ShowReplicas}
+	}
+|	"SHOW" "SLAVE" "HOSTS"
+	{
+		$$ = &ast.ShowStmt{Tp: ast.ShowReplicas}
+	}
+|	"SHOW" Replica "STATUS" ForChannelOpt
 	// From MySQL 8.0.22, use SHOW REPLICA STATUS in place of SHOW SLAVE STATUS,
 	// which is deprecated from that release. In releases before MySQL 8.0.22,
 	// use SHOW SLAVE STATUS.
 	{
-		$$ = &ast.ShowStmt{
+		stmt := &ast.ShowStmt{
 			Tp: ast.ShowReplicaStatus,
 		}
+		if $4 != nil {
+			stmt.Channel = $4.(string)
+			stmt.HasChannel = true
+		}
+		$$ = stmt
 	}
 |	"SHOW" OptFull "PROCESSLIST"
 	{
@@ -9116,6 +9240,51 @@ ShowStmt:
 	{
 		$$ = &ast.ShowStmt{
 			Tp: ast.ShowPrivileges,
+		}
+	}
+|	"SHOW" "WARNINGS" SelectStmtLimitOpt
+	{
+		stmt := &ast.ShowStmt{Tp: ast.ShowWarnings}
+		if $3 != nil {
+			stmt.Limit = $3.(*ast.Limit)
+		}
+		$$ = stmt
+	}
+|	"SHOW" "ERRORS" SelectStmtLimitOpt
+	{
+		stmt := &ast.ShowStmt{Tp: ast.ShowErrors}
+		if $3 != nil {
+			stmt.Limit = $3.(*ast.Limit)
+		}
+		$$ = stmt
+	}
+|	"SHOW" builtinCount '(' '*' ')' "WARNINGS"
+	{
+		$$ = &ast.ShowStmt{Tp: ast.ShowWarnings, CountWarningsOrErrors: true}
+	}
+|	"SHOW" builtinCount '(' '*' ')' "ERRORS"
+	{
+		$$ = &ast.ShowStmt{Tp: ast.ShowErrors, CountWarningsOrErrors: true}
+	}
+|	"SHOW" "PROCEDURE" "CODE" TableName
+	{
+		$$ = &ast.ShowStmt{
+			Tp:    ast.ShowProcedureCode,
+			Table: $4.(*ast.TableName),
+		}
+	}
+|	"SHOW" "FUNCTION" "CODE" TableName
+	{
+		$$ = &ast.ShowStmt{
+			Tp:    ast.ShowFunctionCode,
+			Table: $4.(*ast.TableName),
+		}
+	}
+|	"SHOW" "PARSE_TREE" ExplainableStmt
+	{
+		$$ = &ast.ShowStmt{
+			Tp:            ast.ShowParseTree,
+			ParseTreeStmt: $3,
 		}
 	}
 
@@ -9208,6 +9377,22 @@ ShowTargetFilterable:
 	{
 		$$ = &ast.ShowStmt{Tp: ast.ShowEngines}
 	}
+|	"STORAGE" "ENGINES"
+	{
+		$$ = &ast.ShowStmt{Tp: ast.ShowEngines}
+	}
+|	"PROCEDURE" "STATUS"
+	{
+		$$ = &ast.ShowStmt{Tp: ast.ShowProcedureStatus}
+	}
+|	"FUNCTION" "STATUS"
+	{
+		$$ = &ast.ShowStmt{Tp: ast.ShowFunctionStatus}
+	}
+|	"LIBRARY" "STATUS"
+	{
+		$$ = &ast.ShowStmt{Tp: ast.ShowLibraryStatus}
+	}
 |	"DATABASES"
 	{
 		$$ = &ast.ShowStmt{Tp: ast.ShowDatabases}
@@ -9271,22 +9456,6 @@ ShowTargetFilterable:
 			Full:     $2.(bool),
 			Extended: true,
 		}
-	}
-|	builtinCount '(' '*' ')' "WARNINGS"
-	{
-		$$ = &ast.ShowStmt{Tp: ast.ShowWarnings, CountWarningsOrErrors: true}
-	}
-|	"WARNINGS"
-	{
-		$$ = &ast.ShowStmt{Tp: ast.ShowWarnings}
-	}
-|	builtinCount '(' '*' ')' "ERRORS"
-	{
-		$$ = &ast.ShowStmt{Tp: ast.ShowErrors, CountWarningsOrErrors: true}
-	}
-|	"ERRORS"
-	{
-		$$ = &ast.ShowStmt{Tp: ast.ShowErrors}
 	}
 |	GlobalScope "VARIABLES"
 	{
@@ -9358,6 +9527,10 @@ GlobalScope:
 	{
 		$$ = false
 	}
+|	"LOCAL"
+	{
+		$$ = false
+	}
 
 OptFull:
 	{
@@ -9386,6 +9559,26 @@ ShowTableAliasOpt:
 Replica:
 	"REPLICA"
 |	"SLAVE"
+
+BinlogInOpt:
+	/* empty */
+	{
+		$$ = nil
+	}
+|	"IN" stringLit
+	{
+		$$ = $2
+	}
+
+BinlogFromOpt:
+	/* empty */
+	{
+		$$ = nil
+	}
+|	"FROM" NUM
+	{
+		$$ = getUint64FromNUM($2)
+	}
 
 FlushStmt:
 	"FLUSH" NoWriteToBinLogAliasOpt FlushOption

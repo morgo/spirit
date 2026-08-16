@@ -166,6 +166,10 @@ type ExplainStmt struct {
 	Format  string
 	Analyze bool
 
+	// IntoVar is the raw @variable token of `EXPLAIN ... INTO @var`,
+	// including the leading '@'. Empty when no INTO clause was given.
+	IntoVar string
+
 	// Explore indicates whether to use EXPLAIN EXPLORE.
 	Explore bool
 	// SQLDigest to explain, used in `EXPLAIN EXPLORE <sql_digest>`.
@@ -202,6 +206,11 @@ func (n *ExplainStmt) Restore(ctx *format.RestoreCtx) error {
 		ctx.WriteKeyWord("FORMAT ")
 		ctx.WritePlain("= ")
 		ctx.WriteString(n.Format)
+		ctx.WritePlain(" ")
+	}
+	if n.IntoVar != "" {
+		ctx.WriteKeyWord("INTO ")
+		ctx.WritePlain(n.IntoVar)
 		ctx.WritePlain(" ")
 	}
 	if n.PlanDigest != "" {

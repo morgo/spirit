@@ -2718,6 +2718,20 @@ const (
 	ShowOpenTables
 	ShowBinlogStatus
 	ShowReplicaStatus
+	ShowBinaryLogs
+	ShowBinlogEvents
+	ShowReplicas
+	ShowCreateProcedure
+	ShowCreateFunction
+	ShowCreateTrigger
+	ShowCreateEvent
+	ShowCreateLibrary
+	ShowProcedureStatus
+	ShowFunctionStatus
+	ShowLibraryStatus
+	ShowProcedureCode
+	ShowFunctionCode
+	ShowParseTree
 )
 
 const (
@@ -2762,6 +2776,15 @@ type ShowStmt struct {
 	ShowProfileTypes []int  // Used for `SHOW PROFILE` syntax
 	ShowProfileArgs  *int64 // Used for `SHOW PROFILE` syntax
 	ShowProfileLimit *Limit // Used for `SHOW PROFILE` syntax
+
+	LogName    string // Used for `SHOW BINLOG EVENTS IN 'name'`
+	Pos        uint64 // Used for `SHOW BINLOG EVENTS ... FROM pos`
+	HasPos     bool
+	Channel    string // Used for `SHOW REPLICA STATUS FOR CHANNEL 'name'`
+	HasChannel bool
+	// ParseTreeStmt is the statement whose parse tree is requested by
+	// `SHOW PARSE_TREE <stmt>` (available in debug builds of MySQL).
+	ParseTreeStmt StmtNode
 }
 
 // Restore implements Node interface.
@@ -2804,6 +2827,66 @@ func (n *ShowStmt) Restore(ctx *format.RestoreCtx) error {
 	switch n.Tp {
 	case ShowBinlogStatus:
 		ctx.WriteKeyWord("BINARY LOG STATUS")
+	case ShowBinaryLogs:
+		ctx.WriteKeyWord("BINARY LOGS")
+	case ShowBinlogEvents:
+		ctx.WriteKeyWord("BINLOG EVENTS")
+		if n.LogName != "" {
+			ctx.WriteKeyWord(" IN ")
+			ctx.WriteString(n.LogName)
+		}
+		if n.HasPos {
+			ctx.WriteKeyWord(" FROM ")
+			ctx.WritePlainf("%d", n.Pos)
+		}
+		if n.Limit != nil {
+			ctx.WritePlain(" ")
+			if err := n.Limit.Restore(ctx); err != nil {
+				return fmt.Errorf("an error occurred while restore ShowStmt.Limit: %w", err)
+			}
+		}
+	case ShowReplicas:
+		ctx.WriteKeyWord("REPLICAS")
+	case ShowCreateProcedure:
+		ctx.WriteKeyWord("CREATE PROCEDURE ")
+		if err := n.Table.Restore(ctx); err != nil {
+			return fmt.Errorf("an error occurred while restore ShowStmt.Table: %w", err)
+		}
+	case ShowCreateFunction:
+		ctx.WriteKeyWord("CREATE FUNCTION ")
+		if err := n.Table.Restore(ctx); err != nil {
+			return fmt.Errorf("an error occurred while restore ShowStmt.Table: %w", err)
+		}
+	case ShowCreateTrigger:
+		ctx.WriteKeyWord("CREATE TRIGGER ")
+		if err := n.Table.Restore(ctx); err != nil {
+			return fmt.Errorf("an error occurred while restore ShowStmt.Table: %w", err)
+		}
+	case ShowCreateEvent:
+		ctx.WriteKeyWord("CREATE EVENT ")
+		if err := n.Table.Restore(ctx); err != nil {
+			return fmt.Errorf("an error occurred while restore ShowStmt.Table: %w", err)
+		}
+	case ShowCreateLibrary:
+		ctx.WriteKeyWord("CREATE LIBRARY ")
+		if err := n.Table.Restore(ctx); err != nil {
+			return fmt.Errorf("an error occurred while restore ShowStmt.Table: %w", err)
+		}
+	case ShowProcedureCode:
+		ctx.WriteKeyWord("PROCEDURE CODE ")
+		if err := n.Table.Restore(ctx); err != nil {
+			return fmt.Errorf("an error occurred while restore ShowStmt.Table: %w", err)
+		}
+	case ShowFunctionCode:
+		ctx.WriteKeyWord("FUNCTION CODE ")
+		if err := n.Table.Restore(ctx); err != nil {
+			return fmt.Errorf("an error occurred while restore ShowStmt.Table: %w", err)
+		}
+	case ShowParseTree:
+		ctx.WriteKeyWord("PARSE_TREE ")
+		if err := n.ParseTreeStmt.Restore(ctx); err != nil {
+			return fmt.Errorf("an error occurred while restore ShowStmt.ParseTreeStmt: %w", err)
+		}
 	case ShowCreateTable:
 		ctx.WriteKeyWord("CREATE TABLE ")
 		if err := n.Table.Restore(ctx); err != nil {
@@ -2934,9 +3017,29 @@ func (n *ShowStmt) Restore(ctx *format.RestoreCtx) error {
 			}
 			restoreShowDatabaseNameOpt()
 		case ShowWarnings:
-			ctx.WriteKeyWord("WARNINGS")
+			if n.CountWarningsOrErrors {
+				ctx.WriteKeyWord("COUNT(*) WARNINGS")
+			} else {
+				ctx.WriteKeyWord("WARNINGS")
+				if n.Limit != nil {
+					ctx.WritePlain(" ")
+					if err := n.Limit.Restore(ctx); err != nil {
+						return fmt.Errorf("an error occurred while restore ShowStmt.Limit: %w", err)
+					}
+				}
+			}
 		case ShowErrors:
-			ctx.WriteKeyWord("ERRORS")
+			if n.CountWarningsOrErrors {
+				ctx.WriteKeyWord("COUNT(*) ERRORS")
+			} else {
+				ctx.WriteKeyWord("ERRORS")
+				if n.Limit != nil {
+					ctx.WritePlain(" ")
+					if err := n.Limit.Restore(ctx); err != nil {
+						return fmt.Errorf("an error occurred while restore ShowStmt.Limit: %w", err)
+					}
+				}
+			}
 		case ShowVariables:
 			restoreGlobalScope()
 			ctx.WriteKeyWord("VARIABLES")
@@ -2953,8 +3056,18 @@ func (n *ShowStmt) Restore(ctx *format.RestoreCtx) error {
 			restoreShowDatabaseNameOpt()
 		case ShowPlugins:
 			ctx.WriteKeyWord("PLUGINS")
+		case ShowProcedureStatus:
+			ctx.WriteKeyWord("PROCEDURE STATUS")
+		case ShowFunctionStatus:
+			ctx.WriteKeyWord("FUNCTION STATUS")
+		case ShowLibraryStatus:
+			ctx.WriteKeyWord("LIBRARY STATUS")
 		case ShowReplicaStatus:
 			ctx.WriteKeyWord("REPLICA STATUS")
+			if n.HasChannel {
+				ctx.WriteKeyWord(" FOR CHANNEL ")
+				ctx.WriteString(n.Channel)
+			}
 		default:
 			return errors.New("unknown ShowStmt type")
 		}
@@ -3007,6 +3120,13 @@ func (n *ShowStmt) Accept(v Visitor) (Node, bool) {
 			return n, false
 		}
 		n.Limit = node.(*Limit)
+	}
+	if n.ParseTreeStmt != nil {
+		node, ok := n.ParseTreeStmt.Accept(v)
+		if !ok {
+			return n, false
+		}
+		n.ParseTreeStmt = node.(StmtNode)
 	}
 	return v.Leave(n)
 }
