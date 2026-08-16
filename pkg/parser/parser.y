@@ -498,6 +498,7 @@ type likeEscapeSpec struct {
 	names                    "NAMES"
 	national                 "NATIONAL"
 	ncharType                "NCHAR"
+	nested                   "NESTED"
 	never                    "NEVER"
 	next                     "NEXT"
 	no                       "NO"
@@ -514,6 +515,7 @@ type likeEscapeSpec struct {
 	open                     "OPEN"
 	optional                 "OPTIONAL"
 	options                  "OPTIONS"
+	ordinality               "ORDINALITY"
 	organization             "ORGANIZATION"
 	owner                    "OWNER"
 	packKeys                 "PACK_KEYS"
@@ -524,6 +526,7 @@ type likeEscapeSpec struct {
 	partitioning             "PARTITIONING"
 	partitions               "PARTITIONS"
 	password                 "PASSWORD"
+	path                     "PATH"
 	passwordLockTime         "PASSWORD_LOCK_TIME"
 	persist                  "PERSIST"
 	persistOnly              "PERSIST_ONLY"
@@ -707,6 +710,7 @@ type likeEscapeSpec struct {
 	builtinApproxPercentile
 	builtinBitAnd
 	builtinStCollect
+	jsonTable
 	builtinBitOr
 	builtinBitXor
 	builtinCast
@@ -953,6 +957,8 @@ type likeEscapeSpec struct {
 	GroupingSetList                        "grouping set list"
 	JsonValueReturningOpt                  "optional JSON_VALUE RETURNING clause"
 	JsonValueOnEmptyOrErrorOpt             "optional JSON_VALUE ON EMPTY/ON ERROR clauses"
+	JsonTableColumn                        "JSON_TABLE column definition"
+	JsonTableColumnList                    "JSON_TABLE column definition list"
 	JsonValueBehavior                      "JSON_VALUE ON EMPTY/ON ERROR behavior"
 	BinlogFromOpt                          "optional SHOW BINLOG EVENTS FROM position"
 	AllOrPartitionNameList                 "All or partition name list"
@@ -5248,6 +5254,9 @@ UnReservedKeyword:
 |	"SERVER"
 |	"SOCKET"
 |	"SONAME"
+|	"NESTED"
+|	"ORDINALITY"
+|	"PATH"
 |	"AT"
 |	"GROUPING"
 |	"SETS"
@@ -8325,6 +8334,59 @@ TableFactor:
 		j := $2.(*ast.Join)
 		j.ExplicitParens = true
 		$$ = $2
+	}
+|	jsonTable '(' Expression ',' stringLit "COLUMNS" '(' JsonTableColumnList ')' ')' TableAsNameOpt
+	{
+		jt := &ast.JSONTableExpr{
+			Doc:     $3,
+			Path:    $5,
+			Columns: $8.([]*ast.JSONTableColumn),
+		}
+		$$ = &ast.TableSource{Source: jt, AsName: $11.(ast.CIStr)}
+	}
+
+JsonTableColumnList:
+	JsonTableColumn
+	{
+		$$ = []*ast.JSONTableColumn{$1.(*ast.JSONTableColumn)}
+	}
+|	JsonTableColumnList ',' JsonTableColumn
+	{
+		$$ = append($1.([]*ast.JSONTableColumn), $3.(*ast.JSONTableColumn))
+	}
+
+JsonTableColumn:
+	Identifier "FOR" "ORDINALITY"
+	{
+		$$ = &ast.JSONTableColumn{Name: ast.NewCIStr($1), ForOrdinality: true}
+	}
+|	Identifier Type "PATH" stringLit JsonValueOnEmptyOrErrorOpt
+	{
+		col := &ast.JSONTableColumn{Name: ast.NewCIStr($1), Tp: $2.(*types.FieldType), Path: $4}
+		if $5 != nil {
+			on := $5.(*jsonValueOnHolder)
+			col.OnEmpty = on.onEmpty
+			col.OnError = on.onError
+		}
+		$$ = col
+	}
+|	Identifier Type "EXISTS" "PATH" stringLit JsonValueOnEmptyOrErrorOpt
+	{
+		col := &ast.JSONTableColumn{Name: ast.NewCIStr($1), Tp: $2.(*types.FieldType), Exists: true, Path: $5}
+		if $6 != nil {
+			on := $6.(*jsonValueOnHolder)
+			col.OnEmpty = on.onEmpty
+			col.OnError = on.onError
+		}
+		$$ = col
+	}
+|	"NESTED" stringLit "COLUMNS" '(' JsonTableColumnList ')'
+	{
+		$$ = &ast.JSONTableColumn{Path: $2, NestedColumns: $5.([]*ast.JSONTableColumn)}
+	}
+|	"NESTED" "PATH" stringLit "COLUMNS" '(' JsonTableColumnList ')'
+	{
+		$$ = &ast.JSONTableColumn{Path: $3, NestedColumns: $6.([]*ast.JSONTableColumn)}
 	}
 
 PartitionNameListOpt:

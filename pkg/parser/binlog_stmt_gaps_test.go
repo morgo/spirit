@@ -1020,3 +1020,23 @@ func TestSoundsLike(t *testing.T) {
 	}
 	RunTest(t, table, false)
 }
+
+func TestJSONTable(t *testing.T) {
+	table := []testCase{
+		{"SELECT attrs.* FROM t_json, JSON_TABLE(json_col, '$[*]' COLUMNS (nickname JSON PATH '$.nickname')) as attrs", true, "SELECT `attrs`.* FROM (`t_json`) JOIN JSON_TABLE(`json_col`, '$[*]' COLUMNS (`nickname` JSON PATH '$.nickname')) AS `attrs`"},
+		{"SELECT * FROM json_table('[]', '$[*]' COLUMNS (p CHAR(1) CHARACTER SET utf8mb3 PATH '$.a')) AS t", true, "SELECT * FROM JSON_TABLE(_UTF8MB4'[]', '$[*]' COLUMNS (`p` CHAR(1) CHARACTER SET UTF8 PATH '$.a')) AS `t`"},
+		{"SELECT description FROM JSON_TABLE(plan, '$**.operation' COLUMNS (o FOR ORDINALITY, description TEXT PATH '$')) AS jt", true, "SELECT `description` FROM JSON_TABLE(`plan`, '$**.operation' COLUMNS (`o` FOR ORDINALITY, `description` TEXT PATH '$')) AS `jt`"},
+		{"SELECT * FROM JSON_TABLE('[1]', '$[*]' COLUMNS (i INT PATH '$[0]' NULL ON EMPTY DEFAULT '9' ON ERROR)) AS t3", true, "SELECT * FROM JSON_TABLE(_UTF8MB4'[1]', '$[*]' COLUMNS (`i` INT PATH '$[0]' NULL ON EMPTY DEFAULT _UTF8MB4'9' ON ERROR)) AS `t3`"},
+		{"SELECT * FROM JSON_TABLE('[1]', '$[*]' COLUMNS (i INT EXISTS PATH '$[0]')) AS t4", true, "SELECT * FROM JSON_TABLE(_UTF8MB4'[1]', '$[*]' COLUMNS (`i` INT EXISTS PATH '$[0]')) AS `t4`"},
+		// NESTED with and without the optional PATH keyword; both restore with it.
+		{"SELECT * FROM JSON_TABLE('[]', '$[*]' COLUMNS (a INT PATH '$.a', NESTED PATH '$.b[*]' COLUMNS (b INT PATH '$'), NESTED '$.c[*]' COLUMNS (c TEXT PATH '$'))) tt", true, "SELECT * FROM JSON_TABLE(_UTF8MB4'[]', '$[*]' COLUMNS (`a` INT PATH '$.a', NESTED PATH '$.b[*]' COLUMNS (`b` INT PATH '$'), NESTED PATH '$.c[*]' COLUMNS (`c` TEXT PATH '$'))) AS `tt`"},
+		{"SELECT id FROM JSON_TABLE(IF(x<>NOW(), '[{\"a\":1}]', '[]'), '$[*]' COLUMNS (id INT PATH '$.a')) AS jt", true, "SELECT `id` FROM JSON_TABLE(IF(`x`!=NOW(), _UTF8MB4'[{\"a\":1}]', _UTF8MB4'[]'), '$[*]' COLUMNS (`id` INT PATH '$.a')) AS `jt`"},
+		// PATH, NESTED and ORDINALITY remain usable as identifiers, and
+		// JSON_TABLE is only a keyword when followed by a parenthesis.
+		{"SELECT path, nested, ordinality FROM t", true, "SELECT `path`,`nested`,`ordinality` FROM `t`"},
+		{"SELECT * FROM t WHERE json_table = 5", true, "SELECT * FROM `t` WHERE `json_table`=5"},
+		// JSON_TABLE is not a scalar function.
+		{"SELECT JSON_TABLE('[]', '$' COLUMNS (i INT PATH '$'))", false, ""},
+	}
+	RunTest(t, table, false)
+}

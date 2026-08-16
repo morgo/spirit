@@ -21,6 +21,7 @@ import (
 	"github.com/block/spirit/pkg/parser/auth"
 	"github.com/block/spirit/pkg/parser/format"
 	"github.com/block/spirit/pkg/parser/mysql"
+	"github.com/block/spirit/pkg/parser/types"
 )
 
 var (
@@ -604,6 +605,156 @@ func (n *TableSource) Accept(v Visitor) (Node, bool) {
 		return n, false
 	}
 	n.Source = node.(ResultSetNode)
+	return v.Leave(n)
+}
+
+// JSONTableColumn is one column definition in the COLUMNS clause of
+// JSON_TABLE. Exactly one of ForOrdinality, Tp (value column) and
+// NestedColumns (NESTED PATH entry) is set.
+type JSONTableColumn struct {
+	// Name is the column name; empty for NESTED entries.
+	Name CIStr
+	// ForOrdinality marks a `name FOR ORDINALITY` counter column.
+	ForOrdinality bool
+	// Tp is the column type of a value column; nil otherwise.
+	Tp *types.FieldType
+	// Exists marks an `EXISTS PATH` value column.
+	Exists bool
+	// Path is the JSON path literal of value and nested entries.
+	Path string
+	// OnEmpty is the ON EMPTY behavior of a value column; nil when absent.
+	OnEmpty *JSONValueOnBehavior
+	// OnError is the ON ERROR behavior of a value column; nil when absent.
+	OnError *JSONValueOnBehavior
+	// NestedColumns is non-nil for `NESTED [PATH] '...' COLUMNS (...)` entries.
+	NestedColumns []*JSONTableColumn
+}
+
+// Restore implements Node interface.
+func (n *JSONTableColumn) Restore(ctx *format.RestoreCtx) error {
+	if n.NestedColumns != nil {
+		ctx.WriteKeyWord("NESTED PATH ")
+		ctx.WriteString(n.Path)
+		ctx.WriteKeyWord(" COLUMNS ")
+		return restoreJSONTableColumns(ctx, n.NestedColumns)
+	}
+	ctx.WriteName(n.Name.O)
+	if n.ForOrdinality {
+		ctx.WriteKeyWord(" FOR ORDINALITY")
+		return nil
+	}
+	ctx.WritePlain(" ")
+	if err := n.Tp.Restore(ctx); err != nil {
+		return fmt.Errorf("an error occurred while restore JSONTableColumn.Tp: %w", err)
+	}
+	if n.Exists {
+		ctx.WriteKeyWord(" EXISTS")
+	}
+	ctx.WriteKeyWord(" PATH ")
+	ctx.WriteString(n.Path)
+	if n.OnEmpty != nil {
+		ctx.WritePlain(" ")
+		if err := n.OnEmpty.Restore(ctx); err != nil {
+			return err
+		}
+		ctx.WriteKeyWord(" ON EMPTY")
+	}
+	if n.OnError != nil {
+		ctx.WritePlain(" ")
+		if err := n.OnError.Restore(ctx); err != nil {
+			return err
+		}
+		ctx.WriteKeyWord(" ON ERROR")
+	}
+	return nil
+}
+
+func restoreJSONTableColumns(ctx *format.RestoreCtx, cols []*JSONTableColumn) error {
+	ctx.WritePlain("(")
+	for i, col := range cols {
+		if i != 0 {
+			ctx.WritePlain(", ")
+		}
+		if err := col.Restore(ctx); err != nil {
+			return fmt.Errorf("an error occurred while restore JSONTableColumn: %w", err)
+		}
+	}
+	ctx.WritePlain(")")
+	return nil
+}
+
+// acceptJSONTableColumns visits the behavior default expressions of all
+// (recursively nested) JSON_TABLE columns.
+func acceptJSONTableColumns(v Visitor, cols []*JSONTableColumn) bool {
+	for _, col := range cols {
+		if col.OnEmpty != nil && col.OnEmpty.Default != nil {
+			node, ok := col.OnEmpty.Default.Accept(v)
+			if !ok {
+				return false
+			}
+			col.OnEmpty.Default = node.(ExprNode)
+		}
+		if col.OnError != nil && col.OnError.Default != nil {
+			node, ok := col.OnError.Default.Accept(v)
+			if !ok {
+				return false
+			}
+			col.OnError.Default = node.(ExprNode)
+		}
+		if col.NestedColumns != nil && !acceptJSONTableColumns(v, col.NestedColumns) {
+			return false
+		}
+	}
+	return true
+}
+
+// JSONTableExpr is the JSON_TABLE(doc, path COLUMNS (...)) table function
+// used as a table factor.
+type JSONTableExpr struct {
+	node
+
+	// Doc is the JSON document argument.
+	Doc ExprNode
+	// Path is the row path literal.
+	Path string
+	// Columns is the COLUMNS clause.
+	Columns []*JSONTableColumn
+}
+
+func (*JSONTableExpr) resultSet() {}
+
+// Restore implements Node interface.
+func (n *JSONTableExpr) Restore(ctx *format.RestoreCtx) error {
+	ctx.WriteKeyWord("JSON_TABLE")
+	ctx.WritePlain("(")
+	if err := n.Doc.Restore(ctx); err != nil {
+		return fmt.Errorf("an error occurred while restore JSONTableExpr.Doc: %w", err)
+	}
+	ctx.WritePlain(", ")
+	ctx.WriteString(n.Path)
+	ctx.WriteKeyWord(" COLUMNS ")
+	if err := restoreJSONTableColumns(ctx, n.Columns); err != nil {
+		return err
+	}
+	ctx.WritePlain(")")
+	return nil
+}
+
+// Accept implements Node Accept interface.
+func (n *JSONTableExpr) Accept(v Visitor) (Node, bool) {
+	newNode, skipChildren := v.Enter(n)
+	if skipChildren {
+		return v.Leave(newNode)
+	}
+	n = newNode.(*JSONTableExpr)
+	node, ok := n.Doc.Accept(v)
+	if !ok {
+		return n, false
+	}
+	n.Doc = node.(ExprNode)
+	if !acceptJSONTableColumns(v, n.Columns) {
+		return n, false
+	}
 	return v.Leave(n)
 }
 
