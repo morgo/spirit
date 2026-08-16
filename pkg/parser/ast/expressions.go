@@ -570,6 +570,42 @@ func (n *DefaultExpr) Accept(v Visitor) (Node, bool) {
 	return v.Leave(n)
 }
 
+// FuncCallArgAliasExpr is a function call argument carrying MySQL's
+// optional UDF attribute alias: udf_expr: expr [[AS] ident]. The server
+// accepts the alias syntactically for any function and rejects non-UDF
+// uses during resolution.
+type FuncCallArgAliasExpr struct {
+	exprNode
+
+	Expr   ExprNode
+	AsName CIStr
+}
+
+// Restore implements Node interface.
+func (n *FuncCallArgAliasExpr) Restore(ctx *format.RestoreCtx) error {
+	if err := n.Expr.Restore(ctx); err != nil {
+		return fmt.Errorf("an error occurred while restore FuncCallArgAliasExpr.Expr: %w", err)
+	}
+	ctx.WriteKeyWord(" AS ")
+	ctx.WriteName(n.AsName.O)
+	return nil
+}
+
+// Accept implements Node Accept interface.
+func (n *FuncCallArgAliasExpr) Accept(v Visitor) (Node, bool) {
+	newNode, skipChildren := v.Enter(n)
+	if skipChildren {
+		return v.Leave(newNode)
+	}
+	n = newNode.(*FuncCallArgAliasExpr)
+	node, ok := n.Expr.Accept(v)
+	if !ok {
+		return n, false
+	}
+	n.Expr = node.(ExprNode)
+	return v.Leave(n)
+}
+
 // JSONDualityObjectPair is one 'key' : value member of a JSON_DUALITY_OBJECT
 // constructor.
 type JSONDualityObjectPair struct {

@@ -1844,6 +1844,9 @@ type SetOprStmt struct {
 	OrderBy    *OrderByClause
 	Limit      *Limit
 	With       *WithClause
+	// IntoOpt is the trailing INTO of a parenthesized query expression:
+	// (SELECT ...) [ORDER BY ...] [LIMIT ...] INTO var_list.
+	IntoOpt *SelectIntoOption
 }
 
 func (*SetOprStmt) resultSet() {}
@@ -1878,6 +1881,12 @@ func (n *SetOprStmt) Restore(ctx *format.RestoreCtx) error {
 		ctx.WritePlain(" ")
 		if err := n.Limit.Restore(ctx); err != nil {
 			return fmt.Errorf("an error occurred while restore SetOprStmt.Limit: %w", err)
+		}
+	}
+	if n.IntoOpt != nil {
+		ctx.WritePlain(" ")
+		if err := n.IntoOpt.Restore(ctx); err != nil {
+			return fmt.Errorf("an error occurred while restore SetOprStmt.IntoOpt: %w", err)
 		}
 	}
 	return nil
@@ -1916,6 +1925,13 @@ func (n *SetOprStmt) Accept(v Visitor) (Node, bool) {
 			return n, false
 		}
 		n.Limit = node.(*Limit)
+	}
+	if n.IntoOpt != nil {
+		node, ok := n.IntoOpt.Accept(v)
+		if !ok {
+			return n, false
+		}
+		n.IntoOpt = node.(*SelectIntoOption)
 	}
 	return v.Leave(n)
 }

@@ -450,6 +450,21 @@ var (
 	_ ParseParam = CollationConnection("")
 )
 
+// parenQueryToSetOpr wraps a parenthesized query expression in a
+// SetOprStmt, preserving inner WITH/ORDER BY/LIMIT as a nested select
+// list — the same shape the SubSelect OrderBy / SelectStmtLimit
+// statement alternatives build inline.
+func parenQueryToSetOpr(sub *ast.SubqueryExpr) *ast.SetOprStmt {
+	var setOprList []ast.Node
+	switch x := sub.Query.(type) {
+	case *ast.SelectStmt:
+		setOprList = []ast.Node{&ast.SetOprSelectList{Selects: []ast.Node{x}, With: x.With}}
+	case *ast.SetOprStmt:
+		setOprList = []ast.Node{&ast.SetOprSelectList{Selects: x.SelectList.Selects, With: x.With, Limit: x.Limit, OrderBy: x.OrderBy}}
+	}
+	return &ast.SetOprStmt{SelectList: &ast.SetOprSelectList{Selects: setOprList}}
+}
+
 func resetParams(p *Parser) {
 	p.charset = mysql.DefaultCharset
 	p.collation = mysql.DefaultCollationName

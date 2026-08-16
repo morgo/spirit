@@ -196,6 +196,7 @@ type likeEscapeSpec struct {
 	into              "INTO"
 	is                "IS"
 	join              "JOIN"
+	jsonTable         "JSON_TABLE"
 	key               "KEY"
 	keys              "KEYS"
 	kill              "KILL"
@@ -747,7 +748,6 @@ type likeEscapeSpec struct {
 	builtinApproxPercentile
 	builtinBitAnd
 	builtinStCollect
-	jsonTable
 	builtinBitOr
 	builtinBitXor
 	builtinCast
@@ -806,6 +806,8 @@ type likeEscapeSpec struct {
 %token not2
 %type	<expr>
 	Expression                    "expression"
+	IntoVar                       "SELECT INTO target variable"
+	UDFExpression                 "function call argument with optional alias"
 	MaxValueOrExpression          "maxvalue or expression"
 	BoolPri                       "boolean primary expression"
 	ExprOrDefault                 "expression or default"
@@ -843,6 +845,7 @@ type likeEscapeSpec struct {
 	AlterInstanceStmt          "Alter instance statement"
 	AnalyzeTableStmt           "Analyze table statement"
 	BeginTransactionStmt       "BEGIN TRANSACTION statement"
+	StartTransactionStmt       "START TRANSACTION statement"
 	BinlogStmt                 "Binlog base64 statement"
 	CommitStmt                 "COMMIT statement"
 	CreateTableStmt            "CREATE TABLE statement"
@@ -1024,6 +1027,10 @@ type likeEscapeSpec struct {
 	TriggerTimeKwd                         "trigger action time"
 	TriggerEventKwd                        "trigger event"
 	TriggerOrderOpt                        "trigger order clause"
+	IntoVarList                            "SELECT INTO target variable list"
+	TypeWithCollate                        "field type with optional COLLATE"
+	UDFExpressionListOpt                   "function call argument list"
+	UDFExpressionList                      "function call arguments"
 	RelationalOpt                          "optional RELATIONAL keyword"
 	DualityWithOpt                         "optional JSON_DUALITY_OBJECT WITH annotation"
 	DualityOpList                          "JSON_DUALITY_OBJECT WITH operation list"
@@ -1070,6 +1077,7 @@ type likeEscapeSpec struct {
 	GroupingSetList                        "grouping set list"
 	JsonValueReturningOpt                  "optional JSON_VALUE RETURNING clause"
 	JsonValueOnEmptyOrErrorOpt             "optional JSON_VALUE ON EMPTY/ON ERROR clauses"
+	JsonTableOnEmptyOrErrorOpt             "optional JSON_TABLE ON EMPTY/ON ERROR clauses"
 	JsonTableColumn                        "JSON_TABLE column definition"
 	JsonTableColumnList                    "JSON_TABLE column definition list"
 	JsonValueBehavior                      "JSON_VALUE ON EMPTY/ON ERROR behavior"
@@ -1488,6 +1496,9 @@ type likeEscapeSpec struct {
 	Identifier                      "identifier or unreserved keyword"
 	NotKeywordToken                 "Tokens not mysql keyword but treated specially"
 	UnReservedKeyword               "MySQL unreserved keywords"
+	LabelKeyword                    "unreserved keywords usable as a label"
+	NonLabelKeyword                 "unreserved keywords not usable as a label"
+	LabelIdent                      "compound statement label"
 	FunctionNameConflict            "Built-in function call names which are conflict with keywords"
 	FunctionNameConflictNonNow      "FunctionNameConflict except NOW, which DefaultValueExpr handles separately"
 	FunctionNameOptionalBraces      "Function with optional braces, all of them are reserved keywords."
@@ -1510,8 +1521,8 @@ type likeEscapeSpec struct {
 	FieldAsNameOpt                  "Field alias name opt"
 	FieldTerminator                 "Field terminator"
 	HashString                      "Hashed string"
-	OptCharset                      "Optional Character setting"
 	OptCollate                      "Optional Collate setting"
+	JsonPathString                  "JSON path literal"
 	CacheIndexName                  "CACHE INDEX index name (identifier or PRIMARY)"
 	LibraryBody                     "CREATE LIBRARY body literal"
 	DualityOp                       "JSON_DUALITY_OBJECT WITH operation"
@@ -1523,6 +1534,7 @@ type likeEscapeSpec struct {
 	Symbol                          "Constraint Symbol"
 
 %precedence empty
+%precedence member
 %precedence as
 %precedence lowerThanSelectOpt
 %precedence sqlBufferResult
@@ -2494,7 +2506,13 @@ BeginTransactionStmt:
 	{
 		$$ = &ast.BeginStmt{}
 	}
-|	"START" "TRANSACTION"
+|	StartTransactionStmt
+
+// StartTransactionStmt is split out of BeginTransactionStmt because a
+// routine body may contain START TRANSACTION, while a bare BEGIN there
+// opens a compound statement instead.
+StartTransactionStmt:
+	"START" "TRANSACTION"
 	{
 		$$ = &ast.BeginStmt{}
 	}
@@ -3179,6 +3197,16 @@ BareBuiltinFunction:
 		$$ = &ast.FuncCallExpr{
 			FnName: ast.NewCIStr($1),
 			Args:   $3.([]ast.ExprNode),
+		}
+	}
+|	"INTERVAL" '(' Expression ',' ExpressionList ')'
+	{
+		// INTERVAL() takes two or more arguments. With a single
+		// parenthesised argument the token instead starts a temporal
+		// interval, as in `d - INTERVAL (n) DAY_MICROSECOND`.
+		$$ = &ast.FuncCallExpr{
+			FnName: ast.NewCIStr("INTERVAL"),
+			Args:   append([]ast.ExprNode{$3}, $5.([]ast.ExprNode)...),
 		}
 	}
 |	FunctionNameConflictNonNow '(' ExpressionListOpt ')'
@@ -4085,7 +4113,7 @@ CreateProcedureStmt:
 	}
 
 CreateFunctionStmt:
-	RoutineCreatePrefix "FUNCTION" IfNotExists TableName '(' FuncParamListOpt ')' "RETURNS" Type RoutineOptListOpt RoutineBodyTail
+	RoutineCreatePrefix "FUNCTION" IfNotExists TableName '(' FuncParamListOpt ')' "RETURNS" TypeWithCollate RoutineOptListOpt RoutineBodyTail
 	{
 		x := &ast.CreateFunctionStmt{
 			IfNotExists: $3.(bool),
@@ -4164,7 +4192,7 @@ ProcParamList:
 	}
 
 ProcParam:
-	ProcParamDirection Identifier Type
+	ProcParamDirection Identifier TypeWithCollate
 	{
 		$$ = &ast.RoutineParam{
 			Name:      ast.NewCIStr($2),
@@ -4209,9 +4237,21 @@ FuncParamList:
 	}
 
 FuncParam:
-	Identifier Type
+	Identifier TypeWithCollate
 	{
 		$$ = &ast.RoutineParam{Name: ast.NewCIStr($1), Type: $2.(*types.FieldType)}
+	}
+
+// TypeWithCollate is a field type with the optional trailing COLLATE
+// routine parameters, RETURNS clauses and DECLARE statements allow (in
+// column definitions the collation is a column option instead).
+TypeWithCollate:
+	Type
+|	Type "COLLATE" CollationName
+	{
+		ft := $1.(*types.FieldType)
+		ft.SetCollate($3)
+		$$ = ft
 	}
 
 RoutineOptListOpt:
@@ -4304,6 +4344,11 @@ RoutineLib:
 |	TableName "AS" Identifier
 	{
 		$$ = &ast.RoutineLibrary{Name: $1.(*ast.TableName), Alias: ast.NewCIStr($3)}
+	}
+|	TableName Identifier
+	{
+		// The AS is optional, as in table aliases.
+		$$ = &ast.RoutineLibrary{Name: $1.(*ast.TableName), Alias: ast.NewCIStr($2)}
 	}
 
 RoutineBodyTail:
@@ -4573,6 +4618,7 @@ DropRoutineStmt:
  */
 ProcedureBodyStmt:
 	SimpleStatement
+|	StartTransactionStmt
 |	BeginEndStmt
 |	ProcLabeledStmt
 |	ProcIfStmt
@@ -4607,19 +4653,19 @@ BeginEndStmt:
 	}
 
 ProcWhileStmt:
-	"WHILE" Expression "DO" ProcStmtListOpt "END" "WHILE"
+	"WHILE" Expression "DO" ProcStmtListNonEmpty "END" "WHILE"
 	{
 		$$ = &ast.WhileStmt{Cond: $2, Stmts: $4.([]ast.StmtNode)}
 	}
 
 ProcRepeatStmt:
-	"REPEAT" ProcStmtListOpt "UNTIL" Expression "END" "REPEAT"
+	"REPEAT" ProcStmtListNonEmpty "UNTIL" Expression "END" "REPEAT"
 	{
 		$$ = &ast.RepeatStmt{Stmts: $2.([]ast.StmtNode), Until: $4}
 	}
 
 ProcLoopStmt:
-	"LOOP" ProcStmtListOpt "END" "LOOP"
+	"LOOP" ProcStmtListNonEmpty "END" "LOOP"
 	{
 		$$ = &ast.LoopStmt{Stmts: $2.([]ast.StmtNode)}
 	}
@@ -4627,19 +4673,19 @@ ProcLoopStmt:
 // Labels use the raw identifier token: like label_keyword in MySQL, none of
 // the keywords that can begin a body statement may label one.
 ProcLabeledStmt:
-	identifier ':' "BEGIN" ProcStmtListOpt "END" EndLabelOpt
+	LabelIdent ':' "BEGIN" ProcStmtListOpt "END" EndLabelOpt
 	{
 		$$ = &ast.BeginEndStmt{Label: ast.NewCIStr($1), Stmts: $4.([]ast.StmtNode), HasEndLabel: $6 != ""}
 	}
-|	identifier ':' "WHILE" Expression "DO" ProcStmtListOpt "END" "WHILE" EndLabelOpt
+|	LabelIdent ':' "WHILE" Expression "DO" ProcStmtListNonEmpty "END" "WHILE" EndLabelOpt
 	{
 		$$ = &ast.WhileStmt{Label: ast.NewCIStr($1), Cond: $4, Stmts: $6.([]ast.StmtNode), HasEndLabel: $9 != ""}
 	}
-|	identifier ':' "REPEAT" ProcStmtListOpt "UNTIL" Expression "END" "REPEAT" EndLabelOpt
+|	LabelIdent ':' "REPEAT" ProcStmtListNonEmpty "UNTIL" Expression "END" "REPEAT" EndLabelOpt
 	{
 		$$ = &ast.RepeatStmt{Label: ast.NewCIStr($1), Stmts: $4.([]ast.StmtNode), Until: $6, HasEndLabel: $9 != ""}
 	}
-|	identifier ':' "LOOP" ProcStmtListOpt "END" "LOOP" EndLabelOpt
+|	LabelIdent ':' "LOOP" ProcStmtListNonEmpty "END" "LOOP" EndLabelOpt
 	{
 		$$ = &ast.LoopStmt{Label: ast.NewCIStr($1), Stmts: $4.([]ast.StmtNode), HasEndLabel: $7 != ""}
 	}
@@ -4649,7 +4695,7 @@ EndLabelOpt:
 	{
 		$$ = ""
 	}
-|	identifier
+|	LabelIdent
 
 ProcIfStmt:
 	"IF" ProcIfTail "END" "IF"
@@ -4729,7 +4775,7 @@ ProcCaseElseOpt:
 	}
 
 DeclareStmt:
-	"DECLARE" DeclareIdentList Type DeclareDefaultOpt
+	"DECLARE" DeclareIdentList TypeWithCollate DeclareDefaultOpt
 	{
 		x := &ast.DeclareVarStmt{Names: $2.([]ast.CIStr), Type: $3.(*types.FieldType)}
 		if $4 != nil {
@@ -5604,7 +5650,9 @@ logAnd:
 |	"AND"
 
 ExpressionList:
-	Expression
+	// Lowest precedence so that a ',' following the first element is always
+	// shifted: INTERVAL(a, b) is the function, not a row expression.
+	Expression %prec empty
 	{
 		$$ = []ast.ExprNode{$1}
 	}
@@ -5812,6 +5860,13 @@ PredicateExpr:
 	{
 		$$ = &ast.FuncCallExpr{FnName: ast.NewCIStr(ast.JSONMemberOf), Args: []ast.ExprNode{$1, $4}}
 	}
+|	BitExpr "MEMBER" '(' SimpleExpr ')'
+	{
+		// OF is optional: `x MEMBER (doc)` means `x MEMBER OF (doc)`.
+		// MySQL likewise prefers this reading over treating MEMBER as an
+		// alias, so a trailing bare MEMBER is a syntax error there too.
+		$$ = &ast.FuncCallExpr{FnName: ast.NewCIStr(ast.JSONMemberOf), Args: []ast.ExprNode{$1, $4}}
+	}
 |	BitExpr "SOUNDS" "LIKE" BitExpr
 	{
 		// MySQL defines `a SOUNDS LIKE b` as `SOUNDEX(a) = SOUNDEX(b)`.
@@ -5819,7 +5874,7 @@ PredicateExpr:
 		r := &ast.FuncCallExpr{FnName: ast.NewCIStr("soundex"), Args: []ast.ExprNode{$4}}
 		$$ = &ast.BinaryOperationExpr{Op: opcode.EQ, L: l, R: r}
 	}
-|	BitExpr
+|	BitExpr %prec empty
 
 RegexpSym:
 	"REGEXP"
@@ -6148,32 +6203,84 @@ Identifier:
 |	UnReservedKeyword
 |	NotKeywordToken
 
+// LabelIdent is Identifier minus the keywords that cannot open a label.
+LabelIdent:
+	identifier
+|	LabelKeyword
+|	NotKeywordToken
+
 UnReservedKeyword:
+	LabelKeyword
+|	NonLabelKeyword
+
+// NonLabelKeyword holds the unreserved keywords that may not be used as a
+// compound-statement label. Most of them open a statement, so accepting
+// them would make the label rule ambiguous -- MySQL excludes the same set.
+NonLabelKeyword:
+	"ASCII"
+|	"BEGIN"
+|	"BYTE"
+|	"CACHE"
+|	"CHARSET"
+|	"CLONE"
+|	"COMMIT"
+|	"DEALLOCATE"
+|	"DO"
+|	"END"
+|	"FILE"
+|	"FLUSH"
+|	"HANDLER"
+|	"INSTALL"
+|	"PREPARE"
+|	"PROXY"
+|	"RESOURCE"
+|	"ROLLBACK"
+|	"SIGNED"
+|	"START"
+|	"TRUNCATE"
+|	"COMMENT"
+|	"CHECKSUM"
+|	"NO"
+|	"NONE"
+|	"SUPER"
+|	"PROCESS"
+|	"SAVEPOINT"
+|	"REPLICATION"
+|	"RESET"
+|	"SLAVE"
+|	"RELOAD"
+|	"EVENT"
+|	"REPAIR"
+|	"IMPORT"
+|	"CONTAINS"
+|	"FOLLOWS"
+|	"PRECEDES"
+|	"HELP"
+|	"UNICODE"
+|	"LANGUAGE"
+|	"STOP"
+|	"UNINSTALL"
+|	"XA"
+
+LabelKeyword:
 	"ACTION"
-|	"ASCII"
 |	"ATTRIBUTE"
 |	"AUTO_INCREMENT"
 |	"AFTER"
 |	"ALWAYS"
 |	"AVG"
 |	"BACKUP"
-|	"BEGIN"
 |	"BIT"
 |	"BOOL"
 |	"BOOLEAN"
 |	"BTREE"
 |	"BUCKETS"
-|	"BYTE"
-|	"CACHE"
 |	"CHAIN"
 |	"CHANGED"
-|	"CHARSET"
-|	"CLONE"
 |	"CLOSE"
 |	"COLUMNS"
 |	"CONFIG"
 |	"SAN"
-|	"COMMIT"
 |	"COMPACT"
 |	"COMPONENT"
 |	"COMPRESSED"
@@ -6183,14 +6290,11 @@ UnReservedKeyword:
 |	"DATE" %prec lowerThanStringLitToken
 |	"DATETIME"
 |	"DAY"
-|	"DEALLOCATE"
 |	"DEFAULT_AUTH"
-|	"DO"
 |	"DUMPFILE"
 |	"DUPLICATE"
 |	"DYNAMIC"
 |	"ENCRYPTION"
-|	"END"
 |	"ENFORCED"
 |	"ENGINE"
 |	"ENGINES"
@@ -6208,22 +6312,18 @@ UnReservedKeyword:
 |	"EXTENDED"
 |	"FAST"
 |	"FIELDS"
-|	"FILE"
 |	"FIRST"
 |	"FIXED"
-|	"FLUSH"
 |	"FOLLOWING"
 |	"FORMAT"
 |	"FULL"
 |	"GENERAL"
 |	"GLOBAL"
 |	"GROUP_REPLICATION"
-|	"HANDLER"
 |	"HASH"
 |	"HOST"
 |	"HOUR"
 |	"INSERT_METHOD"
-|	"INSTALL"
 |	"LESS"
 |	"LOCAL"
 |	"LAST"
@@ -6242,23 +6342,17 @@ UnReservedKeyword:
 |	"PLUGIN"
 |	"PLUGIN_DIR"
 |	"PORT"
-|	"PREPARE"
 |	"PREV"
-|	"PROXY"
 |	"QUICK"
 |	"REBUILD"
 |	"REDUNDANT"
 |	"REORGANIZE"
-|	"RESOURCE"
 |	"RESTART"
 |	"ROLE"
-|	"ROLLBACK"
 |	"ROLLUP"
 |	"SESSION"
-|	"SIGNED"
 |	"SHUTDOWN"
 |	"SNAPSHOT"
-|	"START"
 |	"STATUS"
 |	"OPEN"
 |	"POINT"
@@ -6271,7 +6365,6 @@ UnReservedKeyword:
 |	"TIME" %prec lowerThanStringLitToken
 |	"TIMESTAMP" %prec lowerThanStringLitToken
 |	"TRANSACTION"
-|	"TRUNCATE"
 |	"UNBOUNDED"
 |	"UNKNOWN"
 |	"VALUE" %prec lowerThanValueKeyword
@@ -6288,10 +6381,8 @@ UnReservedKeyword:
 |	"USER"
 |	"IDENTIFIED"
 |	"COLLATION"
-|	"COMMENT"
 |	"AVG_ROW_LENGTH"
 |	"CONNECTION"
-|	"CHECKSUM"
 |	"COMPRESSION"
 |	"KEY_BLOCK_SIZE"
 |	"MASTER"
@@ -6324,24 +6415,20 @@ UnReservedKeyword:
 |	"ENABLE"
 |	"REVERSE"
 |	"PRIVILEGES"
-|	"NO"
 |	"BINLOG"
 |	"FUNCTION"
 |	"VIEW"
 |	"MODIFY"
 |	"EVENTS"
 |	"PARTITIONS"
-|	"NONE"
 |	"NULLS"
 |	"SQL_THREAD"
-|	"SUPER"
 |	"STATS_PERSISTENT"
 |	"STATS_AUTO_RECALC"
 |	"ROW_COUNT"
 |	"COALESCE"
 |	"CODE"
 |	"MONTH"
-|	"PROCESS"
 |	"PROFILE"
 |	"PROFILES"
 |	"MICROSECOND"
@@ -6349,7 +6436,6 @@ UnReservedKeyword:
 |	"PLUGINS"
 |	"PRECEDING"
 |	"QUERY"
-|	"SAVEPOINT"
 |	"SECOND"
 |	"SEPARATOR"
 |	"SHARE"
@@ -6358,14 +6444,9 @@ UnReservedKeyword:
 |	"MAX_QUERIES_PER_HOUR"
 |	"MAX_UPDATES_PER_HOUR"
 |	"MAX_USER_CONNECTIONS"
-|	"REPLICATION"
-|	"RESET"
 |	"CLIENT"
-|	"SLAVE"
-|	"RELOAD"
 |	"TEMPORARY"
 |	"ROUTINE"
-|	"EVENT"
 |	"ALGORITHM"
 |	"DEFINER"
 |	"INVOKER"
@@ -6418,8 +6499,6 @@ UnReservedKeyword:
 |	"RTREE"
 |	"EXCHANGE"
 |	"COLUMN_FORMAT"
-|	"REPAIR"
-|	"IMPORT"
 |	"DISCARD"
 |	"OLD"
 |	"RETAIN"
@@ -6430,9 +6509,6 @@ UnReservedKeyword:
 |	"DUALITY"
 |	"RELATIONAL"
 |	"RETURNS"
-|	"CONTAINS"
-|	"FOLLOWS"
-|	"PRECEDES"
 |	"SCHEDULE"
 |	"COMPLETION"
 |	"PRESERVE"
@@ -6452,18 +6528,15 @@ UnReservedKeyword:
 |	"CONDITION"
 |	"DIAGNOSTICS"
 |	"GET"
-|	"HELP"
 |	"MUTEX"
 |	"STACKED"
 |	"XML"
-|	"UNICODE"
 |	"SQL_TSI_DAY"
 |	"SQL_TSI_HOUR"
 |	"SQL_TSI_MINUTE"
 |	"SQL_TSI_MONTH"
 |	"SQL_TSI_QUARTER"
 |	"SQL_TSI_SECOND"
-|	"LANGUAGE"
 |	"LIBRARY"
 |	"SQL_TSI_WEEK"
 |	"SQL_TSI_YEAR"
@@ -6535,19 +6608,16 @@ UnReservedKeyword:
 |	"RELAY"
 |	"RESUME"
 |	"ROTATE"
-|	"STOP"
 |	"SUSPEND"
 |	"THREAD_PRIORITY"
 |	"UNDOFILE"
 |	"UNDO_BUFFER_SIZE"
-|	"UNINSTALL"
 |	"UPGRADE"
 |	"USE_FRM"
 |	"USER_RESOURCES"
 |	"VCPU"
 |	"WORK"
 |	"WRAPPER"
-|	"XA"
 |	"XID"
 
 NotKeywordToken:
@@ -7498,7 +7568,6 @@ FunctionNameConflictNonNow:
 |	"GROUPING"
 |	"HOUR"
 |	"IF"
-|	"INTERVAL"
 |	"LINESTRING"
 |	"LOG"
 |	"FORMAT"
@@ -7548,6 +7617,16 @@ FunctionCallKeyword:
 	FunctionNameConflict '(' ExpressionListOpt ')'
 	{
 		$$ = &ast.FuncCallExpr{FnName: ast.NewCIStr($1), Args: $3.([]ast.ExprNode)}
+	}
+|	"INTERVAL" '(' Expression ',' ExpressionList ')'
+	{
+		// INTERVAL() takes two or more arguments. With a single
+		// parenthesised argument the token instead starts a temporal
+		// interval, as in `d - INTERVAL (n) DAY_MICROSECOND`.
+		$$ = &ast.FuncCallExpr{
+			FnName: ast.NewCIStr("INTERVAL"),
+			Args:   append([]ast.ExprNode{$3}, $5.([]ast.ExprNode)...),
+		}
 	}
 |	builtinUser '(' ExpressionListOpt ')'
 	{
@@ -8079,14 +8158,14 @@ OptGConcatSeparator:
 	}
 
 FunctionCallGeneric:
-	identifier '(' ExpressionListOpt ')'
+	identifier '(' UDFExpressionListOpt ')'
 	{
 		$$ = &ast.FuncCallExpr{
 			FnName: ast.NewCIStr($1),
 			Args:   $3.([]ast.ExprNode),
 		}
 	}
-|	Identifier '.' Identifier '(' ExpressionListOpt ')'
+|	Identifier '.' Identifier '(' UDFExpressionListOpt ')'
 	{
 		var tp ast.FuncCallExprType
 		if isInTokenMap($3) {
@@ -8100,6 +8179,38 @@ FunctionCallGeneric:
 			FnName: ast.NewCIStr($3),
 			Args:   $5.([]ast.ExprNode),
 		}
+	}
+
+UDFExpressionListOpt:
+	/* EMPTY */
+	{
+		$$ = []ast.ExprNode{}
+	}
+|	UDFExpressionList
+
+UDFExpressionList:
+	UDFExpression
+	{
+		$$ = []ast.ExprNode{$1}
+	}
+|	UDFExpressionList ',' UDFExpression
+	{
+		$$ = append($1.([]ast.ExprNode), $3)
+	}
+
+// UDFExpression is a function call argument with MySQL's optional UDF
+// attribute alias (udf_expr: expr [[AS] ident]). The server accepts the
+// alias syntactically for any function and rejects non-UDF uses at
+// resolution time, so accepting it here is faithful.
+UDFExpression:
+	Expression
+|	Expression "AS" Identifier
+	{
+		$$ = &ast.FuncCallArgAliasExpr{Expr: $1, AsName: ast.NewCIStr($3)}
+	}
+|	Expression Identifier
+	{
+		$$ = &ast.FuncCallArgAliasExpr{Expr: $1, AsName: ast.NewCIStr($2)}
 	}
 
 FuncDatetimePrec:
@@ -8430,6 +8541,17 @@ CastType:
 		tp.SetCollate(charset.CollationBin)
 		$$ = tp
 	}
+|	"DOUBLE" "PRECISION"
+	{
+		tp := types.NewFieldType(mysql.TypeDouble)
+		flen, decimal := mysql.GetDefaultFieldLengthAndDecimalForCast(mysql.TypeDouble)
+		tp.SetFlen(flen)
+		tp.SetDecimal(decimal)
+		tp.AddFlag(mysql.BinaryFlag)
+		tp.SetCharset(charset.CharsetBin)
+		tp.SetCollate(charset.CollationBin)
+		$$ = tp
+	}
 |	"FLOAT" FloatOpt
 	{
 		tp := types.NewFieldType(mysql.TypeFloat)
@@ -8614,6 +8736,18 @@ JsonValueOnEmptyOrErrorOpt:
 		}
 	}
 
+// JSON_TABLE columns, unlike JSON_VALUE, accept the two clauses in either
+// order.
+JsonTableOnEmptyOrErrorOpt:
+	JsonValueOnEmptyOrErrorOpt
+|	JsonValueBehavior "ON" "ERROR" JsonValueBehavior "ON" "EMPTY"
+	{
+		$$ = &jsonValueOnHolder{
+			onError: $1.(*ast.JSONValueOnBehavior),
+			onEmpty: $4.(*ast.JSONValueOnBehavior),
+		}
+	}
+
 Priority:
 	"LOW_PRIORITY"
 	{
@@ -8765,6 +8899,25 @@ UserVariableList:
 |	UserVariableList ',' UserVariable
 	{
 		$$ = append($1.([]ast.ExprNode), $3)
+	}
+
+IntoVarList:
+	IntoVar
+	{
+		$$ = []ast.ExprNode{$1}
+	}
+|	IntoVarList ',' IntoVar
+	{
+		$$ = append($1.([]ast.ExprNode), $3)
+	}
+
+// IntoVar is one SELECT ... INTO target: a user variable or a stored
+// program variable (a bare identifier).
+IntoVar:
+	UserVariable
+|	Identifier
+	{
+		$$ = &ast.ColumnNameExpr{Name: &ast.ColumnName{Name: ast.NewCIStr($1)}}
 	}
 
 DeallocateStmt:
@@ -9487,6 +9640,16 @@ OptLeadLagInfo:
 		}
 		$$ = args
 	}
+|	',' Identifier OptLLDefault
+	{
+		// ... or a routine parameter/local: LAG(x, n) OVER ().
+		col := &ast.ColumnNameExpr{Name: &ast.ColumnName{Name: ast.NewCIStr($2)}}
+		args := []ast.ExprNode{col}
+		if $3 != nil {
+			args = append(args, $3.(ast.ExprNode))
+		}
+		$$ = args
+	}
 |	',' paramMarker OptLLDefault
 	{
 		args := []ast.ExprNode{ast.NewParamMarkerExpr(yyS[yypt-1].offset)}
@@ -9600,7 +9763,7 @@ TableFactor:
 		j.ExplicitParens = true
 		$$ = $2
 	}
-|	jsonTable '(' Expression ',' stringLit "COLUMNS" '(' JsonTableColumnList ')' ')' TableAsNameOpt
+|	jsonTable '(' Expression ',' JsonPathString "COLUMNS" '(' JsonTableColumnList ')' ')' TableAsNameOpt
 	{
 		jt := &ast.JSONTableExpr{
 			Doc:     $3,
@@ -9625,7 +9788,7 @@ JsonTableColumn:
 	{
 		$$ = &ast.JSONTableColumn{Name: ast.NewCIStr($1), ForOrdinality: true}
 	}
-|	Identifier Type OptCollate "PATH" stringLit JsonValueOnEmptyOrErrorOpt
+|	Identifier Type OptCollate "PATH" JsonPathString JsonTableOnEmptyOrErrorOpt
 	{
 		tp := $2.(*types.FieldType)
 		if $3 != "" {
@@ -9641,7 +9804,7 @@ JsonTableColumn:
 		}
 		$$ = col
 	}
-|	Identifier Type OptCollate "EXISTS" "PATH" stringLit JsonValueOnEmptyOrErrorOpt
+|	Identifier Type OptCollate "EXISTS" "PATH" JsonPathString JsonTableOnEmptyOrErrorOpt
 	{
 		tp := $2.(*types.FieldType)
 		if $3 != "" {
@@ -9655,13 +9818,23 @@ JsonTableColumn:
 		}
 		$$ = col
 	}
-|	"NESTED" stringLit "COLUMNS" '(' JsonTableColumnList ')'
+|	"NESTED" JsonPathString "COLUMNS" '(' JsonTableColumnList ')'
 	{
 		$$ = &ast.JSONTableColumn{Path: $2, NestedColumns: $5.([]*ast.JSONTableColumn)}
 	}
-|	"NESTED" "PATH" stringLit "COLUMNS" '(' JsonTableColumnList ')'
+|	"NESTED" "PATH" JsonPathString "COLUMNS" '(' JsonTableColumnList ')'
 	{
 		$$ = &ast.JSONTableColumn{Path: $3, NestedColumns: $6.([]*ast.JSONTableColumn)}
+	}
+
+// A character-set introducer is allowed on a JSON path literal. It only
+// selects the literal's collation, which path evaluation ignores, so the
+// path text alone is kept.
+JsonPathString:
+	stringLit
+|	"UNDERSCORE_CHARSET" stringLit
+	{
+		$$ = $2
 	}
 
 PartitionNameListOpt:
@@ -9798,12 +9971,20 @@ JoinTable:
 	{
 		$$ = &ast.Join{Left: $1.(ast.ResultSetNode), Right: $4.(ast.ResultSetNode), NaturalJoin: true}
 	}
+|	TableRef "NATURAL" "INNER" "JOIN" TableRef
+	{
+		// NATURAL INNER JOIN is a spelling of NATURAL JOIN.
+		$$ = &ast.Join{Left: $1.(ast.ResultSetNode), Right: $5.(ast.ResultSetNode), NaturalJoin: true}
+	}
 |	TableRef "NATURAL" JoinType OuterOpt "JOIN" TableRef
 	{
 		$$ = &ast.Join{Left: $1.(ast.ResultSetNode), Right: $6.(ast.ResultSetNode), Tp: $3.(ast.JoinType), NaturalJoin: true}
 	}
-|	TableRef "STRAIGHT_JOIN" TableRef
+|	TableRef "STRAIGHT_JOIN" TableRef %prec tableRefPriority
 	{
+		// Same low priority as a plain cross join, so a following join binds
+		// tighter and its ON clause stays with it:
+		// a STRAIGHT_JOIN (b JOIN c ON ...) ON ...
 		$$ = &ast.Join{Left: $1.(ast.ResultSetNode), Right: $3.(ast.ResultSetNode), StraightJoin: true}
 	}
 |	TableRef "STRAIGHT_JOIN" TableRef "ON" Expression
@@ -9841,7 +10022,7 @@ LimitClause:
 	}
 |	"LIMIT" LimitOption
 	{
-		$$ = &ast.Limit{Count: $2.(*ast.ValueExpr)}
+		$$ = &ast.Limit{Count: $2.(ast.ExprNode)}
 	}
 
 LimitOption:
@@ -9852,6 +10033,11 @@ LimitOption:
 |	paramMarker
 	{
 		$$ = ast.NewParamMarkerExpr(yyS[yypt].offset)
+	}
+|	Identifier
+	{
+		// A routine parameter or local variable: SELECT ... LIMIT p1, p2.
+		$$ = &ast.ColumnNameExpr{Name: &ast.ColumnName{Name: ast.NewCIStr($1)}}
 	}
 
 RowOrRows:
@@ -10085,7 +10271,7 @@ IntoClause:
 			FileName: $3,
 		}
 	}
-|	"INTO" UserVariableList
+|	"INTO" IntoVarList
 	{
 		$$ = &ast.SelectIntoOption{
 			Tp:        ast.SelectIntoVars,
@@ -10458,6 +10644,37 @@ SetOprStmtWithLimitOrderBy:
 		setOpr := &ast.SetOprStmt{SelectList: &ast.SetOprSelectList{Selects: setOprList}}
 		setOpr.OrderBy = $2.(*ast.OrderByClause)
 		setOpr.Limit = $3.(*ast.Limit)
+		$$ = setOpr
+	}
+|	SubSelect IntoClause
+	{
+		// (query) INTO ...: MySQL allows the INTO clause after a
+		// parenthesized query expression, optionally preceded by
+		// ORDER BY and LIMIT (the alternatives below).
+		setOpr := parenQueryToSetOpr($1.(*ast.SubqueryExpr))
+		setOpr.IntoOpt = $2.(*ast.SelectIntoOption)
+		$$ = setOpr
+	}
+|	SubSelect OrderBy IntoClause
+	{
+		setOpr := parenQueryToSetOpr($1.(*ast.SubqueryExpr))
+		setOpr.OrderBy = $2.(*ast.OrderByClause)
+		setOpr.IntoOpt = $3.(*ast.SelectIntoOption)
+		$$ = setOpr
+	}
+|	SubSelect SelectStmtLimit IntoClause
+	{
+		setOpr := parenQueryToSetOpr($1.(*ast.SubqueryExpr))
+		setOpr.Limit = $2.(*ast.Limit)
+		setOpr.IntoOpt = $3.(*ast.SelectIntoOption)
+		$$ = setOpr
+	}
+|	SubSelect OrderBy SelectStmtLimit IntoClause
+	{
+		setOpr := parenQueryToSetOpr($1.(*ast.SubqueryExpr))
+		setOpr.OrderBy = $2.(*ast.OrderByClause)
+		setOpr.Limit = $3.(*ast.Limit)
+		setOpr.IntoOpt = $4.(*ast.SelectIntoOption)
 		$$ = setOpr
 	}
 
@@ -12840,14 +13057,21 @@ TextType:
 
 OptCharsetWithOptBinary:
 	OptBinary
-|	"ASCII"
+|	"ASCII" OptBinMod
 	{
 		$$ = &ast.OptBinary{
-			IsBinary: false,
+			IsBinary: $2.(bool),
 			Charset:  charset.CharsetLatin1,
 		}
 	}
-|	"UNICODE"
+|	"BINARY" "ASCII"
+	{
+		$$ = &ast.OptBinary{
+			IsBinary: true,
+			Charset:  charset.CharsetLatin1,
+		}
+	}
+|	"UNICODE" OptBinMod
 	{
 		cs, err := charset.GetCharsetInfo("ucs2")
 		if err != nil {
@@ -12855,7 +13079,19 @@ OptCharsetWithOptBinary:
 			return 1
 		}
 		$$ = &ast.OptBinary{
-			IsBinary: false,
+			IsBinary: $2.(bool),
+			Charset:  cs.Name,
+		}
+	}
+|	"BINARY" "UNICODE"
+	{
+		cs, err := charset.GetCharsetInfo("ucs2")
+		if err != nil {
+			yylex.AppendError(ErrUnknownCharacterSet.GenByArgs("ucs2"))
+			return 1
+		}
+		$$ = &ast.OptBinary{
+			IsBinary: true,
 			Charset:  cs.Name,
 		}
 	}
@@ -12990,11 +13226,18 @@ OptBinary:
 			Charset:  "",
 		}
 	}
-|	"BINARY" OptCharset
+|	"BINARY"
 	{
 		$$ = &ast.OptBinary{
 			IsBinary: true,
-			Charset:  $2,
+			Charset:  "",
+		}
+	}
+|	"BINARY" CharsetKw CharsetName
+	{
+		$$ = &ast.OptBinary{
+			IsBinary: true,
+			Charset:  $3,
 		}
 	}
 |	CharsetKw CharsetName OptBinMod
@@ -13003,15 +13246,6 @@ OptBinary:
 			IsBinary: $3.(bool),
 			Charset:  $2,
 		}
-	}
-
-OptCharset:
-	{
-		$$ = ""
-	}
-|	CharsetKw CharsetName
-	{
-		$$ = $2
 	}
 
 CharsetKw:
@@ -16378,6 +16612,26 @@ KillStmt:
 			Query:        true,
 		}
 	}
+|	"KILL" identifier
+	{
+		// The connection id may be a routine parameter or local variable.
+		$$ = &ast.KillStmt{
+			Expr: &ast.ColumnNameExpr{Name: &ast.ColumnName{Name: ast.NewCIStr($2)}},
+		}
+	}
+|	"KILL" "CONNECTION" identifier
+	{
+		$$ = &ast.KillStmt{
+			Expr: &ast.ColumnNameExpr{Name: &ast.ColumnName{Name: ast.NewCIStr($3)}},
+		}
+	}
+|	"KILL" "QUERY" identifier
+	{
+		$$ = &ast.KillStmt{
+			Expr:  &ast.ColumnNameExpr{Name: &ast.ColumnName{Name: ast.NewCIStr($3)}},
+			Query: true,
+		}
+	}
 |	"KILL" BuiltinFunction
 	{
 		$$ = &ast.KillStmt{
@@ -16466,6 +16720,11 @@ GetDiagnosticsScopeOpt:
 GetDiagnosticsConditionNumber:
 	SignedLiteral
 |	UserVariable
+|	Identifier
+	{
+		// A stored program variable holding the condition number.
+		$$ = &ast.ColumnNameExpr{Name: &ast.ColumnName{Name: ast.NewCIStr($1)}}
+	}
 
 GetDiagnosticsItemList:
 	GetDiagnosticsItem
@@ -16481,6 +16740,11 @@ GetDiagnosticsItem:
 	UserVariable "=" Identifier
 	{
 		$$ = &ast.DiagnosticsItem{Target: $1, Name: strings.ToUpper($3)}
+	}
+|	Identifier "=" Identifier
+	{
+		target := &ast.ColumnNameExpr{Name: &ast.ColumnName{Name: ast.NewCIStr($1)}}
+		$$ = &ast.DiagnosticsItem{Target: target, Name: strings.ToUpper($3)}
 	}
 
 SignedNum:

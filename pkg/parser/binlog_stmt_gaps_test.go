@@ -1036,7 +1036,8 @@ func TestJSONTable(t *testing.T) {
 		// PATH, NESTED and ORDINALITY remain usable as identifiers, and
 		// JSON_TABLE is only a keyword when followed by a parenthesis.
 		{"SELECT path, nested, ordinality FROM t", true, "SELECT `path`,`nested`,`ordinality` FROM `t`"},
-		{"SELECT * FROM t WHERE json_table = 5", true, "SELECT * FROM `t` WHERE `json_table`=5"},
+		// JSON_TABLE is a reserved word, so it cannot name a column.
+		{"SELECT * FROM t WHERE json_table = 5", false, ""},
 		// JSON_TABLE is not a scalar function.
 		{"SELECT JSON_TABLE('[]', '$' COLUMNS (i INT PATH '$'))", false, ""},
 	}
@@ -1485,6 +1486,125 @@ func TestStoredProgramCase(t *testing.T) {
 	table := []testCase{
 		{"CREATE PROCEDURE cs(x INT) BEGIN CASE x WHEN 1 THEN SELECT 'one'; ELSE SELECT 'many'; END CASE; END", true, "CREATE PROCEDURE `cs`(IN `x` INT) BEGIN CASE `x` WHEN 1 THEN SELECT _UTF8MB4'one';  ELSE SELECT _UTF8MB4'many';  END CASE; END"},
 		{"CREATE PROCEDURE cw(x INT) BEGIN CASE WHEN x > 0 THEN SELECT '+'; END CASE; END", true, "CREATE PROCEDURE `cw`(IN `x` INT) BEGIN CASE WHEN `x`>0 THEN SELECT _UTF8MB4'+';  END CASE; END"},
+	}
+	RunTest(t, table, false)
+}
+
+// TestSelectIntoVariables covers SELECT ... INTO, which names routine
+// variables as bare identifiers, and the trailing INTO of a parenthesised
+// query expression.
+func TestSelectIntoVariables(t *testing.T) {
+	table := []testCase{
+		{"SELECT a, b INTO x, y FROM t1", true, "SELECT `a`,`b` FROM `t1` INTO `x`, `y`"},
+		{"SELECT a INTO @v FROM t1", true, "SELECT `a` FROM `t1` INTO @`v`"},
+		{"(SELECT a FROM t1 ORDER BY a LIMIT 1) INTO x", true, "(SELECT `a` FROM `t1` ORDER BY `a` LIMIT 1) INTO `x`"},
+		{"(SELECT a FROM t1) INTO @v", true, "(SELECT `a` FROM `t1`) INTO @`v`"},
+	}
+	RunTest(t, table, false)
+}
+
+// TestRoutineDeclarations covers the routine-signature clauses: a trailing
+// COLLATE on a parameter, RETURNS or DECLARE type, library aliases without
+// AS, GET DIAGNOSTICS naming routine variables, and function-argument
+// attribute aliases (which MySQL accepts syntactically for any function).
+func TestRoutineDeclarations(t *testing.T) {
+	table := []testCase{
+		{"CREATE PROCEDURE p(x CHAR(3) COLLATE utf8mb4_bin) BEGIN DECLARE y VARCHAR(5) CHARACTER SET latin1 COLLATE latin1_bin DEFAULT 'a'; END", true, "CREATE PROCEDURE `p`(IN `x` CHAR(3) COLLATE utf8mb4_bin) BEGIN DECLARE `y` VARCHAR(5) CHARACTER SET LATIN1 COLLATE latin1_bin DEFAULT _UTF8MB4'a'; END"},
+		{"CREATE FUNCTION f() RETURNS CHAR(3) COLLATE utf8mb4_bin RETURN 'a'", true, "CREATE FUNCTION `f`() RETURNS CHAR(3) COLLATE utf8mb4_bin RETURN _UTF8MB4'a'"},
+		{"CREATE FUNCTION jf(n INT) RETURNS INT LANGUAGE JAVASCRIPT USING (mylib ml, other AS o) AS $$ return 1 $$", true, "CREATE FUNCTION `jf`(`n` INT) RETURNS INT LANGUAGE JAVASCRIPT USING (`mylib` AS `ml`, `other` AS `o`) AS ' return 1 '"},
+		{"CREATE PROCEDURE gd() BEGIN GET DIAGNOSTICS CONDITION n @x = MESSAGE_TEXT; GET DIAGNOSTICS CONDITION 1 v = RETURNED_SQLSTATE; END", true, "CREATE PROCEDURE `gd`() BEGIN GET DIAGNOSTICS CONDITION `n` @`x` = MESSAGE_TEXT; GET DIAGNOSTICS CONDITION 1 `v` = RETURNED_SQLSTATE; END"},
+		{"SELECT myudf(a AS x, b y) FROM t1", true, "SELECT MYUDF(`a` AS `x`, `b` AS `y`) FROM `t1`"},
+	}
+	RunTest(t, table, false)
+}
+
+// TestJoinAndOperatorSpellings covers alternate spellings MySQL accepts in
+// joins, casts and the MEMBER OF predicate, plus the STRAIGHT_JOIN nesting
+// that lets a following join keep its own ON clause.
+func TestJoinAndOperatorSpellings(t *testing.T) {
+	table := []testCase{
+		{"SELECT * FROM t1 NATURAL INNER JOIN t2", true, "SELECT * FROM `t1` NATURAL JOIN `t2`"},
+		{"SELECT CAST(1 AS DOUBLE PRECISION)", true, "SELECT CAST(1 AS DOUBLE)"},
+		{"SELECT 1 MEMBER ('[1]')", true, "SELECT 1 MEMBER OF (_UTF8MB4'[1]')"},
+		{"SELECT * FROM t1 a STRAIGHT_JOIN t2 b INNER JOIN t3 c ON b.x = c.x ON a.y = b.y", true, "SELECT * FROM `t1` AS `a` STRAIGHT_JOIN (`t2` AS `b` JOIN `t3` AS `c` ON `b`.`x`=`c`.`x`) ON `a`.`y`=`b`.`y`"},
+		// MEMBER binds as the predicate, so a trailing bare MEMBER is a
+		// syntax error rather than a column alias -- as in MySQL.
+		{"SELECT 1 MEMBER", false, ""},
+	}
+	RunTest(t, table, false)
+}
+
+// TestJSONTableClauses covers the JSON_TABLE-only relaxations: either
+// ON EMPTY/ON ERROR order, and a character-set introducer on a path literal.
+func TestJSONTableClauses(t *testing.T) {
+	table := []testCase{
+		{"SELECT * FROM JSON_TABLE ('[1]', '$[*]' COLUMNS (a INT PATH '$')) jt", true, "SELECT * FROM JSON_TABLE(_UTF8MB4'[1]', '$[*]' COLUMNS (`a` INT PATH '$')) AS `jt`"},
+		{"SELECT * FROM JSON_TABLE('{}', '$' COLUMNS (x VARCHAR(10) PATH '$.x' NULL ON ERROR NULL ON EMPTY)) jt", true, "SELECT * FROM JSON_TABLE(_UTF8MB4'{}', '$' COLUMNS (`x` VARCHAR(10) PATH '$.x' NULL ON EMPTY NULL ON ERROR)) AS `jt`"},
+		{"SELECT * FROM JSON_TABLE(JSON_OBJECT(), _utf8mb4'$' COLUMNS (NESTED PATH _utf8mb4'$.x' COLUMNS (y INT PATH _utf8mb4'$.y'))) jt", true, "SELECT * FROM JSON_TABLE(JSON_OBJECT(), '$' COLUMNS (NESTED PATH '$.x' COLUMNS (`y` INT PATH '$.y'))) AS `jt`"},
+		// JSON_VALUE keeps MySQL's stricter ordering.
+		{"SELECT JSON_VALUE('{}', '$.x' NULL ON ERROR NULL ON EMPTY)", false, ""},
+	}
+	RunTest(t, table, false)
+}
+
+// TestCharsetBinaryCombos covers ASCII/UNICODE combined with BINARY in either
+// order, which MySQL folds into a charset plus the binary flag.
+func TestCharsetBinaryCombos(t *testing.T) {
+	table := []testCase{
+		{"CREATE TABLE t1 (a VARCHAR(10) BINARY ASCII, b VARCHAR(10) ASCII BINARY, c VARCHAR(10) BINARY UNICODE, d VARCHAR(10) UNICODE BINARY)", true, "CREATE TABLE `t1` (`a` VARCHAR(10) BINARY CHARACTER SET LATIN1,`b` VARCHAR(10) BINARY CHARACTER SET LATIN1,`c` VARCHAR(10) BINARY CHARACTER SET UCS2,`d` VARCHAR(10) BINARY CHARACTER SET UCS2)"},
+		{"SELECT CONVERT('a', CHAR(2) ASCII)", true, "SELECT CONVERT(_UTF8MB4'a', CHAR(2) CHARSET LATIN1)"},
+	}
+	RunTest(t, table, false)
+}
+
+// TestRoutineVariableOperands covers the places a routine parameter or local
+// may stand in for a literal: a LEAD/LAG offset, LIMIT, and KILL.
+func TestRoutineVariableOperands(t *testing.T) {
+	table := []testCase{
+		{"CREATE PROCEDURE p1(n INTEGER) DO LAG('x', n) OVER ()", true, "CREATE PROCEDURE `p1`(IN `n` INT) DO LAG(_UTF8MB4'x', `n`) OVER ()"},
+		{"CREATE PROCEDURE p2(p1 INT, p2 INT) SELECT * FROM t1 LIMIT p1, p2", true, "CREATE PROCEDURE `p2`(IN `p1` INT, IN `p2` INT) SELECT * FROM `t1` LIMIT `p1`,`p2`"},
+		{"CREATE PROCEDURE p6(a INT) KILL a", true, "CREATE PROCEDURE `p6`(IN `a` INT) KILL `a`"},
+		{"CREATE PROCEDURE p7(a INT) KILL QUERY a", true, "CREATE PROCEDURE `p7`(IN `a` INT) KILL QUERY `a`"},
+	}
+	RunTest(t, table, true)
+}
+
+// TestRoutineBodyControl covers START TRANSACTION as a routine body statement
+// (a bare BEGIN there opens a compound statement instead) and the loop forms,
+// whose bodies MySQL requires to be non-empty.
+func TestRoutineBodyControl(t *testing.T) {
+	table := []testCase{
+		{"CREATE PROCEDURE p3() START TRANSACTION", true, "CREATE PROCEDURE `p3`() START TRANSACTION"},
+		{"CREATE PROCEDURE p4() BEGIN START TRANSACTION; COMMIT; END", true, "CREATE PROCEDURE `p4`() BEGIN START TRANSACTION; COMMIT; END"},
+		{"CREATE PROCEDURE p() BEGIN END", true, "CREATE PROCEDURE `p`() BEGIN END"},
+		{"CREATE PROCEDURE p() BEGIN LOOP END LOOP; END", false, ""},
+		{"CREATE PROCEDURE p() BEGIN WHILE 0 DO END WHILE; END", false, ""},
+		{"CREATE PROCEDURE p() BEGIN REPEAT UNTIL 1 END REPEAT; END", false, ""},
+	}
+	RunTest(t, table, false)
+}
+
+// TestKeywordLabels covers labels named after unreserved keywords. MySQL
+// excludes the keywords that open a statement, and so does the fork.
+func TestKeywordLabels(t *testing.T) {
+	table := []testCase{
+		{"CREATE PROCEDURE p5() BEGIN skip: LOOP LEAVE skip; END LOOP skip; END", true, "CREATE PROCEDURE `p5`() BEGIN `skip`: LOOP LEAVE `skip`; END LOOP `skip`; END"},
+		{"CREATE FUNCTION f2() RETURNS INT BEGIN format: LOOP RETURN 1; END LOOP; RETURN 0; END", true, "CREATE FUNCTION `f2`() RETURNS INT BEGIN `format`: LOOP RETURN 1; END LOOP; RETURN 0; END"},
+		{"CREATE PROCEDURE p() BEGIN until: LOOP LEAVE until; END LOOP until; END", true, "CREATE PROCEDURE `p`() BEGIN `until`: LOOP LEAVE `until`; END LOOP `until`; END"},
+		{"CREATE PROCEDURE p() BEGIN start: LOOP LEAVE start; END LOOP start; END", false, ""},
+		{"CREATE PROCEDURE p() BEGIN commit: LOOP LEAVE commit; END LOOP commit; END", false, ""},
+	}
+	RunTest(t, table, false)
+}
+
+// TestIntervalArity pins the INTERVAL split: the function form takes two or
+// more arguments, so a single parenthesised argument is a temporal interval.
+func TestIntervalArity(t *testing.T) {
+	table := []testCase{
+		{"SELECT '1985-10-19' - INTERVAL(1) DAY_MICROSECOND", true, "SELECT DATE_SUB(_UTF8MB4'1985-10-19', INTERVAL (1) DAY_MICROSECOND)"},
+		{"SELECT INTERVAL(1, 2, 3)", true, "SELECT INTERVAL(1, 2, 3)"},
+		{"SELECT NOW() + INTERVAL 1 DAY", true, "SELECT DATE_ADD(NOW(), INTERVAL 1 DAY)"},
+		{"SELECT INTERVAL(1)", false, ""},
 	}
 	RunTest(t, table, false)
 }
