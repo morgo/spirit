@@ -476,3 +476,136 @@ func TestDerivedTableColumnList(t *testing.T) {
 	}
 	RunTest(t, table, false)
 }
+
+func TestTableMaintenanceStatements(t *testing.T) {
+	table := []testCase{
+		{"CHECK TABLE t1", true, "CHECK TABLE `t1`"},
+		{"CHECK TABLES t1, t2 FOR UPGRADE", true, "CHECK TABLE `t1`, `t2` FOR UPGRADE"},
+		{"CHECK TABLE t1 QUICK FAST MEDIUM EXTENDED CHANGED", true, "CHECK TABLE `t1` QUICK FAST MEDIUM EXTENDED CHANGED"},
+		{"CHECK TABLE t1 UPGRADE", false, ""},
+		{"CHECKSUM TABLE t1, t2", true, "CHECKSUM TABLE `t1`, `t2`"},
+		{"CHECKSUM TABLE t1 QUICK", true, "CHECKSUM TABLE `t1` QUICK"},
+		{"CHECKSUM TABLE t1 EXTENDED", true, "CHECKSUM TABLE `t1` EXTENDED"},
+	}
+	RunTest(t, table, false)
+}
+
+func TestHandlerStatements(t *testing.T) {
+	table := []testCase{
+		{"HANDLER t1 OPEN", true, "HANDLER `t1` OPEN"},
+		{"HANDLER test.t1 OPEN AS h1", true, "HANDLER `test`.`t1` OPEN AS `h1`"},
+		{"HANDLER t1 OPEN h1", true, "HANDLER `t1` OPEN AS `h1`"},
+		{"HANDLER h1 CLOSE", true, "HANDLER `h1` CLOSE"},
+		{"HANDLER t1 READ FIRST", true, "HANDLER `t1` READ FIRST"},
+		{"HANDLER t1 READ NEXT LIMIT 5", true, "HANDLER `t1` READ NEXT LIMIT 5"},
+		{"HANDLER t1 READ idx PREV WHERE a > 1", true, "HANDLER `t1` READ `idx` PREV WHERE `a`>1"},
+		{"HANDLER t1 READ idx LAST", true, "HANDLER `t1` READ `idx` LAST"},
+		{"HANDLER t1 READ `PRIMARY` = (1, 'x')", true, "HANDLER `t1` READ `PRIMARY` = (1, _UTF8MB4'x')"},
+		{"HANDLER t1 READ idx <= (10) WHERE b = 2 LIMIT 3", true, "HANDLER `t1` READ `idx` <= (10) WHERE `b`=2 LIMIT 3"},
+		// Natural-order scans only go forward.
+		{"HANDLER t1 READ PREV", false, ""},
+		{"HANDLER t1 READ idx != (1)", false, ""},
+	}
+	RunTest(t, table, false)
+}
+
+func TestPurgeBinaryLogs(t *testing.T) {
+	table := []testCase{
+		{"PURGE BINARY LOGS TO 'binlog.000001'", true, "PURGE BINARY LOGS TO 'binlog.000001'"},
+		{"PURGE MASTER LOGS TO 'binlog.000001'", true, "PURGE BINARY LOGS TO 'binlog.000001'"},
+		{"PURGE BINARY LOGS BEFORE '2026-08-01 00:00:00'", true, "PURGE BINARY LOGS BEFORE _UTF8MB4'2026-08-01 00:00:00'"},
+		{"PURGE BINARY LOGS BEFORE NOW() - INTERVAL 3 DAY", true, "PURGE BINARY LOGS BEFORE DATE_SUB(NOW(), INTERVAL 3 DAY)"},
+		{"PURGE BINARY LOGS", false, ""},
+	}
+	RunTest(t, table, false)
+}
+
+func TestImportTable(t *testing.T) {
+	table := []testCase{
+		{"IMPORT TABLE FROM 't1.sdi'", true, "IMPORT TABLE FROM 't1.sdi'"},
+		{"IMPORT TABLE FROM 'sdi_dir/*.sdi', 't2.sdi'", true, "IMPORT TABLE FROM 'sdi_dir/*.sdi', 't2.sdi'"},
+		{"IMPORT TABLE FROM", false, ""},
+	}
+	RunTest(t, table, false)
+}
+
+func TestKeyCacheStatements(t *testing.T) {
+	table := []testCase{
+		{"CACHE INDEX t1 IN hot_cache", true, "CACHE INDEX `t1` IN `hot_cache`"},
+		{"CACHE INDEX t1, t2 IN DEFAULT", true, "CACHE INDEX `t1`, `t2` IN `default`"},
+		{"CACHE INDEX t1 INDEX (i1, i2) IN hot_cache", true, "CACHE INDEX `t1` INDEX (`i1`, `i2`) IN `hot_cache`"},
+		{"CACHE INDEX t1 KEY (i1) IN hot_cache", true, "CACHE INDEX `t1` INDEX (`i1`) IN `hot_cache`"},
+		{"CACHE INDEX t1 PARTITION (p0, p1) IN hot_cache", true, "CACHE INDEX `t1` PARTITION (`p0`, `p1`) IN `hot_cache`"},
+		{"CACHE INDEX t1 PARTITION (ALL) INDEX (i1) IN hot_cache", true, "CACHE INDEX `t1` PARTITION (ALL) INDEX (`i1`) IN `hot_cache`"},
+		{"CACHE INDEX t1", false, ""},
+		{"LOAD INDEX INTO CACHE t1", true, "LOAD INDEX INTO CACHE `t1`"},
+		{"LOAD INDEX INTO CACHE t1 IGNORE LEAVES, t2", true, "LOAD INDEX INTO CACHE `t1` IGNORE LEAVES, `t2`"},
+		{"LOAD INDEX INTO CACHE t1 PARTITION (p0) INDEX (i1) IGNORE LEAVES", true, "LOAD INDEX INTO CACHE `t1` PARTITION (`p0`) INDEX (`i1`) IGNORE LEAVES"},
+	}
+	RunTest(t, table, false)
+}
+
+func TestPluginAndComponentStatements(t *testing.T) {
+	table := []testCase{
+		{"INSTALL PLUGIN clone SONAME 'mysql_clone.so'", true, "INSTALL PLUGIN `clone` SONAME 'mysql_clone.so'"},
+		{"UNINSTALL PLUGIN clone", true, "UNINSTALL PLUGIN `clone`"},
+		{"INSTALL COMPONENT 'file://component_keyring_file'", true, "INSTALL COMPONENT 'file://component_keyring_file'"},
+		{"INSTALL COMPONENT 'file://a', 'file://b'", true, "INSTALL COMPONENT 'file://a', 'file://b'"},
+		{"INSTALL COMPONENT 'file://a' SET GLOBAL x.y = 1", true, "INSTALL COMPONENT 'file://a' SET @@GLOBAL.`x.y`=1"},
+		{"UNINSTALL COMPONENT 'file://a', 'file://b'", true, "UNINSTALL COMPONENT 'file://a', 'file://b'"},
+		{"INSTALL PLUGIN clone", false, ""},
+	}
+	RunTest(t, table, false)
+}
+
+func TestServerStatements(t *testing.T) {
+	table := []testCase{
+		{"CREATE SERVER s FOREIGN DATA WRAPPER mysql OPTIONS (USER 'u', HOST '127.0.0.1', DATABASE 'db')", true, "CREATE SERVER `s` FOREIGN DATA WRAPPER `mysql` OPTIONS (USER 'u', HOST '127.0.0.1', DATABASE 'db')"},
+		{"CREATE SERVER 's1' FOREIGN DATA WRAPPER 'mysql' OPTIONS (PORT 3306)", true, "CREATE SERVER `s1` FOREIGN DATA WRAPPER 'mysql' OPTIONS (PORT 3306)"},
+		{"ALTER SERVER s OPTIONS (PASSWORD 'p', SOCKET '/tmp/x.sock', OWNER 'o')", true, "ALTER SERVER `s` OPTIONS (PASSWORD 'p', SOCKET '/tmp/x.sock', OWNER 'o')"},
+		{"DROP SERVER IF EXISTS s", true, "DROP SERVER IF EXISTS `s`"},
+		{"DROP SERVER s", true, "DROP SERVER `s`"},
+		{"CREATE SERVER s FOREIGN DATA WRAPPER mysql", false, ""},
+	}
+	RunTest(t, table, false)
+}
+
+func TestResourceGroupStatements(t *testing.T) {
+	table := []testCase{
+		{"CREATE RESOURCE GROUP rg TYPE = SYSTEM", true, "CREATE RESOURCE GROUP `rg` TYPE = SYSTEM"},
+		{"CREATE RESOURCE GROUP rg TYPE USER VCPU = 0-3, 8 THREAD_PRIORITY = -5 DISABLE", true, "CREATE RESOURCE GROUP `rg` TYPE = USER VCPU = 0-3, 8 THREAD_PRIORITY = -5 DISABLE"},
+		{"ALTER RESOURCE GROUP rg VCPU 2 ENABLE", true, "ALTER RESOURCE GROUP `rg` VCPU = 2 ENABLE"},
+		{"ALTER RESOURCE GROUP rg DISABLE FORCE", true, "ALTER RESOURCE GROUP `rg` DISABLE FORCE"},
+		{"DROP RESOURCE GROUP rg FORCE", true, "DROP RESOURCE GROUP `rg` FORCE"},
+		{"SET RESOURCE GROUP rg", true, "SET RESOURCE GROUP `rg`"},
+		{"SET RESOURCE GROUP rg FOR 14, 78", true, "SET RESOURCE GROUP `rg` FOR 14, 78"},
+		{"CREATE RESOURCE GROUP rg", false, ""},
+		// SET of a variable that happens to be named resource still works.
+		{"SET resource = 1", true, "SET @@SESSION.`resource`=1"},
+	}
+	RunTest(t, table, false)
+}
+
+func TestCloneStatements(t *testing.T) {
+	table := []testCase{
+		{"CLONE LOCAL DATA DIRECTORY = '/tmp/clone_dir'", true, "CLONE LOCAL DATA DIRECTORY = '/tmp/clone_dir'"},
+		{"CLONE LOCAL DATA DIRECTORY '/tmp/clone_dir'", true, "CLONE LOCAL DATA DIRECTORY = '/tmp/clone_dir'"},
+		{"CLONE INSTANCE FROM 'u'@'donor' : 3306 IDENTIFIED BY 'pw'", true, "CLONE INSTANCE FROM `u`@`donor`:3306 IDENTIFIED BY 'pw'"},
+		{"CLONE INSTANCE FROM u@h:3306 IDENTIFIED BY 'pw' DATA DIRECTORY '/d' REQUIRE SSL", true, "CLONE INSTANCE FROM `u`@`h`:3306 IDENTIFIED BY 'pw' DATA DIRECTORY = '/d' REQUIRE SSL"},
+		{"CLONE INSTANCE FROM u@h:3306 IDENTIFIED BY 'pw' REQUIRE NO SSL", true, "CLONE INSTANCE FROM `u`@`h`:3306 IDENTIFIED BY 'pw' REQUIRE NO SSL"},
+		{"CLONE INSTANCE FROM u@h IDENTIFIED BY 'pw'", false, ""},
+	}
+	RunTest(t, table, false)
+}
+
+func TestInstanceLockStatements(t *testing.T) {
+	table := []testCase{
+		{"LOCK INSTANCE FOR BACKUP", true, "LOCK INSTANCE FOR BACKUP"},
+		{"UNLOCK INSTANCE", true, "UNLOCK INSTANCE"},
+		{"LOCK INSTANCE", false, ""},
+		// LOCK TABLES gained aliases and LOW_PRIORITY WRITE.
+		{"LOCK TABLES t1 AS a1 READ, t2 LOW_PRIORITY WRITE", true, "LOCK TABLES `t1` AS `a1` READ, `t2` LOW_PRIORITY WRITE"},
+		{"LOCK TABLE t1 a1 WRITE", true, "LOCK TABLES `t1` AS `a1` WRITE"},
+	}
+	RunTest(t, table, false)
+}

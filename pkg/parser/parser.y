@@ -83,6 +83,7 @@ type likeEscapeSpec struct {
 	array             "ARRAY"
 	as                "AS"
 	asc               "ASC"
+	before            "BEFORE"
 	between           "BETWEEN"
 	bigIntType        "BIGINT"
 	binaryType        "BINARY"
@@ -225,6 +226,7 @@ type likeEscapeSpec struct {
 	precisionType     "PRECISION"
 	primary           "PRIMARY"
 	procedure         "PROCEDURE"
+	purge             "PURGE"
 	rangeKwd          "RANGE"
 	rank              "RANK"
 	read              "READ"
@@ -314,6 +316,7 @@ type likeEscapeSpec struct {
 	autoIncrement            "AUTO_INCREMENT"
 	avg                      "AVG"
 	avgRowLength             "AVG_ROW_LENGTH"
+	backup                   "BACKUP"
 	begin                    "BEGIN"
 	binlog                   "BINLOG"
 	bitType                  "BIT"
@@ -323,14 +326,18 @@ type likeEscapeSpec struct {
 	btree                    "BTREE"
 	buckets                  "BUCKETS"
 	byteType                 "BYTE"
+	cache                    "CACHE"
 	cascaded                 "CASCADED"
 	chain                    "CHAIN"
 	challengeResponse        "CHALLENGE_RESPONSE"
+	changed                  "CHANGED"
 	channel                  "CHANNEL"
 	charsetKwd               "CHARSET"
 	checksum                 "CHECKSUM"
 	cipher                   "CIPHER"
 	client                   "CLIENT"
+	clone                    "CLONE"
+	closeKwd                 "CLOSE"
 	coalesce                 "COALESCE"
 	collation                "COLLATION"
 	columns                  "COLUMNS"
@@ -339,6 +346,7 @@ type likeEscapeSpec struct {
 	commit                   "COMMIT"
 	committed                "COMMITTED"
 	compact                  "COMPACT"
+	component                "COMPONENT"
 	compressed               "COMPRESSED"
 	compression              "COMPRESSION"
 	config                   "CONFIG"
@@ -387,6 +395,7 @@ type likeEscapeSpec struct {
 	extentSize               "EXTENT_SIZE"
 	factor                   "FACTOR"
 	failedLoginAttempts      "FAILED_LOGIN_ATTEMPTS"
+	fast                     "FAST"
 	faultsSym                "FAULTS"
 	fields                   "FIELDS"
 	file                     "FILE"
@@ -405,9 +414,12 @@ type likeEscapeSpec struct {
 	geometryCollection       "GEOMETRYCOLLECTION"
 	global                   "GLOBAL"
 	grants                   "GRANTS"
+	groupReplication         "GROUP_REPLICATION"
+	handler                  "HANDLER"
 	hash                     "HASH"
 	histogram                "HISTOGRAM"
 	history                  "HISTORY"
+	host                     "HOST"
 	hosts                    "HOSTS"
 	hour                     "HOUR"
 	identified               "IDENTIFIED"
@@ -418,6 +430,7 @@ type likeEscapeSpec struct {
 	initialSize              "INITIAL_SIZE"
 	initiate                 "INITIATE"
 	insertMethod             "INSERT_METHOD"
+	install                  "INSTALL"
 	instance                 "INSTANCE"
 	invisible                "INVISIBLE"
 	invoker                  "INVOKER"
@@ -430,6 +443,7 @@ type likeEscapeSpec struct {
 	keyBlockSize             "KEY_BLOCK_SIZE"
 	language                 "LANGUAGE"
 	last                     "LAST"
+	leaves                   "LEAVES"
 	library                  "LIBRARY"
 	less                     "LESS"
 	level                    "LEVEL"
@@ -447,6 +461,7 @@ type likeEscapeSpec struct {
 	maxSize                  "MAX_SIZE"
 	maxUpdatesPerHour        "MAX_UPDATES_PER_HOUR"
 	maxUserConnections       "MAX_USER_CONNECTIONS"
+	medium                   "MEDIUM"
 	member                   "MEMBER"
 	memory                   "MEMORY"
 	merge                    "MERGE"
@@ -479,7 +494,9 @@ type likeEscapeSpec struct {
 	only                     "ONLY"
 	open                     "OPEN"
 	optional                 "OPTIONAL"
+	options                  "OPTIONS"
 	organization             "ORGANIZATION"
+	owner                    "OWNER"
 	packKeys                 "PACK_KEYS"
 	pageSym                  "PAGE"
 	parser                   "PARSER"
@@ -488,13 +505,18 @@ type likeEscapeSpec struct {
 	partitions               "PARTITIONS"
 	password                 "PASSWORD"
 	passwordLockTime         "PASSWORD_LOCK_TIME"
+	persist                  "PERSIST"
+	persistOnly              "PERSIST_ONLY"
 	phase                    "PHASE"
 	pipesAsOr
+	plugin                   "PLUGIN"
 	plugins                  "PLUGINS"
 	point                    "POINT"
 	polygon                  "POLYGON"
+	port                     "PORT"
 	preceding                "PRECEDING"
 	prepare                  "PREPARE"
+	prev                     "PREV"
 	privileges               "PRIVILEGES"
 	process                  "PROCESS"
 	processlist              "PROCESSLIST"
@@ -546,6 +568,7 @@ type likeEscapeSpec struct {
 	separator                "SEPARATOR"
 	serial                   "SERIAL"
 	serializable             "SERIALIZABLE"
+	server                   "SERVER"
 	session                  "SESSION"
 	share                    "SHARE"
 	shutdown                 "SHUTDOWN"
@@ -555,7 +578,9 @@ type likeEscapeSpec struct {
 	slave                    "SLAVE"
 	slow                     "SLOW"
 	snapshot                 "SNAPSHOT"
+	socket                   "SOCKET"
 	some                     "SOME"
+	soname                   "SONAME"
 	source                   "SOURCE"
 	sqlBufferResult          "SQL_BUFFER_RESULT"
 	sqlCache                 "SQL_CACHE"
@@ -588,6 +613,7 @@ type likeEscapeSpec struct {
 	temptable                "TEMPTABLE"
 	textType                 "TEXT"
 	than                     "THAN"
+	threadPriority           "THREAD_PRIORITY"
 	timeType                 "TIME"
 	timestampType            "TIMESTAMP"
 	tokenIssuer              "TOKEN_ISSUER"
@@ -602,14 +628,17 @@ type likeEscapeSpec struct {
 	undofile                 "UNDOFILE"
 	undoBufferSize           "UNDO_BUFFER_SIZE"
 	unicodeSym               "UNICODE"
+	uninstall                "UNINSTALL"
 	unknown                  "UNKNOWN"
 	unregister               "UNREGISTER"
+	upgrade                  "UPGRADE"
 	user                     "USER"
 	useFrm                   "USE_FRM"
 	userResources            "USER_RESOURCES"
 	validation               "VALIDATION"
 	value                    "VALUE"
 	variables                "VARIABLES"
+	vcpu                     "VCPU"
 	vectorType               "VECTOR"
 	view                     "VIEW"
 	visible                  "VISIBLE"
@@ -619,6 +648,7 @@ type likeEscapeSpec struct {
 	weightString             "WEIGHT_STRING"
 	without                  "WITHOUT"
 	work                     "WORK"
+	wrapper                  "WRAPPER"
 	x509                     "X509"
 	xa                       "XA"
 	xid                      "XID"
@@ -811,9 +841,53 @@ type likeEscapeSpec struct {
 	RestartStmt                "RESTART statement"
 	CreateViewSelectOpt        "Select/Union/Except/Intersect statement in CREATE VIEW ... AS SELECT"
 	UpdateStmtNoWith           "Update statement without CTE clause"
+	CheckTableStmt             "CHECK TABLE statement"
+	ChecksumTableStmt          "CHECKSUM TABLE statement"
+	HandlerStmt                "HANDLER statement"
+	PurgeStmt                  "PURGE BINARY LOGS statement"
+	ImportTableStmt            "IMPORT TABLE statement"
+	CacheIndexStmt             "CACHE INDEX statement"
+	LoadIndexStmt              "LOAD INDEX INTO CACHE statement"
+	InstallStmt                "INSTALL PLUGIN/COMPONENT statement"
+	UninstallStmt              "UNINSTALL PLUGIN/COMPONENT statement"
+	CreateServerStmt           "CREATE SERVER statement"
+	AlterServerStmt            "ALTER SERVER statement"
+	DropServerStmt             "DROP SERVER statement"
+	CreateResourceGroupStmt    "CREATE RESOURCE GROUP statement"
+	AlterResourceGroupStmt     "ALTER RESOURCE GROUP statement"
+	DropResourceGroupStmt      "DROP RESOURCE GROUP statement"
+	SetResourceGroupStmt       "SET RESOURCE GROUP statement"
+	CloneStmt                  "CLONE statement"
+	LockInstanceStmt           "LOCK INSTANCE FOR BACKUP statement"
+	UnlockInstanceStmt         "UNLOCK INSTANCE statement"
 
 %type	<item>
 	LikeEscapeOpt                          "like escape option"
+	CheckTableOption                       "CHECK TABLE option"
+	CheckTableOptionListOpt                "CHECK TABLE option list"
+	ChecksumTypeOpt                        "CHECKSUM TABLE QUICK/EXTENDED modifier"
+	HandlerReadTarget                      "HANDLER READ scan or index target"
+	HandlerCompareOp                       "HANDLER READ comparison operator"
+	StringLitList                          "string literal list"
+	CacheTableIndex                        "CACHE INDEX table entry"
+	CacheTableIndexList                    "CACHE INDEX table entry list"
+	CacheIndexNameList                     "CACHE INDEX index name list"
+	LoadIndexTableIndex                    "LOAD INDEX table entry"
+	LoadIndexTableIndexList                "LOAD INDEX table entry list"
+	InstallComponentSetOpt                 "INSTALL COMPONENT optional SET clause"
+	ServerOption                           "CREATE SERVER option"
+	ServerOptionList                       "CREATE SERVER option list"
+	ServerOptionName                       "CREATE SERVER option name"
+	IdentOrText                            "identifier or text string"
+	ResourceGroupVcpuOpt                   "resource group optional VCPU clause"
+	VcpuRangeList                          "resource group VCPU range list"
+	VcpuRange                              "resource group VCPU range"
+	ResourceGroupPriorityOpt               "resource group optional THREAD_PRIORITY clause"
+	EnableDisableOpt                       "resource group optional ENABLE or DISABLE"
+	ThreadIdListOpt                        "SET RESOURCE GROUP optional FOR thread list"
+	ThreadIdList                           "thread id list"
+	CloneDataDirectoryOpt                  "CLONE INSTANCE optional DATA DIRECTORY clause"
+	CloneRequireSSLOpt                     "CLONE INSTANCE optional REQUIRE SSL clause"
 	AllOrPartitionNameList                 "All or partition name list"
 	AlgorithmClause                        "Alter table algorithm"
 	AlterTableSpecSingleOpt                "Alter table single option"
@@ -4671,6 +4745,7 @@ UnReservedKeyword:
 |	"AFTER"
 |	"ALWAYS"
 |	"AVG"
+|	"BACKUP"
 |	"BEGIN"
 |	"BIT"
 |	"BOOL"
@@ -4678,13 +4753,18 @@ UnReservedKeyword:
 |	"BTREE"
 |	"BUCKETS"
 |	"BYTE"
+|	"CACHE"
 |	"CHAIN"
+|	"CHANGED"
 |	"CHARSET"
+|	"CLONE"
+|	"CLOSE"
 |	"COLUMNS"
 |	"CONFIG"
 |	"SAN"
 |	"COMMIT"
 |	"COMPACT"
+|	"COMPONENT"
 |	"COMPRESSED"
 |	"CONSISTENT"
 |	"CURRENT"
@@ -4710,6 +4790,7 @@ UnReservedKeyword:
 |	"EXECUTE"
 |	"EXPLORE"
 |	"EXTENDED"
+|	"FAST"
 |	"FIELDS"
 |	"FILE"
 |	"FIRST"
@@ -4720,19 +4801,32 @@ UnReservedKeyword:
 |	"FULL"
 |	"GENERAL"
 |	"GLOBAL"
+|	"GROUP_REPLICATION"
+|	"HANDLER"
 |	"HASH"
+|	"HOST"
 |	"HOUR"
 |	"INSERT_METHOD"
+|	"INSTALL"
 |	"LESS"
 |	"LOCAL"
 |	"LAST"
+|	"LEAVES"
+|	"MEDIUM"
 |	"NAMES"
 |	"NVARCHAR"
 |	"OFFSET"
+|	"OPTIONS"
+|	"OWNER"
 |	"PACK_KEYS"
 |	"PARSER"
 |	"PASSWORD" %prec lowerThanEq
+|	"PERSIST"
+|	"PERSIST_ONLY"
+|	"PLUGIN"
+|	"PORT"
 |	"PREPARE"
+|	"PREV"
 |	"PROXY"
 |	"QUICK"
 |	"REBUILD"
@@ -4904,6 +4998,9 @@ UnReservedKeyword:
 |	"DISCARD"
 |	"OLD"
 |	"RETAIN"
+|	"SERVER"
+|	"SOCKET"
+|	"SONAME"
 |	"UNICODE"
 |	"SQL_TSI_DAY"
 |	"SQL_TSI_HOUR"
@@ -4982,11 +5079,16 @@ UnReservedKeyword:
 |	"RESUME"
 |	"ROTATE"
 |	"SUSPEND"
+|	"THREAD_PRIORITY"
 |	"UNDOFILE"
 |	"UNDO_BUFFER_SIZE"
+|	"UNINSTALL"
+|	"UPGRADE"
 |	"USE_FRM"
 |	"USER_RESOURCES"
+|	"VCPU"
 |	"WORK"
+|	"WRAPPER"
 |	"XA"
 |	"XID"
 
@@ -9484,6 +9586,25 @@ Statement:
 |	ShutdownStmt
 |	RestartStmt
 |	OptimizeTableStmt
+|	CheckTableStmt
+|	ChecksumTableStmt
+|	HandlerStmt
+|	PurgeStmt
+|	ImportTableStmt
+|	CacheIndexStmt
+|	LoadIndexStmt
+|	InstallStmt
+|	UninstallStmt
+|	CreateServerStmt
+|	AlterServerStmt
+|	DropServerStmt
+|	CreateResourceGroupStmt
+|	AlterResourceGroupStmt
+|	DropResourceGroupStmt
+|	SetResourceGroupStmt
+|	CloneStmt
+|	LockInstanceStmt
+|	UnlockInstanceStmt
 
 ExplainableStmt:
 	DeleteFromStmt
@@ -12712,11 +12833,12 @@ TablesTerminalSym:
 |	"TABLE"
 
 TableLock:
-	TableName LockType
+	TableName TableAsNameOpt LockType
 	{
 		$$ = ast.TableLock{
 			Table: $1.(*ast.TableName),
-			Type:  $2.(ast.TableLockType),
+			Alias: $2.(ast.CIStr),
+			Type:  $3.(ast.TableLockType),
 		}
 	}
 
@@ -12737,6 +12859,10 @@ LockType:
 	{
 		$$ = ast.TableLockWriteLocal
 	}
+|	"LOW_PRIORITY" "WRITE"
+	{
+		$$ = ast.TableLockLowPriorityWrite
+	}
 
 TableLockList:
 	TableLock
@@ -12746,6 +12872,650 @@ TableLockList:
 |	TableLockList ',' TableLock
 	{
 		$$ = append($1.([]ast.TableLock), $3.(ast.TableLock))
+	}
+
+/********************************************************************
+ * Table maintenance statements
+ * See https://dev.mysql.com/doc/refman/8.0/en/table-maintenance-statements.html
+ *******************************************************************/
+CheckTableStmt:
+	"CHECK" TablesTerminalSym TableNameList CheckTableOptionListOpt
+	{
+		$$ = &ast.CheckTableStmt{
+			Tables:  $3.([]*ast.TableName),
+			Options: $4.([]ast.CheckTableCheckOption),
+		}
+	}
+
+CheckTableOptionListOpt:
+	/* empty */
+	{
+		$$ = []ast.CheckTableCheckOption{}
+	}
+|	CheckTableOptionListOpt CheckTableOption
+	{
+		$$ = append($1.([]ast.CheckTableCheckOption), $2.(ast.CheckTableCheckOption))
+	}
+
+CheckTableOption:
+	"FOR" "UPGRADE"
+	{
+		$$ = ast.CheckOptionForUpgrade
+	}
+|	"QUICK"
+	{
+		$$ = ast.CheckOptionQuick
+	}
+|	"FAST"
+	{
+		$$ = ast.CheckOptionFast
+	}
+|	"MEDIUM"
+	{
+		$$ = ast.CheckOptionMedium
+	}
+|	"EXTENDED"
+	{
+		$$ = ast.CheckOptionExtended
+	}
+|	"CHANGED"
+	{
+		$$ = ast.CheckOptionChanged
+	}
+
+ChecksumTableStmt:
+	"CHECKSUM" TablesTerminalSym TableNameList ChecksumTypeOpt
+	{
+		$$ = &ast.ChecksumTableStmt{
+			Tables: $3.([]*ast.TableName),
+			Type:   $4.(ast.ChecksumType),
+		}
+	}
+
+ChecksumTypeOpt:
+	/* empty */
+	{
+		$$ = ast.ChecksumTypeDefault
+	}
+|	"QUICK"
+	{
+		$$ = ast.ChecksumTypeQuick
+	}
+|	"EXTENDED"
+	{
+		$$ = ast.ChecksumTypeExtended
+	}
+
+/********************************************************************
+ * HANDLER statements
+ * See https://dev.mysql.com/doc/refman/8.0/en/handler.html
+ *******************************************************************/
+HandlerStmt:
+	"HANDLER" TableName "OPEN" TableAsNameOpt
+	{
+		$$ = &ast.HandlerOpenStmt{
+			Table:  $2.(*ast.TableName),
+			AsName: $4.(ast.CIStr),
+		}
+	}
+|	"HANDLER" Identifier "CLOSE"
+	{
+		$$ = &ast.HandlerCloseStmt{Handler: ast.NewCIStr($2)}
+	}
+|	"HANDLER" Identifier "READ" HandlerReadTarget WhereClauseOptional SelectStmtLimitOpt
+	{
+		stmt := $4.(*ast.HandlerReadStmt)
+		stmt.Handler = ast.NewCIStr($2)
+		if $5 != nil {
+			stmt.Where = $5.(ast.ExprNode)
+		}
+		if $6 != nil {
+			stmt.Limit = $6.(*ast.Limit)
+		}
+		$$ = stmt
+	}
+
+HandlerReadTarget:
+	"FIRST"
+	{
+		$$ = &ast.HandlerReadStmt{Direction: "FIRST"}
+	}
+|	"NEXT"
+	{
+		$$ = &ast.HandlerReadStmt{Direction: "NEXT"}
+	}
+|	Identifier "FIRST"
+	{
+		$$ = &ast.HandlerReadStmt{Index: ast.NewCIStr($1), Direction: "FIRST"}
+	}
+|	Identifier "NEXT"
+	{
+		$$ = &ast.HandlerReadStmt{Index: ast.NewCIStr($1), Direction: "NEXT"}
+	}
+|	Identifier "PREV"
+	{
+		$$ = &ast.HandlerReadStmt{Index: ast.NewCIStr($1), Direction: "PREV"}
+	}
+|	Identifier "LAST"
+	{
+		$$ = &ast.HandlerReadStmt{Index: ast.NewCIStr($1), Direction: "LAST"}
+	}
+|	Identifier HandlerCompareOp '(' ExpressionList ')'
+	{
+		$$ = &ast.HandlerReadStmt{
+			Index:     ast.NewCIStr($1),
+			CompareOp: $2.(string),
+			Values:    $4.([]ast.ExprNode),
+		}
+	}
+
+HandlerCompareOp:
+	"="
+	{
+		$$ = "="
+	}
+|	'<'
+	{
+		$$ = "<"
+	}
+|	'>'
+	{
+		$$ = ">"
+	}
+|	"<="
+	{
+		$$ = "<="
+	}
+|	">="
+	{
+		$$ = ">="
+	}
+
+/********************************************************************
+ * PURGE BINARY LOGS. The deprecated MASTER spelling parses to the
+ * same node and restores as BINARY.
+ * See https://dev.mysql.com/doc/refman/8.0/en/purge-binary-logs.html
+ *******************************************************************/
+PurgeStmt:
+	"PURGE" BinaryOrMasterSym "LOGS" "TO" stringLit
+	{
+		$$ = &ast.PurgeLogsStmt{To: $5}
+	}
+|	"PURGE" BinaryOrMasterSym "LOGS" "BEFORE" Expression
+	{
+		$$ = &ast.PurgeLogsStmt{Before: $5}
+	}
+
+BinaryOrMasterSym:
+	"BINARY"
+|	"MASTER"
+
+/********************************************************************
+ * IMPORT TABLE (SDI import)
+ * See https://dev.mysql.com/doc/refman/8.0/en/import-table.html
+ *******************************************************************/
+ImportTableStmt:
+	"IMPORT" "TABLE" "FROM" StringLitList
+	{
+		$$ = &ast.ImportTableStmt{Files: $4.([]string)}
+	}
+
+StringLitList:
+	stringLit
+	{
+		$$ = []string{$1}
+	}
+|	StringLitList ',' stringLit
+	{
+		$$ = append($1.([]string), $3)
+	}
+
+/********************************************************************
+ * MyISAM key cache statements
+ * See https://dev.mysql.com/doc/refman/8.0/en/cache-index.html
+ * and https://dev.mysql.com/doc/refman/8.0/en/load-index.html
+ *******************************************************************/
+CacheIndexStmt:
+	"CACHE" "INDEX" CacheTableIndexList "IN" Identifier
+	{
+		$$ = &ast.CacheIndexStmt{
+			TableIndexes: $3.([]*ast.CacheTableIndex),
+			CacheName:    ast.NewCIStr($5),
+		}
+	}
+|	"CACHE" "INDEX" CacheTableIndexList "IN" "DEFAULT"
+	{
+		$$ = &ast.CacheIndexStmt{
+			TableIndexes: $3.([]*ast.CacheTableIndex),
+			CacheName:    ast.NewCIStr("default"),
+		}
+	}
+
+CacheTableIndexList:
+	CacheTableIndex
+	{
+		$$ = []*ast.CacheTableIndex{$1.(*ast.CacheTableIndex)}
+	}
+|	CacheTableIndexList ',' CacheTableIndex
+	{
+		$$ = append($1.([]*ast.CacheTableIndex), $3.(*ast.CacheTableIndex))
+	}
+
+CacheTableIndex:
+	TableName
+	{
+		$$ = &ast.CacheTableIndex{Table: $1.(*ast.TableName)}
+	}
+|	TableName "PARTITION" '(' AllOrPartitionNameList ')'
+	{
+		ti := &ast.CacheTableIndex{Table: $1.(*ast.TableName)}
+		if $4 == nil {
+			ti.AllPartitions = true
+		} else {
+			ti.PartitionNames = $4.([]ast.CIStr)
+		}
+		$$ = ti
+	}
+|	TableName CacheIndexNameList
+	{
+		$$ = &ast.CacheTableIndex{
+			Table:      $1.(*ast.TableName),
+			IndexNames: $2.([]ast.CIStr),
+		}
+	}
+|	TableName "PARTITION" '(' AllOrPartitionNameList ')' CacheIndexNameList
+	{
+		ti := &ast.CacheTableIndex{
+			Table:      $1.(*ast.TableName),
+			IndexNames: $6.([]ast.CIStr),
+		}
+		if $4 == nil {
+			ti.AllPartitions = true
+		} else {
+			ti.PartitionNames = $4.([]ast.CIStr)
+		}
+		$$ = ti
+	}
+
+CacheIndexNameList:
+	KeyOrIndex '(' IdentList ')'
+	{
+		$$ = $3
+	}
+
+LoadIndexStmt:
+	"LOAD" "INDEX" "INTO" "CACHE" LoadIndexTableIndexList
+	{
+		$$ = &ast.LoadIndexStmt{TableIndexes: $5.([]*ast.CacheTableIndex)}
+	}
+
+LoadIndexTableIndexList:
+	LoadIndexTableIndex
+	{
+		$$ = []*ast.CacheTableIndex{$1.(*ast.CacheTableIndex)}
+	}
+|	LoadIndexTableIndexList ',' LoadIndexTableIndex
+	{
+		$$ = append($1.([]*ast.CacheTableIndex), $3.(*ast.CacheTableIndex))
+	}
+
+LoadIndexTableIndex:
+	CacheTableIndex
+|	CacheTableIndex "IGNORE" "LEAVES"
+	{
+		ti := $1.(*ast.CacheTableIndex)
+		ti.IgnoreLeaves = true
+		$$ = ti
+	}
+
+/********************************************************************
+ * Plugin and component management
+ * See https://dev.mysql.com/doc/refman/8.0/en/install-plugin.html
+ * and https://dev.mysql.com/doc/refman/8.0/en/install-component.html
+ *******************************************************************/
+InstallStmt:
+	"INSTALL" "PLUGIN" Identifier "SONAME" stringLit
+	{
+		$$ = &ast.InstallPluginStmt{
+			Name:   ast.NewCIStr($3),
+			SoName: $5,
+		}
+	}
+|	"INSTALL" "COMPONENT" StringLitList InstallComponentSetOpt
+	{
+		stmt := &ast.InstallComponentStmt{Components: $3.([]string)}
+		if $4 != nil {
+			stmt.SetVars = $4.([]*ast.VariableAssignment)
+		}
+		$$ = stmt
+	}
+
+InstallComponentSetOpt:
+	/* empty */
+	{
+		$$ = nil
+	}
+|	"SET" VariableAssignmentList
+	{
+		$$ = $2
+	}
+
+UninstallStmt:
+	"UNINSTALL" "PLUGIN" Identifier
+	{
+		$$ = &ast.UninstallPluginStmt{Name: ast.NewCIStr($3)}
+	}
+|	"UNINSTALL" "COMPONENT" StringLitList
+	{
+		$$ = &ast.UninstallComponentStmt{Components: $3.([]string)}
+	}
+
+/********************************************************************
+ * FEDERATED server objects
+ * See https://dev.mysql.com/doc/refman/8.0/en/create-server.html
+ *******************************************************************/
+CreateServerStmt:
+	"CREATE" "SERVER" IdentOrText "FOREIGN" "DATA" "WRAPPER" Identifier "OPTIONS" '(' ServerOptionList ')'
+	{
+		$$ = &ast.CreateServerStmt{
+			Name:    ast.NewCIStr($3.(string)),
+			Wrapper: $7,
+			Options: $10.([]*ast.ServerOption),
+		}
+	}
+|	"CREATE" "SERVER" IdentOrText "FOREIGN" "DATA" "WRAPPER" stringLit "OPTIONS" '(' ServerOptionList ')'
+	{
+		$$ = &ast.CreateServerStmt{
+			Name:          ast.NewCIStr($3.(string)),
+			Wrapper:       $7,
+			WrapperString: true,
+			Options:       $10.([]*ast.ServerOption),
+		}
+	}
+
+AlterServerStmt:
+	"ALTER" "SERVER" IdentOrText "OPTIONS" '(' ServerOptionList ')'
+	{
+		$$ = &ast.AlterServerStmt{
+			Name:    ast.NewCIStr($3.(string)),
+			Options: $6.([]*ast.ServerOption),
+		}
+	}
+
+DropServerStmt:
+	"DROP" "SERVER" IfExists IdentOrText
+	{
+		$$ = &ast.DropServerStmt{
+			IfExists: $3.(bool),
+			Name:     ast.NewCIStr($4.(string)),
+		}
+	}
+
+IdentOrText:
+	Identifier
+	{
+		$$ = $1
+	}
+|	stringLit
+	{
+		$$ = $1
+	}
+
+ServerOptionList:
+	ServerOption
+	{
+		$$ = []*ast.ServerOption{$1.(*ast.ServerOption)}
+	}
+|	ServerOptionList ',' ServerOption
+	{
+		$$ = append($1.([]*ast.ServerOption), $3.(*ast.ServerOption))
+	}
+
+ServerOption:
+	ServerOptionName stringLit
+	{
+		$$ = &ast.ServerOption{Name: $1.(string), StrValue: $2}
+	}
+|	ServerOptionName NUM
+	{
+		$$ = &ast.ServerOption{Name: $1.(string), NumValue: getUint64FromNUM($2), IsNum: true}
+	}
+
+// MySQL fixes the option names (HOST, DATABASE, USER, PASSWORD, SOCKET,
+// OWNER, PORT) but all except DATABASE are unreserved here and parse as
+// identifiers. Uppercased for a stable restore round trip.
+ServerOptionName:
+	Identifier
+	{
+		$$ = strings.ToUpper($1)
+	}
+|	"DATABASE"
+	{
+		$$ = "DATABASE"
+	}
+
+/********************************************************************
+ * Resource groups
+ * See https://dev.mysql.com/doc/refman/8.0/en/create-resource-group.html
+ *******************************************************************/
+CreateResourceGroupStmt:
+	"CREATE" "RESOURCE" "GROUP" Identifier "TYPE" EqOpt "SYSTEM" ResourceGroupVcpuOpt ResourceGroupPriorityOpt EnableDisableOpt
+	{
+		stmt := &ast.CreateResourceGroupStmt{
+			Name:   ast.NewCIStr($4),
+			System: true,
+		}
+		if $8 != nil {
+			stmt.Vcpus = $8.([]ast.VcpuRange)
+		}
+		if $9 != nil {
+			stmt.ThreadPriority = $9.(*int64)
+		}
+		if $10 != nil {
+			stmt.Enable = $10.(*bool)
+		}
+		$$ = stmt
+	}
+|	"CREATE" "RESOURCE" "GROUP" Identifier "TYPE" EqOpt "USER" ResourceGroupVcpuOpt ResourceGroupPriorityOpt EnableDisableOpt
+	{
+		stmt := &ast.CreateResourceGroupStmt{Name: ast.NewCIStr($4)}
+		if $8 != nil {
+			stmt.Vcpus = $8.([]ast.VcpuRange)
+		}
+		if $9 != nil {
+			stmt.ThreadPriority = $9.(*int64)
+		}
+		if $10 != nil {
+			stmt.Enable = $10.(*bool)
+		}
+		$$ = stmt
+	}
+
+AlterResourceGroupStmt:
+	"ALTER" "RESOURCE" "GROUP" Identifier ResourceGroupVcpuOpt ResourceGroupPriorityOpt EnableDisableOpt ForceOpt
+	{
+		stmt := &ast.AlterResourceGroupStmt{
+			Name:  ast.NewCIStr($4),
+			Force: $8.(bool),
+		}
+		if $5 != nil {
+			stmt.Vcpus = $5.([]ast.VcpuRange)
+		}
+		if $6 != nil {
+			stmt.ThreadPriority = $6.(*int64)
+		}
+		if $7 != nil {
+			stmt.Enable = $7.(*bool)
+		}
+		$$ = stmt
+	}
+
+DropResourceGroupStmt:
+	"DROP" "RESOURCE" "GROUP" Identifier ForceOpt
+	{
+		$$ = &ast.DropResourceGroupStmt{
+			Name:  ast.NewCIStr($4),
+			Force: $5.(bool),
+		}
+	}
+
+SetResourceGroupStmt:
+	"SET" "RESOURCE" "GROUP" Identifier ThreadIdListOpt
+	{
+		stmt := &ast.SetResourceGroupStmt{Name: ast.NewCIStr($4)}
+		if $5 != nil {
+			stmt.Threads = $5.([]uint64)
+		}
+		$$ = stmt
+	}
+
+ResourceGroupVcpuOpt:
+	/* empty */
+	{
+		$$ = nil
+	}
+|	"VCPU" EqOpt VcpuRangeList
+	{
+		$$ = $3
+	}
+
+VcpuRangeList:
+	VcpuRange
+	{
+		$$ = []ast.VcpuRange{$1.(ast.VcpuRange)}
+	}
+|	VcpuRangeList ',' VcpuRange
+	{
+		$$ = append($1.([]ast.VcpuRange), $3.(ast.VcpuRange))
+	}
+
+VcpuRange:
+	NUM
+	{
+		n := getUint64FromNUM($1)
+		$$ = ast.VcpuRange{Start: n, End: n}
+	}
+|	NUM '-' NUM
+	{
+		$$ = ast.VcpuRange{Start: getUint64FromNUM($1), End: getUint64FromNUM($3), IsRange: true}
+	}
+
+ResourceGroupPriorityOpt:
+	/* empty */
+	{
+		$$ = nil
+	}
+|	"THREAD_PRIORITY" EqOpt SignedNum
+	{
+		v := $3.(int64)
+		$$ = &v
+	}
+
+EnableDisableOpt:
+	/* empty */
+	{
+		$$ = nil
+	}
+|	"ENABLE"
+	{
+		b := true
+		$$ = &b
+	}
+|	"DISABLE"
+	{
+		b := false
+		$$ = &b
+	}
+
+ThreadIdListOpt:
+	/* empty */
+	{
+		$$ = nil
+	}
+|	"FOR" ThreadIdList
+	{
+		$$ = $2
+	}
+
+ThreadIdList:
+	NUM
+	{
+		$$ = []uint64{getUint64FromNUM($1)}
+	}
+|	ThreadIdList ',' NUM
+	{
+		$$ = append($1.([]uint64), getUint64FromNUM($3))
+	}
+
+/********************************************************************
+ * CLONE plugin statements
+ * See https://dev.mysql.com/doc/refman/8.0/en/clone.html
+ *******************************************************************/
+CloneStmt:
+	"CLONE" "LOCAL" "DATA" "DIRECTORY" EqOpt stringLit
+	{
+		$$ = &ast.CloneStmt{
+			Local:            true,
+			HasDataDirectory: true,
+			DataDirectory:    $6,
+		}
+	}
+|	"CLONE" "INSTANCE" "FROM" Username ':' NUM "IDENTIFIED" "BY" stringLit CloneDataDirectoryOpt CloneRequireSSLOpt
+	{
+		stmt := &ast.CloneStmt{
+			User:     $4.(*auth.UserIdentity),
+			Port:     getUint64FromNUM($6),
+			Password: $9,
+		}
+		if $10 != nil {
+			stmt.HasDataDirectory = true
+			stmt.DataDirectory = $10.(string)
+		}
+		if $11 != nil {
+			b := $11.(bool)
+			stmt.RequireSSL = &b
+		}
+		$$ = stmt
+	}
+
+CloneDataDirectoryOpt:
+	/* empty */
+	{
+		$$ = nil
+	}
+|	"DATA" "DIRECTORY" EqOpt stringLit
+	{
+		$$ = $4
+	}
+
+CloneRequireSSLOpt:
+	/* empty */
+	{
+		$$ = nil
+	}
+|	"REQUIRE" "SSL"
+	{
+		$$ = true
+	}
+|	"REQUIRE" "NO" "SSL"
+	{
+		$$ = false
+	}
+
+/********************************************************************
+ * Instance backup locks
+ * See https://dev.mysql.com/doc/refman/8.0/en/lock-instance-for-backup.html
+ *******************************************************************/
+LockInstanceStmt:
+	"LOCK" "INSTANCE" "FOR" "BACKUP"
+	{
+		$$ = &ast.LockInstanceStmt{}
+	}
+
+UnlockInstanceStmt:
+	"UNLOCK" "INSTANCE"
+	{
+		$$ = &ast.UnlockInstanceStmt{}
 	}
 
 /********************************************************************

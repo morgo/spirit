@@ -2001,6 +2001,8 @@ type LockTablesStmt struct {
 // TableLock contains the table name and lock type.
 type TableLock struct {
 	Table *TableName
+	// Alias is the optional [AS] alias of the locked table.
+	Alias CIStr
 	Type  TableLockType
 }
 
@@ -2030,6 +2032,10 @@ func (n *LockTablesStmt) Restore(ctx *format.RestoreCtx) error {
 		}
 		if err := tl.Table.Restore(ctx); err != nil {
 			return fmt.Errorf("an error occurred while add index: %w", err)
+		}
+		if tl.Alias.O != "" {
+			ctx.WriteKeyWord(" AS ")
+			ctx.WriteName(tl.Alias.O)
 		}
 		ctx.WriteKeyWord(" " + tl.Type.String())
 	}
