@@ -522,11 +522,25 @@ func startWithSlash(s *Scanner) (tok int, pos Pos, lit string) {
 
 	s.r.inc() // we see '/*' so far.
 	switch s.r.readByte() {
-	case '!': // '/*!' MySQL-specific comments
-		// See http://dev.mysql.com/doc/refman/5.7/en/comments.html
-		// in '/*!', which we always recognize regardless of version.
-		s.scanVersionDigits(5, 5)
-		s.inBangComment = true
+	case '!': // '/*!' MySQL-specific code, optionally gated on a version
+		// number: /*!90700 ... */. The content is parsed as statement text
+		// when there is no version number or the number is at or below the
+		// version this parser mimics; otherwise the whole comment is
+		// skipped like a plain comment, matching a server older than the
+		// stated version (mysqldump 9.x emits /*!999999 for sandbox mode).
+		// See https://dev.mysql.com/doc/refman/9.7/en/comments.html
+		if version, hasVersion := s.scanVersionNumber(); !hasVersion || version <= mimicMySQLVersionID {
+			s.inBangComment = true
+			return s.scan()
+		}
+		// A higher version: discard the comment content. Like MySQL
+		// (consume_comment in sql_lex.cc), one nested /* ... */ level is
+		// honored while discarding; quoted strings are not special.
+		if !s.discardComment(1) {
+			// Unclosed comment.
+			s.errs = append(s.errs, ParseErrorWith(s.r.data(&pos), s.r.p.Line))
+			return
+		}
 		return s.scan()
 
 	case '+': // '/*+' optimizer hints
@@ -895,20 +909,47 @@ func (s *Scanner) scanDigits() string {
 	return s.r.data(&pos)
 }
 
-// scanVersionDigits scans for `min` to `max` digits (range inclusive) used in
-// `/*!12345 ... */` comments.
-func (s *Scanner) scanVersionDigits(minv, maxv int) {
-	pos := s.r.pos()
-	for i := range maxv {
-		ch := s.r.peek()
-		switch {
-		case isDigit(ch):
+// mimicMySQLVersionID is the MySQL version ID this parser mimics when
+// deciding whether the content of a /*!NNNNN ... */ versioned comment is
+// parsed or skipped.
+const mimicMySQLVersionID = 90700
+
+// scanVersionNumber scans the digits directly following '/*!'. hasVersion is
+// false for a bare '/*!' comment with no version number. Like MySQL, any
+// digit count forms a version number; the value saturates once it exceeds
+// mimicMySQLVersionID so long digit runs cannot overflow.
+func (s *Scanner) scanVersionNumber() (version int, hasVersion bool) {
+	for isDigit(s.r.peek()) {
+		if version <= mimicMySQLVersionID {
+			version = version*10 + int(s.r.peek()-'0')
+		}
+		s.r.inc()
+		hasVersion = true
+	}
+	return
+}
+
+// discardComment consumes the remaining content of a comment whose opener
+// was already read, up to and including the closing */, and reports whether
+// the comment was closed before EOF. Mirroring MySQL's consume_comment
+// (sql_lex.cc), each level may contain nestingBudget levels of nested
+// /* ... */ comments; quoted strings inside the comment are not special.
+func (s *Scanner) discardComment(nestingBudget int) bool {
+	for {
+		ch := s.r.incAsLongAs(func(c byte) bool { return c != '*' && c != '/' })
+		if s.r.eof() {
+			return false
+		}
+		s.r.inc()
+		if ch == '*' && s.r.peek() == '/' {
 			s.r.inc()
-		case i < minv:
-			s.r.updatePos(pos)
-			return
-		default:
-			return
+			return true
+		}
+		if ch == '/' && s.r.peek() == '*' && nestingBudget > 0 {
+			s.r.inc()
+			if !s.discardComment(nestingBudget - 1) {
+				return false
+			}
 		}
 	}
 }

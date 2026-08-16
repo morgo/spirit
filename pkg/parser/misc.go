@@ -839,15 +839,14 @@ var aliases = map[string]string{
 // hintedTokens is a set of tokens which recognizes a hint.
 // According to https://dev.mysql.com/doc/refman/8.0/en/optimizer-hints.html,
 // only SELECT, INSERT, REPLACE, UPDATE and DELETE accept optimizer hints.
-// additionally we support CREATE and PARTITION for hints at table creation.
+// A /*+ ... */ anywhere else is warned about and skipped as a comment,
+// matching MySQL, rather than failing the parse.
 var hintedTokens = map[int]struct{}{
 	selectKwd: {},
 	insert:    {},
 	replace:   {},
 	update:    {},
 	deleteKwd: {},
-	create:    {},
-	partition: {},
 }
 
 var hintTokenMap = map[string]int{

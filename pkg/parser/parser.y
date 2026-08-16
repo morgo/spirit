@@ -4438,18 +4438,7 @@ NUM:
 	intLit
 
 Expression:
-	singleAtIdentifier assignmentEq Expression %prec assignmentEq
-	{
-		v := $1
-		v = strings.TrimPrefix(v, "@")
-		$$ = &ast.VariableExpr{
-			Name:     v,
-			IsGlobal: false,
-			IsSystem: false,
-			Value:    $3,
-		}
-	}
-|	Expression logOr Expression %prec pipes
+	Expression logOr Expression %prec pipes
 	{
 		$$ = &ast.BinaryOperationExpr{Op: opcode.LogicOr, L: $1, R: $3}
 	}
@@ -4576,18 +4565,6 @@ BoolPri:
 		sq := $4.(*ast.SubqueryExpr)
 		sq.MultiRows = true
 		$$ = &ast.CompareSubqueryExpr{Op: $2.(opcode.Op), L: $1, R: sq, All: $3.(bool)}
-	}
-|	BoolPri CompareOp singleAtIdentifier assignmentEq PredicateExpr %prec assignmentEq
-	{
-		v := $3
-		v = strings.TrimPrefix(v, "@")
-		variable := &ast.VariableExpr{
-			Name:     v,
-			IsGlobal: false,
-			IsSystem: false,
-			Value:    $5,
-		}
-		$$ = &ast.BinaryOperationExpr{Op: $2.(opcode.Op), L: $1, R: variable}
 	}
 |	PredicateExpr
 
@@ -4866,6 +4843,12 @@ GroupByClause:
 	"GROUP" "BY" ByList WithRollupClause
 	{
 		$$ = &ast.GroupByClause{Items: $3.([]*ast.ByItem), Rollup: $4.(bool)}
+	}
+|	"GROUP" "BY" "ROLLUP" '(' ByList ')'
+	{
+		// GROUP BY ROLLUP(...) is the function-style spelling of
+		// GROUP BY ... WITH ROLLUP; the restored form uses WITH ROLLUP.
+		$$ = &ast.GroupByClause{Items: $5.([]*ast.ByItem), Rollup: true}
 	}
 |	"GROUP" "BY" "GROUPING" "SETS" '(' GroupingSetList ')'
 	{
@@ -6028,7 +6011,7 @@ BitExpr:
 	{
 		$$ = &ast.BinaryOperationExpr{Op: opcode.Xor, L: $1, R: $3}
 	}
-|	SimpleExpr
+|	SimpleExpr %prec assignmentEq
 
 SimpleIdent:
 	Identifier
@@ -6058,6 +6041,24 @@ SimpleExpr:
 |	FunctionCallKeyword
 |	FunctionCallNonKeyword
 |	FunctionCallGeneric
+|	singleAtIdentifier assignmentEq BitExpr %prec assignmentEq
+	{
+		// @var := val is a simple expression in MySQL (sql_yacc.yy
+		// variable_aux), usable as any operand: SELECT (@a:=1)+@b:=2.
+		// The assigned value is a BitExpr rather than a full Expression:
+		// an unrestricted right side would make every expression chain
+		// reduction conflict with the in-progress assignment. Arithmetic
+		// still binds greedily (@a:=1+2 assigns 3); comparison and logical
+		// operators bind outside the assignment.
+		v := $1
+		v = strings.TrimPrefix(v, "@")
+		$$ = &ast.VariableExpr{
+			Name:     v,
+			IsGlobal: false,
+			IsSystem: false,
+			Value:    $3,
+		}
+	}
 |	"MATCH" '(' ColumnNameList ')' "AGAINST" '(' BitExpr FulltextSearchModifierOpt ')'
 	{
 		$$ = &ast.MatchAgainst{
@@ -6906,6 +6907,17 @@ SumExpr:
 			$$ = &ast.AggregateFuncExpr{F: $1, Args: []ast.ExprNode{$3}}
 		}
 	}
+|	"JSON_ARRAYAGG" '(' Expression "NULL" "ON" "NULL" ')' OptWindowingClause
+	{
+		// NULL ON NULL spells out the default null handling; the AST is
+		// identical to the bare form. (ABSENT ON NULL is rejected by the
+		// MySQL grammar with ER_NOT_SUPPORTED_YET, not implemented here.)
+		if $8 != nil {
+			$$ = &ast.WindowFuncExpr{Name: $1, Args: []ast.ExprNode{$3}, Spec: *($8.(*ast.WindowSpec))}
+		} else {
+			$$ = &ast.AggregateFuncExpr{F: $1, Args: []ast.ExprNode{$3}}
+		}
+	}
 |	"JSON_ARRAYAGG" '(' "ALL" Expression ')' OptWindowingClause
 	{
 		if $6 != nil {
@@ -7189,6 +7201,23 @@ CastType:
 			tp.SetCharset(parser.charset)
 			tp.SetCollate(parser.collation)
 		}
+		$$ = tp
+	}
+|	NChar OptFieldLen
+	{
+		// CAST(... AS NCHAR(n)): the national character set is always
+		// utf8mb3, which the charset registry resolves via its "utf8"
+		// alias, so the restored CHAR(n) CHARSET form re-parses identically.
+		tp := types.NewFieldType(mysql.TypeVarString)
+		tp.SetFlen($2.(int))
+		tp.SetCharset(charset.CharsetUTF8)
+		co, err := charset.GetDefaultCollation(charset.CharsetUTF8)
+		if err != nil {
+			yylex.AppendError(yylex.Errorf("Get collation error for charset: %s", tp.GetCharset()))
+			return 1
+		}
+		tp.SetCollate(co)
+		parser.explicitCharset = true
 		$$ = tp
 	}
 |	"DATE"
@@ -7821,6 +7850,24 @@ SelectStmt:
 		}
 		$$ = st
 	}
+|	SelectStmtBasic "QUALIFY" Expression OrderByOptional SelectStmtLimitOpt SelectLockIntoOpt
+	{
+		// QUALIFY needs no FROM clause: SELECT 1 QUALIFY ROW_NUMBER() OVER () > 1.
+		st := $1.(*ast.SelectStmt)
+		st.Qualify = $3
+		if $4 != nil {
+			st.OrderBy = $4.(*ast.OrderByClause)
+		}
+		if $5 != nil {
+			st.Limit = $5.(*ast.Limit)
+		}
+		if $6 != nil {
+			h := $6.(*selectLockIntoHolder)
+			st.LockInfos = h.locks
+			st.SelectIntoOpt = h.into
+		}
+		$$ = st
+	}
 |	SelectStmtBasic SelectLockList IntoClause
 	{
 		st := $1.(*ast.SelectStmt)
@@ -8321,6 +8368,15 @@ OptLeadLagInfo:
 		}
 		$$ = args
 	}
+|	',' UserVariable OptLLDefault
+	{
+		// The offset may be a user variable: LAG(x, @n) OVER ().
+		args := []ast.ExprNode{$2}
+		if $3 != nil {
+			args = append(args, $3.(ast.ExprNode))
+		}
+		$$ = args
+	}
 |	',' paramMarker OptLLDefault
 	{
 		args := []ast.ExprNode{ast.NewParamMarkerExpr(yyS[yypt-1].offset)}
@@ -8459,21 +8515,31 @@ JsonTableColumn:
 	{
 		$$ = &ast.JSONTableColumn{Name: ast.NewCIStr($1), ForOrdinality: true}
 	}
-|	Identifier Type "PATH" stringLit JsonValueOnEmptyOrErrorOpt
+|	Identifier Type OptCollate "PATH" stringLit JsonValueOnEmptyOrErrorOpt
 	{
-		col := &ast.JSONTableColumn{Name: ast.NewCIStr($1), Tp: $2.(*types.FieldType), Path: $4}
-		if $5 != nil {
-			on := $5.(*jsonValueOnHolder)
+		tp := $2.(*types.FieldType)
+		if $3 != "" {
+			// MySQL validates the collation against the column charset at
+			// execution time, not in the grammar.
+			tp.SetCollate($3)
+		}
+		col := &ast.JSONTableColumn{Name: ast.NewCIStr($1), Tp: tp, Path: $5}
+		if $6 != nil {
+			on := $6.(*jsonValueOnHolder)
 			col.OnEmpty = on.onEmpty
 			col.OnError = on.onError
 		}
 		$$ = col
 	}
-|	Identifier Type "EXISTS" "PATH" stringLit JsonValueOnEmptyOrErrorOpt
+|	Identifier Type OptCollate "EXISTS" "PATH" stringLit JsonValueOnEmptyOrErrorOpt
 	{
-		col := &ast.JSONTableColumn{Name: ast.NewCIStr($1), Tp: $2.(*types.FieldType), Exists: true, Path: $5}
-		if $6 != nil {
-			on := $6.(*jsonValueOnHolder)
+		tp := $2.(*types.FieldType)
+		if $3 != "" {
+			tp.SetCollate($3)
+		}
+		col := &ast.JSONTableColumn{Name: ast.NewCIStr($1), Tp: tp, Exists: true, Path: $6}
+		if $7 != nil {
+			on := $7.(*jsonValueOnHolder)
 			col.OnEmpty = on.onEmpty
 			col.OnError = on.onError
 		}
@@ -8884,17 +8950,20 @@ SelectStmtGroup:
 |	GroupByClause
 
 IntoClause:
-	"INTO" "OUTFILE" stringLit Fields Lines
+	"INTO" "OUTFILE" stringLit CharsetOpt Fields Lines
 	{
 		x := &ast.SelectIntoOption{
 			Tp:       ast.SelectIntoOutfile,
 			FileName: $3,
 		}
-		if $4 != nil {
-			x.FieldsInfo = $4.(*ast.FieldsClause)
+		if cs := $4.(*string); cs != nil {
+			x.Charset = *cs
 		}
 		if $5 != nil {
-			x.LinesInfo = $5.(*ast.LinesClause)
+			x.FieldsInfo = $5.(*ast.FieldsClause)
+		}
+		if $6 != nil {
+			x.LinesInfo = $6.(*ast.LinesClause)
 		}
 
 		$$ = x
@@ -9661,15 +9730,15 @@ CharsetNameOrDefault:
 CharsetName:
 	StringName
 	{
-		// Validate input charset name to keep the same behavior as parser of MySQL.
-		cs, err := charset.GetCharsetInfo($1)
-		if err != nil {
-			yylex.AppendError(ErrUnknownCharacterSet.GenByArgs($1))
-			return 1
+		// Use the canonical name from the registry when the charset is
+		// known, keeping lower case of input for generated column restore.
+		// Unknown names are kept as written (lowered): MySQL reports
+		// ER_UNKNOWN_CHARACTER_SET at execution time, not as a syntax error.
+		if cs, err := charset.GetCharsetInfo($1); err == nil {
+			$$ = cs.Name
+		} else {
+			$$ = strings.ToLower($1)
 		}
-		// Use charset name returned from charset.GetCharsetInfo(),
-		// to keep lower case of input for generated column restore.
-		$$ = cs.Name
 	}
 |	binaryType
 	{
@@ -9679,12 +9748,14 @@ CharsetName:
 CollationName:
 	StringName
 	{
-		info, err := charset.GetCollationByName($1)
-		if err != nil {
-			yylex.AppendError(err)
-			return 1
+		// Like CharsetName above: unknown collations, including
+		// user-defined LDML collations such as utf8mb4_test_ci, are a
+		// runtime error in MySQL (ER_UNKNOWN_COLLATION), not a parse error.
+		if info, err := charset.GetCollationByName($1); err == nil {
+			$$ = info.Name
+		} else {
+			$$ = strings.ToLower($1)
 		}
-		$$ = info.Name
 	}
 |	binaryType
 	{
@@ -9725,6 +9796,31 @@ SystemVariable:
 		} else if strings.HasPrefix(v, "@@") {
 			v, explicitScope = strings.TrimPrefix(v, "@@"), false
 		}
+		$$ = &ast.VariableExpr{Name: v, IsGlobal: isGlobal, IsInstance: isInstance, IsSystem: true, ExplicitScope: explicitScope}
+	}
+|	doubleAtIdentifier '.' Identifier
+	{
+		// Structured system variables whose component after the dot is
+		// quoted separately: @@global.`default`.`key_buffer_size`. The
+		// fully unquoted form lexes as a single token via the rule above.
+		v := strings.ToLower($1)
+		var isGlobal bool
+		var isInstance bool
+		explicitScope := true
+		if strings.HasPrefix(v, "@@global.") {
+			isGlobal = true
+			v = strings.TrimPrefix(v, "@@global.")
+		} else if strings.HasPrefix(v, "@@instance.") {
+			isInstance = true
+			v = strings.TrimPrefix(v, "@@instance.")
+		} else if strings.HasPrefix(v, "@@session.") {
+			v = strings.TrimPrefix(v, "@@session.")
+		} else if strings.HasPrefix(v, "@@local.") {
+			v = strings.TrimPrefix(v, "@@local.")
+		} else if strings.HasPrefix(v, "@@") {
+			v, explicitScope = strings.TrimPrefix(v, "@@"), false
+		}
+		v = v + "." + strings.ToLower($3)
 		$$ = &ast.VariableExpr{Name: v, IsGlobal: isGlobal, IsInstance: isInstance, IsSystem: true, ExplicitScope: explicitScope}
 	}
 

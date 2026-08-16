@@ -520,20 +520,24 @@ func TestErrorMsg(t *testing.T) {
 	_, _, err = p.Parse("load data infile 'aaa' into table aaa FIELDS  Enclosed by '\\\\b' Escaped by '\\\\b' ;", "", "")
 	require.EqualError(t, err, "[parser:1083]Field separator argument is not what is expected; check the manual")
 
+	// Unknown character sets and collations are execution-time errors in
+	// MySQL (ER_UNKNOWN_CHARACTER_SET 1115 / ER_UNKNOWN_COLLATION 1273, not
+	// 1064 syntax errors), e.g. user-defined LDML collations, so the
+	// grammar accepts any name here.
 	_, _, err = p.Parse("ALTER DATABASE `` CHARACTER SET = ''", "", "")
-	require.EqualError(t, err, "[parser:1115]Unknown character set: ''")
+	require.NoError(t, err)
 
 	_, _, err = p.Parse("ALTER DATABASE t CHARACTER SET = ''", "", "")
-	require.EqualError(t, err, "[parser:1115]Unknown character set: ''")
+	require.NoError(t, err)
 
 	_, _, err = p.Parse("ALTER SCHEMA t CHARACTER SET = 'SOME_INVALID_CHARSET'", "", "")
-	require.EqualError(t, err, "[parser:1115]Unknown character set: 'SOME_INVALID_CHARSET'")
+	require.NoError(t, err)
 
 	_, _, err = p.Parse("ALTER DATABASE t COLLATE = ''", "", "")
-	require.EqualError(t, err, "[ddl:1273]Unknown collation: ''")
+	require.NoError(t, err)
 
 	_, _, err = p.Parse("ALTER SCHEMA t COLLATE = 'SOME_INVALID_COLLATION'", "", "")
-	require.EqualError(t, err, "[ddl:1273]Unknown collation: 'SOME_INVALID_COLLATION'")
+	require.NoError(t, err)
 
 	_, _, err = p.Parse("ALTER DATABASE CHARSET = 'utf8mb4' COLLATE = 'utf8_bin'", "", "")
 	require.EqualError(t, err, "line 1 column 24 near \"= 'utf8mb4' COLLATE = 'utf8_bin'\" ")
@@ -591,8 +595,9 @@ func TestErrorMsg(t *testing.T) {
 	_, _, err = p.Parse("create table t (a text unicode, b mediumtext ascii, c int)", "", "")
 	require.NoError(t, err)
 
+	// Unknown collations are execution-time errors (1273), not parse errors.
 	_, _, err = p.Parse("select 1 collate some_unknown_collation", "", "")
-	require.EqualError(t, err, "[ddl:1273]Unknown collation: 'some_unknown_collation'")
+	require.NoError(t, err)
 }
 
 func TestOptimizerHints(t *testing.T) {

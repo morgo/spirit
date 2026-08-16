@@ -374,9 +374,11 @@ func TestCharsetRegistry(t *testing.T) {
 		{"CREATE TABLE t (a TEXT COLLATE utf8mb4_nb_0900_ai_ci)", true, "CREATE TABLE `t` (`a` TEXT COLLATE utf8mb4_nb_0900_ai_ci)"},
 		{"CREATE TABLE t (a TEXT COLLATE utf8mb4_mn_cyrl_0900_as_cs)", true, "CREATE TABLE `t` (`a` TEXT COLLATE utf8mb4_mn_cyrl_0900_as_cs)"},
 		{"SET NAMES utf8mb4 COLLATE utf8mb4_sr_latn_0900_ai_ci", true, "SET NAMES 'utf8mb4' COLLATE 'utf8mb4_sr_latn_0900_ai_ci'"},
-		// Names MySQL does not know are still rejected.
-		{"CREATE TABLE t (a CHAR(10) CHARACTER SET nosuch)", false, ""},
-		{"CREATE TABLE t (a TEXT COLLATE nosuch_ci)", false, ""},
+		// Names MySQL does not know still parse: unknown character sets
+		// and collations are execution-time errors in MySQL (1115/1273,
+		// not 1064), e.g. user-defined LDML collations.
+		{"CREATE TABLE t (a CHAR(10) CHARACTER SET nosuch)", true, "CREATE TABLE `t` (`a` CHAR(10) CHARACTER SET NOSUCH)"},
+		{"CREATE TABLE t (a TEXT COLLATE nosuch_ci)", true, "CREATE TABLE `t` (`a` TEXT COLLATE nosuch_ci)"},
 	}
 	RunTest(t, table, false)
 }
@@ -1130,6 +1132,143 @@ func TestSelectAliasCurrentRole(t *testing.T) {
 		{"SELECT 1 AS CURRENT_ROLE", true, "SELECT 1 AS `CURRENT_ROLE`"},
 		{"SELECT 1 CURRENT_ROLE", true, "SELECT 1 AS `CURRENT_ROLE`"},
 		{"SELECT CURRENT_ROLE", true, "SELECT CURRENT_ROLE()"},
+	}
+	RunTest(t, table, false)
+}
+
+// TestGroupByRollupFunc covers GROUP BY ROLLUP(...), the function-style
+// spelling of WITH ROLLUP added in MySQL 8.0.1, which restores to the
+// WITH ROLLUP form. A generic function named rollup stays a syntax error,
+// matching MySQL (1064).
+func TestGroupByRollupFunc(t *testing.T) {
+	table := []testCase{
+		{"SELECT a, SUM(b) FROM t GROUP BY ROLLUP(a)", true, "SELECT `a`,SUM(`b`) FROM `t` GROUP BY `a` WITH ROLLUP"},
+		{"SELECT a FROM t GROUP BY ROLLUP(a, b, c) HAVING a > 1", true, "SELECT `a` FROM `t` GROUP BY `a`,`b`,`c` WITH ROLLUP HAVING `a`>1"},
+		{"SELECT rollup(1)", false, ""},
+		{"CREATE TABLE rollup (a INT)", true, "CREATE TABLE `rollup` (`a` INT)"},
+	}
+	RunTest(t, table, false)
+}
+
+// TestQualifyWithoutFrom covers QUALIFY directly after the field list
+// (MySQL 9.7 allows it with no FROM clause).
+func TestQualifyWithoutFrom(t *testing.T) {
+	table := []testCase{
+		{"SELECT 1 AS res QUALIFY ROW_NUMBER() OVER () > 10", true, "SELECT 1 AS `res` QUALIFY ROW_NUMBER() OVER ()>10"},
+		{"SELECT (SELECT 1 QUALIFY ROW_NUMBER() OVER () < 10) AS res", true, "SELECT (SELECT 1 QUALIFY ROW_NUMBER() OVER ()<10) AS `res`"},
+		{"SELECT 1 QUALIFY SUM(1) OVER () > 0 ORDER BY 1 LIMIT 2", true, "SELECT 1 QUALIFY SUM(1) OVER ()>0 ORDER BY 1 LIMIT 2"},
+	}
+	RunTest(t, table, true)
+}
+
+// TestUserVariableAssignExpr covers @var := val as a simple expression
+// (MySQL sql_yacc.yy variable_aux), usable as any operand. The assigned
+// value is a BitExpr: arithmetic binds greedily, while comparison and
+// logical operators bind outside the assignment.
+func TestUserVariableAssignExpr(t *testing.T) {
+	table := []testCase{
+		{"SELECT (@t2:=1)+@t3:=4, @t2, @t3", true, "SELECT (@`t2`:=1)+@`t3`:=4,@`t2`,@`t3`"},
+		{"SELECT @t1:=(@t2:=1)+@t3:=4, @t1", true, "SELECT @`t1`:=(@`t2`:=1)+@`t3`:=4,@`t1`"},
+		{"SELECT 1 = @v := 2 AND 0", true, "SELECT 1=@`v`:=2 AND 0"},
+		{"SELECT @a := b COLLATE utf8mb4_bin FROM t", true, "SELECT @`a`:=`b` COLLATE utf8mb4_bin FROM `t`"},
+		{"SELECT hex(@a:=1), hex(@a)", true, "SELECT HEX(@`a`:=1),HEX(@`a`)"},
+	}
+	RunTest(t, table, false)
+}
+
+// TestLeadLagUserVariableOffset covers user variables as LAG/LEAD offsets.
+func TestLeadLagUserVariableOffset(t *testing.T) {
+	table := []testCase{
+		{"DO LAG(1, @v) OVER()", true, "DO LAG(1, @`v`) OVER ()"},
+		{"DO LEAD(1, @n, 3) OVER()", true, "DO LEAD(1, @`n`, 3) OVER ()"},
+	}
+	RunTest(t, table, true)
+}
+
+// TestCastNChar covers CAST(... AS NCHAR/NATIONAL CHAR): the national
+// character set is always utf8mb3, registered under its "utf8" alias.
+func TestCastNChar(t *testing.T) {
+	table := []testCase{
+		{"SELECT CAST('abc' AS NCHAR(2))", true, "SELECT CAST(_UTF8MB4'abc' AS CHAR(2) CHARSET UTF8)"},
+		{"SELECT CAST('abc' AS NATIONAL CHAR)", true, "SELECT CAST(_UTF8MB4'abc' AS CHAR CHARSET UTF8)"},
+		{"SELECT CAST('abc' AS NCHAR)", true, "SELECT CAST(_UTF8MB4'abc' AS CHAR CHARSET UTF8)"},
+	}
+	RunTest(t, table, false)
+}
+
+// TestStructuredSystemVariable covers @@scope.instance.component system
+// variables whose component after the dot is quoted separately; the fully
+// unquoted spelling lexes as a single token and restores identically.
+func TestStructuredSystemVariable(t *testing.T) {
+	table := []testCase{
+		{"SELECT @@global.`default`.`key_buffer_size`", true, "SELECT @@GLOBAL.`default.key_buffer_size`"},
+		{"SELECT @@GLOBAL.default.key_buffer_size", true, "SELECT @@GLOBAL.`default.key_buffer_size`"},
+	}
+	RunTest(t, table, false)
+}
+
+// TestJSONArrayaggNullOnNull covers JSON_ARRAYAGG(expr NULL ON NULL), which
+// spells out the default null handling (the AST is unchanged). JSON_OBJECTAGG
+// does not accept the clause, matching MySQL (1064).
+func TestJSONArrayaggNullOnNull(t *testing.T) {
+	table := []testCase{
+		{"SELECT JSON_ARRAYAGG(a NULL ON NULL) FROM t1", true, "SELECT JSON_ARRAYAGG(`a`) FROM `t1`"},
+		{"SELECT JSON_OBJECTAGG('a', 1 NULL ON NULL)", false, ""},
+	}
+	RunTest(t, table, false)
+	windowed := []testCase{
+		{"SELECT JSON_ARRAYAGG(a NULL ON NULL) OVER () FROM t1", true, "SELECT JSON_ARRAYAGG(`a`) OVER () FROM `t1`"},
+	}
+	RunTest(t, windowed, true)
+}
+
+// TestVersionedComments covers /*!NNNNN ... */ comments gated on the MySQL
+// version this parser mimics (90700): content at or below it is parsed,
+// content above it is skipped, and a bare /*! is always parsed. mysqldump
+// 9.x emits /*!999999 for sandbox mode.
+func TestVersionedComments(t *testing.T) {
+	table := []testCase{
+		{"select 1 /*!999999 +1 */", true, "SELECT 1"},
+		{"SELECT 1 /*!080100 +1*/ AS r", true, "SELECT 1+1 AS `r`"},
+		{"select 1 + /*!00000 2 */ + 3 /*!99999 noise*/ + 4", true, "SELECT 1+2+3+4"},
+		{"/*!99999 --- */INSERT /*!INTO*/ /*!10000 t1 */ VALUES(10) /*!99999 ,(11)*/", true, "INSERT INTO `t1` VALUES (10)"},
+		// While discarding, one nested /* ... */ level is honored per level
+		// (recursively, so siblings each nest), quoted strings are not
+		// special, and deeper nesting or an unclosed comment is a syntax
+		// error -- all matching MySQL 9.7 behavior exactly.
+		{"SELECT 1 /*!99999 /* */ */", true, "SELECT 1"},
+		{"SELECT 1 /*!99999 /* */ /* */ */", true, "SELECT 1"},
+		{"SELECT 1 /*!99999 ' */", true, "SELECT 1"},
+		{"SELECT 1 /*!99999 /* /* */ */ */", false, ""},
+		{"SELECT 1 /*!99999 /* */", false, ""},
+	}
+	RunTest(t, table, false)
+}
+
+// TestHintOutsideHintSlot: a /*+ ... */ where MySQL accepts no hint is
+// warned about and skipped like a comment instead of failing the parse.
+func TestHintOutsideHintSlot(t *testing.T) {
+	table := []testCase{
+		{"CREATE /*+ x */ TABLE t (a INT)", true, "CREATE TABLE `t` (`a` INT)"},
+	}
+	RunTest(t, table, false)
+}
+
+// TestSelectIntoOutfileCharset covers INTO OUTFILE ... CHARACTER SET.
+func TestSelectIntoOutfileCharset(t *testing.T) {
+	table := []testCase{
+		{"select * from t1 into outfile 'tmp1.txt' character set binary", true, "SELECT * FROM `t1` INTO OUTFILE 'tmp1.txt' CHARACTER SET BINARY"},
+		{"SELECT '00' UNION SELECT '10' INTO OUTFILE 'tmpp2.txt' CHARACTER SET ucs2", true, "SELECT _UTF8MB4'00' UNION SELECT _UTF8MB4'10' INTO OUTFILE 'tmpp2.txt' CHARACTER SET UCS2"},
+	}
+	RunTest(t, table, false)
+}
+
+// TestJSONTableColumnCollate covers COLLATE on JSON_TABLE column types;
+// MySQL validates the collation against the charset at execution time.
+func TestJSONTableColumnCollate(t *testing.T) {
+	table := []testCase{
+		{"SELECT * FROM json_table('[]', '$[*]' COLUMNS (p CHAR(1) CHARACTER SET ucs2 COLLATE ucs2_persian_ci PATH '$.a')) AS t", true, "SELECT * FROM JSON_TABLE(_UTF8MB4'[]', '$[*]' COLUMNS (`p` CHAR(1) CHARACTER SET UCS2 COLLATE ucs2_persian_ci PATH '$.a')) AS `t`"},
+		{"SELECT * FROM json_table('[]', '$[*]' COLUMNS (p CHAR(1) CHARACTER SET ucs2 COLLATE ucs2_persian_ci EXISTS PATH '$.a')) AS t", true, "SELECT * FROM JSON_TABLE(_UTF8MB4'[]', '$[*]' COLUMNS (`p` CHAR(1) CHARACTER SET UCS2 COLLATE ucs2_persian_ci EXISTS PATH '$.a')) AS `t`"},
 	}
 	RunTest(t, table, false)
 }

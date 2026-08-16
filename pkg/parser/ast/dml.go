@@ -3487,8 +3487,10 @@ const (
 type SelectIntoOption struct {
 	node
 
-	Tp         SelectIntoType
-	FileName   string
+	Tp       SelectIntoType
+	FileName string
+	// Charset is the optional CHARACTER SET clause of INTO OUTFILE.
+	Charset    string
 	FieldsInfo *FieldsClause
 	LinesInfo  *LinesClause
 	// Variables is the user variable list of SELECT ... INTO @var [, @var] ...
@@ -3501,6 +3503,10 @@ func (n *SelectIntoOption) Restore(ctx *format.RestoreCtx) error {
 	case SelectIntoOutfile:
 		ctx.WriteKeyWord("INTO OUTFILE ")
 		ctx.WriteString(n.FileName)
+		if n.Charset != "" {
+			ctx.WriteKeyWord(" CHARACTER SET ")
+			ctx.WriteKeyWord(n.Charset)
+		}
 		if n.FieldsInfo != nil {
 			if err := n.FieldsInfo.Restore(ctx); err != nil {
 				return fmt.Errorf("an error occurred while restore SelectInto.FieldsInfo: %w", err)
