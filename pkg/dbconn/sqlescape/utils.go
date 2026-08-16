@@ -260,7 +260,7 @@ func escapeSQL(sql string, args ...any) ([]byte, error) {
 			i++ // skip specifier
 		case 'r':
 			if argPos >= len(args) {
-				return nil, errors.Errorf("missing arguments, need %d-th arg, but only got %d args", argPos+1, len(args))
+				return nil, fmt.Errorf("missing arguments, need %d-th arg, but only got %d args", argPos+1, len(args))
 			}
 			arg := args[argPos]
 			argPos++
@@ -270,7 +270,7 @@ func escapeSQL(sql string, args ...any) ([]byte, error) {
 				// A plain string is rejected on purpose: the RawSQL conversion
 				// at the call site is the explicit, greppable assertion that
 				// this text is safe to splice verbatim.
-				return nil, errors.Errorf("expect sqlescape.RawSQL for %%r, got %T", arg)
+				return nil, fmt.Errorf("expect sqlescape.RawSQL for %%r, got %T", arg)
 			}
 			// Spliced verbatim: buf is never re-scanned, so %-sequences inside
 			// v (e.g. COMMENT '100%new') are data, not format specifiers.
