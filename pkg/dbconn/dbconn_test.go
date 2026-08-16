@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/block/spirit/pkg/dbconn/sqlescape"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
@@ -322,6 +323,104 @@ func TestForceExec(t *testing.T) {
 	// But change it to forceexec and it will work!
 	err = ForceExec(t.Context(), db, []*table.TableInfo{ti}, config, slog.Default(), "ALTER TABLE requires_mdl ALGORITHM=INSTANT, ADD COLUMN colc INT")
 	require.NoError(t, err)
+}
+
+// TestExecRawVerb tests that the %r verb splices user SQL verbatim, with no
+// format interpretation. Sequences like %n, %? and %% appear legitimately
+// inside string literals of user-provided DDL, and must reach the server
+// exactly as written.
+func TestExecRawVerb(t *testing.T) {
+	db, err := New(testutils.DSN(), NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	err = Exec(t.Context(), db, "DROP TABLE IF EXISTS execraw_percent, execraw_percent2")
+	require.NoError(t, err)
+	err = Exec(t.Context(), db, "CREATE TABLE %n (id INT NOT NULL PRIMARY KEY, %r)",
+		"execraw_percent",
+		sqlescape.RawSQL("b VARCHAR(20) NOT NULL DEFAULT '50%% off' COMMENT '100%new, a%?b'"))
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, Exec(context.Background(), db, "DROP TABLE IF EXISTS execraw_percent"))
+	}()
+
+	// The literals must land exactly as written: %% is two percent signs to
+	// MySQL (not an escape), and %n / %? are plain text.
+	var tbl, createStmt string
+	require.NoError(t, db.QueryRowContext(t.Context(), "SHOW CREATE TABLE execraw_percent").Scan(&tbl, &createStmt))
+	require.Contains(t, createStmt, "DEFAULT '50%% off'")
+	require.Contains(t, createStmt, "COMMENT '100%new, a%?b'")
+
+	// The same text placed in the format string itself is misinterpreted:
+	// %n and %? try to consume arguments that don't exist. Pin the message so
+	// a leftover execraw_percent2 ("table already exists") can never satisfy
+	// this assertion for the wrong reason.
+	err = Exec(t.Context(), db,
+		"CREATE TABLE execraw_percent2 (id INT NOT NULL PRIMARY KEY, b VARCHAR(20) NOT NULL COMMENT '100%new')")
+	require.ErrorContains(t, err, "missing arguments")
+
+	// A plain string is not accepted for %r: the sqlescape.RawSQL conversion
+	// is the explicit assertion that the text is safe to splice.
+	err = Exec(t.Context(), db, "ALTER TABLE %n %r", "execraw_percent", "ADD COLUMN c INT")
+	require.ErrorContains(t, err, "expect sqlescape.RawSQL")
+}
+
+// TestForceExecRawVerb tests that ForceExec supports the %r verb, while
+// preserving its kill-timer behavior: a connection holding a metadata lock
+// on the table is force-killed so the DDL succeeds.
+func TestForceExecRawVerb(t *testing.T) {
+	config := NewDBConfig()
+	config.LockWaitTimeout = 1 // as short as possible.
+	db, err := New(testutils.DSN(), config)
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	err = Exec(t.Context(), db, "DROP TABLE IF EXISTS forceexecraw_percent")
+	require.NoError(t, err)
+	err = Exec(t.Context(), db, "CREATE TABLE forceexecraw_percent (id INT NOT NULL PRIMARY KEY, colb int)")
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, Exec(context.Background(), db, "DROP TABLE IF EXISTS forceexecraw_percent"))
+	}()
+
+	ti := table.NewTableInfo(db, "test", "forceexecraw_percent")
+	err = ti.SetInfo(t.Context())
+	require.NoError(t, err)
+
+	// Hold a metadata lock on the table with an open transaction.
+	trx, err := db.BeginTx(t.Context(), nil)
+	require.NoError(t, err)
+	defer trx.Rollback()                                                        //nolint: errcheck
+	_, err = trx.ExecContext(t.Context(), "SELECT * FROM forceexecraw_percent") // just a select, nothing else.
+	require.NoError(t, err)
+
+	// The clause contains %% and %n inside string literals; spliced via %r
+	// they must not be interpreted, and the MDL blocker must still be
+	// force-killed.
+	err = ForceExec(t.Context(), db, []*table.TableInfo{ti}, config, slog.Default(),
+		"ALTER TABLE %n ALGORITHM=INSTANT, %r", ti.TableName,
+		sqlescape.RawSQL("ADD COLUMN colc VARCHAR(20) NOT NULL DEFAULT '50%% off' COMMENT '100%new'"))
+	require.NoError(t, err)
+
+	var tbl, createStmt string
+	require.NoError(t, db.QueryRowContext(t.Context(), "SHOW CREATE TABLE forceexecraw_percent").Scan(&tbl, &createStmt))
+	require.Contains(t, createStmt, "DEFAULT '50%% off'")
+	require.Contains(t, createStmt, "COMMENT '100%new'")
+}
+
+// TestForceExecBadFormatString tests that ForceExec returns an error (rather
+// than panicking mid-flight) when the format string cannot be escaped, e.g. a
+// %? specifier with no matching argument. The escape now happens before the
+// kill timer is armed, so a bad format string can never fire the killer.
+func TestForceExecBadFormatString(t *testing.T) {
+	config := NewDBConfig()
+	db, err := New(testutils.DSN(), config)
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	err = ForceExec(t.Context(), db, nil, config, slog.Default(), "SELECT %?")
+	require.Error(t, err)
+	require.ErrorContains(t, err, "missing arguments")
 }
 
 func TestStandardTrx(t *testing.T) {
