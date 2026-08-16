@@ -1856,6 +1856,12 @@ func (n *RoleOrPriv) ToPriv() (*PrivElem, error) {
 		if p, ok := n.Node.(*PrivElem); ok {
 			return p, nil
 		}
+		if r, ok := n.Node.(*auth.RoleIdentity); ok && r.Hostname == "%" && r.Username != "" {
+			// A quoted dynamic privilege, e.g. GRANT 'SYSTEM_VARIABLES_ADMIN'
+			// ON *.*: the grammar reads the string as a role name, and the
+			// privilege position (an ON clause is present) resolves it here.
+			return &PrivElem{Priv: mysql.ExtendedPriv, Name: r.Username}, nil
+		}
 		return nil, fmt.Errorf("can't convert to PrivElem, type %T", n.Node)
 	}
 	if len(n.Symbols) == 0 {

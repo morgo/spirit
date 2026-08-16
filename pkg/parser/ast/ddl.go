@@ -26,6 +26,7 @@ import (
 var (
 	_ DDLNode = &AlterTableStmt{}
 	_ DDLNode = &CreateDatabaseStmt{}
+	_ DDLNode = &CreateJSONDualityViewStmt{}
 	_ DDLNode = &CreateIndexStmt{}
 	_ DDLNode = &CreateTableStmt{}
 	_ DDLNode = &CreateViewStmt{}
@@ -1474,6 +1475,89 @@ func (n *CreateViewStmt) Accept(v Visitor) (Node, bool) {
 		return v.Leave(newNode)
 	}
 	n = newNode.(*CreateViewStmt)
+	node, ok := n.ViewName.Accept(v)
+	if !ok {
+		return n, false
+	}
+	n.ViewName = node.(*TableName)
+	selnode, ok := n.Select.Accept(v)
+	if !ok {
+		return n, false
+	}
+	n.Select = selnode.(StmtNode)
+	return v.Leave(n)
+}
+
+// CreateJSONDualityViewStmt is a statement to create a JSON relational
+// duality view. See https://dev.mysql.com/doc/refman/9.4/en/create-json-duality-view.html
+type CreateJSONDualityViewStmt struct {
+	ddlNode
+
+	OrReplace   bool
+	Algorithm   ViewAlgorithm
+	Definer     *auth.UserIdentity
+	Security    ViewSecurity
+	Relational  bool
+	IfNotExists bool
+	ViewName    *TableName
+	Select      StmtNode
+}
+
+// Restore implements Node interface.
+func (n *CreateJSONDualityViewStmt) Restore(ctx *format.RestoreCtx) error {
+	ctx.WriteKeyWord("CREATE ")
+	if n.OrReplace {
+		ctx.WriteKeyWord("OR REPLACE ")
+	}
+	// The view attributes are only written when they differ from what an
+	// absent clause parses to, so unattributed statements restore without
+	// them.
+	if n.Algorithm != AlgorithmUndefined {
+		ctx.WriteKeyWord("ALGORITHM")
+		ctx.WritePlain(" = ")
+		ctx.WriteKeyWord(n.Algorithm.String())
+		ctx.WritePlain(" ")
+	}
+	if n.Definer != nil && !n.Definer.CurrentUser {
+		ctx.WriteKeyWord("DEFINER")
+		ctx.WritePlain(" = ")
+		ctx.WriteName(n.Definer.Username)
+		if n.Definer.Hostname != "" {
+			ctx.WritePlain("@")
+			ctx.WriteName(n.Definer.Hostname)
+		}
+		ctx.WritePlain(" ")
+	}
+	if n.Security != SecurityDefiner {
+		ctx.WriteKeyWord("SQL SECURITY ")
+		ctx.WriteKeyWord(n.Security.String())
+		ctx.WritePlain(" ")
+	}
+	ctx.WriteKeyWord("JSON ")
+	if n.Relational {
+		ctx.WriteKeyWord("RELATIONAL ")
+	}
+	ctx.WriteKeyWord("DUALITY VIEW ")
+	if n.IfNotExists {
+		ctx.WriteKeyWord("IF NOT EXISTS ")
+	}
+	if err := n.ViewName.Restore(ctx); err != nil {
+		return fmt.Errorf("an error occurred while restore CreateJSONDualityViewStmt.ViewName: %w", err)
+	}
+	ctx.WriteKeyWord(" AS ")
+	if err := n.Select.Restore(ctx); err != nil {
+		return fmt.Errorf("an error occurred while restore CreateJSONDualityViewStmt.Select: %w", err)
+	}
+	return nil
+}
+
+// Accept implements Node Accept interface.
+func (n *CreateJSONDualityViewStmt) Accept(v Visitor) (Node, bool) {
+	newNode, skipChildren := v.Enter(n)
+	if skipChildren {
+		return v.Leave(newNode)
+	}
+	n = newNode.(*CreateJSONDualityViewStmt)
 	node, ok := n.ViewName.Accept(v)
 	if !ok {
 		return n, false

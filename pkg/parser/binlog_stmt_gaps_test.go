@@ -830,7 +830,7 @@ func TestHelpStatement(t *testing.T) {
 	table := []testCase{
 		{"HELP 'contents'", true, "HELP 'contents'"},
 		{"help '%function_1'", true, "HELP '%function_1'"},
-		{"HELP contents", false, ""},
+		{"HELP contents", true, "HELP 'contents'"},
 	}
 	RunTest(t, table, false)
 }
@@ -1269,6 +1269,113 @@ func TestJSONTableColumnCollate(t *testing.T) {
 	table := []testCase{
 		{"SELECT * FROM json_table('[]', '$[*]' COLUMNS (p CHAR(1) CHARACTER SET ucs2 COLLATE ucs2_persian_ci PATH '$.a')) AS t", true, "SELECT * FROM JSON_TABLE(_UTF8MB4'[]', '$[*]' COLUMNS (`p` CHAR(1) CHARACTER SET UCS2 COLLATE ucs2_persian_ci PATH '$.a')) AS `t`"},
 		{"SELECT * FROM json_table('[]', '$[*]' COLUMNS (p CHAR(1) CHARACTER SET ucs2 COLLATE ucs2_persian_ci EXISTS PATH '$.a')) AS t", true, "SELECT * FROM JSON_TABLE(_UTF8MB4'[]', '$[*]' COLUMNS (`p` CHAR(1) CHARACTER SET UCS2 COLLATE ucs2_persian_ci EXISTS PATH '$.a')) AS `t`"},
+	}
+	RunTest(t, table, false)
+}
+
+// TestSetLocalTransaction covers the LOCAL synonym for SESSION.
+func TestSetLocalTransaction(t *testing.T) {
+	table := []testCase{
+		{"SET LOCAL TRANSACTION ISOLATION LEVEL READ COMMITTED", true, "SET @@SESSION.`tx_isolation`=_UTF8MB4'READ-COMMITTED'"},
+		{"SET LOCAL TRANSACTION READ ONLY", true, "SET @@SESSION.`tx_read_only`=_UTF8MB4'1'"},
+	}
+	RunTest(t, table, false)
+}
+
+// TestShowRelaylogEvents covers SHOW RELAYLOG EVENTS.
+func TestShowRelaylogEvents(t *testing.T) {
+	table := []testCase{
+		{"SHOW RELAYLOG EVENTS", true, "SHOW RELAYLOG EVENTS"},
+		{"SHOW RELAYLOG EVENTS IN 'relay-bin.000002' FROM 4 LIMIT 2", true, "SHOW RELAYLOG EVENTS IN 'relay-bin.000002' FROM 4 LIMIT 2"},
+		{"SELECT relaylog FROM t", true, "SELECT `relaylog` FROM `t`"},
+	}
+	RunTest(t, table, false)
+}
+
+// TestHelpIdentifier covers unquoted HELP topics.
+func TestHelpIdentifier(t *testing.T) {
+	table := []testCase{
+		{"HELP data_types", true, "HELP 'data_types'"},
+		{"HELP contents", true, "HELP 'contents'"},
+	}
+	RunTest(t, table, false)
+}
+
+// TestResetBinaryLogsToHex covers RESET BINARY LOGS AND GTIDS TO 0xF, which
+// restores using the decimal spelling of the index.
+func TestResetBinaryLogsToHex(t *testing.T) {
+	table := []testCase{
+		{"RESET BINARY LOGS AND GTIDS TO 0xF", true, "RESET BINARY LOGS AND GTIDS TO 15"},
+		{"RESET BINARY LOGS AND GTIDS TO 15", true, "RESET BINARY LOGS AND GTIDS TO 15"},
+	}
+	RunTest(t, table, false)
+}
+
+// TestCacheIndexPrimary covers PRIMARY as an index name in CACHE INDEX and
+// LOAD INDEX INTO CACHE key lists.
+func TestCacheIndexPrimary(t *testing.T) {
+	table := []testCase{
+		{"load index into cache t1, t2 key (primary,b) ignore leaves", true, "LOAD INDEX INTO CACHE `t1`, `t2` INDEX (`PRIMARY`, `b`) IGNORE LEAVES"},
+		{"CACHE INDEX t1 KEY (PRIMARY) IN default", true, "CACHE INDEX `t1` INDEX (`PRIMARY`) IN `default`"},
+	}
+	RunTest(t, table, false)
+}
+
+// TestAlterUserFuncReplacePassword covers REPLACE 'current' on the
+// ALTER USER USER() form.
+func TestAlterUserFuncReplacePassword(t *testing.T) {
+	table := []testCase{
+		{"ALTER USER user() IDENTIFIED BY 'ahaha' REPLACE 'hehe'", true, "ALTER USER USER() IDENTIFIED BY 'ahaha' REPLACE 'hehe'"},
+		{"ALTER USER IF EXISTS user() IDENTIFIED BY 'x' REPLACE 'y' RETAIN CURRENT PASSWORD", true, "ALTER USER IF EXISTS USER() IDENTIFIED BY 'x' REPLACE 'y' RETAIN CURRENT PASSWORD"},
+	}
+	RunTest(t, table, false)
+}
+
+// TestGrantQuotedDynamicPriv covers dynamic privileges written as quoted
+// strings; the privilege position (an ON clause) resolves them, while plain
+// GRANT ... TO keeps reading roles.
+func TestGrantQuotedDynamicPriv(t *testing.T) {
+	table := []testCase{
+		{"GRANT 'SYSTEM_VARIABLES_ADMIN' ON *.* TO 'var_admin_user'@'%'", true, "GRANT SYSTEM_VARIABLES_ADMIN ON *.* TO `var_admin_user`@`%`"},
+		{"GRANT 'r1' TO 'u'@'%'", true, "GRANT `r1`@`%` TO `u`@`%`"},
+	}
+	RunTest(t, table, false)
+}
+
+// TestCreateLibraryBodyForms covers COMMENT placed after LANGUAGE and binary
+// library bodies, which decode to their byte content.
+func TestCreateLibraryBodyForms(t *testing.T) {
+	table := []testCase{
+		{"CREATE LIBRARY lib1 LANGUAGE JAVASCRIPT COMMENT 'hi' AS 'export function f(n) {return n}'", true, "CREATE LIBRARY `lib1` COMMENT 'hi' LANGUAGE JAVASCRIPT AS 'export function f(n) {return n}'"},
+		{"CREATE LIBRARY lib2 LANGUAGE JAVASCRIPT AS 0x2F2A20636F6D6D656E74202A2F", true, "CREATE LIBRARY `lib2` LANGUAGE JAVASCRIPT AS '/* comment */'"},
+		{"CREATE LIBRARY lib4 COMMENT 'a' LANGUAGE JAVASCRIPT COMMENT 'b' AS X'414243'", true, "CREATE LIBRARY `lib4` COMMENT 'b' LANGUAGE JAVASCRIPT AS 'ABC'"},
+	}
+	RunTest(t, table, false)
+}
+
+// TestCreateJSONDualityView covers CREATE JSON [RELATIONAL] DUALITY VIEW and
+// the JSON_DUALITY_OBJECT constructor.
+func TestCreateJSONDualityView(t *testing.T) {
+	table := []testCase{
+		{"CREATE OR REPLACE JSON RELATIONAL DUALITY VIEW dv AS SELECT JSON_DUALITY_OBJECT(WITH (INSERT, UPDATE, DELETE) '_id' : f1) FROM t", true, "CREATE OR REPLACE JSON RELATIONAL DUALITY VIEW `dv` AS SELECT JSON_DUALITY_OBJECT(WITH (INSERT, UPDATE, DELETE) '_id' : `f1`) FROM `t`"},
+		{"CREATE JSON DUALITY VIEW IF NOT EXISTS dv2 AS SELECT JSON_DUALITY_OBJECT(\"_id\" : C1, \"C2\" : C2) FROM T1", true, "CREATE JSON DUALITY VIEW IF NOT EXISTS `dv2` AS SELECT JSON_DUALITY_OBJECT('_id' : `C1`, 'C2' : `C2`) FROM `T1`"},
+		{"CREATE OR REPLACE ALGORITHM = MERGE DEFINER = current_user() SQL SECURITY INVOKER JSON RELATIONAL DUALITY VIEW dv1 AS SELECT 1", true, "CREATE OR REPLACE ALGORITHM = MERGE SQL SECURITY INVOKER JSON RELATIONAL DUALITY VIEW `dv1` AS SELECT 1"},
+		{"CREATE ALGORITHM = TEMPTABLE DEFINER = u@h JSON DUALITY VIEW dv3 AS SELECT 1", true, "CREATE ALGORITHM = TEMPTABLE DEFINER = `u`@`h` JSON DUALITY VIEW `dv3` AS SELECT 1"},
+		// DUALITY and RELATIONAL stay usable as identifiers.
+		{"SELECT duality, relational FROM t", true, "SELECT `duality`,`relational` FROM `t`"},
+		{"CREATE TABLE duality (relational INT)", true, "CREATE TABLE `duality` (`relational` INT)"},
+	}
+	RunTest(t, table, false)
+}
+
+// TestJSONDualityObject covers the JSON_DUALITY_OBJECT member forms; the
+// comma spelling is a syntax error, members use 'key' : value.
+func TestJSONDualityObject(t *testing.T) {
+	table := []testCase{
+		{"SELECT JSON_DUALITY_OBJECT(WITH(UPDATE, DELETE, INSERT) '_id' : id, 'x' : x) FROM t1", true, "SELECT JSON_DUALITY_OBJECT(WITH (UPDATE, DELETE, INSERT) '_id' : `id`, 'x' : `x`) FROM `t1`"},
+		{"SELECT JSON_DUALITY_OBJECT('a', 1)", false, ""},
+		// Nested constructors inside aggregates and subqueries.
+		{"SELECT JSON_ARRAYAGG(JSON_DUALITY_OBJECT('c' : (SELECT JSON_DUALITY_OBJECT('d' : d) FROM u))) FROM t", true, "SELECT JSON_ARRAYAGG(JSON_DUALITY_OBJECT('c' : (SELECT JSON_DUALITY_OBJECT('d' : `d`) FROM `u`))) FROM `t`"},
 	}
 	RunTest(t, table, false)
 }

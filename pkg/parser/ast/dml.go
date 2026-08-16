@@ -2969,6 +2969,7 @@ const (
 	ShowEngineStatus
 	ShowEngineLogs
 	ShowEngineMutex
+	ShowRelaylogEvents
 )
 
 const (
@@ -3067,8 +3068,12 @@ func (n *ShowStmt) Restore(ctx *format.RestoreCtx) error {
 		ctx.WriteKeyWord("BINARY LOG STATUS")
 	case ShowBinaryLogs:
 		ctx.WriteKeyWord("BINARY LOGS")
-	case ShowBinlogEvents:
-		ctx.WriteKeyWord("BINLOG EVENTS")
+	case ShowBinlogEvents, ShowRelaylogEvents:
+		if n.Tp == ShowBinlogEvents {
+			ctx.WriteKeyWord("BINLOG EVENTS")
+		} else {
+			ctx.WriteKeyWord("RELAYLOG EVENTS")
+		}
 		if n.LogName != "" {
 			ctx.WriteKeyWord(" IN ")
 			ctx.WriteString(n.LogName)

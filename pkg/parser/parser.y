@@ -559,6 +559,9 @@ type likeEscapeSpec struct {
 	reference                "REFERENCE"
 	registration             "REGISTRATION"
 	relay                    "RELAY"
+	relaylog                 "RELAYLOG"
+	duality                  "DUALITY"
+	relational               "RELATIONAL"
 	reload                   "RELOAD"
 	remove                   "REMOVE"
 	reorganize               "REORGANIZE"
@@ -722,6 +725,7 @@ type likeEscapeSpec struct {
 	builtinDateSub
 	builtinExtract
 	builtinGroupConcat
+	builtinJSONDualityObject
 	builtinMax
 	builtinMin
 	builtinNow
@@ -810,6 +814,7 @@ type likeEscapeSpec struct {
 	CommitStmt                 "COMMIT statement"
 	CreateTableStmt            "CREATE TABLE statement"
 	CreateViewStmt             "CREATE VIEW  statement"
+	CreateJSONDualityViewStmt  "CREATE JSON DUALITY VIEW statement"
 	CreateUserStmt             "CREATE User statement"
 	CreateRoleStmt             "CREATE Role statement"
 	CreateDatabaseStmt         "Create Database Statement"
@@ -917,6 +922,12 @@ type likeEscapeSpec struct {
 	StringLitList                          "string literal list"
 	CacheTableIndex                        "CACHE INDEX table entry"
 	CacheTableIndexList                    "CACHE INDEX table entry list"
+	CacheIndexNames                        "CACHE INDEX index names"
+	RelationalOpt                          "optional RELATIONAL keyword"
+	DualityWithOpt                         "optional JSON_DUALITY_OBJECT WITH annotation"
+	DualityOpList                          "JSON_DUALITY_OBJECT WITH operation list"
+	DualityKeyValueList                    "JSON_DUALITY_OBJECT member list"
+	DualityKeyValue                        "JSON_DUALITY_OBJECT member"
 	CacheIndexNameList                     "CACHE INDEX index name list"
 	LoadIndexTableIndex                    "LOAD INDEX table entry"
 	LoadIndexTableIndexList                "LOAD INDEX table entry list"
@@ -1400,6 +1411,9 @@ type likeEscapeSpec struct {
 	HashString                      "Hashed string"
 	OptCharset                      "Optional Character setting"
 	OptCollate                      "Optional Collate setting"
+	CacheIndexName                  "CACHE INDEX index name (identifier or PRIMARY)"
+	LibraryBody                     "CREATE LIBRARY body literal"
+	DualityOp                       "JSON_DUALITY_OBJECT WITH operation"
 	PasswordOpt                     "Password option"
 	RoleNameString                  "role name string"
 	ShowDatabaseNameOpt             "Show tables/columns statement database name option"
@@ -3852,6 +3866,94 @@ CreateViewStmt:
 		$$ = x
 	}
 
+/*******************************************************************
+ *
+ *  Create JSON Duality View Statement
+ *
+ *  Example:
+ *      CREATE JSON RELATIONAL DUALITY VIEW dv AS
+ *          SELECT JSON_DUALITY_OBJECT(WITH (INSERT, UPDATE, DELETE) '_id' : t.id) FROM t
+ *******************************************************************/
+CreateJSONDualityViewStmt:
+	"CREATE" OrReplace ViewAlgorithm ViewDefiner ViewSQLSecurity "JSON" RelationalOpt "DUALITY" "VIEW" IfNotExists ViewName "AS" CreateViewSelectOpt
+	{
+		startOffset := parser.startOffset(&yyS[yypt])
+		endOffset := parser.yylval.offset
+		selStmt := $13.(ast.StmtNode)
+		x := &ast.CreateJSONDualityViewStmt{
+			OrReplace:   $2.(bool),
+			Algorithm:   $3.(ast.ViewAlgorithm),
+			Definer:     $4.(*auth.UserIdentity),
+			Security:    $5.(ast.ViewSecurity),
+			Relational:  $7.(bool),
+			IfNotExists: $10.(bool),
+			ViewName:    $11.(*ast.TableName),
+			Select:      selStmt,
+		}
+		parser.setNodeText(selStmt, strings.TrimSpace(parser.src[startOffset:endOffset]))
+		$$ = x
+	}
+
+RelationalOpt:
+	/* EMPTY */
+	{
+		$$ = false
+	}
+|	"RELATIONAL"
+	{
+		$$ = true
+	}
+
+DualityWithOpt:
+	/* EMPTY */
+	{
+		$$ = []string(nil)
+	}
+|	"WITH" '(' DualityOpList ')'
+	{
+		$$ = $3
+	}
+
+DualityOpList:
+	DualityOp
+	{
+		$$ = []string{$1}
+	}
+|	DualityOpList ',' DualityOp
+	{
+		$$ = append($1.([]string), $3)
+	}
+
+DualityOp:
+	"INSERT"
+	{
+		$$ = "INSERT"
+	}
+|	"UPDATE"
+	{
+		$$ = "UPDATE"
+	}
+|	"DELETE"
+	{
+		$$ = "DELETE"
+	}
+
+DualityKeyValueList:
+	DualityKeyValue
+	{
+		$$ = []*ast.JSONDualityObjectPair{$1.(*ast.JSONDualityObjectPair)}
+	}
+|	DualityKeyValueList ',' DualityKeyValue
+	{
+		$$ = append($1.([]*ast.JSONDualityObjectPair), $3.(*ast.JSONDualityObjectPair))
+	}
+
+DualityKeyValue:
+	stringLit ':' Expression
+	{
+		$$ = &ast.JSONDualityObjectPair{Key: $1, Value: $3}
+	}
+
 /* See https://dev.mysql.com/doc/refman/8.4/en/alter-view.html */
 AlterViewStmt:
 	"ALTER" ViewAlgorithm ViewDefiner ViewSQLSecurity "VIEW" ViewName ViewFieldList "AS" CreateViewSelectOpt ViewCheckOption
@@ -5335,6 +5437,9 @@ UnReservedKeyword:
 |	"SERVER"
 |	"SOCKET"
 |	"SONAME"
+|	"RELAYLOG"
+|	"DUALITY"
+|	"RELATIONAL"
 |	"CONCURRENT"
 |	"NESTED"
 |	"ORDINALITY"
@@ -6513,6 +6618,10 @@ FunctionCallNonKeyword:
 	builtinCurTime '(' FuncDatetimePrecListOpt ')'
 	{
 		$$ = &ast.FuncCallExpr{FnName: ast.NewCIStr($1), Args: $3.([]ast.ExprNode)}
+	}
+|	builtinJSONDualityObject '(' DualityWithOpt DualityKeyValueList ')'
+	{
+		$$ = &ast.JSONDualityObjectExpr{With: $3.([]string), Pairs: $4.([]*ast.JSONDualityObjectPair)}
 	}
 |	builtinSysDate '(' FuncDatetimePrecListOpt ')'
 	{
@@ -9474,6 +9583,11 @@ SetStmt:
 	{
 		$$ = &ast.SetStmt{Variables: $4.([]*ast.VariableAssignment)}
 	}
+|	"SET" "LOCAL" "TRANSACTION" TransactionChars
+	{
+		// LOCAL is a synonym for SESSION.
+		$$ = &ast.SetStmt{Variables: $4.([]*ast.VariableAssignment)}
+	}
 |	"SET" "TRANSACTION" TransactionChars
 	{
 		assigns := $3.([]*ast.VariableAssignment)
@@ -10065,6 +10179,21 @@ ShowStmt:
 |	"SHOW" "BINLOG" "EVENTS" BinlogInOpt BinlogFromOpt SelectStmtLimitOpt
 	{
 		stmt := &ast.ShowStmt{Tp: ast.ShowBinlogEvents}
+		if $4 != nil {
+			stmt.LogName = $4.(string)
+		}
+		if $5 != nil {
+			stmt.Pos = $5.(uint64)
+			stmt.HasPos = true
+		}
+		if $6 != nil {
+			stmt.Limit = $6.(*ast.Limit)
+		}
+		$$ = stmt
+	}
+|	"SHOW" "RELAYLOG" "EVENTS" BinlogInOpt BinlogFromOpt SelectStmtLimitOpt
+	{
+		stmt := &ast.ShowStmt{Tp: ast.ShowRelaylogEvents}
 		if $4 != nil {
 			stmt.LogName = $4.(string)
 		}
@@ -10680,6 +10809,7 @@ Statement:
 |	CreateIndexStmt
 |	CreateTableStmt
 |	CreateViewStmt
+|	CreateJSONDualityViewStmt
 |	CreateUserStmt
 |	CreateRoleStmt
 |	DoStmt
@@ -11994,19 +12124,47 @@ XAXid:
  * string ($tag$ ... $tag$); the lexer delivers both as stringLit.
  *******************************************************************/
 CreateLibraryStmt:
-	"CREATE" "LIBRARY" IfNotExists TableName LibraryCommentOpt "LANGUAGE" Identifier "AS" stringLit
+	"CREATE" "LIBRARY" IfNotExists TableName LibraryCommentOpt "LANGUAGE" Identifier LibraryCommentOpt "AS" LibraryBody
 	{
 		stmt := &ast.CreateLibraryStmt{
 			IfNotExists: $3.(bool),
 			Library:     $4.(*ast.TableName),
 			Language:    strings.ToUpper($7),
-			Body:        $9,
+			Body:        $10,
 		}
+		// COMMENT may be written before or after LANGUAGE; the restored
+		// form always places it before.
 		if $5 != nil {
 			stmt.HasComment = true
 			stmt.Comment = $5.(string)
 		}
+		if $8 != nil {
+			stmt.HasComment = true
+			stmt.Comment = $8.(string)
+		}
 		$$ = stmt
+	}
+
+LibraryBody:
+	stringLit
+|	hexLit
+	{
+		// Binary library bodies (AS 0x... / X'...') decode to their byte
+		// content; the restored form is an ordinary quoted string.
+		$$ = $1.(ast.HexLiteral).ToString()
+	}
+|	bitLit
+	{
+		$$ = $1.(ast.BitLiteral).ToString()
+	}
+|	"UNDERSCORE_CHARSET" hexLit
+	{
+		// The _binary introducer adds nothing at parse level.
+		$$ = $2.(ast.HexLiteral).ToString()
+	}
+|	"UNDERSCORE_CHARSET" bitLit
+	{
+		$$ = $2.(ast.BitLiteral).ToString()
 	}
 
 LibraryCommentOpt:
@@ -12503,24 +12661,32 @@ AlterUserStmt:
 		}
 		$$ = ret
 	}
-|	"ALTER" "USER" IfExists "USER" '(' ')' "IDENTIFIED" "BY" AuthString
+|	"ALTER" "USER" IfExists "USER" '(' ')' "IDENTIFIED" "BY" AuthString ReplacePasswordOpt
 	{
 		auth := &ast.AuthOption{
 			AuthString:   $9,
 			ByAuthString: true,
+		}
+		if $10 != nil {
+			auth.HasReplace = true
+			auth.ReplaceString = $10.(string)
 		}
 		$$ = &ast.AlterUserStmt{
 			IfExists:    $3.(bool),
 			CurrentAuth: auth,
 		}
 	}
-|	"ALTER" "USER" IfExists "USER" '(' ')' "IDENTIFIED" "BY" AuthString "RETAIN" "CURRENT" "PASSWORD"
+|	"ALTER" "USER" IfExists "USER" '(' ')' "IDENTIFIED" "BY" AuthString ReplacePasswordOpt "RETAIN" "CURRENT" "PASSWORD"
 	{
 		// MySQL 8.0 user_func_auth_option allows RETAIN CURRENT PASSWORD on
 		// the current-user form.
 		auth := &ast.AuthOption{
 			AuthString:   $9,
 			ByAuthString: true,
+		}
+		if $10 != nil {
+			auth.HasReplace = true
+			auth.ReplaceString = $10.(string)
 		}
 		$$ = &ast.AlterUserStmt{
 			IfExists:                  $3.(bool),
@@ -14409,9 +14575,27 @@ CacheTableIndex:
 	}
 
 CacheIndexNameList:
-	KeyOrIndex '(' IdentList ')'
+	KeyOrIndex '(' CacheIndexNames ')'
 	{
 		$$ = $3
+	}
+
+CacheIndexNames:
+	CacheIndexName
+	{
+		$$ = []ast.CIStr{ast.NewCIStr($1)}
+	}
+|	CacheIndexNames ',' CacheIndexName
+	{
+		$$ = append($1.([]ast.CIStr), ast.NewCIStr($3))
+	}
+
+CacheIndexName:
+	Identifier
+|	"PRIMARY"
+	{
+		// PRIMARY names the primary key: LOAD INDEX INTO CACHE t KEY (PRIMARY).
+		$$ = "PRIMARY"
 	}
 
 LoadIndexStmt:
@@ -15077,6 +15261,16 @@ ResetStmt:
 	{
 		$$ = &ast.ResetBinaryLogsStmt{To: getUint64FromNUM($7), HasTo: true}
 	}
+|	"RESET" "BINARY" "LOGS" "AND" "GTIDS" "TO" hexLit
+	{
+		// mysql-test writes the index as a hex literal: TO 0xF. The
+		// restored form uses the decimal spelling.
+		var v uint64
+		for _, b := range $7.(ast.HexLiteral) {
+			v = v<<8 | uint64(b)
+		}
+		$$ = &ast.ResetBinaryLogsStmt{To: v, HasTo: true}
+	}
 
 /********************************************************************
  * Instance backup locks
@@ -15192,6 +15386,11 @@ KillStmt:
 HelpStmt:
 	"HELP" stringLit
 	{
+		$$ = &ast.HelpStmt{Topic: $2}
+	}
+|	"HELP" Identifier
+	{
+		// MySQL also accepts an unquoted topic: HELP data_types.
 		$$ = &ast.HelpStmt{Topic: $2}
 	}
 

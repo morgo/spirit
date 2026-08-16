@@ -570,6 +570,70 @@ func (n *DefaultExpr) Accept(v Visitor) (Node, bool) {
 	return v.Leave(n)
 }
 
+// JSONDualityObjectPair is one 'key' : value member of a JSON_DUALITY_OBJECT
+// constructor.
+type JSONDualityObjectPair struct {
+	Key   string
+	Value ExprNode
+}
+
+// JSONDualityObjectExpr is the JSON_DUALITY_OBJECT(...) constructor used in
+// JSON duality view definitions.
+// See https://dev.mysql.com/doc/refman/9.4/en/create-json-duality-view.html
+type JSONDualityObjectExpr struct {
+	exprNode
+
+	// With lists the operation annotations: WITH (INSERT, UPDATE, DELETE).
+	With  []string
+	Pairs []*JSONDualityObjectPair
+}
+
+// Restore implements Node interface.
+func (n *JSONDualityObjectExpr) Restore(ctx *format.RestoreCtx) error {
+	ctx.WriteKeyWord("JSON_DUALITY_OBJECT")
+	ctx.WritePlain("(")
+	if len(n.With) > 0 {
+		ctx.WriteKeyWord("WITH ")
+		ctx.WritePlain("(")
+		for i, op := range n.With {
+			if i != 0 {
+				ctx.WritePlain(", ")
+			}
+			ctx.WriteKeyWord(op)
+		}
+		ctx.WritePlain(") ")
+	}
+	for i, pair := range n.Pairs {
+		if i != 0 {
+			ctx.WritePlain(", ")
+		}
+		ctx.WriteString(pair.Key)
+		ctx.WritePlain(" : ")
+		if err := pair.Value.Restore(ctx); err != nil {
+			return fmt.Errorf("an error occurred while restore JSONDualityObjectExpr.Pairs[%d]: %w", i, err)
+		}
+	}
+	ctx.WritePlain(")")
+	return nil
+}
+
+// Accept implements Node Accept interface.
+func (n *JSONDualityObjectExpr) Accept(v Visitor) (Node, bool) {
+	newNode, skipChildren := v.Enter(n)
+	if skipChildren {
+		return v.Leave(newNode)
+	}
+	n = newNode.(*JSONDualityObjectExpr)
+	for i, pair := range n.Pairs {
+		node, ok := pair.Value.Accept(v)
+		if !ok {
+			return n, false
+		}
+		n.Pairs[i].Value = node.(ExprNode)
+	}
+	return v.Leave(n)
+}
+
 // ExistsSubqueryExpr is the expression for "exists (select ...)".
 // See https://dev.mysql.com/doc/refman/5.7/en/exists-and-not-exists-subqueries.html
 type ExistsSubqueryExpr struct {
