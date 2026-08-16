@@ -307,8 +307,17 @@ func backoff(attempt int) {
 
 // ForceExec is like Exec but it has some added logic to force kill
 // any connections that are holding up metadata locks preventing this from
-// succeeding.
+// succeeding. Like Exec, stmt is a sqlescape format string: embed raw user
+// SQL (such as an ALTER clause) with the %r verb and a sqlescape.RawSQL
+// argument, never by concatenating it into stmt.
 func ForceExec(ctx context.Context, db *sql.DB, tables []*table.TableInfo, dbConfig *DBConfig, logger *slog.Logger, stmt string, args ...any) error {
+	// Escape before the kill timer below is armed: a bad format string must
+	// fail fast here, not while a timer that kills other connections is
+	// already pending.
+	stmt, err := sqlescape.EscapeSQL(stmt, args...)
+	if err != nil {
+		return err
+	}
 	trx, connId, err := BeginStandardTrx(ctx, db, nil)
 	if err != nil {
 		return err
@@ -339,8 +348,7 @@ func ForceExec(ctx context.Context, db *sql.DB, tables []*table.TableInfo, dbCon
 			return // just return, we can't do much more here
 		}
 	})
-	escapedStmt := sqlescape.MustEscapeSQL(stmt, args...)
-	_, err = trx.ExecContext(ctx, escapedStmt)
+	_, err = trx.ExecContext(ctx, stmt)
 	if timer.Stop() {
 		// Timer was stopped before it fired, so the goroutine never started.
 		// We need to manually decrement the WaitGroup.
@@ -352,7 +360,7 @@ func ForceExec(ctx context.Context, db *sql.DB, tables []*table.TableInfo, dbCon
 	wg.Wait()
 	if shouldRetryForceExecAfterKill(err, killTimerFired.Load()) {
 		logger.Warn("retrying statement after lock wait timeout because force-kill timer fired", "error", err)
-		_, err = trx.ExecContext(ctx, escapedStmt)
+		_, err = trx.ExecContext(ctx, stmt)
 	}
 	return err
 }
@@ -367,8 +375,11 @@ func shouldRetryForceExecAfterKill(err error, killTimerFired bool) bool {
 
 // Exec is like db.Exec but only returns an error.
 // This makes it a little bit easier to use in error handling.
-// It accepts args which are escaped client side using the TiDB escape library.
-// i.e. %n is an identifier, %? is automatic type conversion on a variable.
+// It accepts args which are escaped client side using the sqlescape library.
+// i.e. %n is an identifier, %? is automatic type conversion on a variable,
+// and %r splices a sqlescape.RawSQL argument in verbatim (for raw user SQL
+// such as an ALTER clause, which must never be concatenated into the format
+// string).
 func Exec(ctx context.Context, db *sql.DB, stmt string, args ...any) error {
 	stmt, err := sqlescape.EscapeSQL(stmt, args...)
 	if err != nil {
