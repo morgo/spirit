@@ -1082,8 +1082,9 @@ type SelectStmt struct {
 	OrderBy *OrderByClause
 	// Limit is the limit clause.
 	Limit *Limit
-	// LockInfo is the lock type
-	LockInfo *SelectLockInfo
+	// LockInfos are the locking clauses (FOR UPDATE, FOR SHARE, LOCK IN SHARE
+	// MODE); MySQL allows several locking clauses in one query block.
+	LockInfos []*SelectLockInfo
 	// TableHints represents the table level Optimizer Hint for join type
 	TableHints []*TableOptimizerHint
 	// IsInBraces indicates whether it's a stmt in brace.
@@ -1295,64 +1296,10 @@ func (n *SelectStmt) Restore(ctx *format.RestoreCtx) error {
 		}
 	}
 
-	if n.LockInfo != nil {
+	for _, lock := range n.LockInfos {
 		ctx.WritePlain(" ")
-		switch n.LockInfo.LockType { //nolint:exhaustive
-		case SelectLockNone:
-		case SelectLockForUpdateNoWait:
-			ctx.WriteKeyWord("for update")
-			if len(n.LockInfo.Tables) != 0 {
-				ctx.WriteKeyWord(" OF ")
-				if err := restoreTables(ctx, n.LockInfo.Tables); err != nil {
-					return err
-				}
-			}
-			ctx.WriteKeyWord(" nowait")
-		case SelectLockForUpdateWaitN:
-			ctx.WriteKeyWord("for update")
-			if len(n.LockInfo.Tables) != 0 {
-				ctx.WriteKeyWord(" OF ")
-				if err := restoreTables(ctx, n.LockInfo.Tables); err != nil {
-					return err
-				}
-			}
-			ctx.WriteKeyWord(" wait")
-			ctx.WritePlainf(" %d", n.LockInfo.WaitSec)
-		case SelectLockForShareNoWait:
-			ctx.WriteKeyWord("for share")
-			if len(n.LockInfo.Tables) != 0 {
-				ctx.WriteKeyWord(" OF ")
-				if err := restoreTables(ctx, n.LockInfo.Tables); err != nil {
-					return err
-				}
-			}
-			ctx.WriteKeyWord(" nowait")
-		case SelectLockForUpdateSkipLocked:
-			ctx.WriteKeyWord("for update")
-			if len(n.LockInfo.Tables) != 0 {
-				ctx.WriteKeyWord(" OF ")
-				if err := restoreTables(ctx, n.LockInfo.Tables); err != nil {
-					return err
-				}
-			}
-			ctx.WriteKeyWord(" skip locked")
-		case SelectLockForShareSkipLocked:
-			ctx.WriteKeyWord("for share")
-			if len(n.LockInfo.Tables) != 0 {
-				ctx.WriteKeyWord(" OF ")
-				if err := restoreTables(ctx, n.LockInfo.Tables); err != nil {
-					return err
-				}
-			}
-			ctx.WriteKeyWord(" skip locked")
-		default:
-			ctx.WriteKeyWord(n.LockInfo.LockType.String())
-			if len(n.LockInfo.Tables) != 0 {
-				ctx.WriteKeyWord(" OF ")
-				if err := restoreTables(ctx, n.LockInfo.Tables); err != nil {
-					return err
-				}
-			}
+		if err := restoreSelectLockInfo(ctx, lock); err != nil {
+			return err
 		}
 	}
 
@@ -1360,6 +1307,67 @@ func (n *SelectStmt) Restore(ctx *format.RestoreCtx) error {
 		ctx.WritePlain(" ")
 		if err := n.SelectIntoOpt.Restore(ctx); err != nil {
 			return fmt.Errorf("an error occurred while restore SelectStmt.SelectIntoOpt: %w", err)
+		}
+	}
+	return nil
+}
+
+func restoreSelectLockInfo(ctx *format.RestoreCtx, lock *SelectLockInfo) error {
+	switch lock.LockType { //nolint:exhaustive
+	case SelectLockNone:
+	case SelectLockForUpdateNoWait:
+		ctx.WriteKeyWord("for update")
+		if len(lock.Tables) != 0 {
+			ctx.WriteKeyWord(" OF ")
+			if err := restoreTables(ctx, lock.Tables); err != nil {
+				return err
+			}
+		}
+		ctx.WriteKeyWord(" nowait")
+	case SelectLockForUpdateWaitN:
+		ctx.WriteKeyWord("for update")
+		if len(lock.Tables) != 0 {
+			ctx.WriteKeyWord(" OF ")
+			if err := restoreTables(ctx, lock.Tables); err != nil {
+				return err
+			}
+		}
+		ctx.WriteKeyWord(" wait")
+		ctx.WritePlainf(" %d", lock.WaitSec)
+	case SelectLockForShareNoWait:
+		ctx.WriteKeyWord("for share")
+		if len(lock.Tables) != 0 {
+			ctx.WriteKeyWord(" OF ")
+			if err := restoreTables(ctx, lock.Tables); err != nil {
+				return err
+			}
+		}
+		ctx.WriteKeyWord(" nowait")
+	case SelectLockForUpdateSkipLocked:
+		ctx.WriteKeyWord("for update")
+		if len(lock.Tables) != 0 {
+			ctx.WriteKeyWord(" OF ")
+			if err := restoreTables(ctx, lock.Tables); err != nil {
+				return err
+			}
+		}
+		ctx.WriteKeyWord(" skip locked")
+	case SelectLockForShareSkipLocked:
+		ctx.WriteKeyWord("for share")
+		if len(lock.Tables) != 0 {
+			ctx.WriteKeyWord(" OF ")
+			if err := restoreTables(ctx, lock.Tables); err != nil {
+				return err
+			}
+		}
+		ctx.WriteKeyWord(" skip locked")
+	default:
+		ctx.WriteKeyWord(lock.LockType.String())
+		if len(lock.Tables) != 0 {
+			ctx.WriteKeyWord(" OF ")
+			if err := restoreTables(ctx, lock.Tables); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -1478,14 +1486,22 @@ func (n *SelectStmt) Accept(v Visitor) (Node, bool) {
 		n.Limit = node.(*Limit)
 	}
 
-	if n.LockInfo != nil {
-		for i, t := range n.LockInfo.Tables {
+	for _, lock := range n.LockInfos {
+		for i, t := range lock.Tables {
 			node, ok := t.Accept(v)
 			if !ok {
 				return n, false
 			}
-			n.LockInfo.Tables[i] = node.(*TableName)
+			lock.Tables[i] = node.(*TableName)
 		}
+	}
+
+	if n.SelectIntoOpt != nil {
+		node, ok := n.SelectIntoOpt.Accept(v)
+		if !ok {
+			return n, false
+		}
+		n.SelectIntoOpt = node.(*SelectIntoOption)
 	}
 
 	return v.Leave(n)
@@ -3235,26 +3251,41 @@ type SelectIntoOption struct {
 	FileName   string
 	FieldsInfo *FieldsClause
 	LinesInfo  *LinesClause
+	// Variables is the user variable list of SELECT ... INTO @var [, @var] ...
+	Variables []ExprNode
 }
 
 // Restore implements Node interface.
 func (n *SelectIntoOption) Restore(ctx *format.RestoreCtx) error {
-	if n.Tp != SelectIntoOutfile {
-		// only support SELECT/TABLE/VALUES ... INTO OUTFILE statement now
+	switch n.Tp {
+	case SelectIntoOutfile:
+		ctx.WriteKeyWord("INTO OUTFILE ")
+		ctx.WriteString(n.FileName)
+		if n.FieldsInfo != nil {
+			if err := n.FieldsInfo.Restore(ctx); err != nil {
+				return fmt.Errorf("an error occurred while restore SelectInto.FieldsInfo: %w", err)
+			}
+		}
+		if n.LinesInfo != nil {
+			if err := n.LinesInfo.Restore(ctx); err != nil {
+				return fmt.Errorf("an error occurred while restore SelectInto.LinesInfo: %w", err)
+			}
+		}
+	case SelectIntoDumpfile:
+		ctx.WriteKeyWord("INTO DUMPFILE ")
+		ctx.WriteString(n.FileName)
+	case SelectIntoVars:
+		ctx.WriteKeyWord("INTO ")
+		for i, v := range n.Variables {
+			if i != 0 {
+				ctx.WritePlain(", ")
+			}
+			if err := v.Restore(ctx); err != nil {
+				return fmt.Errorf("an error occurred while restore SelectInto.Variables[%d]: %w", i, err)
+			}
+		}
+	default:
 		return errors.New("unsupported SelectionInto type")
-	}
-
-	ctx.WriteKeyWord("INTO OUTFILE ")
-	ctx.WriteString(n.FileName)
-	if n.FieldsInfo != nil {
-		if err := n.FieldsInfo.Restore(ctx); err != nil {
-			return fmt.Errorf("an error occurred while restore SelectInto.FieldsInfo: %w", err)
-		}
-	}
-	if n.LinesInfo != nil {
-		if err := n.LinesInfo.Restore(ctx); err != nil {
-			return fmt.Errorf("an error occurred while restore SelectInto.LinesInfo: %w", err)
-		}
 	}
 	return nil
 }
@@ -3264,6 +3295,14 @@ func (n *SelectIntoOption) Accept(v Visitor) (Node, bool) {
 	newNode, skipChildren := v.Enter(n)
 	if skipChildren {
 		return v.Leave(newNode)
+	}
+	n = newNode.(*SelectIntoOption)
+	for i, val := range n.Variables {
+		node, ok := val.Accept(v)
+		if !ok {
+			return n, false
+		}
+		n.Variables[i] = node.(ExprNode)
 	}
 	return v.Leave(n)
 }

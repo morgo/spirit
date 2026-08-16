@@ -372,6 +372,7 @@ type likeEscapeSpec struct {
 	discard                  "DISCARD"
 	disk                     "DISK"
 	do                       "DO"
+	dumpfile                 "DUMPFILE"
 	duplicate                "DUPLICATE"
 	dynamic                  "DYNAMIC"
 	enable                   "ENABLE"
@@ -1108,7 +1109,10 @@ type likeEscapeSpec struct {
 	RowFormat                              "Row format option"
 	RowValue                               "Row value"
 	RowStmt                                "Row constructor"
-	SelectLockOpt                          "SELECT lock options"
+	SelectLockClause                       "SELECT single locking clause"
+	SelectLockList                         "SELECT locking clause list"
+	SelectLockListOpt                      "SELECT optional locking clause list"
+	SelectLockIntoOpt                      "SELECT optional locking and INTO clauses"
 	SelectStmtSQLCache                     "SELECT statement optional SQL_CAHCE/SQL_NO_CACHE"
 	SelectStmtFieldList                    "SELECT statement field list"
 	SelectStmtLimit                        "SELECT statement LIMIT clause"
@@ -1120,7 +1124,7 @@ type likeEscapeSpec struct {
 	SelectStmtFromDualTable                "SELECT statement from dual table"
 	SelectStmtFromTable                    "SELECT statement from table"
 	SelectStmtGroup                        "SELECT statement optional GROUP BY clause"
-	SelectStmtIntoOption                   "SELECT statement into clause"
+	IntoClause                             "SELECT INTO clause"
 	SetRoleOpt                             "Set role options"
 	SetDefaultRoleOpt                      "Set default role options"
 	SetOpr                                 "Set operator contain UNION, EXCEPT and INTERSECT"
@@ -4851,6 +4855,7 @@ UnReservedKeyword:
 |	"DEALLOCATE"
 |	"DEFAULT_AUTH"
 |	"DO"
+|	"DUMPFILE"
 |	"DUPLICATE"
 |	"DYNAMIC"
 |	"ENCRYPTION"
@@ -7219,6 +7224,22 @@ SelectStmtFromDualTable:
 			st.Where = $3.(ast.ExprNode)
 		}
 	}
+|	SelectStmtBasic IntoClause FromDual WhereClauseOptional
+	{
+		// SELECT ... INTO ... FROM DUAL: MySQL also allows the INTO clause
+		// directly after the select item list.
+		st := $1.(*ast.SelectStmt)
+		st.SelectIntoOpt = $2.(*ast.SelectIntoOption)
+		lastField := st.Fields.Fields[len(st.Fields.Fields)-1]
+		if lastField.Expr != nil && lastField.AsName.O == "" {
+			lastEnd := yyS[yypt-2].offset - 1
+			parser.setNodeText(lastField, parser.src[lastField.Offset:lastEnd])
+		}
+		if $4 != nil {
+			st.Where = $4.(ast.ExprNode)
+		}
+		$$ = st
+	}
 
 SelectStmtFromTable:
 	SelectStmtBasic "FROM" TableRefsClause WhereClauseOptional SelectStmtGroup HavingClause WindowClauseOptional
@@ -7244,17 +7265,68 @@ SelectStmtFromTable:
 		}
 		$$ = st
 	}
+|	SelectStmtBasic IntoClause "FROM" TableRefsClause WhereClauseOptional SelectStmtGroup HavingClause WindowClauseOptional
+	{
+		// SELECT ... INTO ... FROM t: MySQL also allows the INTO clause
+		// directly after the select item list.
+		st := $1.(*ast.SelectStmt)
+		st.SelectIntoOpt = $2.(*ast.SelectIntoOption)
+		st.From = $4.(*ast.TableRefsClause)
+		lastField := st.Fields.Fields[len(st.Fields.Fields)-1]
+		if lastField.Expr != nil && lastField.AsName.O == "" {
+			lastEnd := parser.endOffset(&yyS[yypt-6])
+			parser.setNodeText(lastField, parser.src[lastField.Offset:lastEnd])
+		}
+		if $5 != nil {
+			st.Where = $5.(ast.ExprNode)
+		}
+		if $6 != nil {
+			st.GroupBy = $6.(*ast.GroupByClause)
+		}
+		if $7 != nil {
+			st.Having = $7.(*ast.HavingClause)
+		}
+		if $8 != nil {
+			st.WindowSpecs = ($8.([]ast.WindowSpec))
+		}
+		$$ = st
+	}
 
 SelectStmt:
-	SelectStmtBasic WhereClauseOptional SelectStmtGroup OrderByOptional SelectStmtLimitOpt SelectLockOpt SelectStmtIntoOption
+	SelectStmtBasic SelectLockListOpt
 	{
 		st := $1.(*ast.SelectStmt)
-		if $6 != nil {
-			st.LockInfo = $6.(*ast.SelectLockInfo)
-		}
 		if $2 != nil {
-			st.Where = $2.(ast.ExprNode)
+			st.LockInfos = $2.([]*ast.SelectLockInfo)
 		}
+		$$ = st
+	}
+|	SelectStmtBasic SelectLockList IntoClause
+	{
+		st := $1.(*ast.SelectStmt)
+		st.LockInfos = $2.([]*ast.SelectLockInfo)
+		st.SelectIntoOpt = $3.(*ast.SelectIntoOption)
+		$$ = st
+	}
+|	SelectStmtBasic IntoClause OrderByOptional SelectStmtLimitOpt SelectLockListOpt
+	{
+		st := $1.(*ast.SelectStmt)
+		st.SelectIntoOpt = $2.(*ast.SelectIntoOption)
+		if $3 != nil {
+			st.OrderBy = $3.(*ast.OrderByClause)
+		}
+		if $4 != nil {
+			st.Limit = $4.(*ast.Limit)
+		}
+		if $5 != nil {
+			st.LockInfos = $5.([]*ast.SelectLockInfo)
+		}
+		$$ = st
+	}
+|	SelectStmtBasic WhereClause SelectStmtGroup OrderByOptional SelectStmtLimitOpt SelectLockIntoOpt
+	{
+		st := $1.(*ast.SelectStmt)
+		st.Where = $2.(ast.ExprNode)
 		if $3 != nil {
 			st.GroupBy = $3.(*ast.GroupByClause)
 		}
@@ -7264,12 +7336,56 @@ SelectStmt:
 		if $5 != nil {
 			st.Limit = $5.(*ast.Limit)
 		}
-		if $7 != nil {
-			st.SelectIntoOpt = $7.(*ast.SelectIntoOption)
+		if $6 != nil {
+			h := $6.(*selectLockIntoHolder)
+			st.LockInfos = h.locks
+			st.SelectIntoOpt = h.into
 		}
 		$$ = st
 	}
-|	SelectStmtFromDualTable SelectStmtGroup OrderByOptional SelectStmtLimitOpt SelectLockOpt SelectStmtIntoOption
+|	SelectStmtBasic GroupByClause OrderByOptional SelectStmtLimitOpt SelectLockIntoOpt
+	{
+		st := $1.(*ast.SelectStmt)
+		st.GroupBy = $2.(*ast.GroupByClause)
+		if $3 != nil {
+			st.OrderBy = $3.(*ast.OrderByClause)
+		}
+		if $4 != nil {
+			st.Limit = $4.(*ast.Limit)
+		}
+		if $5 != nil {
+			h := $5.(*selectLockIntoHolder)
+			st.LockInfos = h.locks
+			st.SelectIntoOpt = h.into
+		}
+		$$ = st
+	}
+|	SelectStmtBasic OrderBy SelectStmtLimitOpt SelectLockIntoOpt
+	{
+		st := $1.(*ast.SelectStmt)
+		st.OrderBy = $2.(*ast.OrderByClause)
+		if $3 != nil {
+			st.Limit = $3.(*ast.Limit)
+		}
+		if $4 != nil {
+			h := $4.(*selectLockIntoHolder)
+			st.LockInfos = h.locks
+			st.SelectIntoOpt = h.into
+		}
+		$$ = st
+	}
+|	SelectStmtBasic SelectStmtLimit SelectLockIntoOpt
+	{
+		st := $1.(*ast.SelectStmt)
+		st.Limit = $2.(*ast.Limit)
+		if $3 != nil {
+			h := $3.(*selectLockIntoHolder)
+			st.LockInfos = h.locks
+			st.SelectIntoOpt = h.into
+		}
+		$$ = st
+	}
+|	SelectStmtFromDualTable SelectStmtGroup OrderByOptional SelectStmtLimitOpt SelectLockIntoOpt
 	{
 		st := $1.(*ast.SelectStmt)
 		if $2 != nil {
@@ -7282,31 +7398,41 @@ SelectStmt:
 			st.Limit = $4.(*ast.Limit)
 		}
 		if $5 != nil {
-			st.LockInfo = $5.(*ast.SelectLockInfo)
-		}
-		if $6 != nil {
-			st.SelectIntoOpt = $6.(*ast.SelectIntoOption)
+			h := $5.(*selectLockIntoHolder)
+			st.LockInfos = h.locks
+			if h.into != nil {
+				if st.SelectIntoOpt != nil {
+					yylex.AppendError(yylex.Errorf("Multiple INTO clauses in one query block"))
+					return 1
+				}
+				st.SelectIntoOpt = h.into
+			}
 		}
 		$$ = st
 	}
-|	SelectStmtFromTable OrderByOptional SelectStmtLimitOpt SelectLockOpt SelectStmtIntoOption
+|	SelectStmtFromTable OrderByOptional SelectStmtLimitOpt SelectLockIntoOpt
 	{
 		st := $1.(*ast.SelectStmt)
-		if $4 != nil {
-			st.LockInfo = $4.(*ast.SelectLockInfo)
-		}
 		if $2 != nil {
 			st.OrderBy = $2.(*ast.OrderByClause)
 		}
 		if $3 != nil {
 			st.Limit = $3.(*ast.Limit)
 		}
-		if $5 != nil {
-			st.SelectIntoOpt = $5.(*ast.SelectIntoOption)
+		if $4 != nil {
+			h := $4.(*selectLockIntoHolder)
+			st.LockInfos = h.locks
+			if h.into != nil {
+				if st.SelectIntoOpt != nil {
+					yylex.AppendError(yylex.Errorf("Multiple INTO clauses in one query block"))
+					return 1
+				}
+				st.SelectIntoOpt = h.into
+			}
 		}
 		$$ = st
 	}
-|	"TABLE" TableName OrderByOptional SelectStmtLimitOpt SelectLockOpt SelectStmtIntoOption
+|	"TABLE" TableName OrderByOptional SelectStmtLimitOpt SelectLockIntoOpt
 	{
 		st := &ast.SelectStmt{
 			Kind:   ast.SelectStmtKindTable,
@@ -7321,14 +7447,13 @@ SelectStmt:
 			st.Limit = $4.(*ast.Limit)
 		}
 		if $5 != nil {
-			st.LockInfo = $5.(*ast.SelectLockInfo)
-		}
-		if $6 != nil {
-			st.SelectIntoOpt = $6.(*ast.SelectIntoOption)
+			h := $5.(*selectLockIntoHolder)
+			st.LockInfos = h.locks
+			st.SelectIntoOpt = h.into
 		}
 		$$ = st
 	}
-|	"VALUES" ValuesStmtList OrderByOptional SelectStmtLimitOpt SelectLockOpt SelectStmtIntoOption
+|	"VALUES" ValuesStmtList OrderByOptional SelectStmtLimitOpt SelectLockIntoOpt
 	{
 		st := &ast.SelectStmt{
 			Kind:   ast.SelectStmtKindValues,
@@ -7342,10 +7467,9 @@ SelectStmt:
 			st.Limit = $4.(*ast.Limit)
 		}
 		if $5 != nil {
-			st.LockInfo = $5.(*ast.SelectLockInfo)
-		}
-		if $6 != nil {
-			st.SelectIntoOpt = $6.(*ast.SelectIntoOption)
+			h := $5.(*selectLockIntoHolder)
+			st.LockInfos = h.locks
+			st.SelectIntoOpt = h.into
 		}
 		$$ = st
 	}
@@ -8177,11 +8301,8 @@ SelectStmtGroup:
 	}
 |	GroupByClause
 
-SelectStmtIntoOption:
-	{
-		$$ = nil
-	}
-|	"INTO" "OUTFILE" stringLit Fields Lines
+IntoClause:
+	"INTO" "OUTFILE" stringLit Fields Lines
 	{
 		x := &ast.SelectIntoOption{
 			Tp:       ast.SelectIntoOutfile,
@@ -8195,6 +8316,20 @@ SelectStmtIntoOption:
 		}
 
 		$$ = x
+	}
+|	"INTO" "DUMPFILE" stringLit
+	{
+		$$ = &ast.SelectIntoOption{
+			Tp:       ast.SelectIntoDumpfile,
+			FileName: $3,
+		}
+	}
+|	"INTO" UserVariableList
+	{
+		$$ = &ast.SelectIntoOption{
+			Tp:        ast.SelectIntoVars,
+			Variables: $2.([]ast.ExprNode),
+		}
 	}
 
 // See https://dev.mysql.com/doc/refman/5.7/en/subqueries.html
@@ -8257,12 +8392,8 @@ SubSelect:
 	}
 
 // See https://dev.mysql.com/doc/refman/8.0/en/innodb-locking-reads.html
-SelectLockOpt:
-	/* empty */
-	{
-		$$ = nil
-	}
-|	"FOR" "UPDATE" OfTablesOpt
+SelectLockClause:
+	"FOR" "UPDATE" OfTablesOpt
 	{
 		$$ = &ast.SelectLockInfo{
 			LockType: ast.SelectLockForUpdate,
@@ -8317,6 +8448,51 @@ SelectLockOpt:
 		$$ = &ast.SelectLockInfo{
 			LockType: ast.SelectLockForShare,
 			Tables:   []*ast.TableName{},
+		}
+	}
+
+SelectLockList:
+	SelectLockClause
+	{
+		$$ = []*ast.SelectLockInfo{$1.(*ast.SelectLockInfo)}
+	}
+|	SelectLockList SelectLockClause
+	{
+		$$ = append($1.([]*ast.SelectLockInfo), $2.(*ast.SelectLockInfo))
+	}
+
+SelectLockListOpt:
+	/* empty */
+	{
+		$$ = nil
+	}
+|	SelectLockList
+
+SelectLockIntoOpt:
+	/* empty */
+	{
+		$$ = nil
+	}
+|	SelectLockList
+	{
+		$$ = &selectLockIntoHolder{locks: $1.([]*ast.SelectLockInfo)}
+	}
+|	SelectLockList IntoClause
+	{
+		$$ = &selectLockIntoHolder{
+			locks: $1.([]*ast.SelectLockInfo),
+			into:  $2.(*ast.SelectIntoOption),
+		}
+	}
+|	IntoClause
+	{
+		$$ = &selectLockIntoHolder{into: $1.(*ast.SelectIntoOption)}
+	}
+|	IntoClause SelectLockList
+	{
+		$$ = &selectLockIntoHolder{
+			into:  $1.(*ast.SelectIntoOption),
+			locks: $2.([]*ast.SelectLockInfo),
 		}
 	}
 

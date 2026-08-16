@@ -737,3 +737,40 @@ func TestShowFilterVariants(t *testing.T) {
 	}
 	RunTest(t, table, false)
 }
+
+func TestSelectIntoAndLocking(t *testing.T) {
+	table := []testCase{
+		// Trailing INTO user variables.
+		{"SELECT 1 INTO @a", true, "SELECT 1 INTO @`a`"},
+		{"SELECT 1, 2 INTO @a, @b", true, "SELECT 1,2 INTO @`a`, @`b`"},
+		{"SELECT a FROM t INTO @v", true, "SELECT `a` FROM `t` INTO @`v`"},
+		{"SELECT a FROM t WHERE b = 1 INTO @v", true, "SELECT `a` FROM `t` WHERE `b`=1 INTO @`v`"},
+		{"SELECT a FROM t ORDER BY a LIMIT 1 INTO @v", true, "SELECT `a` FROM `t` ORDER BY `a` LIMIT 1 INTO @`v`"},
+		{"SELECT 1 WHERE 1 INTO @a", true, "SELECT 1 FROM DUAL WHERE 1 INTO @`a`"},
+		{"SELECT 1 LIMIT 1 INTO @a", true, "SELECT 1 LIMIT 1 INTO @`a`"},
+		{"SELECT 1 UNION SELECT 2 INTO @a", true, "SELECT 1 UNION SELECT 2 INTO @`a`"},
+		// INTO directly after the select item list (before FROM).
+		{"SELECT a INTO @v FROM t", true, "SELECT `a` FROM `t` INTO @`v`"},
+		{"SELECT a, b INTO @x, @y FROM t WHERE c = 1", true, "SELECT `a`,`b` FROM `t` WHERE `c`=1 INTO @`x`, @`y`"},
+		{"SELECT 1 INTO @a FROM DUAL", true, "SELECT 1 INTO @`a`"},
+		{"SELECT * INTO OUTFILE '/tmp/x' FIELDS TERMINATED BY ',' FROM t", true, "SELECT * FROM `t` INTO OUTFILE '/tmp/x' FIELDS TERMINATED BY ','"},
+		// INTO DUMPFILE, and DUMPFILE stays usable as an identifier.
+		{"SELECT * FROM t INTO DUMPFILE '/tmp/x'", true, "SELECT * FROM `t` INTO DUMPFILE '/tmp/x'"},
+		{"SELECT dumpfile FROM t", true, "SELECT `dumpfile` FROM `t`"},
+		// INTO combined with locking clauses, both orders.
+		{"SELECT a FROM t INTO @v FOR UPDATE", true, "SELECT `a` FROM `t` FOR UPDATE INTO @`v`"},
+		{"SELECT a FROM t FOR UPDATE INTO @v", true, "SELECT `a` FROM `t` FOR UPDATE INTO @`v`"},
+		{"SELECT 1 INTO @a FOR UPDATE", true, "SELECT 1 FOR UPDATE INTO @`a`"},
+		// Multiple locking clauses in one query block.
+		{"SELECT a FROM t FOR UPDATE OF t FOR SHARE OF t", true, "SELECT `a` FROM `t` FOR UPDATE OF `t` FOR SHARE OF `t`"},
+		{"SELECT a FROM t FOR UPDATE FOR SHARE NOWAIT", true, "SELECT `a` FROM `t` FOR UPDATE FOR SHARE NOWAIT"},
+		{"SELECT 1 LOCK IN SHARE MODE FOR UPDATE", true, "SELECT 1 FOR SHARE FOR UPDATE"},
+		// TABLE/VALUES statements take the same tail.
+		{"TABLE t INTO @a", true, "TABLE `t` INTO @`a`"},
+		{"VALUES ROW(1,2) INTO @a, @b", true, "VALUES ROW(1,2) INTO @`a`, @`b`"},
+		// MySQL rejects more than one INTO clause per query block.
+		{"SELECT a INTO @v FROM t INTO @w", false, ""},
+		{"SELECT 1 INTO @a INTO @b", false, ""},
+	}
+	RunTest(t, table, false)
+}

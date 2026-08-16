@@ -285,6 +285,7 @@ var tokenMap = map[string]int{
 	"DOUBLE":                     doubleType,
 	"DROP":                       drop,
 	"DUAL":                       dual,
+	"DUMPFILE":                   dumpfile,
 	"DUPLICATE":                  duplicate,
 	"DYNAMIC":                    dynamic,
 	"ELSE":                       elseKwd,

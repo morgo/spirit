@@ -486,3 +486,10 @@ func (c CollationConnection) ApplyOn(p *Parser) error {
 	}
 	return nil
 }
+
+// selectLockIntoHolder carries the trailing locking clauses and INTO clause of
+// a SELECT while the grammar reduces them; it never appears in the final AST.
+type selectLockIntoHolder struct {
+	locks []*ast.SelectLockInfo
+	into  *ast.SelectIntoOption
+}
