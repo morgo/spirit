@@ -85,6 +85,13 @@ func TestMissingStatement(t *testing.T) {
 	err = m.Run()
 	require.Error(t, err)
 	require.ErrorContains(t, err, "not a supported statement type")
+
+	// An ALTER TABLE that does not say what to alter. MySQL rejects this as a
+	// syntax error; our parser accepts it, so it is rejected downstream.
+	m = NewTestMigration(t, WithStatement("ALTER TABLE t1missing"))
+	err = m.Run()
+	require.Error(t, err)
+	require.ErrorContains(t, err, "does not specify any changes")
 }
 
 func TestBadDatabaseCredentials(t *testing.T) {

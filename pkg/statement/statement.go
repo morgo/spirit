@@ -28,6 +28,7 @@ var (
 	ErrNoStatements            = errors.New("could not find any compatible statements to execute")
 	ErrMixMatchMultiStatements = errors.New("when performing atomic schema changes, all statements must be of type ALTER TABLE")
 	ErrUnsafeForInplace        = errors.New("statement contains operations that are not safe for INPLACE algorithm")
+	ErrAlterNoSpecs            = errors.New("ALTER TABLE does not specify any changes to make")
 	ErrMultipleAlterClauses    = errors.New("ALTER contains multiple clauses. Combinations of INSTANT and INPLACE operations cannot be detected safely. Consider executing these as separate ALTER statements")
 	ErrAlterContainsUnique     = errors.New("ALTER contains adding a unique index")
 )
@@ -70,14 +71,14 @@ func NewWithOptions(statement string, opts Options) ([]*AbstractStatement, error
 				return nil, fmt.Errorf("could not restore alter clause statement: %w", err)
 			}
 			normalizedStmt := sb.String()
-			trimLen := len(alterStmt.Table.Name.String()) + 15 // len ALTER TABLE + quotes
-			if len(alterStmt.Table.Schema.String()) > 0 {
-				trimLen += len(alterStmt.Table.Schema.String()) + 3 // len schema + quotes and dot.
+			alterClause, err := trimAlterTablePrefix(alterStmt, normalizedStmt)
+			if err != nil {
+				return nil, err
 			}
 			stmts = append(stmts, &AbstractStatement{
 				Schema:    alterStmt.Table.Schema.String(),
 				Table:     alterStmt.Table.Name.String(),
-				Alter:     normalizedStmt[trimLen:],
+				Alter:     alterClause,
 				Statement: statement,
 				StmtNode:  &stmtNodes[i],
 			})
@@ -152,6 +153,39 @@ func NewWithOptions(statement string, opts Options) ([]*AbstractStatement, error
 	}
 
 	return stmts, nil
+}
+
+// trimAlterTablePrefix returns just the alter clauses from a restored
+// ALTER TABLE statement, i.e. the "ADD COLUMN ..." in
+// "ALTER TABLE `t` ADD COLUMN ...".
+//
+// AlterTableStmt.Restore writes "ALTER TABLE " + the table reference + " " +
+// the comma-separated specs, so the prefix is found by restoring the table
+// reference the same way. Counting characters off the raw identifier does not
+// work: restore back-quotes identifiers and doubles any embedded back-quote,
+// so a name like `a``b` is longer restored than raw.
+//
+// A statement with no specs at all has no prefix to trim. MySQL rejects
+// "ALTER TABLE t" as a syntax error but our parser accepts it, so reject it
+// here rather than returning an empty alter — downstream an empty Alter means
+// "not a schema change" (see the CREATE TABLE case in NewWithOptions), which
+// would silently do the wrong thing.
+func trimAlterTablePrefix(alterStmt *ast.AlterTableStmt, normalizedStmt string) (string, error) {
+	if len(alterStmt.Specs) == 0 {
+		return "", fmt.Errorf("%w: %s", ErrAlterNoSpecs, normalizedStmt)
+	}
+	var sb strings.Builder
+	rCtx := format.NewRestoreCtx(format.DefaultRestoreFlags, &sb)
+	if err := alterStmt.Table.Restore(rCtx); err != nil {
+		return "", fmt.Errorf("could not restore alter table name: %w", err)
+	}
+	alterClause, ok := strings.CutPrefix(normalizedStmt, "ALTER TABLE "+sb.String()+" ")
+	if !ok {
+		// Unreachable unless AlterTableStmt.Restore changes shape; fail loudly
+		// rather than slicing at a guessed offset.
+		return "", fmt.Errorf("could not find the alter clauses in restored statement: %s", normalizedStmt)
+	}
+	return alterClause, nil
 }
 
 // MustNew is like New but panics if the statement cannot be parsed.
