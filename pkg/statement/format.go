@@ -365,6 +365,16 @@ func formatPartitionOptions(partOpts *PartitionOptions) string {
 		parts = append(parts, fmt.Sprintf("PARTITIONS %d", partOpts.Partitions))
 	}
 
+	// Add the subpartitioning clause. MySQL's grammar places SUBPARTITION BY
+	// (and its SUBPARTITIONS count) after the partition method and before the
+	// partition definition list. Emitting it is not optional: the only way Diff
+	// changes a partitioned table's layout is REMOVE PARTITIONING followed by a
+	// fresh PARTITION BY, so a missing clause silently drops the table's
+	// subpartitioning.
+	if partOpts.SubPartition != nil {
+		parts = append(parts, formatSubPartitionOptions(partOpts.SubPartition))
+	}
+
 	// Add partition definitions if present
 	if len(partOpts.Definitions) > 0 {
 		var defParts []string
@@ -372,6 +382,49 @@ func formatPartitionOptions(partOpts *PartitionOptions) string {
 			defParts = append(defParts, formatPartitionDefinition(&def))
 		}
 		parts = append(parts, fmt.Sprintf("(%s)", strings.Join(defParts, ", ")))
+	}
+
+	return strings.Join(parts, " ")
+}
+
+// formatSubPartitionOptions formats the SUBPARTITION BY clause of a
+// partitioned table, including its SUBPARTITIONS count. MySQL only supports
+// HASH and KEY subpartitioning, optionally LINEAR.
+//
+// The count is emitted whenever it is known, even when the partition
+// definitions spell their subpartitions out by name: MySQL accepts the
+// redundant SUBPARTITIONS n as long as it agrees with the lists (verified
+// against MySQL 9.7), and the count is the only representation of
+// subpartitioning for the far more common form where SHOW CREATE TABLE reports
+// SUBPARTITIONS n and leaves the auto-generated subpartition names implicit.
+func formatSubPartitionOptions(subOpts *SubPartitionOptions) string {
+	parts := []string{"SUBPARTITION BY"}
+
+	if subOpts.Linear {
+		parts = append(parts, "LINEAR")
+	}
+
+	parts = append(parts, subOpts.Type)
+
+	switch subOpts.Type {
+	case "HASH":
+		if subOpts.Expression != nil {
+			parts = append(parts, fmt.Sprintf("(%s)", *subOpts.Expression))
+		} else if len(subOpts.Columns) > 0 {
+			// HASH can also use column names directly
+			parts = append(parts, fmt.Sprintf("(%s)", quoteIdentList(subOpts.Columns, ", ")))
+		}
+	case "KEY":
+		if len(subOpts.Columns) > 0 {
+			parts = append(parts, fmt.Sprintf("(%s)", quoteIdentList(subOpts.Columns, ", ")))
+		} else {
+			// KEY() with empty columns uses the primary key
+			parts = append(parts, "()")
+		}
+	}
+
+	if subOpts.Count > 0 {
+		parts = append(parts, fmt.Sprintf("SUBPARTITIONS %d", subOpts.Count))
 	}
 
 	return strings.Join(parts, " ")
@@ -402,6 +455,38 @@ func formatPartitionDefinition(def *PartitionDefinition) string {
 		case "MAXVALUE":
 			parts = append(parts, "VALUES LESS THAN MAXVALUE")
 		}
+	}
+
+	// Partition comment. Emitted in the `COMMENT = 'x'` form SHOW CREATE TABLE
+	// prints. Without it a repartition would silently drop the comment.
+	if def.Comment != nil {
+		parts = append(parts, fmt.Sprintf("COMMENT = '%s'", sqlescape.EscapeString(*def.Comment)))
+	}
+
+	// Explicitly named subpartitions, when the definition carries them. MySQL
+	// only reports subpartition names from SHOW CREATE TABLE when they were
+	// named explicitly at CREATE time — otherwise it reports SUBPARTITIONS n
+	// alone and auto-names them — so passing them through keeps the names
+	// stable across a repartition.
+	if len(def.SubPartitions) > 0 {
+		subParts := make([]string, 0, len(def.SubPartitions))
+		for i := range def.SubPartitions {
+			subParts = append(subParts, formatSubPartitionDefinition(&def.SubPartitions[i]))
+		}
+		parts = append(parts, fmt.Sprintf("(%s)", strings.Join(subParts, ", ")))
+	}
+
+	return strings.Join(parts, " ")
+}
+
+// formatSubPartitionDefinition formats a single named subpartition. Only the
+// name and comment are emitted; a subpartition's ENGINE always matches the
+// table's (see partitionDefinitionEqual) and is therefore not diffed.
+func formatSubPartitionDefinition(sub *SubPartitionDefinition) string {
+	parts := []string{"SUBPARTITION " + sqlescape.EscapeIdentifier(sub.Name)}
+
+	if sub.Comment != nil {
+		parts = append(parts, fmt.Sprintf("COMMENT = '%s'", sqlescape.EscapeString(*sub.Comment)))
 	}
 
 	return strings.Join(parts, " ")
