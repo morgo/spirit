@@ -71,13 +71,21 @@ func (expressionParenNormalizer) Normalize(ct *CreateTable) *CreateTable {
 			continue
 		}
 		canonicalizeExprParens(p, c.Expression)
-		definition := fmt.Sprintf("CHECK (%s)", *c.Expression)
-		if c.NotEnforced {
-			definition += " NOT ENFORCED"
-		}
+		definition := checkConstraintDefinition(c)
 		c.Definition = &definition
 	}
 	return ct
+}
+
+// checkConstraintDefinition renders the CHECK constraint definition text that
+// diffConstraints emits. Any rule that rewrites a CHECK expression has to
+// rebuild the definition from it, or the two drift apart.
+func checkConstraintDefinition(c *Constraint) string {
+	definition := fmt.Sprintf("CHECK (%s)", *c.Expression)
+	if c.NotEnforced {
+		definition += " NOT ENFORCED"
+	}
+	return definition
 }
 
 // parenCanonicalizer is the ast.Visitor behind pass 1 of canonicalizeExprParens:
@@ -113,25 +121,17 @@ func (parenCanonicalizer) Leave(n ast.Node) (ast.Node, bool) {
 }
 
 // canonicalizeExprParens re-parses the expression text and rewrites it in
-// canonical parenthesization, in place. A nil or empty text is left alone.
-//
-// The text was produced by restoring a successfully parsed expression, so a
-// re-parse failure is not expected; if one occurs the text is left unchanged
-// — the worst outcome is a spurious diff on that expression, never a
-// corrupted definition.
+// canonical parenthesization, in place. A nil or empty text is left alone; so
+// is one that does not re-parse (see parseExpressionText).
 func canonicalizeExprParens(p *parser.Parser, text *string) {
 	if text == nil || *text == "" {
 		return
 	}
-	stmt, err := p.ParseOneStmt("SELECT "+*text, "", "")
-	if err != nil {
+	parsed, ok := parseExpressionText(p, *text)
+	if !ok {
 		return
 	}
-	sel, ok := stmt.(*ast.SelectStmt)
-	if !ok || sel.Fields == nil || len(sel.Fields.Fields) != 1 || sel.Fields.Fields[0].Expr == nil {
-		return
-	}
-	node, ok := sel.Fields.Fields[0].Expr.Accept(parenCanonicalizer{})
+	node, ok := parsed.Accept(parenCanonicalizer{})
 	if !ok {
 		return
 	}
