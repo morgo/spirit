@@ -21,6 +21,7 @@ type MockChunker struct {
 	// State
 	isOpen          bool
 	currentPosition uint64
+	rowsCopied      uint64
 	isComplete      bool
 
 	// Control behavior
@@ -173,6 +174,7 @@ func (m *MockChunker) Reset() error {
 
 	// Reset to initial state
 	m.currentPosition = 0
+	m.rowsCopied = 0
 	m.isComplete = false
 	m.feedbackCalls = make([]FeedbackCall, 0)
 	m.nextCalls = 0
@@ -242,6 +244,7 @@ func (m *MockChunker) Feedback(chunk *Chunk, duration time.Duration, actualRows 
 		ActualRows: actualRows,
 		Timestamp:  time.Now(),
 	})
+	m.rowsCopied += actualRows
 }
 
 // KeyAboveHighWatermark returns true if the given key is above the current watermark
@@ -304,7 +307,7 @@ func (m *MockChunker) KeyBelowLowWatermark(key any) bool {
 func (m *MockChunker) RowsCopied() uint64 {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.currentPosition
+	return m.rowsCopied
 }
 
 func (m *MockChunker) Progress() (uint64, uint64, uint64) {

@@ -52,6 +52,26 @@ func TestRowsCopiedIsNotProgressForOptimisticChunker(t *testing.T) {
 		"Progress reports key-space distance travelled, not rows")
 }
 
+func TestMockChunkerRowsCopiedUsesFeedback(t *testing.T) {
+	chunker := NewMockChunker("t1", 3000)
+	require.NoError(t, chunker.Open())
+
+	first, err := chunker.Next()
+	require.NoError(t, err)
+	rowsRead, _, _ := chunker.Progress()
+	require.Equal(t, uint64(1000), rowsRead)
+	require.Zero(t, chunker.RowsCopied())
+
+	chunker.Feedback(first, time.Millisecond, 7)
+	second, err := chunker.Next()
+	require.NoError(t, err)
+	chunker.Feedback(second, time.Millisecond, 11)
+
+	require.Equal(t, uint64(18), chunker.RowsCopied())
+	require.NoError(t, chunker.Reset())
+	require.Zero(t, chunker.RowsCopied())
+}
+
 // TestRowsCopiedCompositeChunker: the composite chunker already counts actual
 // rows, so RowsCopied and Progress's first return agree there. This is what
 // makes RowsCopied a safe single accessor across both chunker types.
