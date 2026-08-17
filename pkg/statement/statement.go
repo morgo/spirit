@@ -64,14 +64,7 @@ func NewWithOptions(statement string, opts Options) ([]*AbstractStatement, error
 			// if the schema name is included it could be different from the --database
 			// specified, which causes all sorts of problems. The easiest way to handle this
 			// it just to not permit it.
-			var sb strings.Builder
-			sb.Reset()
-			rCtx := format.NewRestoreCtx(format.DefaultRestoreFlags, &sb)
-			if err = alterStmt.Restore(rCtx); err != nil {
-				return nil, fmt.Errorf("could not restore alter clause statement: %w", err)
-			}
-			normalizedStmt := sb.String()
-			alterClause, err := trimAlterTablePrefix(alterStmt, normalizedStmt)
+			alterClause, err := alterClauses(alterStmt, format.DefaultRestoreFlags)
 			if err != nil {
 				return nil, err
 			}
@@ -155,35 +148,47 @@ func NewWithOptions(statement string, opts Options) ([]*AbstractStatement, error
 	return stmts, nil
 }
 
-// trimAlterTablePrefix returns just the alter clauses from a restored
-// ALTER TABLE statement, i.e. the "ADD COLUMN ..." in
-// "ALTER TABLE `t` ADD COLUMN ...".
+// alterClauses returns just the alter clauses of an ALTER TABLE statement,
+// i.e. the "ADD COLUMN ..." in "ALTER TABLE `t` ADD COLUMN ...".
 //
 // AlterTableStmt.Restore writes "ALTER TABLE " + the table reference + " " +
-// the comma-separated specs, so the prefix is found by restoring the table
-// reference the same way. Counting characters off the raw identifier does not
-// work: restore back-quotes identifiers and doubles any embedded back-quote,
-// so a name containing one restores longer than it is raw.
+// the comma-separated specs (see its implementation in pkg/parser/ast/ddl.go),
+// so the clauses are whatever follows that prefix. Both the statement and the
+// prefix are restored here, from one flags value and through the same writer
+// calls Restore itself uses, so the two cannot render differently: whatever
+// flags do to keyword case or identifier quoting, they do to both sides.
+//
+// Counting characters off the raw identifier is not a workable substitute:
+// restore back-quotes identifiers and doubles any embedded back-quote, so a
+// name containing one restores longer than it is raw.
 //
 // A statement with no specs at all has no prefix to trim. MySQL rejects
 // "ALTER TABLE t" as a syntax error but our parser accepts it, so reject it
 // here rather than returning an empty alter — downstream an empty Alter means
 // "not a schema change" (see the CREATE TABLE case in NewWithOptions), which
 // would silently do the wrong thing.
-func trimAlterTablePrefix(alterStmt *ast.AlterTableStmt, normalizedStmt string) (string, error) {
-	if len(alterStmt.Specs) == 0 {
-		return "", fmt.Errorf("%w: %s", ErrAlterNoSpecs, normalizedStmt)
+func alterClauses(alterStmt *ast.AlterTableStmt, flags format.RestoreFlags) (string, error) {
+	var stmtSB strings.Builder
+	if err := alterStmt.Restore(format.NewRestoreCtx(flags, &stmtSB)); err != nil {
+		return "", fmt.Errorf("could not restore alter clause statement: %w", err)
 	}
-	var sb strings.Builder
-	rCtx := format.NewRestoreCtx(format.DefaultRestoreFlags, &sb)
-	if err := alterStmt.Table.Restore(rCtx); err != nil {
+	if len(alterStmt.Specs) == 0 {
+		return "", fmt.Errorf("%w: %s", ErrAlterNoSpecs, stmtSB.String())
+	}
+	// Mirror the opening of AlterTableStmt.Restore exactly: the keyword, the
+	// table reference, then the single space before the first spec.
+	var prefixSB strings.Builder
+	prefixCtx := format.NewRestoreCtx(flags, &prefixSB)
+	prefixCtx.WriteKeyWord("ALTER TABLE ")
+	if err := alterStmt.Table.Restore(prefixCtx); err != nil {
 		return "", fmt.Errorf("could not restore alter table name: %w", err)
 	}
-	alterClause, ok := strings.CutPrefix(normalizedStmt, "ALTER TABLE "+sb.String()+" ")
+	prefixCtx.WritePlain(" ")
+	alterClause, ok := strings.CutPrefix(stmtSB.String(), prefixSB.String())
 	if !ok {
-		// Unreachable unless AlterTableStmt.Restore changes shape; fail loudly
-		// rather than slicing at a guessed offset.
-		return "", fmt.Errorf("could not find the alter clauses in restored statement: %s", normalizedStmt)
+		// Unreachable unless AlterTableStmt.Restore changes the shape this
+		// mirrors; fail loudly rather than cutting at a guessed offset.
+		return "", fmt.Errorf("could not find the alter clauses in restored statement: %s", stmtSB.String())
 	}
 	return alterClause, nil
 }

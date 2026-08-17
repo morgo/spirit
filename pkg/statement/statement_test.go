@@ -3,6 +3,7 @@ package statement
 import (
 	"testing"
 
+	"github.com/block/spirit/pkg/parser/format"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
 )
@@ -37,6 +38,34 @@ func TestAlterClauseTrimming(t *testing.T) {
 
 	_, err = New("ALTER TABLE test.t1")
 	require.ErrorIs(t, err, ErrAlterNoSpecs)
+}
+
+// TestAlterClausesRestoreFlags pins that alterClauses cuts the prefix using the
+// flags it is given rather than assuming the defaults. Restoring the statement
+// and the prefix through the same flags is what keeps the cut correct, so
+// lowercase keywords and unquoted identifiers must work as well as the default
+// uppercase + back-quoted rendering.
+func TestAlterClausesRestoreFlags(t *testing.T) {
+	stmts, err := New("ALTER TABLE `a``b` ADD COLUMN c INT, DROP COLUMN d")
+	require.NoError(t, err)
+	alterStmt, ok := stmts[0].AsAlterTable()
+	require.True(t, ok)
+
+	clauses, err := alterClauses(alterStmt, format.DefaultRestoreFlags)
+	require.NoError(t, err)
+	require.Equal(t, "ADD COLUMN `c` INT, DROP COLUMN `d`", clauses)
+
+	// Lowercase keywords: the literal "ALTER TABLE " no longer appears, so a
+	// hard-coded prefix would fail to cut here.
+	clauses, err = alterClauses(alterStmt, format.RestoreKeyWordLowercase|format.RestoreNameBackQuotes)
+	require.NoError(t, err)
+	require.Equal(t, "add column `c` int, drop column `d`", clauses)
+
+	// No identifier quoting at all: the prefix shortens along with the table
+	// reference, and the embedded back-quote is no longer doubled.
+	clauses, err = alterClauses(alterStmt, format.RestoreKeyWordUppercase)
+	require.NoError(t, err)
+	require.Equal(t, "ADD COLUMN c INT, DROP COLUMN d", clauses)
 }
 
 func TestExtractFromStatement(t *testing.T) {
