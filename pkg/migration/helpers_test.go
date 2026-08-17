@@ -207,7 +207,9 @@ func newTestMigration(t *testing.T, opts ...RunnerOption) *Migration {
 // and alter arguments into a full ALTER TABLE statement so tests exercise the
 // same --statement path as production callers.
 //
-// Defaults: Threads=2, TargetChunkTime=500ms (the production default).
+// Defaults: Threads=2, WriteThreads=2. Copy chunk sizing uses the production
+// byte budget (table.DefaultTargetChunkBytes) and the checksum's time budget is
+// the constant table.ChunkerDefaultTarget; neither is settable per-test here.
 //
 // Example:
 //
@@ -217,7 +219,8 @@ func newTestMigration(t *testing.T, opts ...RunnerOption) *Migration {
 //
 //	m := NewTestRunner(t, "mytable", "ADD INDEX idx_a (a)",
 //	    WithThreads(1),
-//	    //	)
+//	    WithTestThrottler(),
+//	)
 func NewTestRunner(t *testing.T, table, alter string, opts ...RunnerOption) *Runner {
 	t.Helper()
 

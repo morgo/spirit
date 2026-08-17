@@ -399,7 +399,7 @@ As with the copy phase, a signal that stops updating does not keep being acted o
 
 One structural constraint shapes this: the checksum's snapshot transaction pool **cannot grow** once the brief table lock is released, because every transaction must take its read view at the same instant. It is therefore provisioned up front at whatever ceiling scaling could actually reach: `ceil(vCPUs / 2)` where the flag engages on Aurora, and plain [threads](#threads) everywhere else — both without the flag, and with the flag on a target where growth is impossible anyway (non-Aurora, or under 4 vCPUs). It reuses the read-side connection budget, since the copier's readers have finished by the time the checksum runs. An idle pooled transaction costs one connection and no extra history retention, so over-provisioning is cheap in resources. What it is not cheap in is lock time: the transactions are started serially under the table lock, so the ceiling directly lengthens that window. This is the reason the read-side ceiling is half the instance rather than all of it.
 
-Chunk sizing is separate from worker count: chunks are sized by the dynamic chunker against [`--target-chunk-size`](#target-chunk-size), and scaling only changes how many are in flight at once.
+Chunk sizing is separate from worker count: the checksum's chunks are sized by the dynamic chunker against a fixed 5s time budget (`table.ChunkerDefaultTarget`, not a flag — and not the copier's [`--target-chunk-size`](#target-chunk-size) byte budget), and scaling only changes how many are in flight at once.
 
 ### max-commit-latency
 
@@ -625,11 +625,11 @@ Note that the whole report is a single log record containing newlines. Spirit's 
 | --- | --- |
 | `%` | Rows copied out of the estimated total. The total comes from table statistics, so the percentage can drift slightly and is not a row count you should reconcile against. |
 | `n/m` | The figures the percentage is derived from. |
-| `chunk-size` | Rows in the most recently claimed chunk. The chunker sizes chunks dynamically to hit [`--target-chunk-size`](#target-chunk-size), so this number moving is normal and healthy — it is how Spirit adapts to row width and server load. A chunk size that has collapsed to its floor and stayed there means each chunk is taking longer than the target, i.e. the server is struggling. |
+| `chunk-size` | Rows in the most recently claimed chunk. The chunker sizes chunks dynamically to hit the [`--target-chunk-size`](#target-chunk-size) byte budget, so this number moving is normal and healthy — it is how Spirit adapts to row width. A chunk size that has collapsed to its floor and stayed there means the rows are too wide to fit the budget even at the floor, i.e. lower `--target-chunk-size` than the data wants, not a struggling server. |
 | `eta` | Remaining rows divided by the recently measured copy rate. `TBD` for the first minute (no rate measured yet) and `DUE` past 99.99%. It is computed from a single 10-second sample, so early on it swings a lot; treat a large jump as noise unless it persists. |
 | `throttled` | Whether the copy is currently paused by a throttler (replica lag, commit latency, or load). A migration that is throttled is behaving as designed — it is protecting the server, not stalling. |
 
-The `checksum` row that replaces this one during the checksum phase has the same shape — including its own `chunk-size`, since the checksum sizes chunks dynamically as well — plus `threads=` and `throttled=` for the checksum's own pacing.
+The `checksum` row that replaces this one during the checksum phase has the same shape — including its own `chunk-size`, since the checksum sizes chunks dynamically as well, though against a fixed 5s time budget rather than the byte budget — plus `threads=` and `throttled=` for the checksum's own pacing.
 
 ### `binlog` row
 
