@@ -1,15 +1,28 @@
 package statement
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/block/spirit/pkg/dbconn/sqlescape"
 	"github.com/block/spirit/pkg/testutils"
+	"github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// erDefaultValNotAllowed is ER_DEFAULT_VAL_GENERATED_NAMED_FUNCTION_IS_NOT_ALLOWED:
+// the server refusing to store a particular function inside a default value
+// expression. Which functions are on that list is version-dependent, so a case
+// that trips it is skipped rather than failed.
+const erDefaultValNotAllowed = 3770
+
+func isDisallowedInDefaultErr(err error) bool {
+	var myErr *mysql.MySQLError
+	return errors.As(err, &myErr) && myErr.Number == erDefaultValNotAllowed
+}
 
 // TestFunctionAliasNormalization covers each alias in the map, in the
 // expression contexts MySQL rewrites: expression DEFAULTs, generated columns,
@@ -283,6 +296,10 @@ func TestRoundTrip_FunctionAliases(t *testing.T) {
 		columns  string // column list of the authored CREATE TABLE
 		suffix   string // clauses after the column list, e.g. PARTITION BY
 		needsVec bool
+		// mayBeDisallowed marks a case whose function MySQL refuses to store in
+		// a default expression on some versions; such a case skips rather than
+		// fails when the server rejects it. See erDefaultValNotAllowed.
+		mayBeDisallowed bool
 	}{
 		{name: "lcase", columns: "c varchar(10) DEFAULT (LCASE('AB'))"},
 		{name: "ucase", columns: "c varchar(10) DEFAULT (UCASE('ab'))"},
@@ -295,8 +312,13 @@ func TestRoundTrip_FunctionAliases(t *testing.T) {
 		{name: "octet_length", columns: "c int DEFAULT (OCTET_LENGTH('abc'))"},
 		{name: "day", columns: "c int DEFAULT (DAY('2020-01-01'))"},
 		{name: "position", columns: "c int DEFAULT (POSITION('a' IN 'abc'))"},
-		{name: "session_user", columns: "c varchar(64) DEFAULT (SESSION_USER())"},
-		{name: "system_user", columns: "c varchar(64) DEFAULT (SYSTEM_USER())"},
+		// Which functions a default expression may contain moved over time:
+		// 8.0.28 rejects user() outright (error 3770), while 8.0.46 and 9.7
+		// store it. Both spellings resolve to user() before that check runs, so
+		// on a server that rejects it neither the authored nor the canonical
+		// form is storable and the round trip cannot be observed at all.
+		{name: "session_user", columns: "c varchar(64) DEFAULT (SESSION_USER())", mayBeDisallowed: true},
+		{name: "system_user", columns: "c varchar(64) DEFAULT (SYSTEM_USER())", mayBeDisallowed: true},
 		{name: "current_date", columns: "c int DEFAULT (YEAR(CURRENT_DATE))"},
 		{name: "current_time", columns: "c int DEFAULT (HOUR(CURRENT_TIME))"},
 		{name: "current_timestamp", columns: "c datetime DEFAULT (CURRENT_TIMESTAMP)"},
@@ -346,6 +368,9 @@ func TestRoundTrip_FunctionAliases(t *testing.T) {
 			_, err := db.ExecContext(t.Context(), "DROP TABLE IF EXISTS "+sqlescape.EscapeIdentifier(table))
 			require.NoError(t, err)
 			_, err = db.ExecContext(t.Context(), authored)
+			if tc.mayBeDisallowed && isDisallowedInDefaultErr(err) {
+				t.Skipf("skipping: this server does not allow the function in a default expression: %v", err)
+			}
 			require.NoError(t, err, "MySQL rejected the authored table")
 			t.Cleanup(func() {
 				_, _ = db.ExecContext(t.Context(), "DROP TABLE IF EXISTS "+sqlescape.EscapeIdentifier(table))
