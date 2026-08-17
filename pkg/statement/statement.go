@@ -163,7 +163,7 @@ func NewWithOptions(statement string, opts Options) ([]*AbstractStatement, error
 // the comma-separated specs, so the prefix is found by restoring the table
 // reference the same way. Counting characters off the raw identifier does not
 // work: restore back-quotes identifiers and doubles any embedded back-quote,
-// so a name like `a``b` is longer restored than raw.
+// so a name containing one restores longer than it is raw.
 //
 // A statement with no specs at all has no prefix to trim. MySQL rejects
 // "ALTER TABLE t" as a syntax error but our parser accepts it, so reject it

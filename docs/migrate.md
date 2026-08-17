@@ -64,6 +64,12 @@ Operationally, this means:
 - If you must change Spirit versions, let the in-flight migration finish first, or accept the lost progress and start fresh with the new version.
 - For long-running migrations that span planned binary upgrades, plan to drain the migration before the upgrade window.
 
+##### Upgrading from a version with `--table`/`--alter`
+
+Resume requires the statement text to match the checkpoint exactly. Versions that still had `--table` and `--alter` stored the statement they composed from that pair (``ALTER TABLE `t` <alter>``, with the table name back-quoted), so a migration started on such a version will **not** resume once you upgrade: the mismatch is treated as definitive and Spirit starts a fresh copy, discarding the checkpoint and the `_new` table.
+
+Drain any in-flight migrations before upgrading past the release that removed those flags.
+
 ### checksum-yield-timeout
 
 - Type: Duration
@@ -256,6 +262,8 @@ When set to `true`, Spirit will keep the old table (renamed to `_<table>_old`) a
 `--statement` is the only way to tell Spirit what change to make. It accepts most DDL statements, including `CREATE TABLE`, `ALTER TABLE`, `CREATE INDEX`, `RENAME TABLE` and `DROP TABLE`. Others such as `DROP INDEX` are _not_ supported and should be rewritten as `ALTER TABLE` statements.
 
 The table name is taken from the statement itself. If it is qualified (`` `schema`.`table` ``) the schema must match `--database`.
+
+`--statement` replaced the earlier `--table` and `--alter` pair, which has been removed. Because resume matches on the exact statement text, migrations started before that removal will not resume — see [Upgrading from a version with `--table`/`--alter`](#upgrading-from-a-version-with---table--alter).
 
 You can also send multiple `ALTER TABLE` statements at once, for example: `--statement="ALTER TABLE t1 CHARSET=utf8mb4; ALTER TABLE t2 CHARSET=utf8mb4;"` All of these statements will cutover atomically, which is useful when you are changing charsets or collations since if you were to perform these alters sequentially it may cause performance issues due to datatype mismatches in joins.
 

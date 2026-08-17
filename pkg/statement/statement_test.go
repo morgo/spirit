@@ -10,6 +10,7 @@ import (
 func TestMain(m *testing.M) {
 	goleak.VerifyTestMain(m)
 }
+
 // TestAlterClauseTrimming covers finding where the alter clauses start in a
 // restored "ALTER TABLE <table> <specs>". This used to be computed by counting
 // characters off the raw table name, which mis-trims quoted identifiers and
