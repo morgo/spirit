@@ -119,6 +119,19 @@ func TestRestoreSkipRedundantParentheses(t *testing.T) {
 		{"a = (b BETWEEN 1 AND 2)", "`a`=(`b` BETWEEN 1 AND 2)"},
 		{"a BETWEEN (b + 1) AND (c * 2)", "`a` BETWEEN `b`+1 AND `c`*2"},
 
+		// Each operand of BETWEEN, IN, LIKE, REGEXP and MEMBER OF is a fixed
+		// grammar production rather than an expression at the operator's own
+		// level, so the positions drop parentheses on their own terms. Every
+		// subject is a bit_expr, as are BETWEEN's bounds and REGEXP's pattern;
+		// LIKE's pattern and MEMBER OF's document are simple_exprs, which
+		// nothing below COLLATE reaches.
+		{"(a = b) BETWEEN 1 AND 2", "(`a`=`b`) BETWEEN 1 AND 2"},
+		{"a BETWEEN 1 AND (b = c)", "`a` BETWEEN 1 AND (`b`=`c`)"},
+		{"s REGEXP (a + b)", "`s` REGEXP `a`+`b`"},
+		{"s LIKE (a + b)", "`s` LIKE (`a`+`b`)"},
+		{"s LIKE (a COLLATE utf8mb4_bin)", "`s` LIKE `a` COLLATE utf8mb4_bin"},
+		{"a MEMBER OF ((b + c))", "`a` MEMBER OF ((`b`+`c`))"},
+
 		// COLLATE binds tighter than every binary operator.
 		{"(a COLLATE utf8mb4_bin) = b", "`a` COLLATE utf8mb4_bin=`b`"},
 		{"a = (b COLLATE utf8mb4_bin)", "`a`=`b` COLLATE utf8mb4_bin"},

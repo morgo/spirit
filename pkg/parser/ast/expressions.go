@@ -1073,13 +1073,7 @@ func canRestoreBinaryChildWithoutParentheses(parentOp, childOp opcode.Op, side i
 		return false
 	}
 	if restoreOpTakesFixedOperands(parentOp) {
-		// The subject of these operators is a bit_expr, so it can drop its
-		// parentheses only when it binds at least as tightly as one -- the
-		// bitwise OR level. The remaining operands differ per operator (LIKE
-		// takes a simple_expr pattern, BETWEEN a bit_expr lower bound and a
-		// predicate upper bound), so they keep their parentheses rather than
-		// have each position modelled separately.
-		return side == binaryOpLeftSide && childPrecedence >= restoreBinaryPrecedence(opcode.Or)
+		return childPrecedence >= restoreFixedOperandPrecedence(parentOp, side)
 	}
 	if childPrecedence > parentPrecedence {
 		return true
@@ -1103,6 +1097,27 @@ func restoreOpTakesFixedOperands(op opcode.Op) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+// restoreFixedOperandPrecedence returns the precedence a child must reach to
+// drop its parentheses in the given operand position of a predicate operator.
+// All five take a bit_expr subject, so a subject binding at least as tightly as
+// bitwise OR fits there. The other operands differ: BETWEEN's bounds and
+// REGEXP's pattern are bit_exprs too, while LIKE's pattern and MEMBER OF's
+// document are simple_exprs, a level only COLLATE reaches here. BETWEEN's upper
+// bound is really a predicate, which is looser again, but it shares a side with
+// the lower bound, so both are held to the stricter of the two. IN's list is
+// restored as a fresh expression and never reaches this function.
+func restoreFixedOperandPrecedence(op opcode.Op, side int) int {
+	if side == binaryOpLeftSide {
+		return restoreBinaryPrecedence(opcode.Or)
+	}
+	switch op { //nolint:exhaustive
+	case restoreOpBetween, opcode.Regexp:
+		return restoreBinaryPrecedence(opcode.Or)
+	default:
+		return restoreBinaryPrecedence(restoreOpCollate)
 	}
 }
 

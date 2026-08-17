@@ -78,6 +78,8 @@ func TestCanonicalExprParensIsFixedPoint(t *testing.T) {
 		"(a + b) IN (1,2)",
 		"(a | b) IN (1,2)",
 		"(a + b) BETWEEN 1 AND 2",
+		// So do BETWEEN's own bounds, which are bit_exprs as well.
+		"a BETWEEN (b + 1) AND (c * 2)",
 	}
 
 	for _, expr := range exprs {
