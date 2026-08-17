@@ -27,9 +27,9 @@ The following are some of the optimizations that make Spirit fast:
 Rather than accept a fixed chunk size (such as 1000 rows), Spirit dynamically adjusts the chunk size against a target. This is both safer for very wide tables with a lot of indexes and faster for smaller tables. The target depends on the copier:
 
 - The **copier** reads full rows into memory, so it sizes each chunk against an in-memory **byte budget** (`--target-chunk-size`, default 16 MiB). Time is a poor signal here — the copier's measured chunk time includes waiting behind the write queue, which inflates under load independently of chunk size — whereas a byte budget is a stable property of the data and keeps chunks large enough to engage InnoDB/Aurora read-ahead.
-- The **checksum** sizes each chunk against a **target time** (such as 500ms), configured via [`--target-chunk-time`](docs/migrate.md#target-chunk-time).
+- The **checksum** aggregates its CRC server-side, so it sizes each chunk against a **target time** instead. That target is a fixed 5s (`table.ChunkerDefaultTarget`), not a flag.
 
-500ms is quite "high" for traditional MySQL environments, but remember _Spirit does not support read-replicas_. This helps it copy chunks as efficiently as possible.
+5s is quite "high" for traditional MySQL environments, but remember _Spirit does not support read-replicas_. This helps it checksum chunks as efficiently as possible.
 
 ### Ignore Key Above Watermark
 
@@ -84,7 +84,7 @@ Only one atomic multi-table migration may run at a time **per schema**: they all
 Our internal goal for Spirit is to be able to migrate a 10TiB table in under 5 days. We believe we are able to achieve this in most-cases, but it depends on:
 - How many secondary indexes the table has.
 - How many active changes are being made to the table.
-- The `threads`, `write-threads`, `target-chunk-size` and `target-chunk-time` settings.
+- The `threads`, `write-threads` and `target-chunk-size` settings.
 - If any replication throttler is used.
 - If the MySQL server becomes significantly CPU or IO bound (at this point, the migration might slow down a lot)
 

@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/stretchr/testify/require"
@@ -134,7 +133,6 @@ func TestCheckConstraintWithDML(t *testing.T) {
 
 	m := NewTestRunner(t, "chk_dml", "ENGINE=InnoDB",
 		WithThreads(1),
-		WithTargetChunkTime(100*time.Millisecond),
 		WithTestThrottler())
 
 	var wg sync.WaitGroup

@@ -221,7 +221,12 @@ func StatusSuffix(c Checker) string {
 }
 
 type CheckerConfig struct {
-	Concurrency     int
+	Concurrency int
+	// TargetChunkTime is reporting-only: it is the target the chunk-size
+	// distribution summary is compared against at the end of each pass, so it
+	// should match the TargetChunkTime the caller built the chunker with
+	// (table.ChunkerDefaultTarget unless the caller overrode it). It does not
+	// itself size anything — chunk sizing lives entirely in the chunker.
 	TargetChunkTime time.Duration
 	DBConfig        *dbconn.DBConfig
 	Logger          *slog.Logger
@@ -253,7 +258,7 @@ type CheckerConfig struct {
 func NewCheckerDefaultConfig() *CheckerConfig {
 	return &CheckerConfig{
 		Concurrency:     4,
-		TargetChunkTime: 1000 * time.Millisecond,
+		TargetChunkTime: table.ChunkerDefaultTarget,
 		DBConfig:        dbconn.NewDBConfig(),
 		Logger:          slog.Default(),
 		FixDifferences:  false,

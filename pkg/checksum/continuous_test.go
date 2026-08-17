@@ -185,11 +185,10 @@ func runUntil(t *testing.T, c *ContinuousChecker) (stop func() error, errCh <-ch
 // silent logger.
 func fastConfig() ContinuousCheckerConfig {
 	return ContinuousCheckerConfig{
-		Concurrency:     4,
-		RetryDelay:      50 * time.Millisecond,
-		MaxQueueSize:    16,
-		TargetChunkTime: time.Second,
-		Logger:          slog.New(slog.NewTextHandler(testWriter{}, &slog.HandlerOptions{Level: slog.LevelError})),
+		Concurrency:  4,
+		RetryDelay:   50 * time.Millisecond,
+		MaxQueueSize: 16,
+		Logger:       slog.New(slog.NewTextHandler(testWriter{}, &slog.HandlerOptions{Level: slog.LevelError})),
 	}
 }
 

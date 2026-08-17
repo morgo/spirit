@@ -52,12 +52,11 @@ func TestBasicMove(t *testing.T) {
 
 	// test
 	move := &Move{
-		SourceDSN:       sourceDSN,
-		TargetDSN:       targetDSN,
-		TargetChunkTime: 5 * time.Second,
-		Threads:         2,
-		WriteThreads:    2,
-		CreateSentinel:  false,
+		SourceDSN:      sourceDSN,
+		TargetDSN:      targetDSN,
+		Threads:        2,
+		WriteThreads:   2,
+		CreateSentinel: false,
 	}
 	require.NoError(t, move.Run())
 }
@@ -103,7 +102,6 @@ func testResumeFromCheckpointE2E(t *testing.T, deferSecondaryIndexes bool) {
 	move := &Move{
 		SourceDSN:             sourceDSN,
 		TargetDSN:             targetDSN,
-		TargetChunkTime:       100 * time.Millisecond,
 		Threads:               1,
 		WriteThreads:          1,
 		DeferSecondaryIndexes: deferSecondaryIndexes,
@@ -155,7 +153,6 @@ func testResumeFromCheckpointE2E(t *testing.T, deferSecondaryIndexes bool) {
 	require.NoError(t, r.Close())
 
 	// Drop the additional column, we should be able to resume now.
-	move.TargetChunkTime = 5 * time.Second
 	move.Threads = 4
 	testutils.RunSQL(t, `ALTER TABLE dest_resume.t1 DROP COLUMN extra_col`)
 	r, err = NewRunner(move)
@@ -195,12 +192,11 @@ func TestEmptyDatabaseMove(t *testing.T) {
 
 	// Run move with empty source
 	move := &Move{
-		SourceDSN:       sourceDSN,
-		TargetDSN:       targetDSN,
-		TargetChunkTime: 5 * time.Second,
-		Threads:         4,
-		WriteThreads:    4,
-		CreateSentinel:  false,
+		SourceDSN:      sourceDSN,
+		TargetDSN:      targetDSN,
+		Threads:        4,
+		WriteThreads:   4,
+		CreateSentinel: false,
 	}
 
 	runner, err := NewRunner(move)
@@ -257,12 +253,11 @@ func TestMoveReservedWordPK(t *testing.T) {
 		") ENGINE=InnoDB")
 
 	move := &Move{
-		SourceDSN:       sourceDSN,
-		TargetDSN:       targetDSN,
-		TargetChunkTime: 5 * time.Second,
-		Threads:         2,
-		WriteThreads:    2,
-		CreateSentinel:  false,
+		SourceDSN:      sourceDSN,
+		TargetDSN:      targetDSN,
+		Threads:        2,
+		WriteThreads:   2,
+		CreateSentinel: false,
 	}
 	require.NoError(t, move.Run())
 }
@@ -302,12 +297,11 @@ func TestMoveReservedWordTableName(t *testing.T) {
 		") ENGINE=InnoDB")
 
 	move := &Move{
-		SourceDSN:       sourceDSN,
-		TargetDSN:       targetDSN,
-		TargetChunkTime: 5 * time.Second,
-		Threads:         2,
-		WriteThreads:    2,
-		CreateSentinel:  false,
+		SourceDSN:      sourceDSN,
+		TargetDSN:      targetDSN,
+		Threads:        2,
+		WriteThreads:   2,
+		CreateSentinel: false,
 	}
 	require.NoError(t, move.Run())
 }
@@ -344,11 +338,10 @@ func TestPostCopyAnalyzeTargetSchema(t *testing.T) {
 	})
 
 	move := &Move{
-		SourceDSN:       sourceDSN,
-		TargetDSN:       targetDSN,
-		TargetChunkTime: 5 * time.Second,
-		Threads:         1,
-		WriteThreads:    1,
+		SourceDSN:    sourceDSN,
+		TargetDSN:    targetDSN,
+		Threads:      1,
+		WriteThreads: 1,
 	}
 	r, err := NewRunner(move)
 	require.NoError(t, err)
@@ -447,7 +440,6 @@ func TestDeltasFlushedDuringIndexRestore(t *testing.T) {
 	move := &Move{
 		SourceDSN:             src.FormatDSN(),
 		TargetDSN:             dest.FormatDSN(),
-		TargetChunkTime:       100 * time.Millisecond,
 		Threads:               1,
 		WriteThreads:          1,
 		DeferSecondaryIndexes: true,
@@ -634,16 +626,13 @@ func TestMoveValidate(t *testing.T) {
 	}{
 		{name: "zero values are valid"},
 		{name: "typical values are valid", m: Move{
-			Threads:         2,
-			WriteThreads:    4,
-			TargetChunkTime: 5 * time.Second,
+			Threads:      2,
+			WriteThreads: 4,
 		}},
 		{name: "negative threads", m: Move{Threads: -5},
 			wantErr: "--threads must be non-negative, got -5"},
 		{name: "negative write-threads", m: Move{WriteThreads: -1},
 			wantErr: "--write-threads must be non-negative, got -1"},
-		{name: "negative target-chunk-time", m: Move{TargetChunkTime: -time.Second},
-			wantErr: "--target-chunk-time must be non-negative, got -1s"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

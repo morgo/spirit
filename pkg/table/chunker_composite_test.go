@@ -387,9 +387,11 @@ func TestCompositeLowWatermark(t *testing.T) {
 	t1 := NewTableInfo(db, "test", "compositewatermark_t1")
 	require.NoError(t, t1.SetInfo(t.Context()))
 
+	// A 100ms target (not ChunkerDefaultTarget) so the 1s feedback below lands
+	// past the 5x panic threshold and exercises the immediate shrink.
 	chunker := &chunkerComposite{
 		Ti:                t1,
-		dynamicChunkSizer: dynamicChunkSizer{ChunkerTarget: ChunkerDefaultTarget},
+		dynamicChunkSizer: dynamicChunkSizer{ChunkerTarget: 100 * time.Millisecond},
 		watermarkTracker:  watermarkTracker{lowerBoundWatermarkMap: make(map[string]*Chunk)},
 		logger:            slog.Default(),
 	}

@@ -249,7 +249,6 @@ func (r *Runner) Run(ctx context.Context) error {
 		"dirty", bi.Modified,
 		"concurrency", r.migration.Threads,
 		"target-chunk-size", r.migration.TargetChunkSize,
-		"target-chunk-time", r.migration.TargetChunkTime,
 	)
 
 	// Create a database connection
@@ -582,13 +581,12 @@ func (r *Runner) postCopyPhase(ctx context.Context) error {
 func (r *Runner) runChecks(ctx context.Context, scope check.ScopeFlag) error {
 	for _, change := range r.changes {
 		if err := check.RunChecks(ctx, check.Resources{
-			DB:              r.db,
-			Replicas:        r.replicas,
-			Table:           change.table,
-			Statement:       change.stmt,
-			TargetChunkTime: r.migration.TargetChunkTime,
-			Threads:         r.migration.Threads,
-			ReplicaMaxLag:   r.migration.ReplicaMaxLag,
+			DB:            r.db,
+			Replicas:      r.replicas,
+			Table:         change.table,
+			Statement:     change.stmt,
+			Threads:       r.migration.Threads,
+			ReplicaMaxLag: r.migration.ReplicaMaxLag,
 			// For the pre-run checks we don't have a DB connection yet.
 			// Instead we check the credentials provided.
 			Host:                 r.migration.Host,
@@ -885,7 +883,7 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context, resumePosi
 
 	r.checker, err = checksum.NewChecker([]*sql.DB{r.db}, r.checksumChunker, []change.Source{r.replClient}, &checksum.CheckerConfig{
 		Concurrency:     r.migration.Threads,
-		TargetChunkTime: r.migration.TargetChunkTime,
+		TargetChunkTime: table.ChunkerDefaultTarget,
 		DBConfig:        r.dbConfig,
 		Logger:          r.logger,
 		FixDifferences:  true,
@@ -1648,11 +1646,12 @@ func (r *Runner) initChunkers() error {
 			)
 		}
 		columnMapping := table.NewColumnMapping(change.table, change.newTable, columnRenames)
+		// TargetChunkTime is left unset: the time signal is a constant
+		// (table.ChunkerDefaultTarget), not a per-run knob.
 		chunkerCfg := table.ChunkerConfig{
-			NewTable:        change.newTable,
-			TargetChunkTime: r.migration.TargetChunkTime,
-			Logger:          r.logger,
-			ColumnMapping:   columnMapping,
+			NewTable:      change.newTable,
+			Logger:        r.logger,
+			ColumnMapping: columnMapping,
 		}
 		// The copier sizes chunks by an in-memory byte budget rather than
 		// copy time — it reads rows into client memory, and its time signal
@@ -2001,7 +2000,6 @@ func (r *Runner) runContinuousChecksum(ctx context.Context) error {
 			// TODO(#831): once the throttler can size threads dynamically,
 			// replace the hard-coded 1 with the migration's thread count.
 			Concurrency:     1,
-			TargetChunkTime: r.migration.TargetChunkTime,
 			MinPassInterval: checksum.ContinuousMinPassInterval,
 			// RetryDelay omitted: the constructor defaults it to
 			// checksum.DefaultContinuousRetryDelay.
@@ -2064,10 +2062,9 @@ func (r *Runner) buildContinuousChunker() (table.Chunker, error) {
 		columnRenames := change.stmt.ColumnRenameMap()
 		columnMapping := table.NewColumnMapping(change.table, change.newTable, columnRenames)
 		c, err := table.NewChunker(change.table, table.ChunkerConfig{
-			NewTable:        change.newTable,
-			TargetChunkTime: r.migration.TargetChunkTime,
-			Logger:          r.logger,
-			ColumnMapping:   columnMapping,
+			NewTable:      change.newTable,
+			Logger:        r.logger,
+			ColumnMapping: columnMapping,
 		})
 		if err != nil {
 			return nil, err

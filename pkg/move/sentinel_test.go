@@ -52,12 +52,11 @@ func TestMoveSentinelDropReleasesCutover(t *testing.T) {
 	defer utils.CloseAndLog(ctl)
 
 	m := &Move{
-		SourceDSN:       src.FormatDSN(),
-		TargetDSN:       dst.FormatDSN(),
-		TargetChunkTime: time.Second,
-		Threads:         1,
-		WriteThreads:    1,
-		CreateSentinel:  true,
+		SourceDSN:      src.FormatDSN(),
+		TargetDSN:      dst.FormatDSN(),
+		Threads:        1,
+		WriteThreads:   1,
+		CreateSentinel: true,
 	}
 	runner, err := NewRunner(m)
 	require.NoError(t, err)

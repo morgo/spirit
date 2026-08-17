@@ -103,12 +103,11 @@ func TestMoveReverseWindowCompleteForward(t *testing.T) {
 	sourceDSN, targetDSN, ctl := setupReverseWindowMove(t, "rwcf_src", "rwcf_dst")
 
 	m := &Move{
-		SourceDSN:       sourceDSN,
-		TargetDSN:       targetDSN,
-		TargetChunkTime: time.Second,
-		Threads:         1,
-		WriteThreads:    1,
-		ReverseWindow:   2 * time.Second,
+		SourceDSN:     sourceDSN,
+		TargetDSN:     targetDSN,
+		Threads:       1,
+		WriteThreads:  1,
+		ReverseWindow: 2 * time.Second,
 	}
 	runner, err := NewRunner(m)
 	require.NoError(t, err)
@@ -137,12 +136,11 @@ func TestMoveReverseWindowRevert(t *testing.T) {
 	sourceDSN, targetDSN, ctl := setupReverseWindowMove(t, "rwrv_src", "rwrv_dst")
 
 	m := &Move{
-		SourceDSN:       sourceDSN,
-		TargetDSN:       targetDSN,
-		TargetChunkTime: time.Second,
-		Threads:         1,
-		WriteThreads:    1,
-		ReverseWindow:   30 * time.Second, // long; the revert ends it early
+		SourceDSN:     sourceDSN,
+		TargetDSN:     targetDSN,
+		Threads:       1,
+		WriteThreads:  1,
+		ReverseWindow: 30 * time.Second, // long; the revert ends it early
 	}
 	runner, err := NewRunner(m)
 	require.NoError(t, err)
@@ -192,12 +190,11 @@ func TestMoveReverseWindowRevert(t *testing.T) {
 func runRevertingMove(t *testing.T, sourceDSN, targetDSN string, ctl *sql.DB, dstDBName string) {
 	t.Helper()
 	m := &Move{
-		SourceDSN:       sourceDSN,
-		TargetDSN:       targetDSN,
-		TargetChunkTime: time.Second,
-		Threads:         1,
-		WriteThreads:    1,
-		ReverseWindow:   30 * time.Second, // long; the revert ends it early
+		SourceDSN:     sourceDSN,
+		TargetDSN:     targetDSN,
+		Threads:       1,
+		WriteThreads:  1,
+		ReverseWindow: 30 * time.Second, // long; the revert ends it early
 	}
 	runner, err := NewRunner(m)
 	require.NoError(t, err)
@@ -246,7 +243,6 @@ func TestMoveReverseWindowResumesAfterKill(t *testing.T) {
 	// without completing it. The checkpoint (phase=reverse_window) survives.
 	run1, err := NewRunner(&Move{
 		SourceDSN: sourceDSN, TargetDSN: targetDSN,
-		TargetChunkTime: time.Second, Threads: 1, WriteThreads: 1,
 		ReverseWindow: 30 * time.Second,
 	})
 	require.NoError(t, err)
@@ -277,7 +273,6 @@ func TestMoveReverseWindowResumesAfterKill(t *testing.T) {
 	// the rollback completes.
 	run2, err := NewRunner(&Move{
 		SourceDSN: sourceDSN, TargetDSN: targetDSN,
-		TargetChunkTime: time.Second, Threads: 1, WriteThreads: 1,
 		ReverseWindow: 30 * time.Second,
 	})
 	require.NoError(t, err)
@@ -316,12 +311,11 @@ func TestMoveReverseWindowRefusesStaleRevertMarker(t *testing.T) {
 	testutils.RunSQL(t, "CREATE TABLE rwsm_dst."+revertMarkerName+" (id INT)")
 
 	m := &Move{
-		SourceDSN:       sourceDSN,
-		TargetDSN:       targetDSN,
-		TargetChunkTime: time.Second,
-		Threads:         1,
-		WriteThreads:    1,
-		ReverseWindow:   2 * time.Second,
+		SourceDSN:     sourceDSN,
+		TargetDSN:     targetDSN,
+		Threads:       1,
+		WriteThreads:  1,
+		ReverseWindow: 2 * time.Second,
 	}
 	runner, err := NewRunner(m)
 	require.NoError(t, err)
@@ -339,11 +333,10 @@ func TestMoveReverseWindowRefusesStaleRevertMarker(t *testing.T) {
 func TestMoveReverseWindowShardedSourceGuards(t *testing.T) {
 	newShardedMove := func() *Move {
 		return &Move{
-			SourceDSNs:      []string{"u:p@tcp(127.0.0.1:3306)/a", "u:p@tcp(127.0.0.1:3306)/b"},
-			TargetChunkTime: time.Second,
-			Threads:         1,
-			WriteThreads:    1,
-			ReverseWindow:   time.Second,
+			SourceDSNs:    []string{"u:p@tcp(127.0.0.1:3306)/a", "u:p@tcp(127.0.0.1:3306)/b"},
+			Threads:       1,
+			WriteThreads:  1,
+			ReverseWindow: time.Second,
 		}
 	}
 	provider := &testShardingProvider{shardingColumn: "id", hashFunc: testutils.EvenOddHasher}
@@ -444,7 +437,6 @@ func (f *nmReverseFixture) newRunner(t *testing.T, window time.Duration) *Runner
 		SourceTables:            []string{"users"},
 		ShardingProvider:        provider,
 		ReverseShardingProvider: provider,
-		TargetChunkTime:         time.Second,
 		Threads:                 1,
 		WriteThreads:            1,
 		ReverseWindow:           window,

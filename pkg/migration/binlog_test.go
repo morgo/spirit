@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"math"
 	"testing"
-	"time"
 
 	"github.com/block/spirit/pkg/copier"
 	"github.com/block/spirit/pkg/dbconn"
@@ -235,8 +234,7 @@ func TestE2EBinlogSubscribingCompositeKeyVarchar(t *testing.T) {
 	// Seed with UUID-based session_ids — each doubling generates new unique UUIDs.
 	tt.SeedRows(t, "INSERT INTO e2et3 (session_id, event_id) SELECT UUID(), FLOOR(RAND()*1000)", 64)
 
-	m := NewTestRunner(t, "e2et3", "ENGINE=InnoDB",
-		WithTargetChunkTime(50*time.Millisecond))
+	m := NewTestRunner(t, "e2et3", "ENGINE=InnoDB")
 	defer func() {
 		require.NoError(t, m.Close())
 	}()
@@ -339,8 +337,7 @@ func TestE2EBinlogSubscribingCompositeKeyCollation(t *testing.T) {
 		SELECT CONCAT('key', LPAD(n, 4, '0')), n + 800 FROM seq`)
 
 	m := NewTestRunner(t, "e2et_collation", "ENGINE=InnoDB",
-		WithThreads(1),
-		WithTargetChunkTime(100*time.Millisecond))
+		WithThreads(1))
 	defer func() {
 		require.NoError(t, m.Close())
 	}()
@@ -488,8 +485,7 @@ func TestE2EBinlogSubscribingCompositeKeyBinary(t *testing.T) {
 	}
 
 	m := NewTestRunner(t, "e2et_binary", "ENGINE=InnoDB",
-		WithThreads(1),
-		WithTargetChunkTime(100*time.Millisecond))
+		WithThreads(1))
 	defer func() {
 		require.NoError(t, m.Close())
 	}()
@@ -630,8 +626,7 @@ func TestE2EBinlogSubscribingCompositeKeyDateTime(t *testing.T) {
 		insertRows(i)
 	}
 
-	m := NewTestRunner(t, "e2et4", "ENGINE=InnoDB",
-		WithTargetChunkTime(50*time.Millisecond))
+	m := NewTestRunner(t, "e2et4", "ENGINE=InnoDB")
 	defer func() {
 		require.NoError(t, m.Close())
 	}()

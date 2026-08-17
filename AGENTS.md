@@ -110,8 +110,7 @@ assert.NoError(t, m.Close())
 // With options
 m := NewTestRunner(t, "mytable", "ADD INDEX idx_a (a)",
     WithThreads(1),
-    WithTargetChunkTime(100*time.Millisecond),
-    WithBuffered(false), // opt out of the default buffered copier
+    WithTestThrottler(),
 )
 ```
 
@@ -132,7 +131,7 @@ m.Alter = "ENGINE=InnoDB"
 require.NoError(t, m.Run())
 ```
 
-Available options: `WithThreads(n)`, `WithTargetChunkTime(d)`, `WithBuffered(b)`, `WithTable(name)`, `WithAlter(stmt)`, `WithStatement(sql)`, `WithTestThrottler()`, `WithDeferCutOver()`, `WithSkipDropAfterCutover()`, `WithDBName(name)`, `WithRespectSentinel()`, `WithHost(host)`, `WithReplicaDSN(dsn)`, `WithReplicaMaxLag(d)`, `WithConfFile(t, content)`.
+Available options: `WithThreads(n)`, `WithTable(name)`, `WithAlter(stmt)`, `WithStatement(sql)`, `WithTestThrottler()`, `WithDeferCutOver()`, `WithSkipDropAfterCutover()`, `WithDBName(name)`, `WithRespectSentinel()`, `WithHost(host)`, `WithReplicaDSN(dsn)`, `WithReplicaMaxLag(d)`, `WithConfFile(t, content)`.
 
 **General test patterns:**
 - Integration tests connect to real MySQL — there are no mocked database tests for core logic
@@ -191,7 +190,7 @@ scripts/      → Build and run helper scripts
 
 ### Key design decisions
 
-- **Dynamic chunking**: chunk size auto-adjusts against a target based on the 90th percentile of the last 10 chunks, rather than a fixed row count. The copier targets an in-memory *byte budget* (`--target-chunk-size`, default `table.DefaultTargetChunkBytes` = 16 MiB); the checksum targets a *chunk time* (`--target-chunk-time`, default 500ms for migrate).
+- **Dynamic chunking**: chunk size auto-adjusts against a target based on the 90th percentile of the last 10 chunks, rather than a fixed row count. The copier targets an in-memory *byte budget* (`--target-chunk-size`, default `table.DefaultTargetChunkBytes` = 16 MiB); the checksum targets a *chunk time* (`table.ChunkerDefaultTarget` = 5s, a constant — there is no `--target-chunk-time` flag).
 - **Change row map**: binlog changes are deduplicated in a map before flushing, so a row updated 10 times is only copied once.
 - **High watermark optimization**: binlog changes above the copier's current position are discarded (only for auto-increment PKs).
 - **Checkpoint/resume**: progress is saved periodically; interrupted migrations resume automatically with ~1 minute of lost progress.

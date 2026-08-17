@@ -41,9 +41,8 @@ import (
 // programmatic callers (e.g. strata's Vitess/PlanetScale import) that
 // inject a non-MySQL change source and/or a custom applier.
 type Sync struct {
-	SourceDSN       string        `name:"source-dsn" help:"Where to sync the tables from." default:"spirit:spirit@tcp(127.0.0.1:3306)/src"`
-	TargetDSN       string        `name:"target-dsn" help:"Where to sync the tables to." default:"spirit:spirit@tcp(127.0.0.1:3306)/dest"`
-	TargetChunkTime time.Duration `name:"target-chunk-time" help:"Target time for each checksum chunk. The copy phase is sized by an in-memory byte budget and does not use this." default:"5s"`
+	SourceDSN string `name:"source-dsn" help:"Where to sync the tables from." default:"spirit:spirit@tcp(127.0.0.1:3306)/src"`
+	TargetDSN string `name:"target-dsn" help:"Where to sync the tables to." default:"spirit:spirit@tcp(127.0.0.1:3306)/dest"`
 	// TargetChunkSize is the in-memory byte budget the buffered copier sizes each
 	// copy chunk against (see table.DefaultTargetChunkBytes). Sync always uses the
 	// buffered copier. A zero value means "use the default" (the runner fills it
@@ -120,9 +119,6 @@ func (s *Sync) Validate() error {
 	}
 	if s.WriteThreads < 0 {
 		return fmt.Errorf("--write-threads must be non-negative, got %d", s.WriteThreads)
-	}
-	if s.TargetChunkTime < 0 {
-		return fmt.Errorf("--target-chunk-time must be non-negative, got %s", s.TargetChunkTime)
 	}
 	if s.FlushInterval < 0 {
 		return fmt.Errorf("--flush-interval must be non-negative, got %s", s.FlushInterval)

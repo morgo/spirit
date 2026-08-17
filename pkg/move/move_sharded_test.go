@@ -84,7 +84,6 @@ func TestShardedMove(t *testing.T) {
 	// Configure the move with multiple targets
 	move := &Move{
 		SourceDSN:        sourceDSN,
-		TargetChunkTime:  5 * time.Second,
 		Threads:          2,
 		WriteThreads:     2,
 		ShardingProvider: shardingProvider,
@@ -193,12 +192,11 @@ func TestNtoMShardedMove(t *testing.T) {
 	}
 
 	move := &Move{
-		SourceDSNs:      []string{src0DSN, src1DSN},
-		TargetChunkTime: 100 * time.Millisecond,
-		Threads:         2,
-		WriteThreads:    2,
-		Targets:         targets,
-		SourceTables:    []string{"users"},
+		SourceDSNs:   []string{src0DSN, src1DSN},
+		Threads:      2,
+		WriteThreads: 2,
+		Targets:      targets,
+		SourceTables: []string{"users"},
 		ShardingProvider: &testShardingProvider{
 			shardingColumn: "id",
 			hashFunc:       testutils.EvenOddHasher,
@@ -318,12 +316,11 @@ func TestNtoMShardedMoveCheckpointDeterminism(t *testing.T) {
 	}
 
 	move := &Move{
-		SourceDSNs:      reversedDSNs,
-		TargetChunkTime: 100 * time.Millisecond,
-		Threads:         2,
-		WriteThreads:    2,
-		Targets:         reversedTargets,
-		SourceTables:    []string{"users"},
+		SourceDSNs:   reversedDSNs,
+		Threads:      2,
+		WriteThreads: 2,
+		Targets:      reversedTargets,
+		SourceTables: []string{"users"},
 		ShardingProvider: &testShardingProvider{
 			shardingColumn: "id",
 			hashFunc:       testutils.EvenOddHasher,
@@ -387,10 +384,9 @@ func TestShardedMoveVindexUpdateFails(t *testing.T) {
 	require.NoError(t, err)
 
 	move := &Move{
-		SourceDSN:       testutils.DSNForDatabase(srcName),
-		TargetChunkTime: 100 * time.Millisecond,
-		Threads:         2,
-		WriteThreads:    2,
+		SourceDSN:    testutils.DSNForDatabase(srcName),
+		Threads:      2,
+		WriteThreads: 2,
 		// The sentinel blocks the move before cutover, giving the test a
 		// deterministic window in which the repl client is streaming.
 		CreateSentinel: true,

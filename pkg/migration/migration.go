@@ -51,13 +51,6 @@ type Migration struct {
 	// derived from the instance instead — see the override in
 	// setupCopierCheckerAndReplClient and autoscale.ReadBounds. See issue #831.
 	EnableExperimentalAutoscaling bool `name:"enable-experimental-autoscaling" help:"EXPERIMENTAL: size the copy, apply and checksum thread pools from the instance and scale them on throttler feedback. Overrides --threads and --write-threads. Requires an Aurora target" optional:"" default:"false"`
-	// TargetChunkTime sizes chunks for the time-based signal: the checksum
-	// (server-side CRC). The copier ignores it and sizes chunks by an
-	// in-memory byte budget (table.DefaultTargetChunkBytes), because its
-	// fed-back time measures read + applier-queue-wait + write/commit — a
-	// signal that is size-independent under backpressure and collapses the
-	// chunk size.
-	TargetChunkTime time.Duration `name:"target-chunk-time" help:"Target time per chunk for the checksum. The copier sizes chunks by memory instead; see --target-chunk-size." optional:"" default:"500ms"`
 	// TargetChunkSize is the in-memory byte budget the copier sizes each copy
 	// chunk against (the memory signal; see table.DefaultTargetChunkBytes and
 	// pkg/table/README.md). A zero value means "use the default"
@@ -108,9 +101,6 @@ func (m *Migration) Validate() error {
 	if m.WriteThreads < 0 {
 		return fmt.Errorf("--write-threads must be non-negative, got %d", m.WriteThreads)
 	}
-	if m.TargetChunkTime < 0 {
-		return fmt.Errorf("--target-chunk-time must be non-negative, got %s", m.TargetChunkTime)
-	}
 	if m.ReplicaMaxLag < 0 {
 		return fmt.Errorf("--replica-max-lag must be non-negative, got %s", m.ReplicaMaxLag)
 	}
@@ -141,9 +131,6 @@ func (m *Migration) Run() error {
 // so the rest of the code can use --statement as the canonical
 // source of truth for what's happening.
 func (m *Migration) normalizeOptions() (stmts []*statement.AbstractStatement, err error) {
-	if m.TargetChunkTime == 0 {
-		m.TargetChunkTime = table.ChunkerDefaultTarget
-	}
 	if m.TargetChunkSize == 0 {
 		m.TargetChunkSize = table.DefaultTargetChunkBytes
 	}

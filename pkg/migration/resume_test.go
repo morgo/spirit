@@ -58,7 +58,6 @@ func TestChangeIntToBigIntPKResumeFromChkPt(t *testing.T) {
 
 	m := NewTestRunner(t, "bigintpk", alterSQL,
 		WithThreads(1),
-		WithTargetChunkTime(100*time.Millisecond),
 		WithTestThrottler())
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -126,7 +125,6 @@ func TestCheckpoint(t *testing.T) {
 			Database:         cfg.DBName,
 			Threads:          1,
 			WriteThreads:     1,
-			TargetChunkTime:  100 * time.Millisecond,
 			Statement:        "ALTER TABLE cpt1 ENGINE=InnoDB",
 			useTestThrottler: true,
 		})
@@ -343,7 +341,6 @@ func TestCheckpointRestoreBinaryPK(t *testing.T) {
 	// has been saved.
 	m := NewTestRunner(t, "binarypk", "ENGINE=InnoDB",
 		WithThreads(1),
-		WithTargetChunkTime(100*time.Millisecond),
 		WithTestThrottler())
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -382,7 +379,6 @@ func TestCheckpointResumeDuringChecksum(t *testing.T) {
 	r := NewTestRunner(t, "cptresume", "ENGINE=InnoDB",
 		WithDBName(dbName),
 		WithThreads(4),
-		WithTargetChunkTime(100*time.Millisecond),
 		WithRespectSentinel())
 
 	// Call r.Run() with our context in a go-routine.
@@ -416,8 +412,7 @@ func TestCheckpointResumeDuringChecksum(t *testing.T) {
 	// Start again as a new runner.
 	r2 := NewTestRunner(t, "cptresume", "ENGINE=InnoDB",
 		WithDBName(dbName),
-		WithThreads(4),
-		WithTargetChunkTime(100*time.Millisecond))
+		WithThreads(4))
 	require.NoError(t, r2.Run(t.Context()))
 	defer utils.CloseAndLog(r2)
 	require.True(t, r2.usedResumeFromCheckpoint.Load())
@@ -437,7 +432,6 @@ func TestCheckpointDifferentRestoreOptions(t *testing.T) {
 	// run slowly and interrupt once a checkpoint has been saved.
 	m := NewTestRunner(t, "cpt1difft1", "ADD COLUMN id3 INT NOT NULL DEFAULT 0, ADD INDEX(id2)",
 		WithThreads(1),
-		WithTargetChunkTime(100*time.Millisecond),
 		WithTestThrottler())
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -457,14 +451,13 @@ func TestCheckpointDifferentRestoreOptions(t *testing.T) {
 	// fresh — see TestResumeFromCheckpointCleanupOnFailure). This check is
 	// copier-agnostic, so the runner uses the default buffered copier.
 	m2, err := NewRunner(&Migration{
-		Host:            cfg.Addr,
-		Username:        cfg.User,
-		Password:        &cfg.Passwd,
-		Database:        cfg.DBName,
-		Threads:         2,
-		WriteThreads:    2,
-		Statement:       "ALTER TABLE cpt1difft1 ADD COLUMN id4 INT NOT NULL DEFAULT 0, ADD INDEX(id2)",
-		TargetChunkTime: 100 * time.Millisecond,
+		Host:         cfg.Addr,
+		Username:     cfg.User,
+		Password:     &cfg.Passwd,
+		Database:     cfg.DBName,
+		Threads:      2,
+		WriteThreads: 2,
+		Statement:    "ALTER TABLE cpt1difft1 ADD COLUMN id4 INT NOT NULL DEFAULT 0, ADD INDEX(id2)",
 	})
 	require.NoError(t, err)
 	m2.db, err = dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
@@ -492,7 +485,6 @@ func TestResumeFromCheckpointE2E(t *testing.T) {
 	// when we kill it once we have a checkpoint saved.
 	m := NewTestRunner(t, "chkpresumetest", alterSQL,
 		WithThreads(1),
-		WithTargetChunkTime(100*time.Millisecond),
 		WithTestThrottler())
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -550,7 +542,6 @@ FROM compositevarcharpk a WHERE version='1'`)
 
 	m := NewTestRunner(t, "compositevarcharpk", "ENGINE=InnoDB",
 		WithThreads(1),
-		WithTargetChunkTime(100*time.Millisecond),
 		WithTestThrottler())
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -618,7 +609,6 @@ func TestResumeFromCheckpointE2EWithManualSentinel(t *testing.T) {
 	runner := NewTestRunner(t, tableName, alterSQL,
 		WithDBName(dbName),
 		WithThreads(1),
-		WithTargetChunkTime(100*time.Millisecond),
 		WithTestThrottler(),
 		WithRespectSentinel())
 
@@ -698,7 +688,6 @@ func TestResumeFromCheckpointCleanupOnFailure(t *testing.T) {
 	// First run: create a checkpoint that we can manipulate
 	m := NewTestRunner(t, "cleanup_test", "ENGINE=InnoDB",
 		WithThreads(1),
-		WithTargetChunkTime(100*time.Millisecond),
 		WithTestThrottler())
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -752,7 +741,6 @@ func TestResumeFromCheckpointTooOld(t *testing.T) {
 	// First run: create a checkpoint
 	m := NewTestRunner(t, "chkpttooold", "ENGINE=InnoDB",
 		WithThreads(1),
-		WithTargetChunkTime(100*time.Millisecond),
 		WithTestThrottler())
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -791,7 +779,6 @@ func TestResumeFromCheckpointNotTooOld(t *testing.T) {
 	// First run: create a checkpoint
 	m := NewTestRunner(t, "chkptnotold", "ENGINE=InnoDB",
 		WithThreads(1),
-		WithTargetChunkTime(100*time.Millisecond),
 		WithTestThrottler())
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -831,7 +818,6 @@ func TestResumeRejectsCheckpointFromDifferentTable(t *testing.T) {
 	// First run: produce a real checkpoint via normal flow.
 	m := NewTestRunner(t, "chkptmismatch", "ENGINE=InnoDB",
 		WithThreads(1),
-		WithTargetChunkTime(100*time.Millisecond),
 		WithTestThrottler())
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -877,7 +863,6 @@ func TestResumeTransientErrorPreservesState(t *testing.T) {
 	// First run: produce a real checkpoint via normal flow, then stop.
 	m := NewTestRunner(t, "transientresume", "ENGINE=InnoDB",
 		WithThreads(1),
-		WithTargetChunkTime(100*time.Millisecond),
 		WithTestThrottler())
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -898,14 +883,13 @@ func TestResumeTransientErrorPreservesState(t *testing.T) {
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	require.NoError(t, err)
 	r, err := NewRunner(&Migration{
-		Host:            cfg.Addr,
-		Username:        cfg.User,
-		Password:        &cfg.Passwd,
-		Database:        cfg.DBName,
-		Threads:         1,
-		WriteThreads:    1,
-		TargetChunkTime: 100 * time.Millisecond,
-		Statement:       "ALTER TABLE transientresume ENGINE=InnoDB",
+		Host:         cfg.Addr,
+		Username:     cfg.User,
+		Password:     &cfg.Passwd,
+		Database:     cfg.DBName,
+		Threads:      1,
+		WriteThreads: 1,
+		Statement:    "ALTER TABLE transientresume ENGINE=InnoDB",
 	})
 	require.NoError(t, err)
 	r.dbConfig = dbconn.NewDBConfig()

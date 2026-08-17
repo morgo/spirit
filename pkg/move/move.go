@@ -11,9 +11,8 @@ import (
 )
 
 type Move struct {
-	SourceDSN       string        `name:"source-dsn" help:"Where to copy the tables from." default:"spirit:spirit@tcp(127.0.0.1:3306)/src"`
-	TargetDSN       string        `name:"target-dsn" help:"Where to copy the tables to." default:"spirit:spirit@tcp(127.0.0.1:3306)/dest"`
-	TargetChunkTime time.Duration `name:"target-chunk-time" help:"Target time for each checksum chunk. The copy phase is sized by an in-memory byte budget and does not use this." default:"5s"`
+	SourceDSN string `name:"source-dsn" help:"Where to copy the tables from." default:"spirit:spirit@tcp(127.0.0.1:3306)/src"`
+	TargetDSN string `name:"target-dsn" help:"Where to copy the tables to." default:"spirit:spirit@tcp(127.0.0.1:3306)/dest"`
 	// TargetChunkSize is the in-memory byte budget the buffered copier sizes each
 	// copy chunk against (see table.DefaultTargetChunkBytes). Move always uses the
 	// buffered copier. A zero value means "use the default" (NewRunner fills it
@@ -89,9 +88,6 @@ func (m *Move) Validate() error {
 	}
 	if m.WriteThreads < 0 {
 		return fmt.Errorf("--write-threads must be non-negative, got %d", m.WriteThreads)
-	}
-	if m.TargetChunkTime < 0 {
-		return fmt.Errorf("--target-chunk-time must be non-negative, got %s", m.TargetChunkTime)
 	}
 	if m.ReverseWindow < 0 {
 		return fmt.Errorf("--reverse-window must be non-negative, got %s", m.ReverseWindow)

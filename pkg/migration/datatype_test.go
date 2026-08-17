@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/testutils"
@@ -193,7 +192,6 @@ func TestEnumReorder(t *testing.T) {
 
 	m := NewTestRunner(t, "enumreorder", "MODIFY COLUMN status ENUM('pending', 'active', 'inactive') NOT NULL",
 		WithThreads(1),
-		WithTargetChunkTime(100*time.Millisecond),
 		WithTestThrottler())
 
 	// Concurrent DML during copy phase to exercise binlog replay.
@@ -241,7 +239,6 @@ func TestSetReorder(t *testing.T) {
 
 	m := NewTestRunner(t, "setreorder", "MODIFY COLUMN perms SET('execute', 'read', 'write') NOT NULL",
 		WithThreads(1),
-		WithTargetChunkTime(100*time.Millisecond),
 		WithTestThrottler())
 
 	// Concurrent DML during copy phase.
@@ -309,7 +306,6 @@ func TestEnumDrop(t *testing.T) {
 
 	m := NewTestRunner(t, tableName, "MODIFY COLUMN status ENUM('active', 'pending', 'archived') NOT NULL",
 		WithThreads(1),
-		WithTargetChunkTime(100*time.Millisecond),
 		WithTestThrottler())
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -374,7 +370,6 @@ func TestEnumDropWithDroppedValueInData(t *testing.T) {
 
 	m := NewTestRunner(t, "enumdrop_unsafe", "MODIFY COLUMN status ENUM('active', 'pending') NOT NULL",
 		WithThreads(1),
-		WithTargetChunkTime(100*time.Millisecond),
 		WithTestThrottler())
 
 	err = m.Run(t.Context())
@@ -401,7 +396,6 @@ func TestEnumToVarchar(t *testing.T) {
 
 	m := NewTestRunner(t, "enumtovarchar", "MODIFY COLUMN status VARCHAR(32) NOT NULL",
 		WithThreads(1),
-		WithTargetChunkTime(100*time.Millisecond),
 		WithTestThrottler())
 
 	// Concurrent DML during the copy phase exercises the binlog replay
@@ -472,7 +466,6 @@ func TestSetToVarchar(t *testing.T) {
 
 	m := NewTestRunner(t, "settovarchar", "MODIFY COLUMN perms VARCHAR(64) NOT NULL",
 		WithThreads(1),
-		WithTargetChunkTime(100*time.Millisecond),
 		WithTestThrottler())
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -531,7 +524,6 @@ func TestEnumToSet(t *testing.T) {
 	m := NewTestRunner(t, "enumtoset_mig",
 		"MODIFY COLUMN status SET('active', 'inactive', 'pending') NOT NULL",
 		WithThreads(1),
-		WithTargetChunkTime(100*time.Millisecond),
 		WithTestThrottler())
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -601,7 +593,6 @@ func TestBufferedMigrationFailsGracefullyWithMinimalRBR(t *testing.T) {
 
 	m := NewTestRunner(t, "minrbr_buffered", "ENGINE=InnoDB",
 		WithThreads(1),
-		WithTargetChunkTime(100*time.Millisecond),
 		WithTestThrottler())
 
 	// Run the migration in a goroutine so we can inject minimal-RBR writes.
@@ -778,7 +769,6 @@ func TestAlterPKIntToBigIntWithDMLAndAdditionalColumnChange(t *testing.T) {
 	m := NewTestRunner(t, "altpk_multi",
 		"MODIFY COLUMN id BIGINT NOT NULL AUTO_INCREMENT, MODIFY COLUMN name VARCHAR(255) NOT NULL",
 		WithThreads(2),
-		WithTargetChunkTime(100*time.Millisecond),
 		WithTestThrottler())
 
 	var wg sync.WaitGroup
@@ -883,7 +873,6 @@ func TestBinaryToVarbinaryConcurrentDML(t *testing.T) {
 
 	m := NewTestRunner(t, "bin2varbin", "MODIFY data VARBINARY(32) NOT NULL",
 		WithThreads(1),
-		WithTargetChunkTime(100*time.Millisecond),
 		WithTestThrottler())
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -1065,7 +1054,6 @@ func runBitDMLTest(t *testing.T, tableName, colName, colDef string, values []uin
 
 	m := NewTestRunner(t, tableName, "ENGINE=InnoDB",
 		WithThreads(1),
-		WithTargetChunkTime(100*time.Millisecond),
 		WithTestThrottler())
 
 	ctx, cancel := context.WithCancel(t.Context())

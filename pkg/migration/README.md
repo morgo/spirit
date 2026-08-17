@@ -77,7 +77,6 @@ func (sm *Spirit) Execute(ctx context.Context, m *ExecutableTask) error {
 		Password:          &m.Cluster.Password,
 		Database:          m.Cluster.DatabaseName,
 		Statement:         m.Statement,
-		TargetChunkTime:   m.TargetChunkTime,
 		Threads:           m.Concurrency,
 		LockWaitTimeout:   m.LockWaitTimeout,
 		InterpolateParams: true,
