@@ -5852,8 +5852,11 @@ PredicateExpr:
 			EscapeExplicit: explicit,
 		}
 	}
-|	BitExpr RegexpOrNotOp SimpleExpr
+|	BitExpr RegexpOrNotOp BitExpr
 	{
+		// The pattern is a full bit_expr, unlike LIKE's, which is a
+		// simple_expr: `'a' REGEXP 'a' + 'b'` is valid, `'a' LIKE 'a' + 'b'`
+		// is not.
 		$$ = &ast.PatternRegexpExpr{Expr: $1, Pattern: $3, Not: !$2.(bool)}
 	}
 |	BitExpr memberof '(' SimpleExpr ')'

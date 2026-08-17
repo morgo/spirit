@@ -238,6 +238,11 @@ func (d *MyDecimal) FromString(str []byte) error {
 		// surface the overflow/truncation.
 		digitsFrac = wordsFrac * digitsPerWord
 		if errors.Is(err, types.ErrDataOutOfRange) {
+			// strIdx deliberately stays put. The extraction loop below walks
+			// backwards from it, so leaving it alone keeps the literal's
+			// trailing digits, which is what MySQL's own warning text quotes:
+			// `SELECT <65 ones><65 twos>` reports the last 81 digits, not the
+			// first. The value itself is clamped by the caller either way.
 			digitsInt = wordsInt * digitsPerWord
 		}
 	}

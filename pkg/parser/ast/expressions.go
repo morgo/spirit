@@ -1072,6 +1072,15 @@ func canRestoreBinaryChildWithoutParentheses(parentOp, childOp opcode.Op, side i
 	if parentPrecedence == 0 || childPrecedence == 0 {
 		return false
 	}
+	if restoreOpTakesFixedOperands(parentOp) {
+		// The subject of these operators is a bit_expr, so it can drop its
+		// parentheses only when it binds at least as tightly as one -- the
+		// bitwise OR level. The remaining operands differ per operator (LIKE
+		// takes a simple_expr pattern, BETWEEN a bit_expr lower bound and a
+		// predicate upper bound), so they keep their parentheses rather than
+		// have each position modelled separately.
+		return side == binaryOpLeftSide && childPrecedence >= restoreBinaryPrecedence(opcode.Or)
+	}
 	if childPrecedence > parentPrecedence {
 		return true
 	}
@@ -1079,6 +1088,22 @@ func canRestoreBinaryChildWithoutParentheses(parentOp, childOp opcode.Op, side i
 		return false
 	}
 	return side == binaryOpLeftSide || isAssociativeRestoreOp(parentOp, childOp)
+}
+
+// restoreOpTakesFixedOperands reports whether op is one of the predicate
+// operators whose operands are fixed productions in MySQL's grammar rather than
+// expressions at op's own precedence level. They look like ordinary infix
+// operators but do not nest like them: dropping an operand's parentheses either
+// rebinds the expression, since MySQL reads `a = b BETWEEN 1 AND 10` as
+// `a = (b BETWEEN 1 AND 10)`, or produces text the server rejects outright, as
+// it does `a IN (1,2) IN (3,4)`.
+func restoreOpTakesFixedOperands(op opcode.Op) bool {
+	switch op { //nolint:exhaustive
+	case restoreOpBetween, opcode.In, opcode.Like, opcode.Regexp, restoreOpMemberOf:
+		return true
+	default:
+		return false
+	}
 }
 
 // restoreBinaryPrecedence follows MySQL operator precedence: larger values bind

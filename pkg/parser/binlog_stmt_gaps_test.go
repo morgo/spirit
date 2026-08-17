@@ -1608,3 +1608,17 @@ func TestIntervalArity(t *testing.T) {
 	}
 	RunTest(t, table, false)
 }
+
+// TestRegexpPattern pins REGEXP's pattern as a full bit_expr. LIKE's pattern is
+// a simple_expr, so the same shape is a syntax error there — on a live server
+// too.
+func TestRegexpPattern(t *testing.T) {
+	table := []testCase{
+		{"SELECT 'a' REGEXP 'a' + 'b'", true, "SELECT _UTF8MB4'a' REGEXP _UTF8MB4'a'+_UTF8MB4'b'"},
+		{"SELECT a REGEXP b | c", true, "SELECT `a` REGEXP `b`|`c`"},
+		{"SELECT a RLIKE b + c", true, "SELECT `a` REGEXP `b`+`c`"},
+		{"SELECT a NOT REGEXP b + c", true, "SELECT `a` NOT REGEXP `b`+`c`"},
+		{"SELECT 'a' LIKE 'a' + 'b'", false, ""},
+	}
+	RunTest(t, table, false)
+}

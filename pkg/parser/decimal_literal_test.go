@@ -42,6 +42,19 @@ func TestHugeDecimalLiterals(t *testing.T) {
 		require.ErrorContains(t, warns[0], "Truncated incorrect DECIMAL value")
 	})
 
+	t.Run("warning quotes the same digits MySQL does", func(t *testing.T) {
+		// An over-long integer part is clamped to the 81-digit buffer by
+		// keeping the literal's *trailing* digits, which reads like a bug but
+		// is what MySQL prints. Verified on 8.0.46 and 9.7.0: SELECT of 65
+		// ones followed by 65 twos warns with the last 81 digits, 16 ones then
+		// 65 twos, not the first 81. The value is still clamped to the maximum
+		// decimal, so only the warning text is affected.
+		val, warns := selectDecimal(t, strings.Repeat("1", 65)+strings.Repeat("2", 65))
+		require.Equal(t, maxDecimal, val)
+		require.Len(t, warns, 1)
+		require.ErrorContains(t, warns[0], strings.Repeat("1", 16)+strings.Repeat("2", 65))
+	})
+
 	t.Run("integer part overflows buffer with fraction", func(t *testing.T) {
 		val, warns := selectDecimal(t, strings.Repeat("9", 90)+".5")
 		require.Equal(t, maxDecimal, val)

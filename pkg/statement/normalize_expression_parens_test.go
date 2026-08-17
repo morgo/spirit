@@ -53,6 +53,31 @@ func TestCanonicalExprParensIsFixedPoint(t *testing.T) {
 		"-(a + b) < c",
 		"a * GREATEST(b + c, 1) > 0",
 		"CASE WHEN a > 0 THEN b ELSE -b END > 0",
+		// BETWEEN, IN, LIKE, REGEXP and MEMBER OF take fixed productions as
+		// their operands rather than expressions at their own level, so they do
+		// not nest like ordinary infix operators. Dropping the parentheses here
+		// either rebinds the expression or emits text MySQL rejects.
+		"(a BETWEEN 1 AND 2) BETWEEN 3 AND 4",
+		"(a IN (1,2)) IN (3,4)",
+		"(s LIKE 'x%') LIKE 'y%'",
+		"(s REGEXP 'x') REGEXP 'y'",
+		"(1 MEMBER OF (j)) MEMBER OF (j)",
+		"(a = b) BETWEEN 1 AND 10",
+		"(a = b) IN (1,2)",
+		"(a = b) LIKE 'x%'",
+		"(a = b) REGEXP 'x'",
+		"(a = b) MEMBER OF (j)",
+		"(a IS NULL) IN (1,2)",
+		"(a IS NULL) BETWEEN 1 AND 2",
+		"a BETWEEN (b = c) AND a",
+		"a BETWEEN 1 AND (b = c)",
+		"s LIKE (a = b)",
+		"s REGEXP (a = b)",
+		// A bit_expr subject still drops its parentheses, which is the whole
+		// point of the flag.
+		"(a + b) IN (1,2)",
+		"(a | b) IN (1,2)",
+		"(a + b) BETWEEN 1 AND 2",
 	}
 
 	for _, expr := range exprs {
@@ -85,6 +110,9 @@ func TestCanonicalExprParensKeepsDistinctExpressionsDistinct(t *testing.T) {
 		{"a & (3 | b) = 0", "a & 3 | b = 0"},
 		{"a = (b BETWEEN 1 AND 10)", "(a = b) BETWEEN 1 AND 10"},
 		{"-(a + b) < c", "-a + b < c"},
+		{"a = (b IN (1,2))", "(a = b) IN (1,2)"},
+		{"s = (s LIKE 'x%')", "(s = s) LIKE 'x%'"},
+		{"a BETWEEN 1 AND (b BETWEEN 2 AND 3)", "(a BETWEEN 1 AND b) BETWEEN 2 AND 3"},
 	}
 
 	for _, pair := range pairs {
