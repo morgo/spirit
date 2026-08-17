@@ -3,6 +3,7 @@ package move
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -364,14 +365,13 @@ func (w *reverseWindow) reverseCutover(ctx context.Context) error {
 				}
 				return fmt.Errorf("reverse cutover: un-retire source %d table %q: %w", si, t.TableName, err)
 			}
+			r.durableMutation.Store(true)
 		}
 	}
 
 	// 4. Switch traffic back to the source.
-	if r.reverseCutoverFunc != nil {
-		if err := r.reverseCutoverFunc(ctx); err != nil {
-			return fmt.Errorf("reverse cutover: traffic switch failed: %w", err)
-		}
+	if err := w.runReverseCutoverCallback(ctx); err != nil {
+		return err
 	}
 
 	// 5. Retire the former targets to their _revert form under their lock —
@@ -395,6 +395,46 @@ func (w *reverseWindow) reverseCutover(ctx context.Context) error {
 	return w.finalizeReverse(ctx)
 }
 
+func (w *reverseWindow) runReverseCutoverCallback(ctx context.Context) error {
+	r := w.r
+	var result CutoverResult
+	var err error
+	switch {
+	case r.reverseCutoverResultFunc != nil:
+		result, err = r.reverseCutoverResultFunc(ctx)
+	case r.reverseCutoverFunc != nil:
+		err = r.reverseCutoverFunc(ctx)
+		if err != nil {
+			result.OwnershipAmbiguous = true
+		}
+	}
+	if result.DurableMutation {
+		r.durableMutation.Store(true)
+	}
+	if result.OwnershipAmbiguous {
+		r.terminalOwnership.Store(uint32(status.WorkflowTerminalOwnershipAmbiguous))
+	}
+	if err == nil && result.OwnershipAmbiguous {
+		err = status.ErrOwnershipAmbiguous
+	}
+	if err == nil {
+		return nil
+	}
+	switch {
+	case result.DurableMutation && result.OwnershipAmbiguous:
+		return errors.Join(
+			status.ErrDurableMutation,
+			fmt.Errorf("%w: reverse cutover traffic switch failed: %w", status.ErrOwnershipAmbiguous, err),
+		)
+	case result.DurableMutation:
+		return fmt.Errorf("%w: reverse cutover traffic switch failed: %w", status.ErrDurableMutation, err)
+	case result.OwnershipAmbiguous:
+		return fmt.Errorf("%w: reverse cutover traffic switch failed: %w", status.ErrOwnershipAmbiguous, err)
+	default:
+		return fmt.Errorf("reverse cutover: traffic switch failed: %w", err)
+	}
+}
+
 // finalizeReverse records that ownership is definitively back on the source,
 // then performs the cleanup that may still fail. Once every former target has
 // been retired no remaining step can move ownership again, so persisting the
@@ -404,6 +444,8 @@ func (w *reverseWindow) finalizeReverse(ctx context.Context) error {
 	if err := w.persistPhase(ctx, phaseReverseFinalized); err != nil {
 		return fmt.Errorf("reverse cutover: persist finalized phase: %w", err)
 	}
+	r.durableMutation.Store(true)
+	r.terminalOwnership.Store(uint32(status.WorkflowTerminalOwnershipReverseFinalized))
 	// 6. Drop the revert marker and the checkpoint.
 	if err := w.dropMarker(ctx); err != nil {
 		return fmt.Errorf("reverse cutover: drop revert marker: %w", err)

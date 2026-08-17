@@ -149,6 +149,10 @@ type Runner struct {
 
 	// MetricsSink
 	metricsSink metrics.Sink
+
+	// Correctness evidence from the most recent Run invocation.
+	durableMutation   atomic.Bool
+	terminalOwnership atomic.Uint32
 }
 
 var _ status.Task = (*Runner)(nil)
@@ -236,11 +240,10 @@ func (r *Runner) attemptMySQLDDL(ctx context.Context) error {
 	return r.changes[0].attemptMySQLDDL(ctx)
 }
 
-// recordCopyCompleted reports the settled copy aggregate to the metrics sink.
-// The counts come from the chunker rather than a second tally in the copier:
-// the chunker is what accumulates copied rows from applier feedback (see
-// table.Chunker.Feedback), and on a resumed run it already carries the rows
-// copied before the restart.
+// recordCopyCompleted reports the copy aggregate settled during this
+// Runner.Run invocation. The optimistic chunker does not persist its
+// actual-row counter in a checkpoint, so a resumed invocation reports only
+// work settled after it resumed.
 func (r *Runner) recordCopyCompleted() {
 	chunker := r.copier.GetChunker()
 	if chunker == nil {
@@ -250,11 +253,20 @@ func (r *Runner) recordCopyCompleted() {
 	r.status.RecordCopyCompleted(chunker.RowsCopied(), chunks)
 }
 
+func (r *Runner) runCopy(ctx context.Context) error {
+	defer r.recordCopyCompleted()
+	return r.status.Do(status.CopyRows, func() error {
+		return r.copier.Run(ctx)
+	})
+}
+
 func (r *Runner) Run(ctx context.Context) error {
 	ctx, r.cancelFunc = context.WithCancel(ctx)
 	defer r.cancelFunc()
 	r.status.SetMetricsSink(r.metricsSink, r.logger)
 	r.status.Begin()
+	r.durableMutation.Store(false)
+	r.terminalOwnership.Store(uint32(status.WorkflowTerminalOwnershipNone))
 	bi := buildinfo.Get()
 	r.logger.Info("Starting spirit migration",
 		"version", bi.Version,
@@ -387,6 +399,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	// Note: this function returns an error when in multi-table mode.
 	err = r.attemptMySQLDDL(ctx)
 	if err == nil {
+		r.durableMutation.Store(true)
 		r.logger.Info("apply complete",
 			"instant-ddl", r.usedInstantDDL,
 			"inplace-ddl", r.usedInplaceDDL,
@@ -398,6 +411,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	// source table may already carry the ALTER, and copying from it would
 	// build the _new table from an unexpected schema. Abort instead.
 	if errors.Is(err, status.ErrOwnershipAmbiguous) {
+		r.terminalOwnership.Store(uint32(status.WorkflowTerminalOwnershipAmbiguous))
 		return err
 	}
 
@@ -422,12 +436,9 @@ func (r *Runner) Run(ctx context.Context) error {
 	// of migrations usually spend time. It is not strictly necessary,
 	// but we always recopy the last-bit, even if we are resuming
 	// partially through the checksum.
-	if err := r.status.Do(status.CopyRows, func() error {
-		return r.copier.Run(ctx)
-	}); err != nil {
+	if err := r.runCopy(ctx); err != nil {
 		return err
 	}
-	r.recordCopyCompleted()
 	r.logger.Info("copy rows complete")
 
 	// Disable both watermark optimizations so that all changes can be flushed.
@@ -499,8 +510,10 @@ func (r *Runner) Run(ctx context.Context) error {
 			}
 		}
 		if err := cutover.Run(ctx); err != nil {
+			r.recordWorkflowError(err)
 			return fmt.Errorf("cutover failed: %w", err)
 		}
+		r.durableMutation.Store(true)
 		return nil
 	}); err != nil {
 		return err
@@ -1313,6 +1326,24 @@ func (r *Runner) fatalError(reason change.FatalReason) bool {
 		r.Cancel()
 	})
 	return true
+}
+
+func (r *Runner) recordWorkflowError(err error) {
+	if errors.Is(err, status.ErrDurableMutation) {
+		r.durableMutation.Store(true)
+	}
+	if errors.Is(err, status.ErrOwnershipAmbiguous) {
+		r.terminalOwnership.Store(uint32(status.WorkflowTerminalOwnershipAmbiguous))
+	}
+}
+
+// Result returns correctness evidence retained from the most recent Run
+// invocation. It is intentionally separate from phase metrics.
+func (r *Runner) Result() status.WorkflowResult {
+	return status.WorkflowResult{
+		DurableMutation:   r.durableMutation.Load(),
+		TerminalOwnership: status.WorkflowTerminalOwnership(r.terminalOwnership.Load()),
+	}
 }
 
 func (r *Runner) Progress() status.Progress {

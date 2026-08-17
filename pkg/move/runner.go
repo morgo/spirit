@@ -137,11 +137,17 @@ type Runner struct {
 	// their own goroutine while setup is still writing it.
 	usedResumeFromCheckpoint atomic.Bool
 
-	cutoverFunc func(ctx context.Context) error
-	// reverseCutoverFunc is the reverse-window rollback's traffic switch (route
-	// back to the source). Set via SetReverseCutover; used only when
-	// move.ReverseWindow > 0 and a revert is requested during the window.
-	reverseCutoverFunc func(ctx context.Context) error
+	cutoverFunc       func(ctx context.Context) error
+	cutoverResultFunc CutoverResultCallback
+	// reverseCutoverFunc and reverseCutoverResultFunc are the mutually
+	// exclusive reverse-window rollback traffic switches.
+	reverseCutoverFunc       func(ctx context.Context) error
+	reverseCutoverResultFunc CutoverResultCallback
+
+	// workflow result evidence is atomic so callers may safely inspect Result
+	// immediately after a Run goroutine returns.
+	durableMutation   atomic.Bool
+	terminalOwnership atomic.Uint32
 	// reversePositions holds each target's binlog position captured at cutover
 	// (keyed by targetKey) — the start points for the reverse feeds. cutoverAt
 	// is when the forward cutover completed (the reverse-window deadline is
@@ -215,11 +221,10 @@ func NewRunner(m *Move) (*Runner, error) {
 	return r, nil
 }
 
-// recordCopyCompleted reports the settled copy aggregate to the metrics sink.
-// The counts come from the chunker rather than a second tally in the copier:
-// the chunker is what accumulates copied rows from applier feedback (see
-// table.Chunker.Feedback), and on a resumed run it already carries the rows
-// copied before the restart.
+// recordCopyCompleted reports the copy aggregate settled during this
+// Runner.Run invocation. The optimistic chunker does not persist its
+// actual-row counter in a checkpoint, so a resumed invocation reports only
+// work settled after it resumed.
 func (r *Runner) recordCopyCompleted() {
 	chunker := r.copier.GetChunker()
 	if chunker == nil {
@@ -227,6 +232,13 @@ func (r *Runner) recordCopyCompleted() {
 	}
 	_, chunks, _ := chunker.Progress()
 	r.status.RecordCopyCompleted(chunker.RowsCopied(), chunks)
+}
+
+func (r *Runner) runCopy(ctx context.Context) error {
+	defer r.recordCopyCompleted()
+	return r.status.Do(status.CopyRows, func() error {
+		return r.copier.Run(ctx)
+	})
 }
 
 func (r *Runner) Close() error {
@@ -1042,6 +1054,8 @@ func (r *Runner) Run(ctx context.Context) error {
 	defer r.cancelFunc()
 	r.status.SetMetricsSink(r.metricsSink, r.logger)
 	r.status.Begin()
+	r.durableMutation.Store(false)
+	r.terminalOwnership.Store(uint32(status.WorkflowTerminalOwnershipNone))
 	bi := buildinfo.Get()
 	r.logger.Info("Starting table move",
 		"version", bi.Version,
@@ -1233,12 +1247,9 @@ func (r *Runner) Run(ctx context.Context) error {
 		return err
 	}
 
-	if err := r.status.Do(status.CopyRows, func() error {
-		return r.copier.Run(ctx)
-	}); err != nil {
+	if err := r.runCopy(ctx); err != nil {
 		return err
 	}
-	r.recordCopyCompleted()
 
 	// Disable both watermark optimizations so that all changes can be flushed.
 	// For non-memory-comparable PKs this also drains the buffered map and
@@ -1295,9 +1306,12 @@ func (r *Runner) Run(ctx context.Context) error {
 				Tables:     r.sources[i].tables,
 			}
 		}
-		cutover, err := NewCutOver(cutoverSources, r.cutoverFunc, r.dbConfig, r.logger)
+		cutover, err := NewCutOver(cutoverSources, nil, r.dbConfig, r.logger)
 		if err != nil {
 			return err
+		}
+		if r.cutoverResultFunc != nil || r.cutoverFunc != nil {
+			cutover.SetCutoverWithResult(r.runForwardCutoverCallback)
 		}
 		if r.move.ReverseWindow > 0 {
 			// Under the cutover lock, right after the traffic switch, capture the
@@ -1311,7 +1325,12 @@ func (r *Runner) Run(ctx context.Context) error {
 		if err := r.assertNoRevertMarker(ctx, "pre-cutover"); err != nil {
 			return err
 		}
-		return cutover.Run(ctx)
+		if err := cutover.Run(ctx); err != nil {
+			r.recordWorkflowError(err)
+			return err
+		}
+		r.durableMutation.Store(true)
+		return nil
 	}); err != nil {
 		return err
 	}
@@ -1320,7 +1339,9 @@ func (r *Runner) Run(ctx context.Context) error {
 		// Hold the reverse window keeping the source current, then complete
 		// forward (retire the source) or roll back. The checkpoint is dropped by
 		// the terminal action, not here.
-		return newReverseWindow(r).run(ctx)
+		err := newReverseWindow(r).run(ctx)
+		r.recordWorkflowError(err)
+		return err
 	}
 
 	// Delete checkpoint table from targets[0].
@@ -1831,15 +1852,73 @@ func (r *Runner) analyzeTable(ctx context.Context, db *sql.DB, tableName string)
 	return rows.Err()
 }
 
+// runForwardCutoverCallback invokes whichever mutually exclusive callback was
+// configured and converts the legacy form into the result-bearing contract.
+func (r *Runner) runForwardCutoverCallback(ctx context.Context) (CutoverResult, error) {
+	var result CutoverResult
+	var err error
+	switch {
+	case r.cutoverResultFunc != nil:
+		result, err = r.cutoverResultFunc(ctx)
+	case r.cutoverFunc != nil:
+		err = r.cutoverFunc(ctx)
+		if err != nil {
+			// The legacy callback cannot report whether it mutated before
+			// failing. Treat its ownership outcome as unknown and never retry.
+			result.OwnershipAmbiguous = true
+		}
+	}
+	if result.DurableMutation {
+		r.durableMutation.Store(true)
+	}
+	if result.OwnershipAmbiguous {
+		r.terminalOwnership.Store(uint32(status.WorkflowTerminalOwnershipAmbiguous))
+	}
+	return result, err
+}
+
+func (r *Runner) recordWorkflowError(err error) {
+	if errors.Is(err, status.ErrDurableMutation) {
+		r.durableMutation.Store(true)
+	}
+	if errors.Is(err, status.ErrOwnershipAmbiguous) {
+		r.terminalOwnership.Store(uint32(status.WorkflowTerminalOwnershipAmbiguous))
+	}
+}
+
+// Result returns correctness evidence retained from the most recent Run
+// invocation. It is intentionally separate from phase metrics.
+func (r *Runner) Result() status.WorkflowResult {
+	return status.WorkflowResult{
+		DurableMutation:   r.durableMutation.Load(),
+		TerminalOwnership: status.WorkflowTerminalOwnership(r.terminalOwnership.Load()),
+	}
+}
+
 func (r *Runner) SetCutover(cutover func(ctx context.Context) error) {
+	r.cutoverResultFunc = nil
 	r.cutoverFunc = cutover
 }
 
-// SetReverseCutover registers the rollback traffic switch used if a revert is
-// requested during the reverse window (route back to the source). It mirrors
-// SetCutover and is only consulted when move.ReverseWindow > 0.
+// SetCutoverWithResult installs a result-bearing forward cutover callback.
+// It is mutually exclusive with SetCutover; the most recent setter wins.
+func (r *Runner) SetCutoverWithResult(cutover CutoverResultCallback) {
+	r.cutoverFunc = nil
+	r.cutoverResultFunc = cutover
+}
+
+// SetReverseCutover registers the legacy rollback traffic switch used if a
+// revert is requested during the reverse window.
 func (r *Runner) SetReverseCutover(fn func(ctx context.Context) error) {
+	r.reverseCutoverResultFunc = nil
 	r.reverseCutoverFunc = fn
+}
+
+// SetReverseCutoverWithResult installs the result-bearing reverse cutover
+// callback. It is mutually exclusive with SetReverseCutover.
+func (r *Runner) SetReverseCutoverWithResult(fn CutoverResultCallback) {
+	r.reverseCutoverFunc = nil
+	r.reverseCutoverResultFunc = fn
 }
 
 func (r *Runner) Progress() status.Progress {

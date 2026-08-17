@@ -340,6 +340,119 @@ func TestCutOverFuncSucceededFailureIsAmbiguous(t *testing.T) {
 	})
 
 	require.ErrorIs(t, err, status.ErrOwnershipAmbiguous)
+	require.NotErrorIs(t, err, status.ErrDurableMutation,
+		"a successful legacy callback is not authoritative mutation evidence")
 	require.ErrorContains(t, err, "manual intervention required")
 	require.Equal(t, 1, attempts)
+}
+
+func TestCutOverResultCallbackPreservesFailureEvidence(t *testing.T) {
+	callbackErr := errors.New("topology write failed")
+	tests := []struct {
+		name          string
+		result        CutoverResult
+		wantDurable   bool
+		wantAmbiguous bool
+	}{
+		{
+			name:        "durable mutation",
+			result:      CutoverResult{DurableMutation: true},
+			wantDurable: true,
+		},
+		{
+			name:          "ownership ambiguous",
+			result:        CutoverResult{OwnershipAmbiguous: true},
+			wantAmbiguous: true,
+		},
+		{
+			name: "both",
+			result: CutoverResult{
+				DurableMutation:    true,
+				OwnershipAmbiguous: true,
+			},
+			wantDurable:   true,
+			wantAmbiguous: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := dbconn.NewDBConfig()
+			cfg.MaxRetries = 3
+			cutover := &CutOver{dbConfig: cfg, logger: slog.Default()}
+			callbackCalls := 0
+			cutover.SetCutoverWithResult(func(context.Context) (CutoverResult, error) {
+				callbackCalls++
+				return tt.result, callbackErr
+			})
+			attempts := 0
+
+			err := cutover.runWithRetries(t.Context(), func(int) error {
+				attempts++
+				return cutover.runCutoverCallback(t.Context())
+			})
+
+			require.ErrorIs(t, err, callbackErr)
+			require.Equal(t, tt.wantDurable, errors.Is(err, status.ErrDurableMutation))
+			require.Equal(t, tt.wantAmbiguous, errors.Is(err, status.ErrOwnershipAmbiguous))
+			require.Equal(t, 1, attempts)
+			require.Equal(t, 1, callbackCalls)
+		})
+	}
+}
+
+func TestCutOverLegacyCallbackFailureIsAmbiguousAndNotRetried(t *testing.T) {
+	cfg := dbconn.NewDBConfig()
+	cfg.MaxRetries = 3
+	callbackErr := errors.New("traffic switch failed")
+	callbackCalls := 0
+	cutover := &CutOver{
+		dbConfig: cfg,
+		logger:   slog.Default(),
+		cutoverFunc: func(context.Context) error {
+			callbackCalls++
+			return callbackErr
+		},
+	}
+	attempts := 0
+
+	err := cutover.runWithRetries(t.Context(), func(int) error {
+		attempts++
+		return cutover.runCutoverCallback(t.Context())
+	})
+
+	require.ErrorIs(t, err, callbackErr)
+	require.ErrorIs(t, err, status.ErrOwnershipAmbiguous)
+	require.NotErrorIs(t, err, status.ErrDurableMutation)
+	require.Equal(t, 1, attempts)
+	require.Equal(t, 1, callbackCalls)
+}
+
+func TestCutOverSuccessfulCallbackDoesNotInventDurableMutation(t *testing.T) {
+	renameErr := errors.New("rename failed")
+	for _, tt := range []struct {
+		name        string
+		result      CutoverResult
+		wantDurable bool
+	}{
+		{name: "no mutation", result: CutoverResult{}},
+		{name: "durable mutation", result: CutoverResult{DurableMutation: true}, wantDurable: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := dbconn.NewDBConfig()
+			cfg.MaxRetries = 3
+			cutover := &CutOver{dbConfig: cfg, logger: slog.Default()}
+			cutover.SetCutoverWithResult(func(context.Context) (CutoverResult, error) {
+				return tt.result, nil
+			})
+			require.NoError(t, cutover.runCutoverCallback(t.Context()))
+
+			err := cutover.runWithRetries(t.Context(), func(int) error {
+				return renameErr
+			})
+
+			require.ErrorIs(t, err, renameErr)
+			require.ErrorIs(t, err, status.ErrOwnershipAmbiguous)
+			require.Equal(t, tt.wantDurable, errors.Is(err, status.ErrDurableMutation))
+		})
+	}
 }

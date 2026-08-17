@@ -176,13 +176,10 @@ func NewRunner(s *Sync) (*Runner, error) {
 	return r, nil
 }
 
-// SetLogger overrides the logger (used by programmatic callers to capture
-// progress output).
-// recordCopyCompleted reports the settled copy aggregate to the metrics sink.
-// The counts come from the chunker rather than a second tally in the copier:
-// the chunker is what accumulates copied rows from applier feedback (see
-// table.Chunker.Feedback), and on a resumed run it already carries the rows
-// copied before the restart.
+// recordCopyCompleted reports the copy aggregate settled during this
+// Runner.Run invocation. The optimistic chunker does not persist its
+// actual-row counter in a checkpoint, so a resumed invocation reports only
+// work settled after it resumed.
 func (r *Runner) recordCopyCompleted() {
 	chunker := r.copier.GetChunker()
 	if chunker == nil {
@@ -190,6 +187,29 @@ func (r *Runner) recordCopyCompleted() {
 	}
 	_, chunks, _ := chunker.Progress()
 	r.status.RecordCopyCompleted(chunker.RowsCopied(), chunks)
+}
+
+func (r *Runner) runCopy(ctx context.Context) error {
+	defer r.recordCopyCompleted()
+	return r.status.Do(status.CopyRows, func() error {
+		r.logger.Info("Starting copy", "resuming", r.resuming.Load())
+		if err := r.copier.Run(ctx); err != nil {
+			return fmt.Errorf("copy failed: %w", err)
+		}
+		if !r.sync.CopyOnly {
+			if !r.resuming.Load() {
+				if err := r.replClient.SetWatermarkOptimization(ctx, false); err != nil {
+					return err
+				}
+			}
+			// Drain the copy-phase backlog so every change observed so far is
+			// applied before steady-state streaming.
+			if err := r.replClient.Flush(ctx); err != nil {
+				return fmt.Errorf("failed to flush after copy: %w", err)
+			}
+		}
+		return nil
+	})
 }
 
 func (r *Runner) SetLogger(logger *slog.Logger) {
@@ -336,26 +356,7 @@ func (r *Runner) Run(ctx context.Context) error {
 			return err
 		}
 	}
-	if err := r.status.Do(status.CopyRows, func() error {
-		r.logger.Info("Starting copy", "resuming", r.resuming.Load())
-		if err := r.copier.Run(ctx); err != nil {
-			return fmt.Errorf("copy failed: %w", err)
-		}
-		r.recordCopyCompleted()
-		if !r.sync.CopyOnly {
-			if !r.resuming.Load() {
-				if err := r.replClient.SetWatermarkOptimization(ctx, false); err != nil {
-					return err
-				}
-			}
-			// Drain the copy-phase backlog so every change observed so far is
-			// applied before steady-state streaming.
-			if err := r.replClient.Flush(ctx); err != nil {
-				return fmt.Errorf("failed to flush after copy: %w", err)
-			}
-		}
-		return nil
-	}); err != nil {
+	if err := r.runCopy(ctx); err != nil {
 		return err
 	}
 

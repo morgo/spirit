@@ -23,6 +23,12 @@ var (
 	// second time. Callers should test for it with errors.Is and escalate to
 	// a human rather than re-running.
 	ErrOwnershipAmbiguous = errors.New("ownership ambiguous; verify table ownership manually before retrying")
+	// ErrDurableMutation marks an error returned after the current invocation
+	// authoritatively completed a durable write. It is orthogonal to
+	// ErrOwnershipAmbiguous: callers may know a write happened without knowing
+	// which side owns traffic, or may know ownership despite later cleanup
+	// failing.
+	ErrDurableMutation = errors.New("durable mutation completed before failure")
 )
 
 const (

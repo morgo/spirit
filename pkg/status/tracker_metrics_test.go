@@ -2,6 +2,7 @@ package status
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -51,6 +52,59 @@ func (s *recordingSink) values(name string) []float64 {
 	}
 	return out
 }
+
+type typedPhaseEvent struct {
+	state   State
+	outcome WorkflowPhaseOutcome
+}
+
+type typedRecordingSink struct {
+	*recordingSink
+
+	workflowMu sync.Mutex
+	started    []State
+	finished   []typedPhaseEvent
+	copyRows   uint64
+	copyChunks uint64
+	panicStart bool
+}
+
+func newTypedRecordingSink() *typedRecordingSink {
+	return &typedRecordingSink{recordingSink: &recordingSink{}}
+}
+
+func (s *typedRecordingSink) RecordWorkflowPhaseStarted(state State) {
+	if s.panicStart {
+		panic("typed sink start")
+	}
+	s.workflowMu.Lock()
+	defer s.workflowMu.Unlock()
+	s.started = append(s.started, state)
+}
+
+func (s *typedRecordingSink) RecordWorkflowPhaseFinished(state State, outcome WorkflowPhaseOutcome) {
+	s.workflowMu.Lock()
+	defer s.workflowMu.Unlock()
+	s.finished = append(s.finished, typedPhaseEvent{state: state, outcome: outcome})
+}
+
+func (s *typedRecordingSink) RecordWorkflowCopyCompleted(rows, chunks uint64) {
+	s.workflowMu.Lock()
+	defer s.workflowMu.Unlock()
+	s.copyRows = rows
+	s.copyChunks = chunks
+}
+
+func (s *typedRecordingSink) workflowSnapshot() ([]State, []typedPhaseEvent, uint64, uint64) {
+	s.workflowMu.Lock()
+	defer s.workflowMu.Unlock()
+	return append([]State(nil), s.started...),
+		append([]typedPhaseEvent(nil), s.finished...),
+		s.copyRows,
+		s.copyChunks
+}
+
+var _ WorkflowMetricsSink = (*typedRecordingSink)(nil)
 
 func TestTrackerReportsPhaseEntry(t *testing.T) {
 	sink := &recordingSink{}
@@ -128,6 +182,17 @@ func TestTrackerRecordCopyCompleted(t *testing.T) {
 		{Name: metrics.CopyRowsCompletedMetricName, Type: metrics.GAUGE, Value: 1234},
 		{Name: metrics.CopyChunksCompletedMetricName, Type: metrics.GAUGE, Value: 7},
 	}}, sink.snapshot())
+	started, finished, rows, chunks := func() ([]State, []typedPhaseEvent, uint64, uint64) {
+		typedSink := newTypedRecordingSink()
+		var typedTracker Tracker
+		typedTracker.SetMetricsSink(typedSink, nil)
+		typedTracker.RecordCopyCompleted(1<<60, 9)
+		return typedSink.workflowSnapshot()
+	}()
+	require.Empty(t, started)
+	require.Empty(t, finished)
+	require.Equal(t, uint64(1<<60), rows, "the typed capability must not lose uint64 precision")
+	require.Equal(t, uint64(9), chunks)
 }
 
 // TestTrackerWithoutSinkIsUnchanged is the "costs nothing when unused" claim:
@@ -172,4 +237,128 @@ func TestTrackerReportsAfterContextCancellation(t *testing.T) {
 
 	require.Contains(t, sink.values(metrics.WorkflowPhaseMetricName), float64(ErrCleanup))
 	require.Contains(t, sink.values(metrics.WorkflowPhaseCompletedMetricName), float64(CopyRows))
+}
+
+func TestTrackerReportsTypedAttemptOutcomes(t *testing.T) {
+	sentinelErr := errors.New("phase failed")
+	tests := []struct {
+		name    string
+		run     func() error
+		wantErr error
+		want    WorkflowPhaseOutcome
+	}{
+		{name: "succeeded", run: func() error { return nil }, want: WorkflowPhaseOutcomeSucceeded},
+		{name: "failed", run: func() error { return sentinelErr }, wantErr: sentinelErr, want: WorkflowPhaseOutcomeFailed},
+		{name: "cancelled", run: func() error { return context.Canceled }, wantErr: context.Canceled, want: WorkflowPhaseOutcomeCancelled},
+		{name: "deadline", run: func() error { return context.DeadlineExceeded }, wantErr: context.DeadlineExceeded, want: WorkflowPhaseOutcomeCancelled},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sink := newTypedRecordingSink()
+			var tracker Tracker
+			tracker.SetMetricsSink(sink, nil)
+			tracker.Begin()
+
+			err := tracker.Do(CopyRows, tt.run)
+			require.ErrorIs(t, err, tt.wantErr)
+			started, finished, _, _ := sink.workflowSnapshot()
+			require.Equal(t, []State{CopyRows}, started)
+			require.Equal(t, []typedPhaseEvent{{state: CopyRows, outcome: tt.want}}, finished)
+		})
+	}
+}
+
+func TestTrackerReportsFailedTypedAttemptOnPanic(t *testing.T) {
+	sink := newTypedRecordingSink()
+	var tracker Tracker
+	tracker.SetMetricsSink(sink, nil)
+
+	require.PanicsWithValue(t, "boom", func() {
+		_ = tracker.Do(Checksum, func() error {
+			panic("boom")
+		})
+	})
+	started, finished, _, _ := sink.workflowSnapshot()
+	require.Equal(t, []State{Checksum}, started)
+	require.Equal(t, []typedPhaseEvent{{
+		state:   Checksum,
+		outcome: WorkflowPhaseOutcomeFailed,
+	}}, finished)
+}
+
+func TestTrackerTypedSinkPanicDoesNotChangeRun(t *testing.T) {
+	sink := newTypedRecordingSink()
+	sink.panicStart = true
+	var tracker Tracker
+	tracker.SetMetricsSink(sink, nil)
+
+	called := false
+	require.NoError(t, tracker.Do(CopyRows, func() error {
+		called = true
+		return nil
+	}))
+	require.True(t, called)
+	_, finished, _, _ := sink.workflowSnapshot()
+	require.Equal(t, []typedPhaseEvent{{
+		state:   CopyRows,
+		outcome: WorkflowPhaseOutcomeSucceeded,
+	}}, finished)
+}
+
+func TestTrackerTypedAttemptFinishesAfterConcurrentFatalTransition(t *testing.T) {
+	sink := newTypedRecordingSink()
+	var tracker Tracker
+	tracker.SetMetricsSink(sink, nil)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- tracker.Do(CopyRows, func() error {
+			close(entered)
+			<-release
+			return errors.New("copy failed")
+		})
+	}()
+
+	<-entered
+	tracker.Set(ErrCleanup)
+	close(release)
+	require.Error(t, <-done)
+	started, finished, _, _ := sink.workflowSnapshot()
+	require.Equal(t, []State{CopyRows}, started,
+		"Set-only transitions never enter the typed attempt stream")
+	require.Equal(t, []typedPhaseEvent{{
+		state:   CopyRows,
+		outcome: WorkflowPhaseOutcomeFailed,
+	}}, finished)
+}
+
+func TestTrackerExcludesSinkLatencyFromPhaseDuration(t *testing.T) {
+	sink := &recordingSink{blockFor: 50 * time.Millisecond}
+	var tracker Tracker
+	tracker.SetMetricsSink(sink, nil)
+
+	tracker.Begin()
+	require.NoError(t, tracker.Do(CopyRows, func() error {
+		time.Sleep(2 * time.Millisecond)
+		return nil
+	}))
+	require.Less(t, tracker.Duration(CopyRows), 25*time.Millisecond)
+}
+
+func TestTrackerTreatsNoopSinkAsDisabled(t *testing.T) {
+	var tracker Tracker
+	tracker.SetMetricsSink(&metrics.NoopSink{}, nil)
+	require.False(t, tracker.hasSink.Load())
+	require.Nil(t, tracker.sink)
+	require.Nil(t, tracker.workflowSink)
+}
+
+func TestTrackerDisabledSinkAddsNoTransitionAllocations(t *testing.T) {
+	var tracker Tracker
+	tracker.SetMetricsSink(&metrics.NoopSink{}, nil)
+	allocs := testing.AllocsPerRun(1000, func() {
+		tracker.Set(CopyRows)
+	})
+	require.Zero(t, allocs)
 }

@@ -635,8 +635,36 @@ func TestFinalizeReversePersistsOwnershipBeforeCleanup(t *testing.T) {
 
 			require.ErrorIs(t, w.finalizeReverse(t.Context()), cleanupErr)
 			require.Equal(t, tt.wantOrder, order)
+			require.Equal(t, status.WorkflowResult{
+				DurableMutation:   true,
+				TerminalOwnership: status.WorkflowTerminalOwnershipReverseFinalized,
+			}, w.r.Result())
 		})
 	}
+}
+
+func TestReverseCutoverResultCallbackPreservesFailureEvidence(t *testing.T) {
+	callbackErr := errors.New("reverse topology write failed")
+	r := &Runner{
+		reverseCutoverResultFunc: func(context.Context) (CutoverResult, error) {
+			return CutoverResult{
+				DurableMutation:    true,
+				OwnershipAmbiguous: true,
+			}, callbackErr
+		},
+	}
+	w := &reverseWindow{r: r}
+
+	err := w.runReverseCutoverCallback(t.Context())
+	r.recordWorkflowError(err)
+
+	require.ErrorIs(t, err, callbackErr)
+	require.ErrorIs(t, err, status.ErrDurableMutation)
+	require.ErrorIs(t, err, status.ErrOwnershipAmbiguous)
+	require.Equal(t, status.WorkflowResult{
+		DurableMutation:   true,
+		TerminalOwnership: status.WorkflowTerminalOwnershipAmbiguous,
+	}, r.Result())
 }
 
 // TestFinalizeReverseFailsClosedWhenOwnershipCannotBePersisted: if the
