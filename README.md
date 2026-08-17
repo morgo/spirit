@@ -29,8 +29,6 @@ Rather than accept a fixed chunk size (such as 1000 rows), Spirit dynamically ad
 - The **copier** reads full rows into memory, so it sizes each chunk against an in-memory **byte budget** (`--target-chunk-size`, default 16 MiB). Time is a poor signal here — the copier's measured chunk time includes waiting behind the write queue, which inflates under load independently of chunk size — whereas a byte budget is a stable property of the data and keeps chunks large enough to engage InnoDB/Aurora read-ahead.
 - The **checksum** aggregates its CRC server-side, so it sizes each chunk against a **target time** instead. That target is a fixed 5s (`table.ChunkerDefaultTarget`), not a flag.
 
-5s is quite "high" for traditional MySQL environments, but remember _Spirit does not support read-replicas_. This helps it checksum chunks as efficiently as possible.
-
 ### Ignore Key Above Watermark
 
 As Spirit is copying rows, it keeps track of the highest key-value that either has been copied, or could be in the process of being copied. This is called the "high watermark". As rows are discovered from the binary log, they can be discarded if the key is above the high watermark. This is because once the copier reaches this point, it is guaranteed it will copy the latest version of the row.
