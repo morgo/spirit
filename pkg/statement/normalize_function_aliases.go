@@ -154,7 +154,15 @@ func canonicalizeFuncAliases(p *parser.Parser, text *string, render func(ast.Exp
 	if !ok || !rewriter.renamed {
 		return false
 	}
-	rendered, ok := render(node.(ast.ExprNode))
+	// The rewriter only ever renames a call in place, so the node it hands
+	// back is the expression it was given. Check rather than assert anyway:
+	// normalization runs on every parse, and leaving the text alone beats
+	// panicking if a future visitor change breaks that.
+	rewritten, ok := node.(ast.ExprNode)
+	if !ok {
+		return false
+	}
+	rendered, ok := render(rewritten)
 	if !ok {
 		return false
 	}
