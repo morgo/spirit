@@ -1049,13 +1049,16 @@ func (r *Runner) createCheckpointTable(ctx context.Context) error {
 	return nil
 }
 
-func (r *Runner) Run(ctx context.Context) error {
+func (r *Runner) Run(ctx context.Context) (retErr error) {
 	ctx, r.cancelFunc = context.WithCancel(ctx)
 	defer r.cancelFunc()
 	r.status.SetMetricsSink(r.metricsSink, r.logger)
 	r.status.Begin()
 	r.durableMutation.Store(false)
 	r.terminalOwnership.Store(uint32(status.WorkflowTerminalOwnershipNone))
+	defer func() {
+		r.recordWorkflowError(retErr)
+	}()
 	bi := buildinfo.Get()
 	r.logger.Info("Starting table move",
 		"version", bi.Version,
@@ -1326,7 +1329,6 @@ func (r *Runner) Run(ctx context.Context) error {
 			return err
 		}
 		if err := cutover.Run(ctx); err != nil {
-			r.recordWorkflowError(err)
 			return err
 		}
 		r.durableMutation.Store(true)
@@ -1340,7 +1342,6 @@ func (r *Runner) Run(ctx context.Context) error {
 		// forward (retire the source) or roll back. The checkpoint is dropped by
 		// the terminal action, not here.
 		err := newReverseWindow(r).run(ctx)
-		r.recordWorkflowError(err)
 		return err
 	}
 

@@ -260,13 +260,16 @@ func (r *Runner) runCopy(ctx context.Context) error {
 	})
 }
 
-func (r *Runner) Run(ctx context.Context) error {
+func (r *Runner) Run(ctx context.Context) (retErr error) {
 	ctx, r.cancelFunc = context.WithCancel(ctx)
 	defer r.cancelFunc()
 	r.status.SetMetricsSink(r.metricsSink, r.logger)
 	r.status.Begin()
 	r.durableMutation.Store(false)
 	r.terminalOwnership.Store(uint32(status.WorkflowTerminalOwnershipNone))
+	defer func() {
+		r.recordWorkflowError(retErr)
+	}()
 	bi := buildinfo.Get()
 	r.logger.Info("Starting spirit migration",
 		"version", bi.Version,
@@ -411,7 +414,6 @@ func (r *Runner) Run(ctx context.Context) error {
 	// source table may already carry the ALTER, and copying from it would
 	// build the _new table from an unexpected schema. Abort instead.
 	if errors.Is(err, status.ErrOwnershipAmbiguous) {
-		r.terminalOwnership.Store(uint32(status.WorkflowTerminalOwnershipAmbiguous))
 		return err
 	}
 
@@ -510,7 +512,6 @@ func (r *Runner) Run(ctx context.Context) error {
 			}
 		}
 		if err := cutover.Run(ctx); err != nil {
-			r.recordWorkflowError(err)
 			return fmt.Errorf("cutover failed: %w", err)
 		}
 		r.durableMutation.Store(true)

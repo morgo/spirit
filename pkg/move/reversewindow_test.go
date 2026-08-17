@@ -310,6 +310,56 @@ func TestMoveReverseWindowResumesAfterKill(t *testing.T) {
 	require.False(t, tableExists(t, ctl, "rwrk_dst", "t1"), "target real table gone after rollback")
 }
 
+// TestMoveReverseWindowRevertingResumeRetainsOwnershipEvidence verifies that a
+// resume refused before the reverse-window runner starts still publishes the
+// ownership ambiguity through Result.
+func TestMoveReverseWindowRevertingResumeRetainsOwnershipEvidence(t *testing.T) {
+	shortenReverseWindowPolling(t)
+	sourceDSN, targetDSN, ctl := setupReverseWindowMove(t, "rwamb_src", "rwamb_dst")
+
+	newRunner := func() *Runner {
+		runner, err := NewRunner(&Move{
+			SourceDSN:       sourceDSN,
+			TargetDSN:       targetDSN,
+			TargetChunkTime: time.Second,
+			Threads:         1,
+			WriteThreads:    1,
+			ReverseWindow:   30 * time.Second,
+		})
+		require.NoError(t, err)
+		return runner
+	}
+
+	run1 := newRunner()
+	run1.SetCutover(func(context.Context) error { return nil })
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	run1Err := make(chan error, 1)
+	go func() { run1Err <- run1.Run(ctx1) }()
+
+	waitForReverseWindow(t, ctl, "rwamb_dst")
+	waitForTable(t, ctl, "rwamb_src", "t1_old")
+	require.Eventually(t, func() bool {
+		return run1.Progress().CurrentState == status.ReverseWindow
+	}, 30*time.Second, 50*time.Millisecond)
+	cancel1()
+	require.ErrorIs(t, <-run1Err, context.Canceled)
+	utils.CloseAndLog(run1)
+
+	testutils.RunSQL(t, "UPDATE rwamb_dst."+checkpointTableName+
+		" SET move_phase='"+phaseReverting+"' WHERE id=1")
+
+	run2 := newRunner()
+	defer utils.CloseAndLog(run2)
+	run2.SetCutover(func(context.Context) error {
+		t.Fatal("an ambiguous reverse-window resume must not restart forward cutover")
+		return nil
+	})
+
+	err := run2.Run(t.Context())
+	require.ErrorIs(t, err, status.ErrOwnershipAmbiguous)
+	require.Equal(t, status.WorkflowTerminalOwnershipAmbiguous, run2.Result().TerminalOwnership)
+}
+
 // TestMoveReverseWindowRefusesStaleRevertMarker: a leftover revert marker on
 // targets[0] (a prior reverse-window move that didn't complete) must make the
 // move refuse at pre-flight rather than start on an unknown-state target.
