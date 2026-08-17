@@ -1303,6 +1303,89 @@ func TestDiff(t *testing.T) {
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, B INT NOT NULL, A INT NOT NULL)",
 			expected: "ALTER TABLE `t1` MODIFY COLUMN `B` int NOT NULL AFTER `id`, MODIFY COLUMN `A` int NOT NULL AFTER `B`",
 		},
+		// Partitioning. The sources below are shaped like SHOW CREATE TABLE
+		// output, which always prints a per-partition `ENGINE = InnoDB` that
+		// human-authored SQL omits; that clause must not register as a change
+		// (it cannot differ from the table engine) or every partitioned table
+		// would repartition itself on every run.
+		{
+			name:     "NoChanges_PartitionedEngineClauseOnly",
+			source:   "CREATE TABLE t1 (dt DATE NOT NULL, PRIMARY KEY (dt)) PARTITION BY RANGE (YEAR(dt)) (PARTITION p0 VALUES LESS THAN (2020) ENGINE = InnoDB, PARTITION p1 VALUES LESS THAN MAXVALUE ENGINE = InnoDB)",
+			target:   "CREATE TABLE t1 (dt DATE NOT NULL, PRIMARY KEY (dt)) PARTITION BY RANGE (YEAR(dt)) (PARTITION p0 VALUES LESS THAN (2020), PARTITION p1 VALUES LESS THAN MAXVALUE)",
+			expected: "",
+		},
+		{
+			name:     "NoChanges_Subpartitioned",
+			source:   "CREATE TABLE t1 (dt DATE NOT NULL, PRIMARY KEY (dt)) PARTITION BY RANGE (year(`dt`)) SUBPARTITION BY HASH (dayofmonth(`dt`)) SUBPARTITIONS 2 (PARTITION p0 VALUES LESS THAN (2020) ENGINE = InnoDB, PARTITION p1 VALUES LESS THAN MAXVALUE ENGINE = InnoDB)",
+			target:   "CREATE TABLE t1 (dt DATE NOT NULL, PRIMARY KEY (dt)) PARTITION BY RANGE (YEAR(dt)) SUBPARTITION BY HASH (dayofmonth(dt)) SUBPARTITIONS 2 (PARTITION p0 VALUES LESS THAN (2020), PARTITION p1 VALUES LESS THAN MAXVALUE)",
+			expected: "",
+		},
+		{
+			// SUBPARTITION BY with neither a count nor explicit names is legal
+			// (MySQL defaults to one subpartition per partition and reports no
+			// SUBPARTITIONS line), so no count must be invented on emission.
+			name:     "NoChanges_SubpartitionedWithoutCount",
+			source:   "CREATE TABLE t1 (dt DATE NOT NULL, PRIMARY KEY (dt)) PARTITION BY RANGE (year(`dt`)) SUBPARTITION BY HASH (dayofmonth(`dt`)) (PARTITION p0 VALUES LESS THAN (2020) ENGINE = InnoDB, PARTITION p1 VALUES LESS THAN MAXVALUE ENGINE = InnoDB)",
+			target:   "CREATE TABLE t1 (dt DATE NOT NULL, PRIMARY KEY (dt)) PARTITION BY RANGE (YEAR(dt)) SUBPARTITION BY HASH (dayofmonth(dt)) (PARTITION p0 VALUES LESS THAN (2020), PARTITION p1 VALUES LESS THAN MAXVALUE)",
+			expected: "",
+		},
+		{
+			name:     "NoChanges_SubpartitionsNamedExplicitly",
+			source:   "CREATE TABLE t1 (dt DATE NOT NULL, PRIMARY KEY (dt)) PARTITION BY RANGE (year(`dt`)) SUBPARTITION BY KEY (dt) (PARTITION p0 VALUES LESS THAN (2020) (SUBPARTITION s0 COMMENT = 'sc0' ENGINE = InnoDB, SUBPARTITION s1 ENGINE = InnoDB), PARTITION p1 VALUES LESS THAN MAXVALUE (SUBPARTITION s2 ENGINE = InnoDB, SUBPARTITION s3 ENGINE = InnoDB))",
+			target:   "CREATE TABLE t1 (dt DATE NOT NULL, PRIMARY KEY (dt)) PARTITION BY RANGE (YEAR(dt)) SUBPARTITION BY KEY (dt) (PARTITION p0 VALUES LESS THAN (2020) (SUBPARTITION s0 COMMENT 'sc0', SUBPARTITION s1), PARTITION p1 VALUES LESS THAN MAXVALUE (SUBPARTITION s2, SUBPARTITION s3))",
+			expected: "",
+		},
+		// A real subpartitioning change must round-trip the whole clause,
+		// including SUBPARTITION BY: the second statement replaces the
+		// partitioning wholesale, so anything it omits is dropped.
+		{
+			name:   "ChangeSubpartitionCount",
+			source: "CREATE TABLE t1 (dt DATE NOT NULL, PRIMARY KEY (dt)) PARTITION BY RANGE (year(`dt`)) SUBPARTITION BY HASH (dayofmonth(`dt`)) SUBPARTITIONS 2 (PARTITION p0 VALUES LESS THAN (2020) ENGINE = InnoDB, PARTITION p1 VALUES LESS THAN MAXVALUE ENGINE = InnoDB)",
+			target: "CREATE TABLE t1 (dt DATE NOT NULL, PRIMARY KEY (dt)) PARTITION BY RANGE (YEAR(dt)) SUBPARTITION BY HASH (dayofmonth(dt)) SUBPARTITIONS 4 (PARTITION p0 VALUES LESS THAN (2020), PARTITION p1 VALUES LESS THAN MAXVALUE)",
+			expectedStatements: []string{
+				"ALTER TABLE `t1` REMOVE PARTITIONING",
+				"ALTER TABLE `t1` PARTITION BY RANGE (YEAR(`dt`)) SUBPARTITION BY HASH (dayofmonth(`dt`)) SUBPARTITIONS 4 (PARTITION `p0` VALUES LESS THAN (2020), PARTITION `p1` VALUES LESS THAN MAXVALUE)",
+			},
+		},
+		{
+			name:   "AddSubpartitioning",
+			source: "CREATE TABLE t1 (dt DATE NOT NULL, PRIMARY KEY (dt)) PARTITION BY RANGE (year(`dt`)) (PARTITION p0 VALUES LESS THAN (2020) ENGINE = InnoDB, PARTITION p1 VALUES LESS THAN MAXVALUE ENGINE = InnoDB)",
+			target: "CREATE TABLE t1 (dt DATE NOT NULL, PRIMARY KEY (dt)) PARTITION BY RANGE (YEAR(dt)) SUBPARTITION BY LINEAR KEY (dt) SUBPARTITIONS 2 (PARTITION p0 VALUES LESS THAN (2020), PARTITION p1 VALUES LESS THAN MAXVALUE)",
+			expectedStatements: []string{
+				"ALTER TABLE `t1` REMOVE PARTITIONING",
+				"ALTER TABLE `t1` PARTITION BY RANGE (YEAR(`dt`)) SUBPARTITION BY LINEAR KEY (`dt`) SUBPARTITIONS 2 (PARTITION `p0` VALUES LESS THAN (2020), PARTITION `p1` VALUES LESS THAN MAXVALUE)",
+			},
+		},
+		{
+			name:   "RemoveSubpartitioning",
+			source: "CREATE TABLE t1 (dt DATE NOT NULL, PRIMARY KEY (dt)) PARTITION BY RANGE (year(`dt`)) SUBPARTITION BY HASH (dayofmonth(`dt`)) SUBPARTITIONS 2 (PARTITION p0 VALUES LESS THAN (2020) ENGINE = InnoDB, PARTITION p1 VALUES LESS THAN MAXVALUE ENGINE = InnoDB)",
+			target: "CREATE TABLE t1 (dt DATE NOT NULL, PRIMARY KEY (dt)) PARTITION BY RANGE (YEAR(dt)) (PARTITION p0 VALUES LESS THAN (2020), PARTITION p1 VALUES LESS THAN MAXVALUE)",
+			expectedStatements: []string{
+				"ALTER TABLE `t1` REMOVE PARTITIONING",
+				"ALTER TABLE `t1` PARTITION BY RANGE (YEAR(`dt`)) (PARTITION `p0` VALUES LESS THAN (2020), PARTITION `p1` VALUES LESS THAN MAXVALUE)",
+			},
+		},
+		{
+			name:   "RepartitionCarriesSubpartitionNamesAndComments",
+			source: "CREATE TABLE t1 (dt DATE NOT NULL, PRIMARY KEY (dt)) PARTITION BY RANGE (year(`dt`)) SUBPARTITION BY KEY (dt) (PARTITION p0 VALUES LESS THAN (2020) (SUBPARTITION s0 COMMENT = 'sc0' ENGINE = InnoDB, SUBPARTITION s1 ENGINE = InnoDB))",
+			target: "CREATE TABLE t1 (dt DATE NOT NULL, PRIMARY KEY (dt)) PARTITION BY RANGE (YEAR(dt)) SUBPARTITION BY KEY (dt) (PARTITION p0 VALUES LESS THAN (2030) (SUBPARTITION s0 COMMENT 'sc0', SUBPARTITION s1))",
+			expectedStatements: []string{
+				"ALTER TABLE `t1` REMOVE PARTITIONING",
+				"ALTER TABLE `t1` PARTITION BY RANGE (YEAR(`dt`)) SUBPARTITION BY KEY (`dt`) SUBPARTITIONS 2 (PARTITION `p0` VALUES LESS THAN (2030) (SUBPARTITION `s0` COMMENT = 'sc0', SUBPARTITION `s1`))",
+			},
+		},
+		// A partition comment is part of the definition and has to survive a
+		// repartition too — the emitted PARTITION BY is the only definition
+		// MySQL will see.
+		{
+			name:   "RepartitionCarriesPartitionComment",
+			source: "CREATE TABLE t1 (dt DATE NOT NULL, PRIMARY KEY (dt)) PARTITION BY RANGE (year(`dt`)) (PARTITION p0 VALUES LESS THAN (2020) COMMENT = 'keep me' ENGINE = InnoDB)",
+			target: "CREATE TABLE t1 (dt DATE NOT NULL, PRIMARY KEY (dt)) PARTITION BY RANGE (YEAR(dt)) SUBPARTITION BY HASH (dayofmonth(dt)) SUBPARTITIONS 2 (PARTITION p0 VALUES LESS THAN (2020) COMMENT 'keep me')",
+			expectedStatements: []string{
+				"ALTER TABLE `t1` REMOVE PARTITIONING",
+				"ALTER TABLE `t1` PARTITION BY RANGE (YEAR(`dt`)) SUBPARTITION BY HASH (dayofmonth(`dt`)) SUBPARTITIONS 2 (PARTITION `p0` VALUES LESS THAN (2020) COMMENT = 'keep me')",
+			},
+		},
 	}
 
 	for _, tt := range tests {
