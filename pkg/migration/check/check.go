@@ -61,7 +61,6 @@ type Resources struct {
 	Replicas             []*sql.DB
 	Table                *table.TableInfo
 	Statement            *statement.AbstractStatement
-	TargetChunkTime      time.Duration
 	Threads              int
 	ReplicaMaxLag        time.Duration
 	SkipDropAfterCutover bool

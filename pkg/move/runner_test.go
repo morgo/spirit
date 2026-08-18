@@ -132,7 +132,6 @@ func testMoveWithConcurrentWrites(t *testing.T, deferSecondaryIndexes bool) {
 	move := &Move{
 		SourceDSN:             sourceDSN,
 		TargetDSN:             targetDSN,
-		TargetChunkTime:       100 * time.Millisecond,
 		Threads:               2,
 		WriteThreads:          2,
 		CreateSentinel:        false,
@@ -313,12 +312,11 @@ func TestMoveWithNewTableCreation(t *testing.T) {
 	// it has a sentinel so it will never complete accidentally
 	time.Sleep(100 * time.Millisecond)
 	move := Move{
-		SourceDSN:       sourceDSN,
-		TargetDSN:       targetDSN,
-		TargetChunkTime: 100 * time.Millisecond,
-		Threads:         2,
-		WriteThreads:    2,
-		CreateSentinel:  true,
+		SourceDSN:      sourceDSN,
+		TargetDSN:      targetDSN,
+		Threads:        2,
+		WriteThreads:   2,
+		CreateSentinel: true,
 	}
 	wg.Go(func() {
 		err = move.Run()
@@ -406,12 +404,11 @@ func TestMoveFailsGracefullyWithMinimalRBR(t *testing.T) {
 	})
 
 	move := &Move{
-		SourceDSN:       sourceDSN,
-		TargetDSN:       targetDSN,
-		TargetChunkTime: 100 * time.Millisecond,
-		Threads:         2,
-		WriteThreads:    2,
-		CreateSentinel:  false,
+		SourceDSN:      sourceDSN,
+		TargetDSN:      targetDSN,
+		Threads:        2,
+		WriteThreads:   2,
+		CreateSentinel: false,
 	}
 
 	err = move.Run()
@@ -466,11 +463,10 @@ func TestMoveResumeDeletesRecopyRange(t *testing.T) {
 		"SELECT MAX(id), COUNT(*) FROM t1").Scan(&srcMaxID, &srcCount))
 
 	move := &Move{
-		SourceDSN:       sourceDSN,
-		TargetDSN:       targetDSN,
-		TargetChunkTime: 100 * time.Millisecond,
-		Threads:         1,
-		WriteThreads:    1,
+		SourceDSN:    sourceDSN,
+		TargetDSN:    targetDSN,
+		Threads:      1,
+		WriteThreads: 1,
 	}
 	checkpointAndStop(t, move)
 
@@ -578,12 +574,11 @@ func TestMoveForceWipesUnresumableTarget(t *testing.T) {
 
 	newMove := func(force bool) *Move {
 		return &Move{
-			SourceDSN:       sourceDSN,
-			TargetDSN:       targetDSN,
-			TargetChunkTime: 100 * time.Millisecond,
-			Threads:         2,
-			WriteThreads:    2,
-			Force:           force,
+			SourceDSN:    sourceDSN,
+			TargetDSN:    targetDSN,
+			Threads:      2,
+			WriteThreads: 2,
+			Force:        force,
 		}
 	}
 
@@ -643,11 +638,10 @@ func TestMoveRetryBeforeFirstCheckpointStartsFresh(t *testing.T) {
 
 	newMove := func() *Move {
 		return &Move{
-			SourceDSN:       sourceDSN,
-			TargetDSN:       targetDSN,
-			TargetChunkTime: 100 * time.Millisecond,
-			Threads:         2,
-			WriteThreads:    2,
+			SourceDSN:    sourceDSN,
+			TargetDSN:    targetDSN,
+			Threads:      2,
+			WriteThreads: 2,
 		}
 	}
 
@@ -726,12 +720,11 @@ func TestConcurrentMoveDoesNotWipeTarget(t *testing.T) {
 	// target is exactly the state --force wipes — but B must fail on the
 	// advisory lock before it gets the chance.
 	move := &Move{
-		SourceDSN:       sourceDSN,
-		TargetDSN:       targetDSN,
-		TargetChunkTime: 100 * time.Millisecond,
-		Threads:         2,
-		WriteThreads:    2,
-		Force:           true,
+		SourceDSN:    sourceDSN,
+		TargetDSN:    targetDSN,
+		Threads:      2,
+		WriteThreads: 2,
+		Force:        true,
 	}
 	err = move.Run()
 	require.Error(t, err)
@@ -832,12 +825,11 @@ func TestMoveWithVarcharPK(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	move := &Move{
-		SourceDSN:       sourceDSN,
-		TargetDSN:       targetDSN,
-		TargetChunkTime: 100 * time.Millisecond,
-		Threads:         2,
-		WriteThreads:    2,
-		CreateSentinel:  false,
+		SourceDSN:      sourceDSN,
+		TargetDSN:      targetDSN,
+		Threads:        2,
+		WriteThreads:   2,
+		CreateSentinel: false,
 	}
 	err = move.Run()
 	cancel()
@@ -973,11 +965,10 @@ func TestResumeFromCheckpointMultiTableE2E(t *testing.T) {
 	testutils.RunSQL(t, "INSERT INTO "+srcDB+".t2 VALUES ('a','1'), ('b','2'), ('c','3'), ('d','4'), ('e','5')")
 
 	move := &Move{
-		SourceDSN:       sourceDSN,
-		TargetDSN:       targetDSN,
-		TargetChunkTime: 100 * time.Millisecond,
-		Threads:         1,
-		WriteThreads:    1,
+		SourceDSN:    sourceDSN,
+		TargetDSN:    targetDSN,
+		Threads:      1,
+		WriteThreads: 1,
 	}
 	checkpointAndStop(t, move)
 
@@ -988,7 +979,6 @@ func TestResumeFromCheckpointMultiTableE2E(t *testing.T) {
 
 	// Resume. Before the fix this failed with:
 	//   resume validation passed but checkpoint resume failed: ... Error 1064
-	move.TargetChunkTime = 5 * time.Second
 	move.Threads = 4
 	r, err := NewRunner(move)
 	require.NoError(t, err)
@@ -1045,11 +1035,10 @@ func TestResumeFromCheckpointCompositePKE2E(t *testing.T) {
 	}
 
 	move := &Move{
-		SourceDSN:       sourceDSN,
-		TargetDSN:       targetDSN,
-		TargetChunkTime: 100 * time.Millisecond,
-		Threads:         1,
-		WriteThreads:    1,
+		SourceDSN:    sourceDSN,
+		TargetDSN:    targetDSN,
+		Threads:      1,
+		WriteThreads: 1,
 	}
 	checkpointAndStop(t, move)
 
@@ -1057,7 +1046,6 @@ func TestResumeFromCheckpointCompositePKE2E(t *testing.T) {
 	testutils.RunSQL(t, "INSERT INTO "+srcDB+".t1 SELECT UUID(), RANDOM_BYTES(64) FROM "+srcDB+".t1 LIMIT 100")
 
 	// Resume. Before the fix this failed with error 1064.
-	move.TargetChunkTime = 5 * time.Second
 	move.Threads = 4
 	r, err := NewRunner(move)
 	require.NoError(t, err)
@@ -1127,12 +1115,11 @@ func TestMultiSourceResumeFromCheckpointE2E(t *testing.T) {
 	seedUsersRange(t, srcBName, 2, 2400) // 1200 even rows
 
 	move := &Move{
-		SourceDSNs:      []string{testutils.DSNForDatabase(srcAName), testutils.DSNForDatabase(srcBName)},
-		TargetDSN:       testutils.DSNForDatabase(tgtName),
-		TargetChunkTime: 100 * time.Millisecond,
-		Threads:         1,
-		WriteThreads:    1,
-		SourceTables:    []string{"users"},
+		SourceDSNs:   []string{testutils.DSNForDatabase(srcAName), testutils.DSNForDatabase(srcBName)},
+		TargetDSN:    testutils.DSNForDatabase(tgtName),
+		Threads:      1,
+		WriteThreads: 1,
+		SourceTables: []string{"users"},
 	}
 	checkpointAndStop(t, move)
 
@@ -1142,7 +1129,6 @@ func TestMultiSourceResumeFromCheckpointE2E(t *testing.T) {
 	seedUsersRange(t, srcBName, 2402, 2410)
 
 	// Resume.
-	move.TargetChunkTime = 5 * time.Second
 	move.Threads = 4
 	r, err := NewRunner(move)
 	require.NoError(t, err)
@@ -1208,12 +1194,11 @@ func TestMultiSourceResumeDiscardsChecksumWatermark(t *testing.T) {
 	seedUsersRange(t, srcBName, 2, 200)
 
 	move := &Move{
-		SourceDSNs:      []string{testutils.DSNForDatabase(srcAName), testutils.DSNForDatabase(srcBName)},
-		TargetDSN:       testutils.DSNForDatabase(tgtName),
-		TargetChunkTime: 100 * time.Millisecond,
-		Threads:         1,
-		WriteThreads:    1,
-		SourceTables:    []string{"users"},
+		SourceDSNs:   []string{testutils.DSNForDatabase(srcAName), testutils.DSNForDatabase(srcBName)},
+		TargetDSN:    testutils.DSNForDatabase(tgtName),
+		Threads:      1,
+		WriteThreads: 1,
+		SourceTables: []string{"users"},
 	}
 	checkpointAndStop(t, move)
 
@@ -1288,11 +1273,10 @@ func TestSingleSourceResumeKeepsChecksumWatermark(t *testing.T) {
 	seedUsersRange(t, srcName, 1, 2399) // 1200 rows
 
 	move := &Move{
-		SourceDSN:       testutils.DSNForDatabase(srcName),
-		TargetDSN:       testutils.DSNForDatabase(tgtName),
-		TargetChunkTime: 100 * time.Millisecond,
-		Threads:         1,
-		WriteThreads:    1,
+		SourceDSN:    testutils.DSNForDatabase(srcName),
+		TargetDSN:    testutils.DSNForDatabase(tgtName),
+		Threads:      1,
+		WriteThreads: 1,
 	}
 	checkpointAndStop(t, move)
 
@@ -1309,7 +1293,6 @@ func TestSingleSourceResumeKeepsChecksumWatermark(t *testing.T) {
 	require.EqualValues(t, 1, rowsAffected, "exactly one checkpoint row should have been crafted")
 
 	// Resume.
-	move.TargetChunkTime = 5 * time.Second
 	move.Threads = 4
 	r, err := NewRunner(move)
 	require.NoError(t, err)
@@ -1550,11 +1533,10 @@ func TestResumeFromCheckpointTooOld(t *testing.T) {
 	}
 
 	move := &Move{
-		SourceDSN:       sourceDSN,
-		TargetDSN:       targetDSN,
-		TargetChunkTime: 100 * time.Millisecond,
-		Threads:         1,
-		WriteThreads:    1,
+		SourceDSN:    sourceDSN,
+		TargetDSN:    targetDSN,
+		Threads:      1,
+		WriteThreads: 1,
 	}
 	checkpointAndStop(t, move)
 
@@ -1596,16 +1578,14 @@ func TestResumeFromCheckpointNotTooOld(t *testing.T) {
 	}
 
 	move := &Move{
-		SourceDSN:       sourceDSN,
-		TargetDSN:       targetDSN,
-		TargetChunkTime: 100 * time.Millisecond,
-		Threads:         1,
-		WriteThreads:    1,
+		SourceDSN:    sourceDSN,
+		TargetDSN:    targetDSN,
+		Threads:      1,
+		WriteThreads: 1,
 	}
 	checkpointAndStop(t, move)
 
 	// Do NOT backdate the checkpoint — it was just created, so it's fresh.
-	move.TargetChunkTime = 5 * time.Second
 	r, err := NewRunner(move)
 	require.NoError(t, err)
 	require.NoError(t, r.Run(t.Context()))

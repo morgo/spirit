@@ -28,7 +28,6 @@ spirit migrate --host mydb:3306 --username root --password secret \
 - [replica-max-lag](#replica-max-lag)
 - [skip-drop-after-cutover](#skip-drop-after-cutover)
 - [statement](#statement)
-- [target-chunk-time](#target-chunk-time)
 - [target-chunk-size](#target-chunk-size)
 - [threads](#threads)
 - [write-threads](#write-threads)
@@ -273,34 +272,14 @@ There are some restrictions to `--statement`:
 - When sending multiple statements, the `INSTANT` and `INPLACE` optimizations will be skipped. This means that metadata-only changes that would execute instantly if submitted alone will require a full table copy.
 - When sending multiple statements, all statements must operate on tables in the same underlying database (aka schema).
 
-### target-chunk-time
-
-- Type: Duration
-- Default value: `500ms`
-- Range: `100ms-5s`
-- Typical safe values: `100ms-1s`
-
-The target time for each chunk of the **checksum**. Note that the chunk size is specified as a _target time_ and not a _target rows_. This is helpful because rows can be inconsistent when you consider some tables may have a lot of columns or secondary indexes, or copy tasks may slow down as the workload becomes IO bound.
-
-> **The copier does not use `--target-chunk-time`.** It reads full rows into memory, so it sizes each copy chunk against an in-memory _byte budget_ ([`--target-chunk-size`](#target-chunk-size)) instead. Time is a poor signal for the copier: its measured chunk time includes the wait behind the write queue, which inflates under load independently of chunk size and would collapse the chunk size to the row floor. A byte budget is a stable property of the data and keeps chunks large enough to engage InnoDB/Aurora read-ahead. The budget defaults to 16 MiB and can be tuned with [`--target-chunk-size`](#target-chunk-size).
-
-The target is not a hard limit, but rather a guideline which is recalculated based on a 90th percentile from the last 10 chunks (the same servo drives the copier's byte budget). You should expect some outliers where the chunk time is higher than the target. Outliers >5x the target will print to the log, and force an immediate reduction in how many rows are processed per chunk without waiting for the next recalculation.
-
-Larger values generally yield better performance, but have consequences:
-
-- A `5s` value means that at any point replicas will appear `5s` behind the source. Spirit does not support read-replicas, so we do not typically consider this a problem. See [replica-max-lag](#replica-max-lag) for more context.
-- It is recommended to set the target chunk time to a value for which if queries increased by this much, user experience would still be acceptable even if a little frustrating. In some of our systems this means up to `2s`. We do not know of scenarios where values should ever exceed `5s`. If you can tolerate more unavailability, consider running DDL directly on the MySQL server.
-
-Note that Spirit does not support dynamically adjusting the target-chunk-time while running, but it does support automatically resuming from a checkpoint if it is killed. This means that if you find that you've misjudged the number of [threads](#threads) or target-chunk-time, you can simply kill the Spirit process and start it again with different values.
-
 ### target-chunk-size
 
 - Type: Integer (bytes)
 - Default value: `16777216` (16 MiB)
 
-The in-memory byte budget the copier sizes each copy chunk against. Unlike [target-chunk-time](#target-chunk-time), this is a _byte_ target, not a time target: the copier reads full rows into memory, and its measured chunk time is a poor sizing signal (it includes the wait behind the write queue, which inflates under load independently of chunk size). Bytes-per-row is a stable property of the data, so a byte budget keeps chunks convergent under load and large enough to engage InnoDB/Aurora read-ahead.
+The in-memory byte budget the copier sizes each copy chunk against. This is a _byte_ target, not a time target: the copier reads full rows into memory, and its measured chunk time is a poor sizing signal (it includes the wait behind the write queue, which inflates under load independently of chunk size). Bytes-per-row is a stable property of the data, so a byte budget keeps chunks convergent under load and large enough to engage InnoDB/Aurora read-ahead.
 
-The chunker adjusts the row count per chunk so that the in-memory size of each chunk trends toward this budget, using the same 90th-percentile servo as target-chunk-time (with the same `100,000`-row ceiling and `10`-row floor). The default of 16 MiB is roughly 1024 16KB InnoDB pages per chunk; most users should not need to change it.
+The chunker adjusts the row count per chunk so that the in-memory size of each chunk trends toward this budget, using a 90th-percentile servo over the last 10 chunks (with a `100,000`-row ceiling and a `10`-row floor). The default of 16 MiB is roughly 1024 16KB InnoDB pages per chunk; most users should not need to change it.
 
 ### threads
 
@@ -326,7 +305,7 @@ Throttler polling is not counted: it runs on a dedicated monitoring pool.
 
 You may want to wrap `threads` in automation and set it to a percentage of the cores of your database server. For example, if you have a 32-core machine you may choose to set this to `8`. Approximately 25% is a good starting point, making sure you always leave plenty of free cores for regular database operations. If your migration is IO bound and/or your IO latency is high (such as Aurora) you may even go higher than 25%.
 
-By default Spirit does not dynamically adjust the number of threads while running, but it does support automatically resuming from a checkpoint if it is killed. This means that if you find that you've misjudged the number of threads (or [target-chunk-time](#target-chunk-time)), you can simply kill the Spirit process and start it again with different values. The experimental [enable-experimental-autoscaling](#enable-experimental-autoscaling) flag opts into dynamic read-, write- and checksum-thread scaling driven by throttler feedback.
+By default Spirit does not dynamically adjust the number of threads while running, but it does support automatically resuming from a checkpoint if it is killed. This means that if you find that you've misjudged the number of threads, you can simply kill the Spirit process and start it again with different values. The experimental [enable-experimental-autoscaling](#enable-experimental-autoscaling) flag opts into dynamic read-, write- and checksum-thread scaling driven by throttler feedback.
 
 One piece of pacing is *not* opt-in: the checksum phase waits on the throttler before dispatching a chunk, with or without autoscaling. It reacts to *load* signals only — see [checksum scaling](#checksum-scaling) for why replica lag deliberately does not pause a checksum. What the flag adds is movement of the checksum's own worker count.
 
@@ -411,7 +390,7 @@ As with the copy phase, a signal that stops updating does not keep being acted o
 
 One structural constraint shapes this: the checksum's snapshot transaction pool **cannot grow** once the brief table lock is released, because every transaction must take its read view at the same instant. It is therefore provisioned up front at whatever ceiling scaling could actually reach: `ceil(vCPUs / 2)` where the flag engages on Aurora, and plain [threads](#threads) everywhere else — both without the flag, and with the flag on a target where growth is impossible anyway (non-Aurora, or under 4 vCPUs). It reuses the read-side connection budget, since the copier's readers have finished by the time the checksum runs. An idle pooled transaction costs one connection and no extra history retention, so over-provisioning is cheap in resources. What it is not cheap in is lock time: the transactions are started serially under the table lock, so the ceiling directly lengthens that window. This is the reason the read-side ceiling is half the instance rather than all of it.
 
-Chunk sizing is separate from worker count: chunks are sized by the dynamic chunker against [target-chunk-time](#target-chunk-time), and scaling only changes how many are in flight at once.
+Chunk sizing is separate from worker count: the checksum's chunks are sized by the dynamic chunker against a fixed 5s time budget (`table.ChunkerDefaultTarget`, not a flag — and not the copier's [`--target-chunk-size`](#target-chunk-size) byte budget), and scaling only changes how many are in flight at once.
 
 ### max-commit-latency
 
@@ -631,11 +610,11 @@ Note that the whole report is a single log record containing newlines. Spirit's 
 | --- | --- |
 | `%` | Rows copied out of the estimated total. The total comes from table statistics, so the percentage can drift slightly and is not a row count you should reconcile against. |
 | `n/m` | The figures the percentage is derived from. |
-| `chunk-size` | Rows in the most recently claimed chunk. The chunker sizes chunks dynamically to hit [`--target-chunk-time`](#target-chunk-time), so this number moving is normal and healthy — it is how Spirit adapts to row width and server load. A chunk size that has collapsed to its floor and stayed there means each chunk is taking longer than the target, i.e. the server is struggling. |
+| `chunk-size` | Rows in the most recently claimed chunk. The chunker sizes chunks dynamically to hit the [`--target-chunk-size`](#target-chunk-size) byte budget, so this number moving is normal and healthy — it is how Spirit adapts to row width. A chunk size that has collapsed to its floor and stayed there means the rows are too wide to fit the budget even at the floor, i.e. lower `--target-chunk-size` than the data wants, not a struggling server. |
 | `eta` | Remaining rows divided by the recently measured copy rate. `TBD` for the first minute (no rate measured yet) and `DUE` past 99.99%. It is computed from a single 10-second sample, so early on it swings a lot; treat a large jump as noise unless it persists. |
 | `throttled` | Whether the copy is currently paused by a throttler (replica lag, commit latency, or load). A migration that is throttled is behaving as designed — it is protecting the server, not stalling. |
 
-The `checksum` row that replaces this one during the checksum phase has the same shape — including its own `chunk-size`, since the checksum sizes chunks dynamically as well — plus `threads=` and `throttled=` for the checksum's own pacing.
+The `checksum` row that replaces this one during the checksum phase has the same shape — including its own `chunk-size`, since the checksum sizes chunks dynamically as well, though against a fixed 5s time budget rather than the byte budget — plus `threads=` and `throttled=` for the checksum's own pacing.
 
 ### `binlog` row
 

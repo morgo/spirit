@@ -157,9 +157,6 @@ func NewRunner(s *Sync) (*Runner, error) {
 	if s.WriteThreads <= 0 {
 		s.WriteThreads = 4
 	}
-	if s.TargetChunkTime <= 0 {
-		s.TargetChunkTime = 5 * time.Second
-	}
 	if s.TargetChunkSize == 0 {
 		s.TargetChunkSize = table.DefaultTargetChunkBytes
 	}
@@ -610,7 +607,6 @@ func (r *Runner) runContinuousChecksum(ctx context.Context) error {
 		r.source.db, r.target.DB, chunker, r.replClient,
 		checksum.ContinuousCheckerConfig{
 			Concurrency:     r.sync.Threads,
-			TargetChunkTime: r.sync.TargetChunkTime,
 			MinPassInterval: checksum.ContinuousMinPassInterval,
 			Recopier:        recopier,
 			Logger:          r.logger,
@@ -661,8 +657,7 @@ func (r *Runner) buildContinuousChunker() (table.Chunker, error) {
 	chunkers := make([]table.Chunker, 0, len(r.sourceTables))
 	for _, tbl := range r.sourceTables {
 		cc, err := table.NewChunker(tbl, table.ChunkerConfig{
-			TargetChunkTime: r.sync.TargetChunkTime,
-			Logger:          r.logger,
+			Logger: r.logger,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("new continuous-checksum chunker for %s: %w", tbl.TableName, err)
@@ -1112,7 +1107,6 @@ func (r *Runner) buildChunkers() ([]table.Chunker, error) {
 		// copy time, whose signal collapses under write-side backpressure. The
 		// continuous checksum runs server-side and keeps the time signal.
 		cc, err := table.NewChunker(tbl, table.ChunkerConfig{
-			TargetChunkTime:  r.sync.TargetChunkTime,
 			TargetChunkBytes: r.sync.TargetChunkSize,
 			Logger:           r.logger,
 		})

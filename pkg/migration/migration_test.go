@@ -342,8 +342,7 @@ func TestLargeNumberOfMultiChanges(t *testing.T) {
 		}
 	})
 
-	m := NewTestMigration(t, WithTargetChunkTime(2*time.Second),
-		WithStatement(strings.Join(alterStmts, "; ")))
+	m := NewTestMigration(t, WithStatement(strings.Join(alterStmts, "; ")))
 	require.NoError(t, m.Run())
 }
 
@@ -897,7 +896,6 @@ func TestMigrationValidate(t *testing.T) {
 		{name: "typical values are valid", m: Migration{
 			Threads:          4,
 			WriteThreads:     4,
-			TargetChunkTime:  500 * time.Millisecond,
 			ReplicaMaxLag:    120 * time.Second,
 			CheckpointMaxAge: 168 * time.Hour,
 		}},
@@ -905,8 +903,6 @@ func TestMigrationValidate(t *testing.T) {
 			wantErr: "--threads must be non-negative, got -5"},
 		{name: "negative write-threads", m: Migration{WriteThreads: -1},
 			wantErr: "--write-threads must be non-negative, got -1"},
-		{name: "negative target-chunk-time", m: Migration{TargetChunkTime: -time.Second},
-			wantErr: "--target-chunk-time must be non-negative, got -1s"},
 		{name: "negative replica-max-lag", m: Migration{ReplicaMaxLag: -time.Minute},
 			wantErr: "--replica-max-lag must be non-negative, got -1m0s"},
 		{name: "negative checkpoint-max-age", m: Migration{CheckpointMaxAge: -time.Hour},

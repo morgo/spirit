@@ -55,11 +55,11 @@ func (d *dynamicChunkSizer) panicShrink(logger *slog.Logger, dur time.Duration) 
 	newTarget := uint64(float64(d.chunkSize) / float64(DynamicPanicFactor*2))
 	if d.chunkSize <= MinDynamicRowSize {
 		if !d.pinnedAtFloor {
-			logger.Warn("chunk size pinned at minimum; rows may be too wide to meet target-chunk-time",
+			logger.Warn("chunk size pinned at minimum; rows may be too wide to meet the chunk time budget",
 				"time", dur,
 				"threshold", d.ChunkerTarget*DynamicPanicFactor,
 				"min-rows", MinDynamicRowSize,
-				"target-ms", d.ChunkerTarget,
+				"target-time", d.ChunkerTarget,
 			)
 			d.pinnedAtFloor = true
 		}
@@ -68,7 +68,7 @@ func (d *dynamicChunkSizer) panicShrink(logger *slog.Logger, dur time.Duration) 
 			"time", dur,
 			"threshold", d.ChunkerTarget*DynamicPanicFactor,
 			"target-rows", d.chunkSize,
-			"target-ms", d.ChunkerTarget,
+			"target-time", d.ChunkerTarget,
 			"new-target-rows", newTarget,
 		)
 	}

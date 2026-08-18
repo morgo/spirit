@@ -527,7 +527,9 @@ func TestYieldTimeout(t *testing.T) {
 	require.NoError(t, err)
 	feed := change.NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), change.NewClientDefaultConfig())
 	defer feed.Close()
-	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
+	// A 100ms target (not ChunkerDefaultTarget, which is 5s) keeps the chunks
+	// small, so the pass is long enough for the yield timeout below to fire.
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2, TargetChunkTime: 100 * time.Millisecond})
 	require.NoError(t, err)
 	require.NoError(t, feed.AddSubscription(t1, t2, chunker))
 	require.NoError(t, feed.Start(t.Context()))

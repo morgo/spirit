@@ -23,8 +23,18 @@ const (
 	// is 50ms, an actual time 250ms+ will cause the dynamic chunk size to immediately be reduced.
 	DynamicPanicFactor = 5
 
-	// ChunkerDefaultTarget is the default chunker target
-	ChunkerDefaultTarget = 100 * time.Millisecond
+	// ChunkerDefaultTarget is the wall-clock budget the dynamic chunker sizes a
+	// chunk against whenever it uses the time signal: the checksum (a
+	// server-side CRC), and any copy chunker that isn't given a byte budget.
+	// It is deliberately a constant rather than a flag. It was previously
+	// settable per-run as --target-chunk-time, but that flag read as a copier
+	// knob and wasn't one — the copier sizes chunks by DefaultTargetChunkBytes.
+	//
+	// 5s is the top of the range the old flag accepted. Note to future self: if
+	// you increase it, extend the lock timeouts in dbconn/dbconn.go too,
+	// otherwise you will encounter problems. See
+	// https://github.com/block/spirit/issues/96 for an example.
+	ChunkerDefaultTarget = 5 * time.Second
 
 	// DefaultTargetChunkBytes is the in-memory byte budget the buffered copier
 	// sizes each chunk against (see dynamicChunkSizer.TargetChunkBytes). Because

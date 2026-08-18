@@ -67,7 +67,6 @@ func TestNewRunnerValidation(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 4, r.sync.Threads)
 	require.Equal(t, 4, r.sync.WriteThreads)
-	require.Equal(t, 5*time.Second, r.sync.TargetChunkTime)
 	require.Equal(t, uint64(table.DefaultTargetChunkBytes), r.sync.TargetChunkSize)
 	require.Positive(t, r.sync.FlushInterval)
 }
@@ -125,12 +124,11 @@ func TestSyncE2E(t *testing.T) {
 	}
 
 	s := &Sync{
-		SourceDSN:       sourceDSN,
-		TargetDSN:       targetDSN,
-		TargetChunkTime: 100 * time.Millisecond,
-		Threads:         2,
-		WriteThreads:    2,
-		FlushInterval:   100 * time.Millisecond,
+		SourceDSN:     sourceDSN,
+		TargetDSN:     targetDSN,
+		Threads:       2,
+		WriteThreads:  2,
+		FlushInterval: 100 * time.Millisecond,
 	}
 	runner, err := NewRunner(s)
 	require.NoError(t, err)
@@ -188,11 +186,10 @@ func TestSyncInitialCopy(t *testing.T) {
 	testutils.RunSQL(t, `DROP DATABASE IF EXISTS sync_initialcopy_dest`)
 
 	s := &Sync{
-		SourceDSN:       sourceDSN,
-		TargetDSN:       targetDSN,
-		TargetChunkTime: 100 * time.Millisecond,
-		Threads:         2,
-		WriteThreads:    2,
+		SourceDSN:    sourceDSN,
+		TargetDSN:    targetDSN,
+		Threads:      2,
+		WriteThreads: 2,
 	}
 	runner, err := NewRunner(s)
 	require.NoError(t, err)
@@ -234,12 +231,11 @@ func TestSyncCopyOnly(t *testing.T) {
 	testutils.RunSQL(t, `DROP DATABASE IF EXISTS sync_copyonly_dest`)
 
 	s := &Sync{
-		SourceDSN:       sourceDSN,
-		TargetDSN:       targetDSN,
-		TargetChunkTime: 100 * time.Millisecond,
-		Threads:         2,
-		WriteThreads:    2,
-		CopyOnly:        true,
+		SourceDSN:    sourceDSN,
+		TargetDSN:    targetDSN,
+		Threads:      2,
+		WriteThreads: 2,
+		CopyOnly:     true,
 	}
 	runner, err := NewRunner(s)
 	require.NoError(t, err)
@@ -301,11 +297,10 @@ func TestRunnerStatusTask(t *testing.T) {
 	testutils.RunSQL(t, `DROP DATABASE IF EXISTS sync_statustask_dest`)
 
 	s := &Sync{
-		SourceDSN:       src.FormatDSN(),
-		TargetDSN:       dest.FormatDSN(),
-		TargetChunkTime: 100 * time.Millisecond,
-		Threads:         2,
-		WriteThreads:    2,
+		SourceDSN:    src.FormatDSN(),
+		TargetDSN:    dest.FormatDSN(),
+		Threads:      2,
+		WriteThreads: 2,
 	}
 	runner, err := NewRunner(s)
 	require.NoError(t, err)
@@ -409,11 +404,10 @@ func TestSyncResume(t *testing.T) {
 
 	newSync := func() *Sync {
 		return &Sync{
-			SourceDSN:       sourceDSN,
-			TargetDSN:       targetDSN,
-			TargetChunkTime: 100 * time.Millisecond,
-			Threads:         2,
-			WriteThreads:    2,
+			SourceDSN:    sourceDSN,
+			TargetDSN:    targetDSN,
+			Threads:      2,
+			WriteThreads: 2,
 		}
 	}
 
@@ -483,11 +477,10 @@ func TestSyncResumeNoWatermarkRow(t *testing.T) {
 
 	newSync := func() *Sync {
 		return &Sync{
-			SourceDSN:       sourceDSN,
-			TargetDSN:       targetDSN,
-			TargetChunkTime: 100 * time.Millisecond,
-			Threads:         2,
-			WriteThreads:    2,
+			SourceDSN:    sourceDSN,
+			TargetDSN:    targetDSN,
+			Threads:      2,
+			WriteThreads: 2,
 		}
 	}
 
@@ -542,12 +535,11 @@ func TestSyncForce(t *testing.T) {
 
 	newSync := func(force bool) *Sync {
 		return &Sync{
-			SourceDSN:       sourceDSN,
-			TargetDSN:       targetDSN,
-			TargetChunkTime: 100 * time.Millisecond,
-			Threads:         2,
-			WriteThreads:    2,
-			Force:           force,
+			SourceDSN:    sourceDSN,
+			TargetDSN:    targetDSN,
+			Threads:      2,
+			WriteThreads: 2,
+			Force:        force,
 		}
 	}
 	run := func(force bool) error {
@@ -622,12 +614,11 @@ func TestSyncResumeIncompatibleCheckpoint(t *testing.T) {
 
 	newSync := func(force bool) *Sync {
 		return &Sync{
-			SourceDSN:       sourceDSN,
-			TargetDSN:       targetDSN,
-			TargetChunkTime: 100 * time.Millisecond,
-			Threads:         2,
-			WriteThreads:    2,
-			Force:           force,
+			SourceDSN:    sourceDSN,
+			TargetDSN:    targetDSN,
+			Threads:      2,
+			WriteThreads: 2,
+			Force:        force,
 		}
 	}
 
@@ -729,11 +720,10 @@ func TestSyncCreateTableLegacyDefault(t *testing.T) {
 	target := applier.Target{DB: targetDB, Config: targetCfg, KeyRange: "0"}
 
 	s := &Sync{
-		SourceDSN:       src.FormatDSN(),
-		Target:          &target,
-		TargetChunkTime: 100 * time.Millisecond,
-		Threads:         2,
-		WriteThreads:    2,
+		SourceDSN:    src.FormatDSN(),
+		Target:       &target,
+		Threads:      2,
+		WriteThreads: 2,
 	}
 	runner, err := NewRunner(s)
 	require.NoError(t, err)
@@ -883,7 +873,6 @@ func TestSyncDeferSecondaryIndexesE2E(t *testing.T) {
 	s := &Sync{
 		SourceDSN:             sourceDSN,
 		TargetDSN:             targetDSN,
-		TargetChunkTime:       100 * time.Millisecond,
 		Threads:               2,
 		WriteThreads:          2,
 		FlushInterval:         100 * time.Millisecond,
@@ -935,17 +924,14 @@ func TestSyncValidate(t *testing.T) {
 	}{
 		{name: "zero values are valid"},
 		{name: "typical values are valid", s: Sync{
-			Threads:         4,
-			WriteThreads:    4,
-			TargetChunkTime: 5 * time.Second,
-			FlushInterval:   30 * time.Second,
+			Threads:       4,
+			WriteThreads:  4,
+			FlushInterval: 30 * time.Second,
 		}},
 		{name: "negative threads", s: Sync{Threads: -5},
 			wantErr: "--threads must be non-negative, got -5"},
 		{name: "negative write-threads", s: Sync{WriteThreads: -1},
 			wantErr: "--write-threads must be non-negative, got -1"},
-		{name: "negative target-chunk-time", s: Sync{TargetChunkTime: -time.Second},
-			wantErr: "--target-chunk-time must be non-negative, got -1s"},
 		{name: "negative flush-interval", s: Sync{FlushInterval: -time.Minute},
 			wantErr: "--flush-interval must be non-negative, got -1m0s"},
 	}

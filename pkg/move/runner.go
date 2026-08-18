@@ -476,9 +476,10 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 	// to that source's repl client.
 	for i := range r.sources {
 		for _, tbl := range r.sources[i].tables {
+			// TargetChunkTime is left unset: the time signal is a constant
+			// (table.ChunkerDefaultTarget), not a per-run knob.
 			chunkerCfg := table.ChunkerConfig{
-				TargetChunkTime: r.move.TargetChunkTime,
-				Logger:          r.logger,
+				Logger: r.logger,
 			}
 			// Move always uses the buffered copier, which reads rows into client
 			// memory; size the copy chunker by an in-memory byte budget rather than
@@ -969,9 +970,10 @@ func (r *Runner) newCopy(ctx context.Context) error {
 	// to that source's repl client.
 	for i := range r.sources {
 		for _, tbl := range r.sources[i].tables {
+			// TargetChunkTime is left unset: the time signal is a constant
+			// (table.ChunkerDefaultTarget), not a per-run knob.
 			chunkerCfg := table.ChunkerConfig{
-				TargetChunkTime: r.move.TargetChunkTime,
-				Logger:          r.logger,
+				Logger: r.logger,
 			}
 			// Move always uses the buffered copier, which reads rows into client
 			// memory; size the copy chunker by an in-memory byte budget rather than
@@ -1793,7 +1795,7 @@ func (r *Runner) postCopyPhase(ctx context.Context) error {
 	var err error
 	r.checker, err = checksum.NewChecker(sourceDBs, r.checksumChunker, feeds, &checksum.CheckerConfig{
 		Concurrency:     r.move.Threads,
-		TargetChunkTime: r.move.TargetChunkTime,
+		TargetChunkTime: table.ChunkerDefaultTarget,
 		DBConfig:        r.dbConfig,
 		Logger:          r.logger,
 		Applier:         r.applier,
@@ -2008,7 +2010,7 @@ func (r *Runner) runContinuousChecksum(ctx context.Context) error {
 		// TODO(#831): once the throttler can size threads dynamically,
 		// replace the hard-coded 1 with the move's thread count.
 		Concurrency:     1,
-		TargetChunkTime: r.move.TargetChunkTime,
+		TargetChunkTime: table.ChunkerDefaultTarget,
 		DBConfig:        r.dbConfig,
 		Logger:          r.logger,
 		Applier:         r.applier,
@@ -2105,9 +2107,10 @@ func (r *Runner) buildContinuousChunker() (table.Chunker, error) {
 	chunkers := make([]table.Chunker, 0)
 	for i := range r.sources {
 		for _, tbl := range r.sources[i].tables {
+			// TargetChunkTime is left unset: the time signal is a constant
+			// (table.ChunkerDefaultTarget), not a per-run knob.
 			chunkerCfg := table.ChunkerConfig{
-				TargetChunkTime: r.move.TargetChunkTime,
-				Logger:          r.logger,
+				Logger: r.logger,
 			}
 			c, err := table.NewChunker(tbl, chunkerCfg)
 			if err != nil {

@@ -7,7 +7,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/migration/check"
@@ -378,8 +377,7 @@ func TestMigrationCancelledFromTableModification(t *testing.T) {
 	tt.SeedRows(t, "INSERT INTO t1modification (col1, col2) SELECT RANDOM_BYTES(1024), RANDOM_BYTES(1024)", 100000)
 
 	m := NewTestRunnerFromStatement(t, "ALTER TABLE t1modification ENGINE=InnoDB",
-		WithThreads(1),
-		WithTargetChunkTime(100*time.Millisecond))
+		WithThreads(1))
 
 	wg := sync.WaitGroup{}
 	var gErr error

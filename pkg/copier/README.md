@@ -89,7 +89,7 @@ type CopierConfig struct {
 - **`DBConfig`**: Database connection configuration including retry settings.
 - **`Applier`**: Writes rows to the target. Required (non-nil). The migration runner shares one applier between the copier and the replication client, so the copy and the binlog replay go through the same write pipeline.
 
-Note that chunk sizing is **not** configured here — it lives entirely in the chunker. Configure it via `table.ChunkerConfig` when you build the chunker: `TargetChunkBytes` for the copier's in-memory byte-budget signal, or `TargetChunkTime` for the wall-clock signal the checksum uses.
+Note that chunk sizing is **not** configured here — it lives entirely in the chunker. Configure it via `table.ChunkerConfig` when you build the chunker: `TargetChunkBytes` for the copier's in-memory byte-budget signal, or `TargetChunkTime` (default `table.ChunkerDefaultTarget`) for the wall-clock signal the checksum uses.
 - **`Autoscale`** (`AutoscaleConfig`, default: disabled): configures the experimental write-thread autoscaler, enabled via `--enable-experimental-autoscaling`. When `Enabled`, it scales the applier's live write-worker count between `StartThreads` and `MaxThreads`, and its own read-worker count between `Concurrency` and `MaxReadThreads`, based on throttler utilization. Requires a dynamically-scalable applier. See [Autoscaling](#autoscaling-experimental) under Core Concepts.
 
 ## Usage

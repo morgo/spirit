@@ -13,13 +13,13 @@ import (
 // pass and renders a one-line summary when the pass ends.
 //
 // It exists to answer a specific question with data rather than guesswork:
-// which ceiling is actually binding on checksum chunk size. The checksum
-// shares --target-chunk-time with the copier, but its chunks are far cheaper
-// (the CRC is aggregated server-side, so only one row per chunk crosses the
-// wire) and the dynamic sizer is also bounded by table.MaxDynamicRowSize. If
-// most chunks sit at that row cap well inside the time target, then raising
-// the time target alone would change nothing, and the row cap is the thing to
-// revisit. rowCapped counts exactly that case.
+// which ceiling is actually binding on checksum chunk size. The checksum sizes
+// chunks against table.ChunkerDefaultTarget, but its chunks are far cheaper
+// than a copy chunk (the CRC is aggregated server-side, so only one row per
+// chunk crosses the wire) and the dynamic sizer is also bounded by
+// table.MaxDynamicRowSize. If most chunks sit at that row cap well inside the
+// time target, then raising the time target alone would change nothing, and the
+// row cap is the thing to revisit. rowCapped counts exactly that case.
 //
 // Safe for concurrent use: every checksum worker records into it.
 type chunkObserver struct {
