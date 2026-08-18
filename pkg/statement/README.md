@@ -329,6 +329,8 @@ type PartitionOptions struct {
 }
 ```
 
+Partitioning is compared as a whole: MySQL cannot alter a partition method in place, so any difference other than a HASH/KEY partition-count change is emitted as `REMOVE PARTITIONING` followed by a complete `PARTITION BY` — including its `SUBPARTITION BY` clause, partition comments, and any explicitly named subpartitions. The per-partition `ENGINE` clause is the one thing deliberately **not** compared: MySQL requires every partition to use the table's engine, so it carries no information, yet `SHOW CREATE TABLE` always prints it while authored SQL does not.
+
 ## Normalization
 
 MySQL rewrites many constructs when it stores a table definition, so the form a human writes rarely matches what `SHOW CREATE TABLE` reports. Left unhandled, this produces **spurious diffs** — a schema file that says `active BOOLEAN` would appear to differ from the live `active tinyint(1)`, and a diff would emit a pointless `MODIFY COLUMN`. To prevent this, `ParseCreateTable` runs a pipeline of **normalization rules** over the parsed `CreateTable` before returning it, canonicalizing both sides so `Diff` compares like with like.
@@ -344,10 +346,12 @@ Two layers of canonicalization apply:
    | `indexNormalizer` | inline `c INT UNIQUE` → table-level `UNIQUE KEY`; assigns MySQL's default names to unnamed indexes |
    | `columnCheckNormalizer` | hoists a column-level `CHECK` into a table-level constraint |
    | `expressionParenNormalizer` | rewrites `CHECK` and generated-column expressions into a canonical parenthesization, keeping only the parentheses the expression's own precedence does not already imply: MySQL stores them fully parenthesized and the parser preserves input parens verbatim, so `CHECK ((a=1) OR ((b=2) AND (c=3)))` and `CHECK (a=1 OR b=2 AND c=3)` both canonicalize to the latter |
+   | `functionAliasNormalizer` | rewrites a function name to the one MySQL stores, in expression `DEFAULT`s, generated columns, `CHECK`s, functional indexes and partition expressions: `STRING_TO_VECTOR` → `to_vector`, `LCASE` → `lower`, `SUBSTRING`/`MID` → `substr`, `DAY` → `dayofmonth`, and the timestamp family inside an expression default → `now()` |
    | `binaryAttributeNormalizer` | resolves the legacy `BINARY` column attribute to the column charset's `_bin` collation |
    | `integerDisplayWidthNormalizer` | strips deprecated integer display widths (`int(11)` → `int`), keeping `tinyint(1)` and `ZEROFILL` |
    | `vectorDimensionNormalizer` | fills in the default dimension of a `VECTOR` column declared without one (`vector` → `vector(2048)`, MySQL 9.7+) |
    | `charsetlessTypeNormalizer` | drops charset/collation from the types that cannot carry one (`VECTOR`, spatial) — both the parser's synthetic `binary` charset and one an author wrote by hand, which MySQL accepts and silently discards |
+   | `partitionCommentNormalizer` | pushes a partition-level `COMMENT` down onto explicitly named subpartitions that have none, and clears it from the partition — what MySQL stores for `PARTITION p0 ... COMMENT 'c' (SUBPARTITION s0, SUBPARTITION s1)`. A partition comment on implicit subpartitions (`SUBPARTITIONS n`) stays on the partition |
 
 ### Pipeline
 
@@ -368,7 +372,7 @@ Because canonicalization happens at parse time, **`Diff` assumes normalized inpu
 
 ### Relationship to `spirit fmt`
 
-Normalization is an **offline, best-effort** approximation of what MySQL does: it needs no database and covers the common cases. [`spirit fmt`](../../docs/fmt.md) is the **ground-truth** canonicalizer — it round-trips a `CREATE TABLE` through a live MySQL server and reads back `SHOW CREATE TABLE`, so it captures *every* transformation, including ones normalization does not implement (e.g. `DEFAULT FALSE` → `DEFAULT '0'`). Use `spirit fmt` to canonicalize schema files on disk; normalization keeps in-memory parsing and diffing accurate without a server.
+Normalization is an **offline, best-effort** approximation of what MySQL does: it needs no database and covers the common cases. [`spirit fmt`](../../docs/fmt.md) is the **ground-truth** canonicalizer — it round-trips a `CREATE TABLE` through a live MySQL server and reads back `SHOW CREATE TABLE`, so it captures *every* transformation, including ones normalization does not implement (e.g. `DEFAULT FALSE` → `DEFAULT '0'`, and the expression rewrites that restructure rather than rename — `MOD(a,b)` → `(a % b)`, `INSTR(a,b)` → `locate(b,a)`, `WEEKOFYEAR(d)` → `week(d,3)`). Use `spirit fmt` to canonicalize schema files on disk; normalization keeps in-memory parsing and diffing accurate without a server.
 
 ## Helper Functions
 

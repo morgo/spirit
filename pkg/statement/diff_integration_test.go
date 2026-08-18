@@ -461,3 +461,127 @@ func TestDiffIntegrationDescIndex(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, stmts)
 }
+
+// TestDiffIntegrationSubpartitionNoSpuriousDiff verifies that a subpartitioned
+// table does not diff against the definition it was created from. The live
+// definition differs cosmetically in two ways Diff has to absorb: the partition
+// expression comes back lowercased and backtick-quoted, and every partition
+// carries an `ENGINE = InnoDB` clause the authored SQL never wrote.
+//
+// This is a regression test. Comparing the per-partition ENGINE made every
+// partitioned table repartition itself on every run — and because the emitted
+// PARTITION BY had no SUBPARTITION BY clause, applying that "no-op" silently
+// dropped the table's subpartitioning.
+func TestDiffIntegrationSubpartitionNoSpuriousDiff(t *testing.T) {
+	const authoredSQL = "CREATE TABLE diff_subpart (dt date NOT NULL, PRIMARY KEY (dt)) " +
+		"PARTITION BY RANGE (YEAR(dt)) SUBPARTITION BY HASH (dayofmonth(dt)) SUBPARTITIONS 2 " +
+		"(PARTITION p0 VALUES LESS THAN (2020), PARTITION p1 VALUES LESS THAN MAXVALUE)"
+	tt := testutils.NewTestTable(t, "diff_subpart", authoredSQL)
+
+	target, err := ParseCreateTable(authoredSQL)
+	require.NoError(t, err)
+
+	live := showCreateTable(t, tt.DB, tt.Name)
+	require.Contains(t, live, "SUBPARTITION BY HASH", "precondition: the table is subpartitioned")
+	require.Contains(t, live, "ENGINE = InnoDB", "precondition: MySQL prints per-partition ENGINE")
+
+	source, err := ParseCreateTable(live)
+	require.NoError(t, err)
+	stmts, err := source.Diff(target, nil)
+	require.NoError(t, err)
+	require.Nil(t, stmts, "live definition must not diff against the SQL it was created from")
+
+	requireNoSelfDiff(t, tt.DB, tt.Name)
+}
+
+// TestDiffIntegrationSubpartitionChange verifies that a genuine subpartitioning
+// change is emitted in full and actually applies: the REMOVE PARTITIONING +
+// PARTITION BY pair must carry the SUBPARTITION BY clause, or the table comes
+// back partitioned but no longer subpartitioned. The re-diff then converges.
+func TestDiffIntegrationSubpartitionChange(t *testing.T) {
+	tt := testutils.NewTestTable(t, "diff_subpart_chg",
+		"CREATE TABLE diff_subpart_chg (dt date NOT NULL, PRIMARY KEY (dt)) "+
+			"PARTITION BY RANGE (YEAR(dt)) SUBPARTITION BY HASH (dayofmonth(dt)) SUBPARTITIONS 2 "+
+			"(PARTITION p0 VALUES LESS THAN (2020), PARTITION p1 VALUES LESS THAN MAXVALUE)")
+
+	const targetSQL = "CREATE TABLE diff_subpart_chg (dt date NOT NULL, PRIMARY KEY (dt)) " +
+		"PARTITION BY RANGE (YEAR(dt)) SUBPARTITION BY HASH (dayofmonth(dt)) SUBPARTITIONS 4 " +
+		"(PARTITION p0 VALUES LESS THAN (2020), PARTITION p1 VALUES LESS THAN MAXVALUE)"
+	target, err := ParseCreateTable(targetSQL)
+	require.NoError(t, err)
+
+	stmts := diffLiveTable(t, tt.DB, tt.Name, targetSQL)
+	require.Len(t, stmts, 2, "a subpartitioning change needs REMOVE PARTITIONING first")
+	require.Equal(t, "ALTER TABLE `diff_subpart_chg` REMOVE PARTITIONING", stmts[0].Statement)
+	require.Equal(t,
+		"ALTER TABLE `diff_subpart_chg` PARTITION BY RANGE (YEAR(`dt`)) "+
+			"SUBPARTITION BY HASH (dayofmonth(`dt`)) SUBPARTITIONS 4 "+
+			"(PARTITION `p0` VALUES LESS THAN (2020), PARTITION `p1` VALUES LESS THAN MAXVALUE)",
+		stmts[1].Statement)
+
+	// Execute exactly what Diff emitted, as the Runner would.
+	for _, stmt := range stmts {
+		_, err = tt.DB.ExecContext(t.Context(), stmt.Statement)
+		require.NoError(t, err)
+	}
+	postAlter := showCreateTable(t, tt.DB, tt.Name)
+	require.Contains(t, postAlter, "SUBPARTITION BY HASH (dayofmonth(`dt`))", "subpartitioning must survive")
+	require.Contains(t, postAlter, "SUBPARTITIONS 4")
+
+	// Re-diff: the schemas now converge.
+	source, err := ParseCreateTable(postAlter)
+	require.NoError(t, err)
+	stmts, err = source.Diff(target, nil)
+	require.NoError(t, err)
+	require.Nil(t, stmts)
+}
+
+// TestDiffIntegrationSubpartitionNamesAndComments verifies the high-fidelity
+// shape: explicitly named subpartitions plus partition/subpartition comments.
+// MySQL echoes explicit subpartition names back from SHOW CREATE TABLE, and
+// pushes a partition-level comment down onto the subpartitions that lack one,
+// so both sides have to model that to converge — and a repartition has to
+// re-emit the names and comments rather than silently reset them.
+func TestDiffIntegrationSubpartitionNamesAndComments(t *testing.T) {
+	const authoredSQL = "CREATE TABLE diff_subpart_named (dt date NOT NULL, PRIMARY KEY (dt)) " +
+		"PARTITION BY RANGE (YEAR(dt)) SUBPARTITION BY KEY (dt) " +
+		"(PARTITION p0 VALUES LESS THAN (2020) COMMENT 'pc0' (SUBPARTITION s0 COMMENT 'sc0', SUBPARTITION s1), " +
+		"PARTITION p1 VALUES LESS THAN MAXVALUE (SUBPARTITION s2, SUBPARTITION s3))"
+	tt := testutils.NewTestTable(t, "diff_subpart_named", authoredSQL)
+
+	target, err := ParseCreateTable(authoredSQL)
+	require.NoError(t, err)
+	source, err := ParseCreateTable(showCreateTable(t, tt.DB, tt.Name))
+	require.NoError(t, err)
+	stmts, err := source.Diff(target, nil)
+	require.NoError(t, err)
+	require.Nil(t, stmts, "named subpartitions and comments must not diff against themselves")
+
+	// Now move p0's boundary. The repartition has to carry every subpartition
+	// name and comment through, or they are silently lost.
+	const movedSQL = "CREATE TABLE diff_subpart_named (dt date NOT NULL, PRIMARY KEY (dt)) " +
+		"PARTITION BY RANGE (YEAR(dt)) SUBPARTITION BY KEY (dt) " +
+		"(PARTITION p0 VALUES LESS THAN (2030) COMMENT 'pc0' (SUBPARTITION s0 COMMENT 'sc0', SUBPARTITION s1), " +
+		"PARTITION p1 VALUES LESS THAN MAXVALUE (SUBPARTITION s2, SUBPARTITION s3))"
+	moved, err := ParseCreateTable(movedSQL)
+	require.NoError(t, err)
+
+	stmts = diffLiveTable(t, tt.DB, tt.Name, movedSQL)
+	require.Len(t, stmts, 2)
+	for _, stmt := range stmts {
+		_, err = tt.DB.ExecContext(t.Context(), stmt.Statement)
+		require.NoError(t, err)
+	}
+	postAlter := showCreateTable(t, tt.DB, tt.Name)
+	require.Contains(t, postAlter, "SUBPARTITION BY KEY")
+	require.Contains(t, postAlter, "SUBPARTITION s0 COMMENT = 'sc0'")
+	require.Contains(t, postAlter, "SUBPARTITION s1 COMMENT = 'pc0'")
+	require.Contains(t, postAlter, "VALUES LESS THAN (2030)")
+
+	// Re-diff: the schemas now converge.
+	source, err = ParseCreateTable(postAlter)
+	require.NoError(t, err)
+	stmts, err = source.Diff(moved, nil)
+	require.NoError(t, err)
+	require.Nil(t, stmts)
+}

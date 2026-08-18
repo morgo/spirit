@@ -517,8 +517,12 @@ func (ct *CreateTable) parseColumn(col *ast.ColumnDef) Column {
 					column.DefaultIsString = true
 				} else {
 					// Non-string defaults (numeric, functions, expressions):
-					// keep the Restored text representation.
-					defaultRaw := fmt.Sprintf("%v", ct.parseExpression(defaultExpr))
+					// keep the Restored text representation. Only a
+					// literal-style default takes MySQL's bare-keyword
+					// spelling of CURRENT_TIMESTAMP; inside the parentheses of
+					// an expression default the call form is canonical (MySQL
+					// stores DEFAULT (CURRENT_TIMESTAMP) as DEFAULT (now())).
+					defaultRaw := fmt.Sprintf("%v", restoreValueExprText(defaultExpr, !column.DefaultIsExpr))
 					column.Default = &defaultRaw
 				}
 			}
@@ -1105,57 +1109,9 @@ func (ct *CreateTable) parseSubPartitionDefinition(sub *ast.SubPartitionDefiniti
 	return subDef
 }
 
-// parseExpression converts an expression to a string representation
+// parseExpression converts an expression to a string representation, in the
+// form MySQL reports for a literal-style DEFAULT / ON UPDATE / partition
+// expression. See restoreValueExprText for the bare-keyword caveat.
 func (ct *CreateTable) parseExpression(expr ast.ExprNode) any {
-	if expr == nil {
-		return nil
-	}
-
-	// Handle different expression types
-	switch e := expr.(type) {
-	case *ast.FuncCallExpr:
-		// Handle function calls like CURRENT_TIMESTAMP, CURRENT_TIMESTAMP(3), UUID(), etc.
-		// We use Restore to preserve function arguments (e.g. precision in CURRENT_TIMESTAMP(3)).
-		// RestoreKeyWordLowercase renders the function name and any keywords
-		// inside its arguments in lowercase — matching MySQL's canonical
-		// SHOW CREATE TABLE form (e.g. DEFAULT (concat(...))) so that
-		// function-name case never causes a spurious diff — while leaving
-		// string-literal arguments byte-exact. The previous strings.ToLower
-		// over the whole Restored text corrupted literal case:
-		// DEFAULT (concat('A')) round-tripped to concat('a'), emitting a
-		// different default value and making defaults that differ only in
-		// literal case compare equal.
-		var sb strings.Builder
-		rCtx := format.NewRestoreCtx(format.RestoreStringSingleQuotes|format.RestoreKeyWordLowercase|
-			format.RestoreNameBackQuotes|format.RestoreStringWithoutCharset, &sb)
-		if err := e.Restore(rCtx); err != nil {
-			return e.FnName.L // fallback to function name on error
-		}
-		restored := sb.String()
-		// Normalize: MySQL's canonical SHOW CREATE TABLE uses "CURRENT_TIMESTAMP" (no parens)
-		// when there is no fractional seconds precision, but the parser's Restore always adds "()".
-		// We only strip parens for timestamp-family functions; other functions like json_object()
-		// need to keep their parens as they represent actual function calls.
-		name := strings.ToUpper(e.FnName.L)
-		isTimestampFunc := name == "CURRENT_TIMESTAMP" || name == "NOW" ||
-			name == "LOCALTIME" || name == "LOCALTIMESTAMP" || name == "UTC_TIMESTAMP"
-		if isTimestampFunc && len(e.Args) == 0 && strings.HasSuffix(restored, "()") {
-			restored = strings.TrimSuffix(restored, "()")
-		}
-		return restored
-	default:
-		// For other types, fall back to text representation
-		var sb strings.Builder
-		sb.Reset()
-		rCtx := format.NewRestoreCtx(format.DefaultRestoreFlags|format.RestoreStringWithoutCharset, &sb)
-		if err := expr.Restore(rCtx); err != nil {
-			return "<error>"
-		}
-		str := sb.String()
-		// if the string is quoted, remove quotes
-		if strings.HasPrefix(str, "'") && strings.HasSuffix(str, "'") {
-			str = str[1 : len(str)-1]
-		}
-		return str
-	}
+	return restoreValueExprText(expr, true)
 }
