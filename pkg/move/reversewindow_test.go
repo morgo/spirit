@@ -314,12 +314,11 @@ func TestMoveReverseWindowRevertingResumeRetainsOwnershipEvidence(t *testing.T) 
 
 	newRunner := func() *Runner {
 		runner, err := NewRunner(&Move{
-			SourceDSN:       sourceDSN,
-			TargetDSN:       targetDSN,
-			TargetChunkTime: time.Second,
-			Threads:         1,
-			WriteThreads:    1,
-			ReverseWindow:   30 * time.Second,
+			SourceDSN:     sourceDSN,
+			TargetDSN:     targetDSN,
+			Threads:       1,
+			WriteThreads:  1,
+			ReverseWindow: 30 * time.Second,
 		})
 		require.NoError(t, err)
 		return runner
