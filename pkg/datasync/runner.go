@@ -86,8 +86,12 @@ type Runner struct {
 	// status block (#329).
 	lastCheckpoint status.LastCheckpoint
 
-	logger     *slog.Logger
-	cancelFunc context.CancelFunc
+	logger *slog.Logger
+	// metricsSink receives the copier's per-chunk metrics and the tracker's
+	// phase transitions. It defaults to a NoopSink, so a caller that installs
+	// nothing pays only for the discarded values.
+	metricsSink metrics.Sink
+	cancelFunc  context.CancelFunc
 	// sourceDBConfig connects to the read-only source: ForceKill and
 	// RejectReadOnly are disabled (see Run). targetDBConfig connects to the
 	// writable target and keeps the standard safe defaults — most importantly
@@ -165,16 +169,61 @@ func NewRunner(s *Sync) (*Runner, error) {
 	r := &Runner{
 		sync:              s,
 		logger:            slog.Default(),
+		metricsSink:       &metrics.NoopSink{},
 		continuousReadyCh: make(chan struct{}),
 		firstCleanPassCh:  make(chan struct{}),
 	}
 	return r, nil
 }
 
-// SetLogger overrides the logger (used by programmatic callers to capture
-// progress output).
+// recordCopyCompleted reports the copy aggregate settled during this
+// Runner.Run invocation. The optimistic chunker does not persist its
+// actual-row counter in a checkpoint, so a resumed invocation reports only
+// work settled after it resumed.
+func (r *Runner) recordCopyCompleted() {
+	chunker := r.copier.GetChunker()
+	if chunker == nil {
+		return
+	}
+	_, chunks, _ := chunker.Progress()
+	r.status.RecordCopyCompleted(chunker.RowsCopied(), chunks)
+}
+
+func (r *Runner) runCopy(ctx context.Context) error {
+	defer r.recordCopyCompleted()
+	return r.status.Do(status.CopyRows, func() error {
+		r.logger.Info("Starting copy", "resuming", r.resuming.Load())
+		if err := r.copier.Run(ctx); err != nil {
+			return fmt.Errorf("copy failed: %w", err)
+		}
+		if !r.sync.CopyOnly {
+			if !r.resuming.Load() {
+				if err := r.replClient.SetWatermarkOptimization(ctx, false); err != nil {
+					return err
+				}
+			}
+			// Drain the copy-phase backlog so every change observed so far is
+			// applied before steady-state streaming.
+			if err := r.replClient.Flush(ctx); err != nil {
+				return fmt.Errorf("failed to flush after copy: %w", err)
+			}
+		}
+		return nil
+	})
+}
+
 func (r *Runner) SetLogger(logger *slog.Logger) {
 	r.logger = logger
+}
+
+// SetMetricsSink installs the destination for this run's metrics, including
+// the workflow phase transitions reported by status.Tracker. It must be called
+// before Run; a nil sink is ignored.
+func (r *Runner) SetMetricsSink(sink metrics.Sink) {
+	if sink == nil {
+		return
+	}
+	r.metricsSink = sink
 }
 
 // Run performs the initial copy and then streams changes continuously
@@ -186,6 +235,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	r.progMu.Lock()
 	r.cancelFunc = cancel
 	r.progMu.Unlock()
+	r.status.SetMetricsSink(r.metricsSink, r.logger)
 	r.status.Begin()
 	r.logger.Info("Starting sync", "source_dsn", dbconn.RedactDSN(r.sync.SourceDSN))
 
@@ -306,25 +356,7 @@ func (r *Runner) Run(ctx context.Context) error {
 			return err
 		}
 	}
-	if err := r.status.Do(status.CopyRows, func() error {
-		r.logger.Info("Starting copy", "resuming", r.resuming.Load())
-		if err := r.copier.Run(ctx); err != nil {
-			return fmt.Errorf("copy failed: %w", err)
-		}
-		if !r.sync.CopyOnly {
-			if !r.resuming.Load() {
-				if err := r.replClient.SetWatermarkOptimization(ctx, false); err != nil {
-					return err
-				}
-			}
-			// Drain the copy-phase backlog so every change observed so far is
-			// applied before steady-state streaming.
-			if err := r.replClient.Flush(ctx); err != nil {
-				return fmt.Errorf("failed to flush after copy: %w", err)
-			}
-		}
-		return nil
-	}); err != nil {
+	if err := r.runCopy(ctx); err != nil {
 		return err
 	}
 
@@ -1111,7 +1143,7 @@ func (r *Runner) buildCopyPipeline() error {
 		Concurrency: r.sync.Threads,
 		Logger:      r.logger,
 		Throttler:   &throttler.Noop{},
-		MetricsSink: &metrics.NoopSink{},
+		MetricsSink: r.metricsSink,
 		DBConfig:    r.sourceDBConfig,
 		Applier:     r.applier,
 	})

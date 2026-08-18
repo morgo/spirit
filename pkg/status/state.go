@@ -15,6 +15,20 @@ var (
 	ErrCheckpointCollision     = errors.New("checkpoint belongs to a different table (truncation collision)")
 	ErrCouldNotWriteCheckpoint = errors.New("could not write checkpoint")
 	ErrWatermarkNotReady       = errors.New("watermark not ready")
+	// ErrOwnershipAmbiguous marks a failure after which spirit cannot tell
+	// which side owns the table(s): a DDL or RENAME that the server may have
+	// committed before the client lost its acknowledgement, or a caller-owned
+	// traffic switch whose outcome is unknown. Spirit never retries past one
+	// of these, because a retry that guesses wrong can move ownership a
+	// second time. Callers should test for it with errors.Is and escalate to
+	// a human rather than re-running.
+	ErrOwnershipAmbiguous = errors.New("ownership ambiguous; verify table ownership manually before retrying")
+	// ErrDurableMutation marks an error returned after the current invocation
+	// authoritatively completed a durable write. It is orthogonal to
+	// ErrOwnershipAmbiguous: callers may know a write happened without knowing
+	// which side owns traffic, or may know ownership despite later cleanup
+	// failing.
+	ErrDurableMutation = errors.New("durable mutation completed before failure")
 )
 
 const (
