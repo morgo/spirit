@@ -30,6 +30,16 @@ Because the tracker owns the timing, the runners no longer carry ad-hoc fields l
 
 The tracker assumes spirit's linear execution model — one goroutine advances through the phases in order, and the only concurrent transition is a fatal `Set(ErrCleanup)` racing an open bracket (time accrues to the bracketed state up to the fatal transition; the bracket's own exit becomes a no-op). It is not designed for concurrent or overlapping phases. `Begin()` marks the start of a run and resets all timing; runners call it once at the top of `Run`.
 
+### Metrics and reusable-run evidence
+
+Every runner passes its existing `metrics.Sink` to `Tracker`. Generic sinks receive phase-entry and completed-duration values. A sink that also implements `status.WorkflowMetricsSink` receives typed, synchronous callbacks for each bracketed `Do` attempt (`started`, then `finished` with `succeeded`, `failed`, or `cancelled`) and one exact `uint64` copy aggregate. These are attempt outcomes, not workflow/SLO outcomes: a failed checksum may be retried successfully, and a cancelled pod may later resume. `Set`-only transitions such as `ErrCleanup` do not enter the typed attempt stream.
+
+The typed capability deliberately extends `metrics.Sink` rather than creating another observer mechanism. A runner with the default `metrics.NoopSink` disables transition delivery entirely and adds no transition allocations. Sink calls happen outside the tracker's timing mutex, their latency is excluded from phase duration, and a panic in a typed callback is recovered so telemetry cannot change migration behavior.
+
+Copy totals count work settled during the current `Run` invocation and are emitted even when the copy attempt fails or is cancelled. The optimistic chunker does not persist its actual-row counter, so a resumed invocation reports only rows and chunks settled after resume.
+
+Durable mutation and physical ownership are correctness facts, not metrics. `migration.Runner.Result` and `move.Runner.Result` return `status.WorkflowResult` after `Run`; failures also preserve machine-checkable `status.ErrDurableMutation` and `status.ErrOwnershipAmbiguous` markers through `errors.Is`. Result-bearing forward and reverse cutover callbacks carry the same two independent facts, so a caller can report a confirmed partial write without inventing ownership ambiguity.
+
 ## Task Interface
 
 The `Task` interface defines the contract that a migration runner must implement: reporting progress, returning a status string, dumping checkpoints, and cancelling. Both the `migration.Runner` and `move.Runner` implement this interface.
