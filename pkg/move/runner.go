@@ -950,9 +950,14 @@ func (r *Runner) newCopy(ctx context.Context) error {
 
 	// Create the sentinel on targets[0], alongside the checkpoint, so all of
 	// move's coordination tables live in one place (the source tables are
-	// renamed out of the way at cutover). Idempotent (CREATE IF NOT EXISTS) so a
-	// resume recreates it and a concurrent existence probe never sees it absent.
-	if r.move.CreateSentinel {
+	// renamed out of the way at cutover). Only the fresh-copy path creates it;
+	// a resume never does, and does not need to — the sentinel lives on the
+	// target, so it simply survives, and the existence-driven sentinel.Wait
+	// below blocks again. (If the operator dropped it before the resume, the
+	// resumed move cuts over without waiting, matching migrate.) Creation is
+	// idempotent (CREATE IF NOT EXISTS) so that a concurrent existence probe
+	// never sees it absent — see TestCreateSentinelTableIdempotent.
+	if r.move.DeferCutOver {
 		if err := sentinel.Create(ctx, r.targets[0].DB); err != nil {
 			return err
 		}
@@ -1593,7 +1598,7 @@ func (r *Runner) runChecks(ctx context.Context, scope check.ScopeFlag) error {
 		Sources:        sources,
 		Targets:        r.targets,
 		SourceTables:   r.sourceTables,
-		CreateSentinel: r.move.CreateSentinel,
+		DeferCutOver:   r.move.DeferCutOver,
 		MoveEverything: len(r.move.SourceTables) == 0,
 	}, r.logger, scope)
 }
@@ -1706,7 +1711,7 @@ func (r *Runner) restoreIndexesForTargets(ctx context.Context, host string, targ
 // postCopyPhase runs the work that happens between copy-rows and the
 // sentinel wait: drain the binlog backlog, restore secondary indexes
 // (if deferred), run ANALYZE TABLE, and perform the initial checksum.
-// When create-sentinel is not in use this is also the last phase
+// When defer-cutover is not in use this is also the last phase
 // before cutover.
 func (r *Runner) postCopyPhase(ctx context.Context) error {
 	// Flush all pending events, but leave the periodic flush running until
