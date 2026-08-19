@@ -134,7 +134,7 @@ func testMoveWithConcurrentWrites(t *testing.T, deferSecondaryIndexes bool) {
 		TargetDSN:             targetDSN,
 		Threads:               2,
 		WriteThreads:          2,
-		CreateSentinel:        false,
+		DeferCutOver:          false,
 		DeferSecondaryIndexes: deferSecondaryIndexes,
 	}
 
@@ -312,11 +312,11 @@ func TestMoveWithNewTableCreation(t *testing.T) {
 	// it has a sentinel so it will never complete accidentally
 	time.Sleep(100 * time.Millisecond)
 	move := Move{
-		SourceDSN:      sourceDSN,
-		TargetDSN:      targetDSN,
-		Threads:        2,
-		WriteThreads:   2,
-		CreateSentinel: true,
+		SourceDSN:    sourceDSN,
+		TargetDSN:    targetDSN,
+		Threads:      2,
+		WriteThreads: 2,
+		DeferCutOver: true,
 	}
 	wg.Go(func() {
 		err = move.Run()
@@ -404,11 +404,11 @@ func TestMoveFailsGracefullyWithMinimalRBR(t *testing.T) {
 	})
 
 	move := &Move{
-		SourceDSN:      sourceDSN,
-		TargetDSN:      targetDSN,
-		Threads:        2,
-		WriteThreads:   2,
-		CreateSentinel: false,
+		SourceDSN:    sourceDSN,
+		TargetDSN:    targetDSN,
+		Threads:      2,
+		WriteThreads: 2,
+		DeferCutOver: false,
 	}
 
 	err = move.Run()
@@ -825,11 +825,11 @@ func TestMoveWithVarcharPK(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	move := &Move{
-		SourceDSN:      sourceDSN,
-		TargetDSN:      targetDSN,
-		Threads:        2,
-		WriteThreads:   2,
-		CreateSentinel: false,
+		SourceDSN:    sourceDSN,
+		TargetDSN:    targetDSN,
+		Threads:      2,
+		WriteThreads: 2,
+		DeferCutOver: false,
 	}
 	err = move.Run()
 	cancel()

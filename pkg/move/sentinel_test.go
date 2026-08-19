@@ -26,7 +26,7 @@ func sentinelTestTableExists(t *testing.T, db *sql.DB, schema, name string) bool
 	return true
 }
 
-// TestMoveSentinelDropReleasesCutover: with --create-sentinel, dropping the
+// TestMoveSentinelDropReleasesCutover: with --defer-cutover, dropping the
 // sentinel must RELEASE the cutover and let the move finish — not be seen as a
 // schema change that cancels it. The sentinel lives on targets[0], so the drop
 // is a target-side DDL that the source-watching change feed must ignore. Uses a
@@ -52,11 +52,11 @@ func TestMoveSentinelDropReleasesCutover(t *testing.T) {
 	defer utils.CloseAndLog(ctl)
 
 	m := &Move{
-		SourceDSN:      src.FormatDSN(),
-		TargetDSN:      dst.FormatDSN(),
-		Threads:        1,
-		WriteThreads:   1,
-		CreateSentinel: true,
+		SourceDSN:    src.FormatDSN(),
+		TargetDSN:    dst.FormatDSN(),
+		Threads:      1,
+		WriteThreads: 1,
+		DeferCutOver: true,
 	}
 	runner, err := NewRunner(m)
 	require.NoError(t, err)

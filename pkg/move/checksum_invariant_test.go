@@ -71,11 +71,11 @@ func setupRunnerForChecksumTest(t *testing.T, dbSuffix string) (*Runner, context
 	})
 
 	move := &Move{
-		SourceDSN:      sourceDSN,
-		TargetDSN:      targetDSN,
-		Threads:        1,
-		WriteThreads:   1,
-		CreateSentinel: false,
+		SourceDSN:    sourceDSN,
+		TargetDSN:    targetDSN,
+		Threads:      1,
+		WriteThreads: 1,
+		DeferCutOver: false,
 	}
 	r, err := NewRunner(move)
 	require.NoError(t, err)

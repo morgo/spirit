@@ -33,10 +33,10 @@ type SourceResource struct {
 
 // Resources contains the resources needed for move checks
 type Resources struct {
-	Sources        []SourceResource
-	Targets        []applier.Target
-	SourceTables   []*table.TableInfo
-	CreateSentinel bool
+	Sources      []SourceResource
+	Targets      []applier.Target
+	SourceTables []*table.TableInfo
+	DeferCutOver bool
 	// MoveEverything is true when no explicit table list was supplied (i.e.
 	// move.SourceTables is empty), so every table in each source database is
 	// being moved. The source_schema_consistency check uses this to decide

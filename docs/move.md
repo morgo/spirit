@@ -14,7 +14,7 @@ This will copy all tables from the source database to the target database, verif
 ## Configuration
 
 - [checkpoint-max-age](#checkpoint-max-age)
-- [create-sentinel](#create-sentinel)
+- [defer-cutover](#defer-cutover)
 - [defer-secondary-indexes](#defer-secondary-indexes)
 - [force](#force)
 - [reverse-window](#reverse-window)
@@ -35,7 +35,7 @@ Unlike [migrate](migrate.md#checkpoint-max-age), Move does **not** fall back to 
 
 The same caveats about [resuming across Spirit binary versions](migrate.md#resuming-across-spirit-binary-versions) apply to Move, with one difference: where migrate silently discards an unreadable checkpoint and starts fresh, Move fails the run.
 
-### create-sentinel
+### defer-cutover
 
 - Type: Boolean
 - Default value: `false`
@@ -44,12 +44,12 @@ When set to `true`, a sentinel table (`_spirit_sentinel`) is created on the firs
 
 #### Two-checksum model
 
-When `create-sentinel` is in use Move runs two checksums:
+When `defer-cutover` is in use Move runs two checksums:
 
 1. The **initial checksum** runs after copy-rows completes and before Move starts waiting on the sentinel. This is the correctness gate; the cutover will not proceed unless the initial checksum succeeds.
 2. The **continuous checksum** runs in a loop *while* Move is waiting on the sentinel to be dropped. It is a best-effort consistency re-check so that the data is re-verified close to the moment of cutover, even if the sentinel sits for hours. The continuous loop is interrupted as soon as the sentinel is dropped, and Move proceeds to cutover. One exception: if a pass had already detected a mismatch and is mid-recopy, the in-flight repair runs to completion (bounded by an internal per-chunk timeout) before cutover continues, since cancelling between the DELETE on targets and the re-apply from sources would leave the chunk inconsistent. A real repair error surfaced this way aborts the run instead of proceeding to cutover.
 
-Move order (with `create-sentinel`):
+Move order (with `defer-cutover`):
 
 ```
 copy rows → initial checksum → wait on sentinel (continuous checksum loop) → cutover
