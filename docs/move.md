@@ -31,7 +31,7 @@ This will copy all tables from the source database to the target database, verif
 
 The maximum age of a checkpoint before Move refuses to resume from it. Replaying many days of accumulated binary logs can be slower than re-copying, and the binary logs may have been purged in the meantime.
 
-Unlike [migrate](migrate.md#checkpoint-max-age), Move does **not** fall back to a fresh copy when the checkpoint is too old: the target tables already contain rows (which is why the resume path was selected), so silently restarting is not possible. Instead the move fails with a `checkpoint is too old to safely resume` error. To proceed, either re-run with a larger `--checkpoint-max-age`, or wipe the target tables (including the `_spirit_checkpoint` table) and restart the move from scratch.
+Unlike [migrate](migrate.md#checkpoint-max-age), Move does **not** fall back to a fresh copy when the checkpoint is too old: the target tables already contain rows (which is why the resume path was selected), so silently restarting is not possible. Instead the move fails with a `checkpoint is too old to safely resume` error. To proceed, either re-run with a larger `--checkpoint-max-age`, or wipe the target tables (including the `_spirit_move_checkpoint` table) and restart the move from scratch.
 
 The same caveats about [resuming across Spirit binary versions](migrate.md#resuming-across-spirit-binary-versions) apply to Move, with one difference: where migrate silently discards an unreadable checkpoint and starts fresh, Move fails the run.
 

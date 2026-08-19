@@ -950,8 +950,13 @@ func (r *Runner) newCopy(ctx context.Context) error {
 
 	// Create the sentinel on targets[0], alongside the checkpoint, so all of
 	// move's coordination tables live in one place (the source tables are
-	// renamed out of the way at cutover). Idempotent (CREATE IF NOT EXISTS) so a
-	// resume recreates it and a concurrent existence probe never sees it absent.
+	// renamed out of the way at cutover). Only the fresh-copy path creates it;
+	// a resume never does, and does not need to — the sentinel lives on the
+	// target, so it simply survives, and the existence-driven sentinel.Wait
+	// below blocks again. (If the operator dropped it before the resume, the
+	// resumed move cuts over without waiting, matching migrate.) Creation is
+	// idempotent (CREATE IF NOT EXISTS) so that a concurrent existence probe
+	// never sees it absent — see TestCreateSentinelTableIdempotent.
 	if r.move.DeferCutOver {
 		if err := sentinel.Create(ctx, r.targets[0].DB); err != nil {
 			return err
