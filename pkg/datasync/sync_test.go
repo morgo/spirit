@@ -946,3 +946,153 @@ func TestSyncValidate(t *testing.T) {
 		})
 	}
 }
+
+// TestSyncResumeSourceSchemaChanged covers issue #1165: a source DDL that lands
+// between attempts must not be silently copied past. The target table exists
+// from the first run, so createTargetTables does not recreate it; without a
+// schema check the column added on the source falls out of the copy's
+// source/target column intersection — and out of the continuous checksum built
+// from that same intersection — so the sync converges "clean" with the target
+// missing the column. The re-run must fail instead, naming the reconciling
+// ALTER.
+func TestSyncResumeSourceSchemaChanged(t *testing.T) {
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	src := cfg.Clone()
+	src.DBName = "sync_ddl_drift_src"
+	dest := cfg.Clone()
+	dest.DBName = "sync_ddl_drift_dest"
+	sourceDSN := src.FormatDSN()
+	targetDSN := dest.FormatDSN()
+
+	testutils.RunSQL(t, `DROP DATABASE IF EXISTS sync_ddl_drift_src`)
+	testutils.RunSQL(t, `CREATE DATABASE sync_ddl_drift_src`)
+	testutils.RunSQL(t, `CREATE TABLE sync_ddl_drift_src.t1 (id INT PRIMARY KEY, val VARCHAR(255))`)
+	testutils.RunSQL(t, `INSERT INTO sync_ddl_drift_src.t1 VALUES (1,'one'),(2,'two'),(3,'three')`)
+	testutils.RunSQL(t, `CREATE TABLE sync_ddl_drift_src.t2 (id INT PRIMARY KEY, val VARCHAR(255))`)
+	testutils.RunSQL(t, `INSERT INTO sync_ddl_drift_src.t2 VALUES (10,'ten'),(20,'twenty')`)
+	testutils.RunSQL(t, `DROP DATABASE IF EXISTS sync_ddl_drift_dest`)
+
+	newSync := func() *Sync {
+		return &Sync{
+			SourceDSN:    sourceDSN,
+			TargetDSN:    targetDSN,
+			Threads:      2,
+			WriteThreads: 2,
+		}
+	}
+
+	// First run: copies both tables and leaves a resumable checkpoint.
+	r1, err := NewRunner(newSync())
+	require.NoError(t, err)
+	require.NoError(t, runUntilCopied(t, r1))
+	require.NoError(t, r1.Close())
+
+	// The source gains a column while the sync is not running — the shape a
+	// retry of an errored sync sees when the DDL is what aborted it.
+	testutils.RunSQL(t, `ALTER TABLE sync_ddl_drift_src.t1 ADD COLUMN added VARCHAR(64) NOT NULL DEFAULT 'x'`)
+
+	r2, err := NewRunner(newSync())
+	require.NoError(t, err)
+	runErr := runUntilCopied(t, r2)
+	require.NoError(t, r2.Close())
+	require.Error(t, runErr, "a resume against a stale target schema must fail, not copy a column short")
+	require.Contains(t, runErr.Error(), "t1")
+	require.Contains(t, runErr.Error(), "ADD COLUMN `added`",
+		"the error should carry the ALTER that reconciles the target")
+
+	// The unchanged table must not be implicated in the failure.
+	require.NotContains(t, runErr.Error(), "t2")
+
+	// Reconciling the target unblocks the resume. (The rows copied under the old
+	// schema carry the column default rather than the source's values, which is
+	// why spirit refuses to perform this repair itself — see
+	// verifyExistingTargetTable.) Resume in copy-only mode: a continuous resume
+	// opens the change feed at the checkpointed position, which predates the
+	// ALTER, so the source's DDL guard would cancel the run before the copy
+	// finishes — that guard is exactly what leaves the resumable checkpoint this
+	// test starts from, and it is not what's under test here.
+	testutils.RunSQL(t, `ALTER TABLE sync_ddl_drift_dest.t1 ADD COLUMN added VARCHAR(64) NOT NULL DEFAULT 'x'`)
+	reconciled := newSync()
+	reconciled.CopyOnly = true
+	r3, err := NewRunner(reconciled)
+	require.NoError(t, err)
+	require.NoError(t, runUntilCopied(t, r3))
+	require.NoError(t, r3.Close())
+}
+
+// TestSyncTargetSchemaVerifyIgnoresDeferredIndexes guards the resume-time schema
+// check against the false positive that would break --defer-secondary-indexes:
+// an attempt that died between the deferred CREATE and restoreSecondaryIndexes
+// leaves the target legitimately missing its regular secondary indexes, and the
+// resume must proceed (and restore them) rather than report a schema mismatch.
+// UNIQUE indexes are kept on the deferred CREATE, so dropping one *is* a
+// mismatch and must still be caught.
+func TestSyncTargetSchemaVerifyIgnoresDeferredIndexes(t *testing.T) {
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	src := cfg.Clone()
+	src.DBName = "sync_deferidx_verify_src"
+	dest := cfg.Clone()
+	dest.DBName = "sync_deferidx_verify_dest"
+
+	testutils.RunSQL(t, `DROP DATABASE IF EXISTS sync_deferidx_verify_src`)
+	testutils.RunSQL(t, `CREATE DATABASE sync_deferidx_verify_src`)
+	testutils.RunSQL(t, `CREATE TABLE sync_deferidx_verify_src.t1 (
+		id INT PRIMARY KEY,
+		u VARCHAR(36) NOT NULL,
+		a INT,
+		UNIQUE KEY uq_u (u),
+		KEY idx_a (a)
+	)`)
+	testutils.RunSQL(t, `DROP DATABASE IF EXISTS sync_deferidx_verify_dest`)
+	testutils.RunSQL(t, `CREATE DATABASE sync_deferidx_verify_dest`)
+
+	s := &Sync{
+		SourceDSN:             src.FormatDSN(),
+		TargetDSN:             dest.FormatDSN(),
+		DeferSecondaryIndexes: true,
+	}
+	runner, err := NewRunner(s)
+	require.NoError(t, err)
+
+	sourceDB, err := sql.Open("mysql", s.SourceDSN)
+	require.NoError(t, err)
+	defer utils.CloseAndLog(sourceDB)
+	runner.source = sourceInfo{db: sourceDB, config: src, dsn: s.SourceDSN}
+	targetDB, err := sql.Open("mysql", s.TargetDSN)
+	require.NoError(t, err)
+	defer utils.CloseAndLog(targetDB)
+	runner.target = applier.Target{KeyRange: "0", DB: targetDB, Config: dest}
+
+	ctx := context.Background()
+	tables, err := runner.getTables(ctx)
+	require.NoError(t, err)
+	runner.sourceTables = tables
+
+	// Deferred create: target is index-free apart from PRIMARY + UNIQUE.
+	require.NoError(t, runner.createTargetTables(ctx))
+	require.ElementsMatch(t, []string{"uq_u"},
+		secondaryIndexNames(t, targetDB, dest.DBName, "t1"))
+
+	// A resume in that state must not be read as a schema mismatch.
+	require.NoError(t, runner.createTargetTables(ctx),
+		"a target still missing its deferred secondary indexes must resume")
+	require.NoError(t, runner.restoreSecondaryIndexes(ctx))
+
+	// A fully-restored target is equally acceptable.
+	require.NoError(t, runner.createTargetTables(ctx))
+
+	// A dropped UNIQUE index is not deferrable, so it is real drift.
+	testutils.RunSQL(t, `ALTER TABLE sync_deferidx_verify_dest.t1 DROP INDEX uq_u`)
+	err = runner.createTargetTables(ctx)
+	require.Error(t, err, "a missing UNIQUE index is drift, not deferral")
+	require.Contains(t, err.Error(), "uq_u")
+
+	// So is a dropped column.
+	testutils.RunSQL(t, `ALTER TABLE sync_deferidx_verify_dest.t1 ADD UNIQUE KEY uq_u (u)`)
+	testutils.RunSQL(t, `ALTER TABLE sync_deferidx_verify_dest.t1 DROP COLUMN a`)
+	err = runner.createTargetTables(ctx)
+	require.Error(t, err, "a column the target lacks would be silently dropped from the copy")
+	require.Contains(t, err.Error(), "ADD COLUMN `a`")
+}
