@@ -962,9 +962,10 @@ func (r *Runner) hasResumableCheckpoint(ctx context.Context, db *sql.DB) (bool, 
 }
 
 // createTargetTables creates each source table on the target using the
-// source's SHOW CREATE TABLE. Tables that already exist are skipped: on a
+// source's SHOW CREATE TABLE. Tables that already exist are not recreated: on a
 // fresh sync checkTargetEmpty has confirmed they are empty, and on a resume
-// they were created by a previous run.
+// they were created by a previous run. They are still verified against the
+// source first — see verifyExistingTargetTable.
 //
 // When DeferSecondaryIndexes is set, the regular secondary indexes are
 // stripped from the CREATE so the bulk copy loads an index-free table; they
@@ -1011,29 +1012,39 @@ func (r *Runner) createTargetTables(ctx context.Context) error {
 		if err := row.Scan(&name, &createStmt); err != nil {
 			return fmt.Errorf("failed to read CREATE TABLE for source %s: %w", t.TableName, err)
 		}
+		var exists int
+		err := conn.QueryRowContext(ctx,
+			"SELECT 1 FROM information_schema.TABLES WHERE table_schema = ? AND table_name = ?",
+			r.target.Config.DBName, t.TableName).Scan(&exists)
+		if err == nil {
+			// The table is already there. Verify it still matches the source
+			// before we copy into it — an unconditional skip here is what makes
+			// a source DDL between attempts silently lossy (issue #1165).
+			var targetName, targetCreateStmt string
+			targetRow := conn.QueryRowContext(ctx, "SHOW CREATE TABLE "+t.QuotedTableName)
+			if err := targetRow.Scan(&targetName, &targetCreateStmt); err != nil {
+				return fmt.Errorf("failed to read CREATE TABLE for target %s: %w", t.TableName, err)
+			}
+			if err := r.verifyExistingTargetTable(t.TableName, createStmt, targetCreateStmt); err != nil {
+				return err
+			}
+			r.logger.Info("target table already exists and passed schema verification, skipping creation",
+				"table", t.TableName, "database", r.target.Config.DBName)
+			continue
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("failed to check if table %s exists on target: %w", t.TableName, err)
+		}
 		// When deferring secondary indexes, create the table without its regular
 		// secondary indexes; they are added back by restoreSecondaryIndexes once
 		// the initial copy has completed. We don't track which indexes were
 		// stripped — restore re-derives them from the source schema. UNIQUE,
 		// FULLTEXT and SPATIAL indexes are preserved on the CREATE.
 		if r.sync.DeferSecondaryIndexes {
-			var err error
 			createStmt, err = statement.RemoveSecondaryIndexes(createStmt)
 			if err != nil {
 				return fmt.Errorf("failed to remove secondary indexes from CREATE TABLE for %s: %w", t.TableName, err)
 			}
-		}
-		var exists int
-		err := conn.QueryRowContext(ctx,
-			"SELECT 1 FROM information_schema.TABLES WHERE table_schema = ? AND table_name = ?",
-			r.target.Config.DBName, t.TableName).Scan(&exists)
-		if err == nil {
-			r.logger.Info("target table already exists, skipping creation",
-				"table", t.TableName, "database", r.target.Config.DBName)
-			continue
-		}
-		if !errors.Is(err, sql.ErrNoRows) {
-			return fmt.Errorf("failed to check if table %s exists on target: %w", t.TableName, err)
 		}
 		if _, err := conn.ExecContext(ctx, createStmt); err != nil {
 			return fmt.Errorf("failed to create table %s on target: %w", t.TableName, err)
@@ -1042,6 +1053,48 @@ func (r *Runner) createTargetTables(ctx context.Context) error {
 			"deferred_indexes", r.sync.DeferSecondaryIndexes)
 	}
 	return nil
+}
+
+// verifyExistingTargetTable compares a target table that already exists against
+// its source, returning an actionable error when the two have diverged.
+//
+// The copy column list is the *intersection* of the source and target columns
+// (table.ColumnMapping), and the continuous checksum compares that same
+// intersection. So a target left behind by an earlier attempt of this sync,
+// against a source that has since been ALTERed, drops the differing columns
+// from both the copy and the verification: the sync converges "clean" while the
+// target quietly misses data. Because a run that aborts still leaves a resumable
+// checkpoint, that is reachable by any consumer that retries an errored sync
+// (issue #1165). Fail here instead, naming the ALTER that reconciles the two.
+//
+// We fail rather than repair: the rows already copied under the old schema
+// would carry column defaults rather than the source's values, so an ALTER on
+// the target alone would not make the copy correct.
+//
+// Regular secondary indexes are excluded from the comparison on both sides.
+// With DeferSecondaryIndexes the target is deliberately created without them,
+// and an attempt that died mid-copy leaves it that way; restoreSecondaryIndexes
+// re-derives whatever is missing once the copy completes. UNIQUE, FULLTEXT and
+// SPATIAL indexes are kept on the initial CREATE, so those are still compared,
+// as are columns, the primary key, constraints and table options.
+func (r *Runner) verifyExistingTargetTable(tableName, sourceCreate, targetCreate string) error {
+	sourceCmp, err := statement.RemoveSecondaryIndexes(sourceCreate)
+	if err != nil {
+		return fmt.Errorf("failed to parse CREATE TABLE for source %s: %w", tableName, err)
+	}
+	targetCmp, err := statement.RemoveSecondaryIndexes(targetCreate)
+	if err != nil {
+		return fmt.Errorf("failed to parse CREATE TABLE for target %s: %w", tableName, err)
+	}
+	diff, err := statement.DiffCreateTables(tableName, sourceCmp, targetCmp, statement.NewDiffOptions())
+	if err != nil {
+		return fmt.Errorf("failed to compare source and target schema for %s: %w", tableName, err)
+	}
+	if diff == "" {
+		return nil
+	}
+	return fmt.Errorf("table %s already exists on the target (%s) but its schema has diverged from the source; copying into it is unsafe — any column the two do not share is silently dropped from both the copy and the checksum. Reconcile the target with: %s — or drop the target database and re-copy from scratch",
+		tableName, r.target.Config.DBName, diff)
 }
 
 // restoreSecondaryIndexes adds any secondary indexes that exist on a source
