@@ -1028,7 +1028,7 @@ func (r *Runner) createTargetTables(ctx context.Context) error {
 			if err := r.verifyExistingTargetTable(t.TableName, createStmt, targetCreateStmt); err != nil {
 				return err
 			}
-			r.logger.Info("target table already exists and matches the source, skipping creation",
+			r.logger.Info("target table already exists and passed schema verification, skipping creation",
 				"table", t.TableName, "database", r.target.Config.DBName)
 			continue
 		}
@@ -1093,7 +1093,7 @@ func (r *Runner) verifyExistingTargetTable(tableName, sourceCreate, targetCreate
 	if diff == "" {
 		return nil
 	}
-	return fmt.Errorf("table %s already exists on the target (%s) but no longer matches the source; copying into it would silently omit the columns the two do not share. Reconcile the target with: %s — or drop the target database and re-copy from scratch",
+	return fmt.Errorf("table %s already exists on the target (%s) but its schema has diverged from the source; copying into it is unsafe — any column the two do not share is silently dropped from both the copy and the checksum. Reconcile the target with: %s — or drop the target database and re-copy from scratch",
 		tableName, r.target.Config.DBName, diff)
 }
 

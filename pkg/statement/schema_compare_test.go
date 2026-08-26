@@ -80,6 +80,23 @@ func TestDiffCreateTables(t *testing.T) {
 	}
 }
 
+// TestDiffCreateTablesKeepsStatementBoundaries covers a reconciliation that
+// Diff deliberately splits across more than one ALTER. Here it is an
+// option-only index change: MySQL no-ops a DROP and ADD of the same index in a
+// single statement, so merging the two into one comma-joined ALTER would emit
+// SQL that silently fails to reconcile the schemas.
+func TestDiffCreateTablesKeepsStatementBoundaries(t *testing.T) {
+	want := "CREATE TABLE t1 (id INT NOT NULL PRIMARY KEY, b VARCHAR(255), KEY idx_b (b) KEY_BLOCK_SIZE=8)"
+	got := "CREATE TABLE t1 (id INT NOT NULL PRIMARY KEY, b VARCHAR(255), KEY idx_b (b) KEY_BLOCK_SIZE=4)"
+
+	diff, err := DiffCreateTables("t1", want, got, nil)
+	require.NoError(t, err)
+	require.Equal(t,
+		"ALTER TABLE `t1` DROP INDEX `idx_b`; ALTER TABLE `t1` ADD INDEX `idx_b` (`b`) KEY_BLOCK_SIZE=8",
+		diff,
+		"statements Diff kept separate must not be merged into one ALTER")
+}
+
 func TestDiffCreateTablesParseErrors(t *testing.T) {
 	_, err := DiffCreateTables("t1", "NOT A CREATE TABLE", "CREATE TABLE t1 (id INT NOT NULL PRIMARY KEY)", nil)
 	require.ErrorContains(t, err, "failed to parse reference CREATE TABLE")

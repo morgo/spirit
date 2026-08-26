@@ -30,6 +30,12 @@ import (
 // tables on different instances, so their names are normalized away before the
 // diff and never compared.
 //
+// CreateTable.Diff deliberately splits some reconciliations across more than
+// one ALTER — a partition-type change, or an option-only index change that
+// MySQL would no-op if its DROP and ADD shared a statement. Those are emitted
+// as separate semicolon-separated ALTERs, in order, rather than merged into one
+// (which would produce SQL that silently does the wrong thing).
+//
 // If opts is nil, NewDiffOptions() defaults are used.
 func DiffCreateTables(table, wantCreate, gotCreate string, opts *DiffOptions) (string, error) {
 	want, err := ParseCreateTable(wantCreate)
@@ -57,20 +63,21 @@ func DiffCreateTables(table, wantCreate, gotCreate string, opts *DiffOptions) (s
 	if len(stmts) == 0 {
 		return "", nil
 	}
-	clauses := make([]string, 0, len(stmts))
-	for _, s := range stmts {
-		if s.Alter != "" {
-			clauses = append(clauses, s.Alter)
-		}
-	}
-	if len(clauses) == 0 {
-		return "", nil
-	}
-	// Prefix with an escaped "ALTER TABLE <table>" so the output is directly
-	// runnable. Multiple clauses are joined into a single ALTER.
+	// Prefix each statement with an escaped "ALTER TABLE <table>" so the output
+	// is directly runnable. Diff already grouped the clauses that may share an
+	// ALTER, so preserve its statement boundaries rather than flattening them.
 	prefix, err := sqlescape.EscapeSQL("ALTER TABLE %n ", table)
 	if err != nil {
 		return "", err
 	}
-	return prefix + strings.Join(clauses, ", "), nil
+	alters := make([]string, 0, len(stmts))
+	for _, s := range stmts {
+		if s.Alter != "" {
+			alters = append(alters, prefix+s.Alter)
+		}
+	}
+	if len(alters) == 0 {
+		return "", nil
+	}
+	return strings.Join(alters, "; "), nil
 }
