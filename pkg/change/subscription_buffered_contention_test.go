@@ -105,6 +105,28 @@ func shortenContentionBackoff(t *testing.T) {
 	t.Cleanup(func() { contentionBackoff = prev })
 }
 
+func shortenContentionBudget(t *testing.T, d time.Duration) {
+	t.Helper()
+	prev := contentionRetryBudget
+	contentionRetryBudget = d
+	t.Cleanup(func() { contentionRetryBudget = prev })
+}
+
+// fixContentionBackoff pins the backoff to production's shape — first attempt
+// immediate, every later one a fixed delay — so a test can arrange for the
+// budget to expire *inside* the sleep rather than before it.
+func fixContentionBackoff(t *testing.T, d time.Duration) {
+	t.Helper()
+	prev := contentionBackoff
+	contentionBackoff = func(attempt int) time.Duration {
+		if attempt <= 0 {
+			return 0
+		}
+		return d
+	}
+	t.Cleanup(func() { contentionBackoff = prev })
+}
+
 // TestFlushRecoversFromSelfInflictedDeadlock is the regression test for the
 // livelock behind block/spirit#1168: every concurrent drain deadlocked against
 // itself, the whole flush returned an error, and because the clients only
@@ -280,17 +302,21 @@ func (a *alwaysContendingApplier) UpsertRows(context.Context, *table.ColumnMappi
 	return 0, deadlockErr()
 }
 
-// TestSerialRetryExhaustionFailsDrain covers the safety property the whole PR
-// turns on, which had no test: when the serial pass cannot land a batch, the
-// drain must report failure so the caller never publishes a flushed position
+// TestSerialRetryExhaustionDefersWithoutFailing covers the safety property the
+// contention path turns on: the caller must never publish a flushed position
 // over changes that are still buffered.
 //
-// Replacing retryContendedBatches' exhausted-retries error with `continue`
-// previously survived the entire package. It makes drainMapSnapshot return
-// allChangesFlushed=true with rows still in the buffer, and the clients'
-// `if allChangesFlushed { flushedPos = ... }` is the only guard — so the
-// checkpoint would advance past unapplied changes, silently and unrecoverably.
-func TestSerialRetryExhaustionFailsDrain(t *testing.T) {
+// allChangesFlushed=false is what enforces that, not the error. Clients gate
+// position advancement on it — it is the same mechanism watermark-deferred keys
+// use — so a deferred batch holds the position back exactly as a failed drain
+// would, while the batches that *did* land still count as progress. Erroring
+// instead discards the whole drain, which in production meant throwing away six
+// minutes of successful work because one batch contended at the end.
+//
+// The mutation this has to catch is `return true` for allChangesFlushed, not a
+// missing error: that is what would let the checkpoint advance past unapplied
+// changes, silently and unrecoverably.
+func TestSerialRetryExhaustionDefersWithoutFailing(t *testing.T) {
 	shortenContentionBackoff(t)
 	const totalRows = 3 * DefaultBatchSize
 	sub := newByteCapBufferedMap(&countingApplier{}, false)
@@ -302,9 +328,17 @@ func TestSerialRetryExhaustionFailsDrain(t *testing.T) {
 	}
 
 	allFlushed, err := sub.Flush(t.Context(), false, nil)
-	require.Error(t, err, "permanent contention must fail the drain")
-	require.ErrorContains(t, err, "still contended")
-	require.False(t, allFlushed, "a failed drain must never report all-flushed")
+	require.NoError(t, err, "unresolved contention is deferred, not an error")
+	require.False(t, allFlushed,
+		"changes that never landed must hold the flushed position back")
+	require.Equal(t, int64(3), sub.batchesDeferred.Load(), "every batch must be deferred")
+	// A deferred drain is evidence of contention and must narrow the width. The
+	// deferral branch returns before the tail adaptFlushConcurrency call, so it
+	// makes its own — and without it, sustained contention is a steady state
+	// that defers at unchanged width forever, re-contending every drain and
+	// reaching the frozen checkpoint by a third route.
+	require.Less(t, sub.effectiveFlushConcurrency(), 4,
+		"a deferred drain must narrow the flush width")
 
 	// Nothing was lost and nothing was double-counted: every row is back in the
 	// active buffer with balanced accounting and no in-flight residue.
@@ -315,6 +349,74 @@ func TestSerialRetryExhaustionFailsDrain(t *testing.T) {
 	require.Equal(t, expectedBytes, sub.sizeBytes, "byte accounting must balance")
 	require.Zero(t, sub.flushingCount, "no entries may be left marked in-flight")
 	sub.Unlock()
+
+	// The deferral is not a one-way door: once the contention clears, the very
+	// next flush lands the same rows and reports the position as advanceable.
+	sub.applier = &countingApplier{}
+	allFlushed, err = sub.Flush(t.Context(), false, nil)
+	require.NoError(t, err)
+	require.True(t, allFlushed, "the retry must be able to complete the drain")
+	require.Zero(t, sub.Length(), "the deferred rows must land on the next flush")
+}
+
+// TestPartialContentionKeepsLandedBatches is the reason deferral beats
+// erroring. One batch contends permanently while the rest apply cleanly; the
+// clean ones must stay applied and only the contended one comes back.
+//
+// On the error path all of them returned to the buffer as far as the *caller*
+// was concerned — the writes had happened, but the drain reported failure, so
+// flushedGTID never advanced and the flush was never recorded. With a
+// production drain running minutes per pass, that made a late-arriving 1213
+// cost the entire pass.
+func TestPartialContentionKeepsLandedBatches(t *testing.T) {
+	shortenContentionBackoff(t)
+	const batches = 4
+	const totalRows = batches * DefaultBatchSize
+
+	// Fail the first upsert forever, so exactly one batch is unlandable while
+	// its three siblings succeed on their first attempt.
+	fake := &oneStubbornBatchApplier{}
+	sub := newByteCapBufferedMap(&fake.countingApplier, false)
+	sub.applier = fake
+	sub.flushConcurrency = 1 // serial pass 1, so "the first call" is deterministic
+
+	for i := range totalRows {
+		sub.HasChanged([]any{int64(i)}, []any{int64(i), "seed"}, false)
+	}
+
+	allFlushed, err := sub.Flush(t.Context(), false, nil)
+	require.NoError(t, err, "a single stubborn batch must not fail the drain")
+	require.False(t, allFlushed, "the unlanded batch must hold the position back")
+	require.Equal(t, int64(1), sub.batchesDeferred.Load(), "only one batch should defer")
+
+	require.Equal(t, DefaultBatchSize, sub.Length(),
+		"only the contended batch may return to the buffer")
+	expectedBytes := recomputeSizeBytes(sub)
+	sub.Lock()
+	require.Equal(t, expectedBytes, sub.sizeBytes, "byte accounting must balance")
+	require.Zero(t, sub.flushingCount, "no entries may be left marked in-flight")
+	sub.Unlock()
+}
+
+// oneStubbornBatchApplier fails every attempt at the batch it saw first, and
+// applies everything else normally.
+type oneStubbornBatchApplier struct {
+	countingApplier
+	mu       sync.Mutex
+	stubborn []applier.LogicalRow
+}
+
+func (a *oneStubbornBatchApplier) UpsertRows(ctx context.Context, mapping *table.ColumnMapping, rows []applier.LogicalRow, locks []*dbconn.TableLock) (int64, error) {
+	a.mu.Lock()
+	if a.stubborn == nil {
+		a.stubborn = rows
+	}
+	doomed := len(rows) > 0 && len(a.stubborn) > 0 && &a.stubborn[0] == &rows[0]
+	a.mu.Unlock()
+	if doomed {
+		return 0, deadlockErr()
+	}
+	return a.countingApplier.UpsertRows(ctx, mapping, rows, locks)
 }
 
 // TestMixedContentionAndHardErrorDoesNotNarrow pins finding (a) on the AIMD
@@ -448,4 +550,310 @@ func TestContentionAtShutdownIsNotRetried(t *testing.T) {
 	require.Zero(t, sub.batchesContended.Load(),
 		"contention concurrent with cancellation must not be handed to the serial pass")
 	require.Equal(t, totalRows, sub.Length(), "the rows must stay buffered for the next flush")
+}
+
+// budgetBurningApplier contends on its first contendingCalls upserts — enough
+// to send every batch to pass 2 — and then makes the first serial attempt take
+// longer than the whole retry budget before succeeding. That is the shape of a
+// real slow batch: the budget expires while a statement is legitimately in
+// flight, not because anything is wrong.
+//
+// It also records whether it was ever handed an already-cancelled context,
+// which is the property the budget must never violate.
+type budgetBurningApplier struct {
+	countingApplier
+	contendingCalls int64
+	burn            time.Duration
+
+	calls          atomic.Int64
+	burned         atomic.Bool
+	sawCanceledCtx atomic.Bool
+}
+
+func (a *budgetBurningApplier) UpsertRows(ctx context.Context, mapping *table.ColumnMapping, rows []applier.LogicalRow, locks []*dbconn.TableLock) (int64, error) {
+	if ctx.Err() != nil {
+		a.sawCanceledCtx.Store(true)
+	}
+	if a.calls.Add(1) <= a.contendingCalls {
+		return 0, deadlockErr()
+	}
+	if a.burn > 0 && a.burned.CompareAndSwap(false, true) {
+		time.Sleep(a.burn)
+	}
+	// The interesting check: after outlasting the budget, is our context still
+	// live? Under the old context-based budget it would not be.
+	if ctx.Err() != nil {
+		a.sawCanceledCtx.Store(true)
+		return 0, ctx.Err()
+	}
+	return a.countingApplier.UpsertRows(ctx, mapping, rows, locks)
+}
+
+// TestRetryBudgetNeverCancelsAnAttempt pins the production defect this change
+// was written for.
+//
+// The budget used to be a context.WithTimeout handed to flushBatch, so
+// expiring did not merely stop the pass — it killed the REPLACE that happened
+// to be running. On a table whose batches take longer than the budget that
+// fires on a perfectly healthy statement, and it surfaced as
+//
+//	failed to upsert rows: failed to execute upsert: context deadline exceeded
+//
+// which reads like a statement timeout and is nothing of the sort. It reached
+// the operator as a failed migration.
+//
+// The budget must now gate only the *start* of an attempt. An attempt already
+// under way runs on the parent context and is allowed to finish, so it lands.
+func TestRetryBudgetNeverCancelsAnAttempt(t *testing.T) {
+	shortenContentionBackoff(t)
+	shortenContentionBudget(t, 20*time.Millisecond)
+
+	fake := &budgetBurningApplier{contendingCalls: 1, burn: 200 * time.Millisecond}
+	sub := newByteCapBufferedMap(&fake.countingApplier, false)
+	sub.applier = fake
+	sub.flushConcurrency = 1
+
+	const totalRows = DefaultBatchSize
+	for i := range totalRows {
+		sub.HasChanged([]any{int64(i)}, []any{int64(i), "seed"}, false)
+	}
+
+	allFlushed, err := sub.Flush(t.Context(), false, nil)
+	require.NoError(t, err, "the budget must never surface as an apply failure")
+	require.False(t, fake.sawCanceledCtx.Load(),
+		"an attempt outlasting the budget must still have a live context")
+	require.True(t, allFlushed, "the attempt was allowed to finish, so the batch landed")
+	require.Zero(t, sub.Length(), "and the rows are gone from the buffer")
+	require.Zero(t, sub.batchesDeferred.Load(), "nothing needed deferring")
+}
+
+// The budget still does its job: once spent, the batches pass 2 has not reached
+// yet are deferred to the next flush rather than holding flushMu indefinitely.
+// Deferring is not an error, and the batch that did land stays landed.
+func TestRetryBudgetExpiryDefersRemainingBatches(t *testing.T) {
+	shortenContentionBackoff(t)
+	shortenContentionBudget(t, 20*time.Millisecond)
+
+	const batches = 3
+	const totalRows = batches * DefaultBatchSize
+	fake := &budgetBurningApplier{contendingCalls: batches, burn: 200 * time.Millisecond}
+	sub := newByteCapBufferedMap(&fake.countingApplier, false)
+	sub.applier = fake
+	sub.flushConcurrency = 1
+
+	for i := range totalRows {
+		sub.HasChanged([]any{int64(i)}, []any{int64(i), "seed"}, false)
+	}
+
+	allFlushed, err := sub.Flush(t.Context(), false, nil)
+	require.NoError(t, err, "running out of budget is not a failure")
+	require.False(t, fake.sawCanceledCtx.Load())
+	require.False(t, allFlushed, "the deferred batches must hold the position back")
+	require.Equal(t, int64(batches-1), sub.batchesDeferred.Load(),
+		"the first batch outlasted the budget and landed; the rest were never started")
+	require.Equal(t, (batches-1)*DefaultBatchSize, sub.Length(),
+		"exactly the deferred batches stay buffered")
+
+	// Not a one-way door: with the budget restored the next flush finishes.
+	shortenContentionBudget(t, time.Minute)
+	fake.burn = 0
+	allFlushed, err = sub.Flush(t.Context(), false, nil)
+	require.NoError(t, err)
+	require.True(t, allFlushed)
+	require.Zero(t, sub.Length())
+}
+
+// TestHardErrorDuringSerialRetryStillFailsDrain is the other side of the
+// deferral: pass 2 absorbs contention and its own budget, and nothing else. A
+// non-retryable error discovered during the serial pass must still fail the
+// drain, exactly as it would in pass 1.
+func TestHardErrorDuringSerialRetryStillFailsDrain(t *testing.T) {
+	shortenContentionBackoff(t)
+	// First call contends (sending the batch to pass 2), the retry hits a
+	// non-retryable error.
+	fake := &sequencedApplier{errs: []error{deadlockErr(), errInjected}}
+	sub := newByteCapBufferedMap(&fake.countingApplier, false)
+	sub.applier = fake
+	sub.flushConcurrency = 1
+
+	const totalRows = DefaultBatchSize
+	for i := range totalRows {
+		sub.HasChanged([]any{int64(i)}, []any{int64(i), "seed"}, false)
+	}
+
+	allFlushed, err := sub.Flush(t.Context(), false, nil)
+	require.ErrorIs(t, err, errInjected, "a hard error in pass 2 must surface")
+	require.False(t, allFlushed)
+	require.Zero(t, sub.batchesDeferred.Load(), "a hard error is not a deferral")
+	require.Equal(t, totalRows, sub.Length(), "the rows must stay buffered")
+}
+
+// TestRetryBudgetIsNotDefeatedByTheBackoffSleep pins the other half of "the
+// budget gates attempt starts".
+//
+// Checking the deadline before the inter-attempt backoff is not enough: the
+// backoff escalates to a couple of seconds, so a check can pass with a
+// millisecond left, sleep through the expiry, and then start a full flushBatch
+// anyway — holding flushMu for an attempt the budget had already declined. The
+// check that matters is the one after the wait.
+func TestRetryBudgetIsNotDefeatedByTheBackoffSleep(t *testing.T) {
+	// The budget expires during the second attempt's backoff: the first attempt
+	// is immediate, so it starts and fails well inside the budget, and the
+	// sleep that follows outlasts it ten times over.
+	shortenContentionBudget(t, 50*time.Millisecond)
+	fixContentionBackoff(t, 500*time.Millisecond)
+
+	// Contends on every call, so nothing can land and the only thing bounding
+	// the pass is the budget.
+	fake := &budgetBurningApplier{contendingCalls: 1 << 30}
+	sub := newByteCapBufferedMap(&fake.countingApplier, false)
+	sub.applier = fake
+	sub.flushConcurrency = 1
+
+	const totalRows = DefaultBatchSize // one batch by construction
+	for i := range totalRows {
+		sub.HasChanged([]any{int64(i)}, []any{int64(i), "seed"}, false)
+	}
+
+	allFlushed, err := sub.Flush(t.Context(), false, nil)
+	require.NoError(t, err, "an expired budget defers, it does not fail")
+	require.False(t, allFlushed)
+	require.Equal(t, totalRows, sub.Length(), "the batch stays buffered")
+
+	// One call in pass 1 and one in pass 2. A third means an attempt started
+	// after the deadline had already passed, which is the defect.
+	require.Equal(t, int64(2), fake.calls.Load(),
+		"no attempt may start once the budget has expired mid-backoff")
+	require.False(t, fake.sawCanceledCtx.Load(),
+		"the budget must still never reach the applier as a cancellation")
+}
+
+// stallOnCallApplier contends on every call and, on one specific call, sleeps
+// long enough to outlast the retry budget. That lets a test place the expiry
+// *after* a batch has already exhausted its retries, which is the ordering in
+// which the deferral count can silently lose the batches it had already
+// counted.
+type stallOnCallApplier struct {
+	countingApplier
+	stallOnCall int64
+	stall       time.Duration
+
+	calls          atomic.Int64
+	sawCanceledCtx atomic.Bool
+}
+
+func (a *stallOnCallApplier) UpsertRows(ctx context.Context, _ *table.ColumnMapping, _ []applier.LogicalRow, _ []*dbconn.TableLock) (int64, error) {
+	if ctx.Err() != nil {
+		a.sawCanceledCtx.Store(true)
+	}
+	if a.calls.Add(1) == a.stallOnCall {
+		time.Sleep(a.stall)
+	}
+	return 0, deadlockErr()
+}
+
+// TestStubbornBatchDoesNotStrandItsSiblings pins the behaviour the serial pass
+// was rewritten to introduce.
+//
+// The pass used to give up at the first batch that exhausted its retries,
+// deferring everything behind it unexamined. The batches are disjoint by key,
+// so one stubborn lock holder says nothing about whether the next batch can
+// land — and abandoning the rest turns one unlucky batch into a drain that
+// applied a fraction of what it could have, on a path where a drain costs
+// minutes.
+func TestStubbornBatchDoesNotStrandItsSiblings(t *testing.T) {
+	shortenContentionBackoff(t)
+
+	// Serial pass 1 so the call order is fixed: two batches contend (calls 1-2),
+	// the first exhausts all four serial attempts (calls 3-6), and the second
+	// lands on its first attempt (call 7).
+	errs := []error{deadlockErr(), deadlockErr(), deadlockErr(), deadlockErr(), deadlockErr(), deadlockErr()}
+	fake := &sequencedApplier{errs: errs}
+	sub := newByteCapBufferedMap(&fake.countingApplier, false)
+	sub.applier = fake
+	sub.flushConcurrency = 1
+
+	const batches = 2
+	for i := range batches * DefaultBatchSize {
+		sub.HasChanged([]any{int64(i)}, []any{int64(i), "seed"}, false)
+	}
+
+	allFlushed, err := sub.Flush(t.Context(), false, nil)
+	require.NoError(t, err, "one stubborn batch is a deferral, not a failure")
+	require.False(t, allFlushed)
+	require.Equal(t, int64(1), sub.batchesDeferred.Load(),
+		"only the stubborn batch is deferred; the sibling behind it must be tried")
+	require.Equal(t, DefaultBatchSize, sub.Length(),
+		"the sibling's rows must have landed, not been stranded")
+}
+
+// TestBudgetExpiryCountsAlreadyDeferredBatches pins the deferral arithmetic at
+// the budget checks.
+//
+// Both checks report "the batches already counted, plus this one and everything
+// after it". Dropping the accumulator is invisible to safety — the count is
+// still non-zero, so the drain still reports itself incomplete — but the number
+// is the only view an operator gets of this path, and "1 deferred" when six are
+// stuck sends someone looking in the wrong place.
+func TestBudgetExpiryCountsAlreadyDeferredBatches(t *testing.T) {
+	shortenContentionBackoff(t)
+	shortenContentionBudget(t, 100*time.Millisecond)
+
+	const batches = 3
+	// Calls 1-3 are pass 1. Calls 4-7 are the first batch's four serial
+	// attempts, all contending, so it is counted as deferred — and call 7 then
+	// outlasts the budget, so the pass gives up before reaching batch 2.
+	fake := &stallOnCallApplier{stallOnCall: 7, stall: 300 * time.Millisecond}
+	sub := newByteCapBufferedMap(&fake.countingApplier, false)
+	sub.applier = fake
+	sub.flushConcurrency = 1
+
+	for i := range batches * DefaultBatchSize {
+		sub.HasChanged([]any{int64(i)}, []any{int64(i), "seed"}, false)
+	}
+
+	allFlushed, err := sub.Flush(t.Context(), false, nil)
+	require.NoError(t, err, "an expired budget defers, it does not fail")
+	require.False(t, allFlushed)
+	require.Equal(t, int64(7), fake.calls.Load(),
+		"no attempt may start after the budget expired")
+	require.False(t, fake.sawCanceledCtx.Load())
+	// One batch exhausted its retries, two were never reached. All three are
+	// buffered, so all three must be counted.
+	require.Equal(t, int64(batches), sub.batchesDeferred.Load(),
+		"the batch already deferred must be counted alongside the unreached ones")
+	require.Equal(t, batches*DefaultBatchSize, sub.Length())
+}
+
+// TestHardErrorAfterADeferralStillCountsIt is the accounting half of
+// TestHardErrorDuringSerialRetryStillFailsDrain: the error decides the drain,
+// but batches the pass had already given up on are reattached and retried like
+// any other deferral, so leaving them out of the counter reports less stuck
+// work than there is.
+func TestHardErrorAfterADeferralStillCountsIt(t *testing.T) {
+	shortenContentionBackoff(t)
+
+	// Calls 1-2 pass 1, calls 3-6 the first batch's exhausted retries, call 7
+	// the second batch hitting something non-retryable.
+	errs := []error{
+		deadlockErr(), deadlockErr(),
+		deadlockErr(), deadlockErr(), deadlockErr(), deadlockErr(),
+		errInjected,
+	}
+	fake := &sequencedApplier{errs: errs}
+	sub := newByteCapBufferedMap(&fake.countingApplier, false)
+	sub.applier = fake
+	sub.flushConcurrency = 1
+
+	const batches = 2
+	for i := range batches * DefaultBatchSize {
+		sub.HasChanged([]any{int64(i)}, []any{int64(i), "seed"}, false)
+	}
+
+	allFlushed, err := sub.Flush(t.Context(), false, nil)
+	require.ErrorIs(t, err, errInjected, "a hard error still fails the drain")
+	require.False(t, allFlushed)
+	require.Equal(t, int64(1), sub.batchesDeferred.Load(),
+		"the batch that exhausted its retries before the error is still deferred")
+	require.Equal(t, batches*DefaultBatchSize, sub.Length(), "nothing landed")
 }

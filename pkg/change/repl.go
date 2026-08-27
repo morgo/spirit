@@ -74,6 +74,41 @@ const (
 	// (binlog_expire_logs_seconds). Tune this value, or the source's
 	// retention, accordingly.
 	DefaultSubscriptionSoftLimitBytes = 256 << 20
+	// DefaultSubscriptionSoftLimitChanges caps the number of pending
+	// changes per subscription before HasChanged parks, alongside
+	// DefaultSubscriptionSoftLimitBytes. Whichever binds first parks the
+	// reader.
+	//
+	// The byte cap alone is not enough because bytes and count measure
+	// different costs. Bytes bound memory, which is what a handful of wide
+	// LONGTEXT rows threatens. Count bounds how long the drain that empties
+	// the buffer takes: the flush applies rows in batches of at most
+	// DefaultBatchSize per round trip, so drain time scales with count and
+	// is indifferent to row width. A narrow-row table therefore reaches an
+	// unworkable drain long before it reaches 256MiB — in production, a
+	// table averaging ~600 bytes per change filled to over 450k pending
+	// changes while still well inside the byte cap, and the drain that
+	// followed ran for 21m37s holding flushMu for its full duration.
+	//
+	// 50k targets a drain of roughly two minutes rather than twenty. Scaling
+	// that production drain — at most 452,571 rows in 21m37s — down to 50k
+	// gives about 2m23s, and that is a floor rather than an estimate: the
+	// 452,571 figure is the backlog at flush *start*, so if fewer rows actually
+	// landed the per-row cost is higher and the scaled time is longer.
+	//
+	// Two minutes is not "one flush interval", and it is not meant to be. What
+	// matters is that the drain *completes*, because only a complete drain
+	// reports allChangesFlushed=true and only that advances the flushed
+	// position; a cap tight enough to fit one DefaultFlushInterval would
+	// truncate every drain and freeze the position just as before. Overlapping
+	// flushes are not a concern either — flushMu serializes them, so a tick
+	// arriving mid-drain waits rather than piling on.
+	//
+	// It is well above binlogTrivialThreshold, so it does not interfere with
+	// the "flush until trivial" loops, and it still lets dedup absorb hot-row
+	// workloads — map-mode overwrites of already-buffered keys bypass the cap
+	// entirely.
+	DefaultSubscriptionSoftLimitChanges = 50000
 	// DefaultTimeout is how long BlockWait is supposed to wait before returning errors.
 	DefaultTimeout = 30 * time.Second
 	// Maximum number of consecutive errors before recreating the streamer

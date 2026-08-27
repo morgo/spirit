@@ -112,6 +112,11 @@ type binlogClient struct {
 	// cap. See DefaultSubscriptionSoftLimitBytes.
 	subscriptionSoftLimitBytes int64
 
+	// subscriptionSoftLimitChanges is the per-subscription change-count
+	// cap, applied alongside the byte cap. Zero disables it. See
+	// DefaultSubscriptionSoftLimitChanges.
+	subscriptionSoftLimitChanges int
+
 	// flushConcurrency is the map-mode flush batch concurrency passed
 	// to each subscription on construction. See DefaultFlushConcurrency.
 	flushConcurrency int
@@ -143,22 +148,29 @@ func NewBinlogClient(db *sql.DB, host string, username, password string, appl ap
 	} else if softLimit < 0 {
 		softLimit = 0 // explicit opt-out
 	}
+	softLimitChanges := config.SubscriptionSoftLimitChanges
+	if softLimitChanges == 0 {
+		softLimitChanges = DefaultSubscriptionSoftLimitChanges
+	} else if softLimitChanges < 0 {
+		softLimitChanges = 0 // explicit opt-out
+	}
 	return &binlogClient{
-		db:                         db,
-		dbConfig:                   config.DBConfig,
-		host:                       host,
-		username:                   username,
-		password:                   password,
-		logger:                     config.Logger,
-		subs:                       newSubscriptionRegistry(),
-		callerCancelFunc:           config.CancelFunc,
-		ddlFilterSchema:            config.DDLFilterSchema,
-		ddlFilterTables:            toSet(config.DDLFilterTables),
-		serverID:                   config.ServerID,
-		applier:                    appl,
-		subscriptionSoftLimitBytes: softLimit,
-		flushConcurrency:           config.resolveFlushConcurrency(),
-		flushRequests:              make(chan Subscription, 1),
+		db:                           db,
+		dbConfig:                     config.DBConfig,
+		host:                         host,
+		username:                     username,
+		password:                     password,
+		logger:                       config.Logger,
+		subs:                         newSubscriptionRegistry(),
+		callerCancelFunc:             config.CancelFunc,
+		ddlFilterSchema:              config.DDLFilterSchema,
+		ddlFilterTables:              toSet(config.DDLFilterTables),
+		serverID:                     config.ServerID,
+		applier:                      appl,
+		subscriptionSoftLimitBytes:   softLimit,
+		subscriptionSoftLimitChanges: softLimitChanges,
+		flushConcurrency:             config.resolveFlushConcurrency(),
+		flushRequests:                make(chan Subscription, 1),
 	}
 }
 
@@ -181,6 +193,7 @@ func (c *binlogClient) AddSubscription(currentTable, newTable *table.TableInfo, 
 		Chunker:          chunker,
 		Logger:           c.logger,
 		SoftLimitBytes:   c.subscriptionSoftLimitBytes,
+		SoftLimitChanges: c.subscriptionSoftLimitChanges,
 		FlushRequest:     c.flushRequests,
 		FlushConcurrency: c.flushConcurrency,
 	})
@@ -1193,15 +1206,23 @@ func (c *binlogClient) FlushResidual() (int, int) {
 // FeedStats satisfies StatsReporter, so the runner can fold the feed's
 // activity into the binlog row of its periodic status block.
 func (c *binlogClient) FeedStats() FeedStats {
+	// Collected before c.mu is taken: mergeParkStats locks each subscription,
+	// and the subscriptions take c.mu on their flush paths.
+	var stats FeedStats
+	mergeParkStats(&stats, c.subs.Snapshot())
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return FeedStats{
-		LastFlushAt:       c.lastFlushAt,
-		LastFlushDuration: c.lastFlushDuration,
-		LastFlushRows:     c.lastFlushRows,
-		Rotations:         c.rotations.Load(),
-		ForcedRotations:   c.flushedBinlogs.Load(),
+	stats.LastFlushAt = c.lastFlushAt
+	stats.LastFlushDuration = c.lastFlushDuration
+	stats.LastFlushRows = c.lastFlushRows
+	stats.Rotations = c.rotations.Load()
+	stats.ForcedRotations = c.flushedBinlogs.Load()
+	// Already under c.mu, which is what guards bufferedPos.
+	if c.bufferedPos.Name != "" {
+		stats.BufferedPosition = formatBinlogPosition(c.bufferedPos)
 	}
+	return stats
 }
 
 // Flush empties the changeset in a loop until the amount of changes is considered "trivial".

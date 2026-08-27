@@ -2,6 +2,7 @@ package change
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -50,7 +51,7 @@ func (f *statsFeed) Close()                                                     
 
 func TestFeedStatsStringNeverFlushed(t *testing.T) {
 	require.Equal(t,
-		"rotations=0 (0 forced)  never flushed",
+		"rotations=0 (0 forced)  parks=0 is-parked=false  never flushed",
 		FeedStats{}.String())
 }
 
@@ -63,7 +64,7 @@ func TestFeedStatsString(t *testing.T) {
 		ForcedRotations:   1,
 	}
 	require.Equal(t,
-		"rotations=4 (1 forced)  flushed 10s ago (took 2.855ms, 5583 rows)",
+		"rotations=4 (1 forced)  parks=0 is-parked=false  flushed 10s ago (took 2.855ms, 5583 rows)",
 		s.String())
 }
 
@@ -84,7 +85,7 @@ func TestStatusRowSingleSource(t *testing.T) {
 		ForcedRotations:   1,
 	}}
 	require.Equal(t,
-		"rotations=2 (1 forced)  flushed 3s ago (took 5ms, 12 rows)",
+		"rotations=2 (1 forced)  parks=0 is-parked=false  flushed 3s ago (took 5ms, 12 rows)",
 		StatusRow(src))
 }
 
@@ -107,7 +108,7 @@ func TestStatusRowMergesSources(t *testing.T) {
 		ForcedRotations:   0,
 	}}
 	require.Equal(t,
-		"rotations=5 (1 forced)  flushed 1m30s ago (took 7ms, 900 rows)",
+		"rotations=5 (1 forced)  parks=0 is-parked=false  flushed 1m30s ago (took 7ms, 900 rows)",
 		StatusRow(recent, stale))
 	// Order must not matter.
 	require.Equal(t, StatusRow(recent, stale), StatusRow(stale, recent))
@@ -124,7 +125,7 @@ func TestStatusRowNeverFlushedWins(t *testing.T) {
 	}}
 	never := &statsFeed{stats: FeedStats{Rotations: 1}}
 	require.Equal(t,
-		"rotations=2 (0 forced)  never flushed",
+		"rotations=2 (0 forced)  parks=0 is-parked=false  never flushed",
 		StatusRow(flushed, never))
 	require.Equal(t, StatusRow(flushed, never), StatusRow(never, flushed))
 }
@@ -162,7 +163,7 @@ func TestGTIDCountRotation(t *testing.T) {
 // minus forced rotations: it never issues FLUSH BINARY LOGS.
 func TestGTIDFeedStats(t *testing.T) {
 	c := &gtidClient{subs: newSubscriptionRegistry()}
-	require.Equal(t, "rotations=0 (0 forced)  never flushed", StatusRow(c))
+	require.Equal(t, "rotations=0 (0 forced)  parks=0 is-parked=false  never flushed", StatusRow(c))
 
 	c.rotations.Store(2)
 	c.recordFlush(time.Now().Add(-5*time.Millisecond), 42)
@@ -173,7 +174,7 @@ func TestGTIDFeedStats(t *testing.T) {
 	require.Equal(t, 42, stats.LastFlushRows)
 	require.False(t, stats.LastFlushAt.IsZero())
 	require.GreaterOrEqual(t, stats.LastFlushDuration, 5*time.Millisecond)
-	require.Contains(t, StatusRow(c), "rotations=2 (0 forced)  flushed 0s ago")
+	require.Contains(t, StatusRow(c), "rotations=2 (0 forced)  parks=0 is-parked=false  flushed 0s ago")
 }
 
 // The feed records real flushes and real rotations, which is what the runner
@@ -238,4 +239,136 @@ func TestFeedStatsFromLiveFeed(t *testing.T) {
 		return client.FeedStats().Rotations > before
 	}, 10*time.Second, 50*time.Millisecond,
 		"rotation was not counted (still %d)", client.FeedStats().Rotations)
+}
+
+// The buffered position is the field that tells "the reader is fine, only
+// publication is blocked" apart from "the feed has stalled". The ckpt row
+// cannot: it shows the flushed position, which is frozen in both cases.
+func TestFeedStatsStringWithBufferedPosition(t *testing.T) {
+	s := FeedStats{
+		LastFlushAt:       time.Now().Add(-10 * time.Second),
+		LastFlushDuration: 2854617 * time.Nanosecond,
+		LastFlushRows:     5583,
+		BufferedPosition:  "f50a3ec0-154f-3776-8f0f-ced626dbde36:1-38880294638",
+		Rotations:         4,
+		ForcedRotations:   1,
+	}
+	require.Equal(t,
+		"rotations=4 (1 forced)  parks=0 is-parked=false  flushed 10s ago (took 2.855ms, 5583 rows)  "+
+			"read=f50a3ec0-154f-3776-8f0f-ced626dbde36:1-38880294638",
+		s.String())
+}
+
+// The position goes last and whole. A GTID set has no bounded length, so
+// anywhere else it would push the flush phrase off a narrow terminal, and
+// truncating it would stop it being comparable with the ckpt row.
+func TestFeedStatsStringRendersLongPositionInFullAtTheEnd(t *testing.T) {
+	long := "f50a3ec0-154f-3776-8f0f-ced626dbde36:1-38880294638," +
+		"a1b2c3d4-154f-3776-8f0f-ced626dbde36:1-42," +
+		"b7c8d9e0-154f-3776-8f0f-ced626dbde36:1-7"
+	got := FeedStats{BufferedPosition: long}.String()
+	require.Equal(t, "rotations=0 (0 forced)  parks=0 is-parked=false  never flushed  read="+long, got)
+	require.True(t, strings.HasSuffix(got, long), "nothing may follow the position")
+}
+
+// A feed that has not read anything yet omits the field rather than rendering
+// an empty one, which also keeps every pre-existing status line byte-identical.
+func TestFeedStatsStringOmitsEmptyBufferedPosition(t *testing.T) {
+	require.Equal(t, "rotations=0 (0 forced)  parks=0 is-parked=false  never flushed", FeedStats{}.String())
+	require.NotContains(t, FeedStats{Rotations: 3}.String(), "read=")
+}
+
+// The buffered position is taken from the same feed as the flush figures, not
+// merged: positions from different sources are not comparable, and the stalest
+// feed is the one whose reader progress is in question.
+func TestStatusRowBufferedPositionFollowsStalestFeed(t *testing.T) {
+	recent := &statsFeed{stats: FeedStats{
+		LastFlushAt:      time.Now().Add(-time.Second),
+		BufferedPosition: "recent-feed-pos",
+		Rotations:        2,
+	}}
+	stale := &statsFeed{stats: FeedStats{
+		LastFlushAt:      time.Now().Add(-90 * time.Second),
+		BufferedPosition: "stale-feed-pos",
+		Rotations:        3,
+	}}
+	row := StatusRow(recent, stale)
+	require.Contains(t, row, "read=stale-feed-pos")
+	require.NotContains(t, row, "recent-feed-pos")
+	require.Contains(t, row, "rotations=5 (0 forced)", "counters still sum")
+
+	// Order must not matter.
+	require.Equal(t, row, StatusRow(stale, recent))
+}
+
+// stubSubscription is a Subscription that does nothing, so the park-stats
+// tests can vary the one thing they are about.
+type stubSubscription struct{}
+
+func (*stubSubscription) HasChanged([]any, []any, bool) {}
+func (*stubSubscription) Length() int                   { return 0 }
+func (*stubSubscription) Flush(context.Context, bool, []*dbconn.TableLock) (bool, error) {
+	return true, nil
+}
+func (*stubSubscription) Tables() []*table.TableInfo                           { return nil }
+func (*stubSubscription) ImmutableColumnOrdinal() int                          { return -1 }
+func (*stubSubscription) SetWatermarkOptimization(context.Context, bool) error { return nil }
+func (*stubSubscription) Close()                                               {}
+
+// parkingStub additionally reports park stats.
+type parkingStub struct {
+	stubSubscription
+	parks  int64
+	parked bool
+}
+
+func (p *parkingStub) ParkStats() (int64, bool) { return p.parks, p.parked }
+
+// Parking is the reader being held off, which is the one thing the periodic
+// status block could not previously show — the feed logged it on its own
+// schedule instead, at a rate that buried the block it should have complemented.
+func TestFeedStatsStringRendersParks(t *testing.T) {
+	require.Equal(t,
+		"rotations=0 (0 forced)  parks=417 is-parked=true  never flushed",
+		FeedStats{Parks: 417, IsParked: true}.String())
+}
+
+// Parks sum because each subscription throttles the shared reader
+// independently; IsParked ORs because one parked subscription is enough to
+// stall that reader, and a sibling that is running does not make the stall any
+// less real.
+func TestMergeParkStatsAcrossSubscriptions(t *testing.T) {
+	var stats FeedStats
+	mergeParkStats(&stats, []Subscription{
+		&parkingStub{parks: 3, parked: false},
+		&parkingStub{parks: 4, parked: true},
+		&parkingStub{parks: 5, parked: false},
+	})
+	require.Equal(t, int64(12), stats.Parks)
+	require.True(t, stats.IsParked)
+
+	// A subscription that does not report parks contributes nothing rather
+	// than being counted as unparked-and-therefore-fine.
+	var noneReport FeedStats
+	mergeParkStats(&noneReport, []Subscription{&stubSubscription{}})
+	require.Zero(t, noneReport.Parks)
+	require.False(t, noneReport.IsParked)
+}
+
+// Same merge rules across feeds: a sharded move reads one feed per source, and
+// a stall on any of them is a stall.
+func TestStatusRowMergesParkStats(t *testing.T) {
+	busy := &statsFeed{stats: FeedStats{
+		LastFlushAt: time.Now().Add(-time.Second),
+		Parks:       9,
+		IsParked:    true,
+	}}
+	idle := &statsFeed{stats: FeedStats{
+		LastFlushAt: time.Now().Add(-2 * time.Second),
+		Parks:       1,
+		IsParked:    false,
+	}}
+	row := StatusRow(busy, idle)
+	require.Contains(t, row, "parks=10 is-parked=true")
+	require.Equal(t, row, StatusRow(idle, busy), "order must not matter")
 }

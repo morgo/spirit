@@ -2,7 +2,6 @@ package change
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
@@ -174,6 +173,12 @@ type bufferedMap struct {
 	// can briefly exceed the limit by up to one oversized row.
 	softLimitBytes int64
 
+	// softLimitChanges is the second soft cap, on pending change *count*
+	// (Length(), so in-flight drain entries included). Zero disables it.
+	// Same admit-then-park semantics as softLimitBytes. See
+	// overSoftLimitLocked for why both caps exist.
+	softLimitChanges int
+
 	watermarkOptimization bool
 	chunker               table.MappedChunker
 
@@ -212,16 +217,22 @@ type bufferedMap struct {
 	keysAdded        atomic.Int64
 	keysDroppedAbove atomic.Int64
 	keysSkippedBelow atomic.Int64
-	timesParked      atomic.Int64 // HasChanged was parked at least once on the soft limit
+	// timesParked counts every park on a soft limit, cumulatively for the
+	// life of the subscription. Unlike its neighbours it is not reset by the
+	// watermark-toggle bookend log, because the status block reports it
+	// periodically and a counter that silently restarts mid-migration reads
+	// as the parking having stopped.
+	timesParked      atomic.Int64
 	batchesContended atomic.Int64 // applier batches that failed on 1205/1213
+	batchesDeferred  atomic.Int64 // contended batches left for the next flush
 	serialRecoveries atomic.Int64 // drains rescued by the serial retry pass
+	drainsTimedOut   atomic.Int64 // drains cut short by drainDispatchBudget
 
-	// lastParkWarn is when the park/unpark log pair was last emitted at
-	// Warn/Info level. Since flushes release capacity per batch, a
-	// saturated applier produces frequent short parks rather than one
-	// long one; without throttling, the pair would log every couple of
-	// seconds for the lifetime of a long drain. Guarded by Mutex.
-	lastParkWarn time.Time
+	// parked is true while a HasChanged caller is sitting on the soft
+	// limit. Guarded by Mutex, which the parked goroutine releases inside
+	// cond.Wait(), so a status reader can observe it while the park is in
+	// progress — that is the whole point of reporting it.
+	parked bool
 
 	pkIsMemoryComparable bool
 }
@@ -233,13 +244,6 @@ type bufferedMap struct {
 // against — these constants are noise next to the BLOB / large-string
 // payload sizes. Both are approximate; the cap is "soft" anyway.
 const (
-	// parkWarnInterval throttles the park/unpark log pair. Parks under
-	// sustained backpressure are frequent and short (capacity returns
-	// per applied batch), so the pair is emitted at Warn/Info level at
-	// most once per interval per subscription and at Debug otherwise.
-	// The timesParked counter still counts every park.
-	parkWarnInterval = 30 * time.Second
-
 	// bufferedChangeOverhead is the fixed per-entry cost for an item
 	// in s.changes beyond what estimateRowSize captures: the hashed-
 	// key string header (~16 B), the bufferedChange struct laid out
@@ -280,6 +284,12 @@ type BufferedSubscriptionConfig struct {
 	// HasChanged blocks waiting on the flush path. Zero disables the
 	// cap. See bufferedMap.softLimitBytes for the semantics.
 	SoftLimitBytes int64
+
+	// SoftLimitChanges is the per-subscription cap on pending change
+	// *count* before HasChanged parks, applied alongside SoftLimitBytes;
+	// whichever binds first parks the reader. Zero disables it. See
+	// bufferedMap.overSoftLimitLocked for why both exist.
+	SoftLimitChanges int
 
 	// FlushRequest, when non-nil, receives the parked subscription (a
 	// non-blocking send) each time HasChanged parks on the soft limit.
@@ -343,6 +353,7 @@ func NewBufferedSubscription(cfg BufferedSubscriptionConfig) (Subscription, erro
 		applier:              cfg.Applier,
 		pkIsMemoryComparable: cfg.CurrentTable.PrimaryKeyIsMemoryComparable() == nil,
 		softLimitBytes:       cfg.SoftLimitBytes,
+		softLimitChanges:     cfg.SoftLimitChanges,
 		flushRequest:         cfg.FlushRequest,
 		flushConcurrency:     cfg.FlushConcurrency,
 	}
@@ -428,12 +439,45 @@ var _ Subscription = (*bufferedMap)(nil)
 func (s *bufferedMap) Length() int {
 	s.Lock()
 	defer s.Unlock()
+	return s.lengthLocked()
+}
 
-	// flushingCount covers entries an in-flight Flush has swapped out
-	// but not yet applied — they are still pending changes, and callers
-	// like AllChangesFlushed must not see the buffer as empty while a
-	// drain is mid-air.
+// ParkStats satisfies ParkReporter, so the runner's status block can report
+// backpressure instead of the subscription logging every park itself.
+//
+// Taking the Mutex is what makes `parked` readable: the parked goroutine is
+// inside cond.Wait(), which releases the Mutex for the duration of the park.
+// A drain holds the Mutex only for short bookkeeping sections, so this does
+// not queue behind one.
+func (s *bufferedMap) ParkStats() (int64, bool) {
+	s.Lock()
+	defer s.Unlock()
+	return s.timesParked.Load(), s.parked
+}
+
+// lengthLocked is Length without the Mutex, for callers that already hold it.
+//
+// flushingCount covers entries an in-flight Flush has swapped out but not yet
+// applied — they are still pending changes, and callers like AllChangesFlushed
+// must not see the buffer as empty while a drain is mid-air.
+func (s *bufferedMap) lengthLocked() int {
 	return len(s.changes) + len(s.queue) + s.flushingCount
+}
+
+// overSoftLimitLocked reports whether the buffer has reached either soft cap.
+//
+// Two caps because bytes and count measure different costs. Bytes bound the
+// migrator's memory, which is what a few wide LONGTEXT rows threaten. Count
+// bounds how long the resulting drain takes, which is set by applier round
+// trips and is indifferent to row width — and a narrow-row table hits the
+// second wall long before the first. On a production table averaging ~600
+// bytes per buffered change, 256MiB of bytes is over 450k changes, and a drain
+// of that size ran for 21m37s holding flushMu throughout.
+func (s *bufferedMap) overSoftLimitLocked() bool {
+	if s.softLimitBytes > 0 && s.sizeBytes >= s.softLimitBytes {
+		return true
+	}
+	return s.softLimitChanges > 0 && s.lengthLocked() >= s.softLimitChanges
 }
 
 func (s *bufferedMap) Tables() []*table.TableInfo {
@@ -473,6 +517,42 @@ func (s *bufferedMap) ImmutableColumnOrdinal() int {
 // only throughput. Three drains at the default 30s interval is ~90s of proven
 // quiet before stepping back up.
 const cleanDrainsToRecover = 3
+
+// drainDispatchBudget is a backstop on how long one drain spends dispatching
+// batches. Batches not yet scheduled when it expires stay in the snapshot, are
+// reattached, and go again on the next flush.
+//
+// The primary control on drain length is not here: it is
+// DefaultSubscriptionSoftLimitChanges, which bounds how large the buffer — and
+// therefore the snapshot a drain works through — is allowed to get in the first
+// place. That is the right lever, because a drain that finishes is worth far
+// more than a drain that is merely short. Only a complete drain reports
+// allChangesFlushed=true, and only that advances the flushed position; a
+// truncated one protects the checkpoint but does not move it. Capping *time*
+// too aggressively would therefore reproduce the frozen checkpoint it is meant
+// to prevent, just with a livelier status line. So this budget is set well
+// above the time a full buffer is expected to take (~50k changes drained in
+// roughly two minutes on the production table this was tuned against) and is
+// expected never to fire in normal operation.
+//
+// It exists for the case the count cap cannot cover: per-row cost is not
+// bounded. Wide rows, many secondary indexes, or a struggling target can make
+// 50k changes take an hour, and flushMu is held for the whole drain, so
+// everything else in the flush path queues behind it —
+// SetWatermarkOptimization takes flushMu as its first act, and the runner calls
+// it the moment the copy finishes. In production a 21m37s drain over ~452k
+// changes left the post-copy phase blocked on that mutex for over half an hour
+// after the copy had already completed. It also starves the AIMD controller,
+// which is fed once per drain and needs cleanDrainsToRecover of them to give a
+// halving back: at one sample per 20 minutes, "~90s of proven quiet" becomes an
+// hour, so a width reduced by a single transient 1213 stays reduced for the
+// rest of the migration.
+//
+// The budget does not apply to flushMapLocked, the serial path used under the
+// cutover lock and by SetWatermarkOptimization. Those must drain completely.
+//
+// A var so tests can shorten it.
+var drainDispatchBudget = 10 * DefaultFlushInterval
 
 // minAdaptiveBatchSize floors the batch shrink. Below roughly this many rows
 // the per-statement round trip dominates and the drain stops keeping up with a
@@ -643,33 +723,38 @@ func (s *bufferedMap) HasChanged(key, row []any, deleted bool) {
 		_, dedupOverwrite = s.changes[hashedKey]
 	}
 
-	// Soft backpressure: park while the buffer is at or above the byte
-	// threshold. See softLimitBytes on bufferedMap for the semantics.
-	// We log on entry and exit because parking stalls the binlog reader
-	// — the exit duration is the operator's main signal for binlog-
-	// retention risk, and without these lines a stalled migrator looks
-	// indistinguishable from one that's just slow.
-	if s.softLimitBytes > 0 && !dedupOverwrite && s.sizeBytes >= s.softLimitBytes && !s.closed {
+	// Soft backpressure: park while the buffer is at or above either soft
+	// limit. See overSoftLimitLocked for the semantics.
+	//
+	// Both log lines are Debug. Parking stalls the binlog reader, so it does
+	// need to be visible — but flushes release capacity per applied batch, so
+	// sustained backpressure produces a park/unpark pair every few seconds for
+	// the lifetime of a long drain, and at Warn/Info that buried the periodic
+	// status block it was meant to complement. The status block now carries
+	// `parks=` and `is-parked=` on its binlog row instead, which answers the
+	// same question — is the reader being held back, and how often — at the
+	// cadence an operator actually reads.
+	if !dedupOverwrite && !s.closed && s.overSoftLimitLocked() {
 		s.timesParked.Add(1)
 		s.requestFlush()
-		parkEntryLog, parkExitLog := s.logger.Debug, s.logger.Debug
-		if time.Since(s.lastParkWarn) >= parkWarnInterval {
-			s.lastParkWarn = time.Now()
-			parkEntryLog, parkExitLog = s.logger.Warn, s.logger.Info
-		}
-		parkEntryLog("subscription parked on soft memory limit",
+		s.logger.Debug("subscription parked on soft limit",
 			"table", s.table.SchemaName+"."+s.table.TableName,
 			"size_bytes", s.sizeBytes,
 			"soft_limit_bytes", s.softLimitBytes,
+			"changes", s.lengthLocked(),
+			"soft_limit_changes", s.softLimitChanges,
 		)
 		parkStart := time.Now()
-		for s.sizeBytes >= s.softLimitBytes && !s.closed {
+		s.parked = true
+		for !s.closed && s.overSoftLimitLocked() {
 			s.cond.Wait()
 		}
-		parkExitLog("subscription unparked from soft memory limit",
+		s.parked = false
+		s.logger.Debug("subscription unparked from soft limit",
 			"table", s.table.SchemaName+"."+s.table.TableName,
 			"parked_duration", time.Since(parkStart).String(),
 			"size_bytes", s.sizeBytes,
+			"changes", s.lengthLocked(),
 			"closed", s.closed,
 		)
 	}
@@ -823,6 +908,13 @@ func (s *bufferedMap) Flush(ctx context.Context, underLock bool, locks []*dbconn
 		if err != nil {
 			return false, err
 		}
+		if len(remainder) > 0 {
+			// A remainder with no error means the drain gave up its dispatch
+			// budget. Reporting success here would publish a position covering
+			// entries that were only reattached, so it has to hold the position
+			// back — the same contract the map drain's truncation uses.
+			allChangesFlushed = false
+		}
 	}
 	return allChangesFlushed, nil
 }
@@ -931,7 +1023,18 @@ func (s *bufferedMap) drainMapSnapshot(ctx context.Context, snapshot map[string]
 	// Batches that lose to lock contention are collected rather than failing
 	// the drain — see retryContendedBatches for why that is safe and why the
 	// retry has to be serial.
-	contended, err := s.applyBatchesConcurrent(ctx, snapshot, batches)
+	contended, complete, err := s.applyBatchesConcurrent(ctx, snapshot, batches)
+	if !complete {
+		// The dispatch budget expired. Everything unscheduled is still in the
+		// snapshot and will be reattached; report the drain as incomplete so no
+		// client publishes a position that covers it.
+		allChangesFlushed = false
+		s.logger.Warn("flush drain exceeded its dispatch budget; deferring the remainder",
+			"table", s.table.SchemaName+"."+s.table.TableName,
+			"budget", drainDispatchBudget.String(),
+			"total_batches", len(batches),
+		)
+	}
 	if err != nil {
 		// Deliberately no adaptFlushConcurrency call here. A drain that failed
 		// on something other than contention is not evidence of contention, and
@@ -952,11 +1055,50 @@ func (s *bufferedMap) drainMapSnapshot(ctx context.Context, snapshot map[string]
 			"total_batches", len(batches),
 			"concurrency", s.effectiveFlushConcurrency(),
 		)
-		if err := s.retryContendedBatches(ctx, snapshot, contended); err != nil {
-			// Contention that survived a serial retry is unambiguous evidence,
-			// so this one does feed the controller before returning.
-			s.adaptFlushConcurrency(true)
+		deferred, err := s.retryContendedBatches(ctx, snapshot, contended)
+		if err != nil {
+			// A hard error or a real cancellation, not contention: same
+			// reasoning as the pass-1 error path above, so the controller is
+			// left alone.
+			//
+			// The count still lands in the counter. Batches the pass had already
+			// given up on before the error arrived are reattached and retried
+			// like any other deferral, so leaving them out understated the
+			// counter for no benefit. It is only an accounting figure — the
+			// error is what decides the drain.
+			s.batchesDeferred.Add(int64(deferred))
 			return false, err
+		}
+		if deferred > 0 {
+			// Contention that outlived the serial pass is deferred, not failed.
+			//
+			// Reporting it as an error would throw away the whole drain, and a
+			// drain is not a cheap thing to throw away: with the copier taking
+			// the target's write capacity, one pass over a full buffer has been
+			// observed to run for minutes, so a single batch contending at the
+			// end would discard hundreds of batches' worth of *recorded*
+			// progress. The rows they
+			// wrote stay written either way, but on the error path flushedGTID
+			// never advances and the flush is never recorded, which is the
+			// frozen-checkpoint symptom this whole path exists to prevent —
+			// re-entered from the other side.
+			//
+			// allChangesFlushed=false protects the checkpoint exactly as well
+			// as an error does: clients gate position advancement on it, so a
+			// deferred batch holds the position back just as a failed drain
+			// would. It is the same mechanism watermark-deferred keys already
+			// use. The difference is only that the batches which *did* land
+			// count, and the leftovers are retried on the next flush rather
+			// than after a whole failed drain's worth of lost ground.
+			s.batchesDeferred.Add(int64(deferred))
+			s.logger.Warn("flush batches still contended; deferring to the next flush",
+				"table", s.table.SchemaName+"."+s.table.TableName,
+				"deferred_batches", deferred,
+				"contended_batches", len(contended),
+				"total_batches", len(batches),
+			)
+			s.adaptFlushConcurrency(true)
+			return false, nil
 		}
 		s.serialRecoveries.Add(1)
 	}
@@ -976,7 +1118,7 @@ func (s *bufferedMap) drainMapSnapshot(ctx context.Context, snapshot map[string]
 // (the previous behaviour) threw away batches that were about to land and made
 // the whole drain fail, which is what pinned the buffer at its soft limit and
 // froze the flushed position.
-func (s *bufferedMap) applyBatchesConcurrent(ctx context.Context, snapshot map[string]bufferedChange, batches []*mapFlushBatch) ([]*mapFlushBatch, error) {
+func (s *bufferedMap) applyBatchesConcurrent(ctx context.Context, snapshot map[string]bufferedChange, batches []*mapFlushBatch) ([]*mapFlushBatch, bool, error) {
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(s.effectiveFlushConcurrency())
 	// Workers delete their batch's entries as they land, so they only
@@ -986,12 +1128,40 @@ func (s *bufferedMap) applyBatchesConcurrent(ctx context.Context, snapshot map[s
 	var mu sync.Mutex
 	var contended []*mapFlushBatch
 	var skippedBatches bool
+	// Stop starting new batches once the budget is spent; batches already in
+	// flight are waited out below. Unlike the cancellation above this is not an
+	// error — the unstarted batches stay in the snapshot, are reattached, and go
+	// again on the next flush — and the caller reports the drain as incomplete
+	// so no position advances past them.
+	//
+	// Checked in two places, because the loop's own check goes stale. g.Go
+	// blocks once effectiveFlushConcurrency batches are running, so a check that
+	// passes can be followed by an arbitrarily long wait for a slot: at
+	// concurrency 1 with hour-long batches, the loop tests the deadline at t≈0,
+	// blocks in g.Go for an hour, and then launches a batch the budget no longer
+	// covers. The re-check inside the worker is what actually enforces "no new
+	// batch *starts* after the deadline"; the loop check is just a cheap early
+	// exit. Overrun is therefore one in-flight batch's latency, which is the
+	// least that can be promised without abandoning work already under way.
+	deadline := time.Now().Add(drainDispatchBudget)
+	var budgetSpent atomic.Bool
 	for _, batch := range batches {
 		if gctx.Err() != nil {
 			skippedBatches = true
 			break // a batch failed or ctx was canceled; don't queue the rest
 		}
+		if budgetSpent.Load() || time.Now().After(deadline) {
+			budgetSpent.Store(true)
+			break
+		}
 		g.Go(func() error {
+			if time.Now().After(deadline) {
+				// The slot opened after the budget expired. Leave this batch's
+				// entries in the snapshot for the next flush rather than
+				// starting work the budget does not cover.
+				budgetSpent.Store(true)
+				return nil
+			}
 			if err := s.flushBatch(gctx, batch.deleteKeys, batch.upsertRows, nil); err != nil {
 				// The ctx.Err() half deliberately reads the *parent*, not gctx:
 				// a sibling's failure cancels gctx, and that must not stop this
@@ -1023,7 +1193,10 @@ func (s *bufferedMap) applyBatchesConcurrent(ctx context.Context, snapshot map[s
 		// only reattached, not applied.
 		err = ctx.Err()
 	}
-	return contended, err
+	if budgetSpent.Load() {
+		s.drainsTimedOut.Add(1)
+	}
+	return contended, !budgetSpent.Load(), err
 }
 
 // retryContendedBatches re-applies contended batches one at a time.
@@ -1035,10 +1208,15 @@ func (s *bufferedMap) applyBatchesConcurrent(ctx context.Context, snapshot map[s
 // retry is expected to succeed on its first, undelayed attempt; the escalating
 // attempts after it exist only for locks held from outside this drain.
 //
-// A batch that still fails here returns the error, leaving its entries in the
-// snapshot to be reattached and retried on the next flush. That is deliberate:
-// the flushed position must not advance over changes that never landed.
-func (s *bufferedMap) retryContendedBatches(ctx context.Context, snapshot map[string]bufferedChange, contended []*mapFlushBatch) error {
+// Returns how many batches still could not land. Deferring them is not
+// something this function does to them, it is something it declines to do: only
+// releaseAppliedBatch takes a batch's keys out of the snapshot, so a batch that
+// never lands is still there when drainMapSnapshot's deferred reattach runs.
+// The count is for the caller's accounting and logging.
+//
+// A non-nil error means something other than contention went wrong — a hard
+// error, or a genuine cancellation of the parent context.
+func (s *bufferedMap) retryContendedBatches(ctx context.Context, snapshot map[string]bufferedChange, contended []*mapFlushBatch) (int, error) {
 	// Bound the whole pass, not just each batch. Against an external 1205 holder
 	// a single attempt is not cheap: flushBatch goes through
 	// dbconn.RetryableTransaction, which burns its own MaxRetries against
@@ -1049,43 +1227,90 @@ func (s *bufferedMap) retryContendedBatches(ctx context.Context, snapshot map[st
 	//
 	// Giving up early is cheap by comparison: the remaining batches stay in the
 	// snapshot, get reattached, and are retried on the next flush.
-	passCtx, cancel := context.WithTimeout(ctx, contentionRetryBudget)
-	defer cancel()
+	//
+	// The budget is a plain deadline rather than a context, and this is the
+	// important part. An earlier revision derived a context.WithTimeout from ctx
+	// and handed *that* to flushBatch, which meant the budget did not merely
+	// stop the pass — it killed whatever REPLACE was running when it expired.
+	// Production showed the result as
+	//
+	//	failed to upsert rows: failed to execute upsert: context deadline exceeded
+	//
+	// which reads like a statement timeout and is nothing of the sort. On a
+	// table whose batches take longer than the budget, that fires on a
+	// perfectly healthy statement, every time. Checking the error's provenance
+	// before classifying it stopped the misdiagnosis but not the abort.
+	//
+	// So the budget now gates only the decision to *start* another attempt.
+	// Attempts run on ctx and are allowed to finish, which is safe because an
+	// attempt is already bounded from below the flush: RetryableTransaction
+	// makes at most MaxRetries tries, each capped by innodb_lock_wait_timeout.
+	// Overrun past the budget is therefore one attempt's worth, and no deadline
+	// of our own can ever surface as an apply failure. Same shape as
+	// drainDispatchBudget, which likewise stops scheduling rather than
+	// cancelling.
+	deadline := time.Now().Add(contentionRetryBudget)
 
 	var mu sync.Mutex
-	for _, batch := range contended {
+	deferred := 0
+	// giveUpAt reports the total deferral count when the budget expires while
+	// batch i is the one in hand: the batches already counted, plus batch i and
+	// every batch after it, none of which has landed. Named and shared rather
+	// than written out at each check — the two checks below are the same
+	// decision made at different moments, and an accumulator dropped from one of
+	// them would understate how much of the drain is stuck without breaking
+	// anything a test would notice.
+	giveUpAt := func(i int) int { return deferred + len(contended) - i }
+	for i, batch := range contended {
 		var err error
 		for attempt := range contentionRetries {
+			if time.Now().After(deadline) {
+				// Our own impatience, not a failure: the batches not reached
+				// yet — this one included — go back in the buffer.
+				return giveUpAt(i), nil
+			}
 			select {
-			case <-passCtx.Done():
-				// Distinguish our own budget from real shutdown: on budget
-				// expiry the parent is still live and the caller should treat
-				// this as ordinary contention, not cancellation.
-				if ctx.Err() != nil {
-					return ctx.Err()
-				}
-				return fmt.Errorf("serial contention retry budget (%s) exhausted with %w",
-					contentionRetryBudget, errStillContended)
+			case <-ctx.Done():
+				// A real shutdown. That *is* an error, and the caller must not
+				// treat the drain as having merely deferred work.
+				return 0, ctx.Err()
 			case <-time.After(contentionBackoff(attempt)):
 			}
-			if err = s.flushBatch(passCtx, batch.deleteKeys, batch.upsertRows, nil); err == nil {
+			// Re-checked after the wait, and this is the check that enforces the
+			// contract. The backoff escalates to a couple of seconds, so the
+			// check above can pass with a millisecond left and the attempt would
+			// then start well past the deadline. The pre-wait check is only a
+			// cheap early exit that avoids sleeping for a budget already gone.
+			// Same division of labour as drainDispatchBudget's loop check versus
+			// its worker check.
+			if time.Now().After(deadline) {
+				return giveUpAt(i), nil
+			}
+			if err = s.flushBatch(ctx, batch.deleteKeys, batch.upsertRows, nil); err == nil {
 				s.releaseAppliedBatch(snapshot, &mu, batch)
 				break
 			}
+			if ctx.Err() != nil {
+				return 0, ctx.Err()
+			}
 			if !dbconn.IsLockContentionError(err) {
-				return err
+				// A hard error fails the drain, but the batches this pass had
+				// already given up on are still deferred — they are back in the
+				// buffer either way. Reporting them keeps the deferral counter
+				// honest; the caller decides what to do with a count that
+				// arrives alongside an error.
+				return deferred, err
 			}
 		}
 		if err != nil {
-			return fmt.Errorf("flush batch still contended after %d serial retries: %w", contentionRetries, err)
+			// Still contended after every attempt. Defer this one but keep
+			// going: the batches are disjoint, so one stubborn lock holder
+			// says nothing about whether the next batch can land.
+			deferred++
 		}
 	}
-	return nil
+	return deferred, nil
 }
-
-// errStillContended marks a pass-2 giveup so callers can tell "we ran out of
-// patience with a lock holder" from a genuine cancellation.
-var errStillContended = errors.New("batches still contended")
 
 // contentionRetries is how many serial attempts a contended batch gets before
 // the drain gives up and leaves it for the next flush. The first is immediate
@@ -1100,10 +1325,27 @@ const contentionRetries = 4
 
 // contentionRetryBudget caps the total wall-clock time pass 2 may spend, across
 // all contended batches, before giving up and deferring the rest to the next
-// flush. Sized to comfortably cover the self-inflicted case (which returns
-// almost immediately) while keeping flushMu out of the multi-minute territory
-// that N batches against an external lock holder would otherwise reach.
-const contentionRetryBudget = 20 * time.Second
+// flush. It bounds when a new attempt may *start*; see retryContendedBatches
+// for why it is not a context, and why that distinction matters more than the
+// number.
+//
+// The number still has to be in scale with one attempt, or the budget expires
+// before the first batch has had a fair try and pass 2 becomes decorative. It
+// was 20s, which was too small on the table this was tuned against: a drain
+// there worked through at most 452,571 rows in 21m37s, so with batches of
+// DefaultBatchSize and the reduced concurrency in force at the time, average
+// per-batch latency was *at least* ~11s — and a single flushBatch can spend
+// several times that inside RetryableTransaction, which retries up to
+// MaxRetries with innodb_lock_wait_timeout on each.
+//
+// Two minutes gives a handful of batches a genuine serial retry while staying
+// well inside drainDispatchBudget, so the drain's own bound is still the outer
+// one. Expiring remains cheap — the leftovers are deferred, not failed — so
+// this is a "how much is worth trying before handing back" figure, not a
+// deadline anything depends on.
+//
+// A var so tests can shorten it, as with contentionBackoff.
+var contentionRetryBudget = 2 * time.Minute
 
 // releaseAppliedBatch drops a landed batch's entries from the snapshot and
 // returns its bytes to the buffer.
@@ -1167,6 +1409,19 @@ func (s *bufferedMap) drainQueueSnapshot(ctx context.Context, snapshot []queuedC
 		return nil
 	}
 
+	// Same dispatch backstop the map drain applies, for the same reason: this
+	// runs with flushMu held, so an unbounded queue drain blocks every
+	// subsequent flush and the post-copy phase behind it. Queue mode is where
+	// non-memory-comparable PKs spend the post-copy phase, so leaving it
+	// unbounded would exempt exactly those tables.
+	//
+	// A segment boundary is the only place it is safe to stop. The queue is
+	// ordered and drained FIFO, so an applied prefix is a valid amount of work
+	// and reattachLocked prepends the remainder ahead of anything that arrived
+	// during the drain, preserving binlog order. Stopping mid-segment would
+	// split a batch that has already been partly built.
+	deadline := time.Now().Add(drainDispatchBudget)
+
 	prevIsDelete := snapshot[0].logicalRow.IsDeleted
 	for i, change := range snapshot {
 		rowBytes := renderedBytesOfChange(change.logicalRow, change.originalKey)
@@ -1176,6 +1431,13 @@ func (s *bufferedMap) drainQueueSnapshot(ctx context.Context, snapshot []queuedC
 		if typeFlip || batchFull || overBudget {
 			if err := flushSegment(i); err != nil {
 				return snapshot[applied:], err
+			}
+			if time.Now().After(deadline) {
+				// Not an error: the remainder is handed back for the next
+				// flush, and Flush reports the drain as incomplete so no
+				// position advances past it.
+				s.drainsTimedOut.Add(1)
+				return snapshot[applied:], nil
 			}
 		}
 		if change.logicalRow.IsDeleted {
@@ -1529,9 +1791,11 @@ func (s *bufferedMap) SetWatermarkOptimization(ctx context.Context, enabled bool
 		"keys_added", s.keysAdded.Swap(0),
 		"keys_dropped_above_high", s.keysDroppedAbove.Swap(0),
 		"keys_skipped_not_below_low", s.keysSkippedBelow.Swap(0),
-		"times_parked_on_soft_limit", s.timesParked.Swap(0),
+		"times_parked_on_soft_limit_total", s.timesParked.Load(),
 		"batches_lock_contended", s.batchesContended.Swap(0),
+		"batches_contention_deferred", s.batchesDeferred.Swap(0),
 		"drains_rescued_serially", s.serialRecoveries.Swap(0),
+		"drains_truncated_by_time_budget", s.drainsTimedOut.Swap(0),
 		"flush_concurrency", s.effectiveFlushConcurrency(),
 		"delta_len", len(s.changes)+len(s.queue),
 		"size_bytes", s.sizeBytes,
