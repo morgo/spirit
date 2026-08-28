@@ -1214,10 +1214,12 @@ func (c *binlogClient) FlushResidual() (int, int) {
 // FeedStats satisfies StatsReporter, so the runner can fold the feed's
 // activity into the binlog row of its periodic status block.
 func (c *binlogClient) FeedStats() FeedStats {
-	// Collected before c.mu is taken: mergeParkStats locks each subscription,
-	// and the subscriptions take c.mu on their flush paths.
+	// Collected before c.mu is taken: these lock each subscription, and the
+	// subscriptions take c.mu on their flush paths.
 	var stats FeedStats
-	mergeParkStats(&stats, c.subs.Snapshot())
+	subs := c.subs.Snapshot()
+	mergeParkStats(&stats, subs)
+	mergeFlushShapes(&stats, subs)
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
