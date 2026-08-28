@@ -45,11 +45,15 @@ applies it through the applier interface:
 - Higher memory usage than a key-only map: stores full row data for each changed key.
 - Watermark optimizations (`KeyAboveHighWatermark` and `KeyBelowLowWatermark`) are available on `MappedChunker` implementations (both optimistic and composite chunkers). They work correctly for numeric, binary, and temporal primary key types. For `VARCHAR`/`TEXT` columns with collations, Go's byte-order comparison may differ from MySQL's collation order; any discrepancies are caught by the checksum phase (see [issue #479](https://github.com/block/spirit/issues/479)).
 
-**Map iteration order is irrelevant** because the applier issues
+**Map iteration order is irrelevant to correctness** because the applier issues
 `REPLACE INTO target VALUES (...)`, which deletes any row that conflicts
 on PRIMARY KEY or any UNIQUE index before each insert. That makes the
 multi-row VALUES list order-independent — see "Applier idempotence via
 REPLACE INTO" below.
+
+It is not irrelevant to *lock contention*, which is a separate matter and the
+reason a drain no longer batches in iteration order — see
+[Flush partitioning by unique secondary index](#flush-partitioning-by-unique-secondary-index).
 
 **Example scenario:**
 ```
@@ -337,6 +341,82 @@ if !client.AllChangesFlushed() {
 ```
 
 The `client.Flush()` will retry in a loop until the number of pending changes is considered trivial (currently <10K). It is important to handle errors correctly here, because `FlushUnderTableLock` may fail if it can't flush the pending changes fast enough. This is your cue to abandon the cutover operation for now, and try again when the server is under less load.
+
+### Flush partitioning by unique secondary index
+
+A map-mode drain splits its rows into batches and runs several through the
+applier at once. Those batches are disjoint by primary key — a map holds one
+image per key — and for a long time that was assumed to be enough. It is not.
+
+Two concurrent `REPLACE` statements on PK-disjoint rows can still deadlock, and
+in [issue #1168](https://github.com/block/spirit/issues/1168) they did: the
+InnoDB cycle inverted between the clustered index and a `UNIQUE` secondary
+index. `REPLACE`'s duplicate detection takes a **next-key** lock on each unique
+secondary index — the gap below the record included — so two batches collide
+whenever any of their rows land in *adjacent* slots of any such index. Secondary
+key order is unrelated to primary key order, so PK disjointness says nothing
+about it.
+
+The conflict surface is therefore exactly **the set of `UNIQUE` secondary
+indexes**, and that is a precise claim rather than a cautious one. It is
+established against a real server by `TestReplaceContendsOnlyOnUniqueIndexes`
+in `pkg/applier`:
+
+| Two rows are… | Contend? | Why |
+| --- | --- | --- |
+| adjacent in the PRIMARY KEY | **no** | a `REPLACE`'s clustered-index conflict is with the row bearing that exact PK, so under `READ COMMITTED` it takes a record lock and no gap |
+| equal in a *non-unique* secondary index | **no** | those records are keyed `(indexed columns, PK)`, so PK-disjoint rows always occupy distinct records |
+| adjacent in a *`UNIQUE`* secondary index | **yes** | duplicate detection takes a next-key lock, gap included |
+
+So primary-key separation buys nothing, and an earlier attempt at PK-sorting the
+drain was aimed at the wrong index. The drain instead:
+
+1. **Chooses** the unique secondary index whose values are most *clustered*
+   across this drain's own rows — measured, not configured, because whether a
+   key correlates with anything is a property of the workload rather than of the
+   schema. A repeating leading column means physically adjacent sibling records
+   and a near-certain collision; a uniformly distributed key has an adjacency
+   probability of roughly `n²/N` per drain (about 0.3 for 50,000 rows in 8.5
+   billion) and needs no help.
+2. **Sorts** by that index and cuts **contiguous** batches, nudging cut points
+   to fall where the leading key value changes so a run of siblings is not split
+   across two batches. Range partitioning, not hashing: hashing spreads
+   equal-ish values across buckets, which is the arrangement that collides.
+3. **Stripes** the batches into evens and odds, running one group at a time, so
+   no two batches in flight together are neighbours in the sort order. Handing
+   the sorted list straight to the limiter would undo most of the benefit — the
+   in-flight window is roughly contiguous, so neighbours would run together and
+   every batch boundary would become a candidate collision.
+
+Rows that are close together in the chosen index end up in the *same* statement,
+where they cannot conflict, and statements that do run together are separated by
+at least one whole batch of intervening rows. Note that the separation is
+measured in **rows**, not in value distance: whether two values are adjacent in
+the B-tree depends on the whole table, not on the drain, so no value-space
+margin would mean anything.
+
+**Getting it wrong costs throughput, never correctness.** Batches remain
+disjoint by key and map mode makes no cross-key ordering promises, so a
+misordered sort or a poorly chosen index simply reproduces the old collision
+behaviour, which the AIMD contention controller still catches. That is what
+makes it acceptable to sort row images with a best-effort comparator.
+
+The controller therefore stays, and covers what partitioning cannot:
+
+- **Deletes.** A buffered delete keeps only its primary key (the before image is
+  discarded at buffer time), so there is no way to know where it sits in a
+  unique secondary index. Deleted rows are grouped at the tail.
+- **Second and subsequent unique indexes.** Sorting by one says nothing about
+  the others.
+- **`REPLACE`'s out-of-partition deletion cascade.** A `REPLACE` deletes any row
+  conflicting on any unique index, including primary keys not in the batch,
+  whose other unique values are unknowable from here.
+
+Partitioning is automatic, has no flag, and turns itself off when there is
+nothing to do: a table with no usable unique secondary index has no conflict
+surface between PK-disjoint batches at all, so the sort would be pure cost. A
+`flush partitioning enabled` line at Info reports the candidates once per
+subscription.
 
 ### Memory backpressure
 
