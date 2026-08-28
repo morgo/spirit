@@ -484,6 +484,14 @@ const minCutFill = 2
 // kept whole without unbounded batches, so it is split at the hard limit and
 // left to the stripe scheme below, which at least guarantees the two halves do
 // not run concurrently.
+//
+// Given hardEnd > start, the result is always strictly greater than start: the
+// walk-back is floored at start+1, and both early returns (hardEnd, len(rows))
+// are past it. buildBatches advances its cursor to the cut, so a cut at start
+// would be a batch of no rows and a loop that never terminates. It keeps its
+// own guard rather than relying on this — but a change here that could return
+// start is a bug on this side of the boundary, and
+// TestCutAtValueBoundaryAlwaysAdvances is what says so.
 func cutAtValueBoundary(rows []drainRow, idx *partitionIndex, start, hardEnd int) int {
 	if hardEnd >= len(rows) {
 		return len(rows)

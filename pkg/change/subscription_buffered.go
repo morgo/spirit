@@ -1189,7 +1189,23 @@ func (s *bufferedMap) buildBatches(rows []drainRow, idx *partitionIndex) []*mapF
 	batchSize := s.effectiveBatchSize()
 	var batches []*mapFlushBatch
 	for i := 0; i < len(rows); {
-		end := min(i+batchSize, len(rows))
+		// Every batch must consume at least one row. The loop's only progress
+		// is i = j at the bottom, so a batch that ended where it started would
+		// spin here forever, allocating an empty batch per turn until the
+		// process died.
+		//
+		// It cannot happen today: effectiveBatchSize floors at 1, and every
+		// return in cutAtValueBoundary is past its start. The clamp is here
+		// because that invariant lives in two other functions — one of them in
+		// another file — and neither says a caller's loop termination depends
+		// on it. One comparison per batch against a hung migration is worth
+		// making even at probability zero.
+		//
+		// Clamped *before* the cut rather than after, because
+		// cutAtValueBoundary reads rows[hardEnd-1] and so needs the same
+		// guarantee its caller does; a guard placed after the call would only
+		// have replaced the hang with a panic.
+		end := max(min(i+batchSize, len(rows)), i+1)
 		if idx != nil {
 			end = cutAtValueBoundary(rows, idx, i, end)
 		}

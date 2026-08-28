@@ -306,3 +306,92 @@ func abs(n int) int {
 	}
 	return n
 }
+
+// TestCutAtValueBoundaryAlwaysAdvances sweeps the cut over adversarial row
+// shapes and asserts the one property buildBatches' loop termination depends
+// on. The cut is the loop's only source of progress, so a return at `start`
+// would not be an off-by-one — it would be a hang that allocates an empty
+// batch per turn until the process dies.
+//
+// The shapes are chosen to press on every branch: one value everywhere (no
+// boundary to walk back to, so the floor must hold), all values distinct
+// (a boundary at every position), long runs (the walk-back travels), and a
+// delete tail (leadingValue stops reporting partway through).
+func TestCutAtValueBoundaryAlwaysAdvances(t *testing.T) {
+	shapes := map[string][]drainRow{}
+
+	var oneValue, distinct, runs, withDeletes []drainRow
+	for i := range int64(40) {
+		key := fmt.Sprintf("k%03d", i)
+		oneValue = append(oneValue, upsertRow(key, i, "same", ""))
+		distinct = append(distinct, upsertRow(key, i, fmt.Sprintf("v%03d", i), ""))
+		runs = append(runs, upsertRow(key, i, fmt.Sprintf("g%03d", i/7), ""))
+		if i < 25 {
+			withDeletes = append(withDeletes, upsertRow(key, i, fmt.Sprintf("g%03d", i/7), ""))
+		} else {
+			withDeletes = append(withDeletes, deleteRow(key, i))
+		}
+	}
+	shapes["one value"] = oneValue
+	shapes["all distinct"] = distinct
+	shapes["runs of 7"] = runs
+	shapes["delete tail"] = withDeletes
+	shapes["single row"] = oneValue[:1]
+
+	for name, rows := range shapes {
+		t.Run(name, func(t *testing.T) {
+			for _, idx := range []*partitionIndex{&leadingIdx, &compositeIdx} {
+				for start := range len(rows) {
+					// Every batch size, including 1 — the size an AIMD-floored
+					// drain of narrow batches reaches, and the tightest case
+					// for the walk-back floor.
+					for _, batchSize := range []int{1, 2, 3, 7, 10, 64} {
+						hardEnd := min(start+batchSize, len(rows))
+						got := cutAtValueBoundary(rows, idx, start, hardEnd)
+						require.Greater(t, got, start,
+							"idx=%s start=%d batchSize=%d: a cut at or before the start "+
+								"is an infinite loop in buildBatches", idx.name, start, batchSize)
+						require.LessOrEqual(t, got, len(rows),
+							"idx=%s start=%d batchSize=%d: cut past the rows", idx.name, start, batchSize)
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestBuildBatchesAlwaysConsumesRows is the same property one level up, where
+// it actually bites. Termination is asserted by the test completing: the loop
+// under test is the one that would hang.
+func TestBuildBatchesAlwaysConsumesRows(t *testing.T) {
+	for _, batchSize := range []int{1, 2, minAdaptiveBatchSize, DefaultBatchSize} {
+		for _, partitioned := range []bool{false, true} {
+			sub := newByteCapBufferedMap(&countingApplier{}, false)
+			sub.batchSize = batchSize
+
+			// One leading value across the whole set: the shape with no
+			// boundary to align to, so the walk-back finds nothing and the
+			// floor is the only thing keeping the cut ahead of the cursor.
+			var rows []drainRow
+			for i := range int64(120) {
+				rows = append(rows, upsertRow(fmt.Sprintf("k%03d", i), i, "same", ""))
+			}
+
+			var idx *partitionIndex
+			if partitioned {
+				idx = &leadingIdx
+			}
+			batches := sub.buildBatches(rows, idx)
+
+			total := 0
+			for _, b := range batches {
+				require.NotEmpty(t, b.keys,
+					"batchSize=%d partitioned=%t: an empty batch means the cursor did not advance",
+					batchSize, partitioned)
+				total += len(b.keys)
+			}
+			require.Equal(t, len(rows), total,
+				"batchSize=%d partitioned=%t: every row batched exactly once", batchSize, partitioned)
+		}
+	}
+}
