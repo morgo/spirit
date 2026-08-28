@@ -86,6 +86,18 @@ type ClientConfig struct {
 	// force serial flushing. Zero (the zero-value default) means use
 	// DefaultFlushConcurrency.
 	FlushConcurrency int
+
+	// BatchSize overrides DefaultBatchSize for new subscriptions: the
+	// maximum number of rows one map-mode flush batch renders into a
+	// single statement. Zero (the zero-value default) means use
+	// DefaultBatchSize; a negative value is clamped to one row per
+	// statement.
+	//
+	// This travels with FlushConcurrency rather than being set on its
+	// own, because the two together decide how many rows a drain has in
+	// flight. See autoscale.FlushBounds, which is what sets both when
+	// the migration runner sizes them from the instance.
+	BatchSize int
 }
 
 // resolveFlushConcurrency normalizes the FlushConcurrency knob for the
@@ -101,6 +113,18 @@ func (c *ClientConfig) resolveFlushConcurrency() int {
 		return 1 // explicit opt-out: serial
 	}
 	return c.FlushConcurrency
+}
+
+// resolveBatchSize normalizes the BatchSize knob for the clients, on the
+// same 0-means-default footing as resolveFlushConcurrency. Negative is
+// clamped to a single row rather than treated as an opt-out, because
+// there is no such thing as a batch of no rows — the smallest meaningful
+// request is a statement per row.
+func (c *ClientConfig) resolveBatchSize() int {
+	if c.BatchSize == 0 {
+		return DefaultBatchSize
+	}
+	return max(1, c.BatchSize)
 }
 
 // NewClientDefaultConfig returns a default config for the copier.

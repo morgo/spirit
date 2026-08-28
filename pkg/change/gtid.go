@@ -114,6 +114,12 @@ type gtidClient struct {
 	// to each subscription on construction. See DefaultFlushConcurrency.
 	flushConcurrency int
 
+	// batchSize is the map-mode flush batch size passed to each
+	// subscription on construction. It travels with flushConcurrency:
+	// the two together set the rows a drain has in flight. See
+	// DefaultBatchSize.
+	batchSize int
+
 	// flushRequests receives the subscription that parked on its soft
 	// memory limit; runPeriodicFlush selects on it and flushes that
 	// subscription first, then runs the normal all-subscription pass.
@@ -159,6 +165,7 @@ func NewGTIDClient(db *sql.DB, host string, username, password string, appl appl
 		subscriptionSoftLimitBytes:   softLimit,
 		subscriptionSoftLimitChanges: softLimitChanges,
 		flushConcurrency:             config.resolveFlushConcurrency(),
+		batchSize:                    config.resolveBatchSize(),
 		flushRequests:                make(chan Subscription, 1),
 	}
 }
@@ -176,6 +183,7 @@ func (c *gtidClient) AddSubscription(currentTable, newTable *table.TableInfo, ch
 		SoftLimitChanges: c.subscriptionSoftLimitChanges,
 		FlushRequest:     c.flushRequests,
 		FlushConcurrency: c.flushConcurrency,
+		BatchSize:        c.batchSize,
 	})
 	if err != nil {
 		return fmt.Errorf("could not build subscription for table %s.%s: %w", currentTable.SchemaName, currentTable.TableName, err)
