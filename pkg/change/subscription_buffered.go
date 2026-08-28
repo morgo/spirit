@@ -602,7 +602,13 @@ func (s *bufferedMap) effectiveBatchSize() int {
 	if start <= 0 {
 		start = DefaultBatchSize // out-of-tree callers, bare test maps
 	}
-	return shiftDown(start, s.concurrencyPenalty.Load(), minAdaptiveBatchSize)
+	// The floor can never exceed the start. minAdaptiveBatchSize floors
+	// *shrinking*; a caller that deliberately configured fewer rows than that
+	// has not asked to be overruled, least of all by the contention path,
+	// where raising a statement's lock footprint is the opposite of the
+	// intent. Before BatchSize was configurable the start was always
+	// DefaultBatchSize, so the two could never cross.
+	return shiftDown(start, s.concurrencyPenalty.Load(), min(minAdaptiveBatchSize, start))
 }
 
 // shiftDown halves start once per penalty step, never going below floor.

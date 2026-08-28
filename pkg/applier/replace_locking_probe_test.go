@@ -145,7 +145,12 @@ func newLockProbeTable(t *testing.T) *lockProbeTable {
 	b.WriteString(lp.replace(ids...))
 	testutils.RunSQL(t, b.String())
 
-	db, err := sql.Open("mysql", testutils.DSN())
+	// Through dbconn rather than sql.Open, so the probe runs on the same
+	// connection settings the flush path does — above all
+	// transaction_isolation=READ-COMMITTED, which is what makes the clustered
+	// index a record lock with no gap. Under the server default of REPEATABLE
+	// READ the claims below are about a different lock set than production's.
+	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 	require.NoError(t, err)
 	t.Cleanup(func() { utils.CloseAndLog(db) })
 	lp.db = db

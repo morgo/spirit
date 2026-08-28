@@ -338,7 +338,7 @@ The band has hysteresis, so where it settles depends on which side it approaches
 
 | Instance | vCPUs | Apply (write) | Copy read / checksum | Change-feed flush |
 | --- | --- | --- | --- | --- |
-| `db.r6g.large` | 2 | \* | \* | \* |
+| `db.r6g.large` | 2 | \* | \* | 8 × 1000 |
 | `db.r6g.xlarge` | 4 | 2 → 4 | 2 → 2 | 8 × 1000 |
 | `db.r6g.2xlarge` | 8 | 6 → 12 | 2 → 4 | 8 × 1000 |
 | `db.r6g.4xlarge` | 16 | 14 → 28 | 4 → 8 | 14 × 571 |
@@ -348,7 +348,7 @@ The band has hysteresis, so where it settles depends on which side it approaches
 | `db.r8g.24xlarge` | 96 | 94 → 188 | 24 → 48 | 32 × 250 |
 | `db.r8g.48xlarge` | 192 | 190 → 380 | 48 → 96 | 32 × 250 |
 
-\* Below 4 vCPUs autoscaling does not engage at all and all three stay as configured — see the bottom of this section.
+\* Below 4 vCPUs autoscaling does not engage at all: the two thread counts stay exactly as you configured them via [threads](#threads) and [write-threads](#write-threads) — see the bottom of this section. The flush shape is not a flag, so it is not "as configured" in the same sense; it simply stays at the change feed's own default of `8 × 1000`, which is also what every non-Aurora target and every derived concurrency at or below 8 gets.
 
 For a size not listed: write threads start at `vCPUs - 2` (minimum 1) and may reach twice that; read threads start at `ceil((vCPUs - 2) / 4)` (minimum 2) and may reach `ceil(vCPUs / 2)`. `vCPUs` is read from `@@innodb_buffer_pool_instances`, and the resolved counts are logged once at startup. The lower bound is always 1 — the controller may shed below the starting value. Note `xlarge`, the smallest size that engages: its read bounds meet at 2, so the read side can shed but not grow there.
 

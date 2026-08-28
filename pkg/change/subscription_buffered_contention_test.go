@@ -286,6 +286,47 @@ func TestZeroBatchSizeFallsBackToDefault(t *testing.T) {
 	require.Equal(t, DefaultBatchSize, sub.effectiveBatchSize())
 }
 
+// TestSmallBatchSizeIsNeverRaised pins the one direction the adaptive floor
+// must not move. minAdaptiveBatchSize floors *shrinking*, so a caller that
+// configured fewer rows than that keeps them: a contention step that grew a
+// 1-row statement to 50 would be enlarging a statement's lock footprint at
+// exactly the moment the drain reported collisions, and would make a small
+// BatchSize impossible to hold.
+//
+// Only reachable since BatchSize became configurable — before that the start
+// was always DefaultBatchSize, comfortably above the floor.
+func TestSmallBatchSizeIsNeverRaised(t *testing.T) {
+	for _, configured := range []int{1, 10, minAdaptiveBatchSize - 1} {
+		sub := newByteCapBufferedMap(&countingApplier{}, false)
+		// Wide enough that the contention step actually fires: the penalty is
+		// only taken while there is still something to narrow, and a drain
+		// already at concurrency 1 has nothing.
+		sub.flushConcurrency, sub.batchSize = DefaultFlushConcurrency, configured
+		require.Equal(t, configured, sub.effectiveBatchSize(), "no penalty yet")
+
+		sub.adaptFlushConcurrency(true)
+		require.Less(t, sub.effectiveFlushConcurrency(), DefaultFlushConcurrency,
+			"sanity: the penalty was taken, so the batch size was recomputed")
+		require.Equal(t, configured, sub.effectiveBatchSize(),
+			"a penalty must never raise a configured batch size of %d", configured)
+
+		for range 10 {
+			sub.adaptFlushConcurrency(true)
+		}
+		require.Equal(t, configured, sub.effectiveBatchSize(),
+			"still %d after the penalty has run to the floor", configured)
+	}
+
+	// A start above the floor still shrinks to it, which is what the floor is
+	// there for.
+	sub := newByteCapBufferedMap(&countingApplier{}, false)
+	sub.flushConcurrency, sub.batchSize = DefaultFlushConcurrency, minAdaptiveBatchSize*4
+	for range 10 {
+		sub.adaptFlushConcurrency(true)
+	}
+	require.Equal(t, minAdaptiveBatchSize, sub.effectiveBatchSize())
+}
+
 // TestAdaptFlushConcurrencyFloorsAtOne guards the penalty from running away
 // while pinned at the floor: an unbounded penalty would make recovery take
 // proportionally longer once the contention finally clears.
