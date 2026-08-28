@@ -22,6 +22,14 @@ import (
 // tag (pkg/move), since the two flags are independently defaulted.
 const defaultWriteThreads = 4
 
+// defaultMaxConnections must match the `default:"128"` kong tag on
+// Migration.MaxConnections, for the same reason defaultWriteThreads does: a
+// programmatic caller that leaves the field unset must land where the CLI does.
+// This one matters more than most, because the bound only earns its keep on the
+// large instances where the derived ceilings overflow — and those migrations are
+// as likely to be driven by an embedding orchestrator as by the CLI.
+const defaultMaxConnections = 128
+
 var (
 	defaultHost     = "127.0.0.1"
 	defaultPort     = 3306
@@ -39,6 +47,26 @@ type Migration struct {
 	ConfFile     string  `name:"conf" help:"MySQL conf file" optional:"" type:"existingfile"`
 	Threads      int     `name:"threads" help:"Number of concurrent threads for copy and checksum tasks. Ignored when --enable-experimental-autoscaling engages" optional:"" default:"4"`
 	WriteThreads int     `name:"write-threads" help:"Number of concurrent apply (write) threads. Ignored when --enable-experimental-autoscaling engages" optional:"" default:"4"`
+
+	// MaxConnections bounds the main connection pool. It exists because the
+	// pool is otherwise sized by *adding up* every worker ceiling — read,
+	// write, and change-feed flush — so that no pool can ever starve another.
+	// That sum is spirit's demand, and it is not spirit's to spend: the budget
+	// it draws on is the server's max_connections, shared with the production
+	// workload. On a large instance the derived ceilings add up to well over a
+	// hundred connections, and when the server has less spare than that the
+	// copy does not slow down, it dies on `Error 1040: Too many connections`.
+	//
+	// Above this bound the pools contend for connections instead of each
+	// holding its own, which costs throughput and nothing else. The default is
+	// set high enough that no hand-configured thread count reaches it — it
+	// binds on the derived ceilings, which is where the problem is. See
+	// Runner.boundedPoolSize for the one term that cannot give way.
+	//
+	// Zero means "use the default" (normalizeOptions fills it in), matching
+	// Threads and WriteThreads. A negative value means unbounded, for callers
+	// that want the pre-cap behaviour back.
+	MaxConnections int `name:"max-connections" help:"Maximum size of the main connection pool. Read, write and flush workers contend for connections above this rather than each being guaranteed one" optional:"" default:"128"`
 
 	// EnableExperimentalAutoscaling turns on dynamic thread scaling driven by
 	// throttler feedback. When it engages (an Aurora target with at least
@@ -143,6 +171,9 @@ func (m *Migration) normalizeOptions() (stmts []*statement.AbstractStatement, er
 				"write_threads", defaultWriteThreads)
 		}
 		m.WriteThreads = defaultWriteThreads
+	}
+	if m.MaxConnections == 0 {
+		m.MaxConnections = defaultMaxConnections
 	}
 	if m.ReplicaMaxLag == 0 {
 		m.ReplicaMaxLag = 120 * time.Second

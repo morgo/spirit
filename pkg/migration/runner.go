@@ -223,6 +223,62 @@ func (r *Runner) controlPlaneConns() int {
 	return len(r.changes) + 2
 }
 
+// boundedPoolSize is the main pool's size for the ceilings the caller settled
+// on, bounded by Migration.MaxConnections.
+//
+// The unbounded sum is every ceiling added together, so that no pool can ever
+// starve another. As a statement of what spirit would use if nothing else were
+// running it is correct; as a claim on the server it is not spirit's to make.
+// The connections come out of the server's max_connections, shared with the
+// production workload, and on a large instance the derived ceilings add up to
+// well over a hundred. When the server has less spare than that, the migration
+// does not degrade — it fails outright on `Error 1040: Too many connections`,
+// which is a worse outcome than any amount of queueing.
+//
+// Above the bound, write and flush workers give way: they queue on the pool
+// instead of each holding a connection. That trades throughput for survival,
+// which is the right trade, because a worker waiting on a connection is a
+// worker that will eventually run.
+//
+// maxRead does not give way, and this is the part worth stating plainly.
+// During the checksum every transaction in the read pool pins a connection for
+// the whole phase whether or not a worker has it checked out (see
+// checksumOffPoolConns). A pool below maxRead plus the two reserves therefore
+// does not make that phase slower — it leaves chunk dispatch with no connection
+// to get, and the phase hangs. So the bound is floored there, and a bound set
+// below the floor is reported and raised rather than obeyed: refusing to hang
+// is worth more than honouring the number exactly.
+//
+// One deliberate leak: the checksum ratchets the pool +2 above whatever this
+// returns, for the two queries it runs outside its checked-out transaction
+// pool. Those are the connections that must not queue behind anything, so the
+// effective ceiling is bound+2 rather than bound. Two connections is not the
+// difference between fitting on a server and not.
+func (r *Runner) boundedPoolSize(maxRead, maxWrite, maxFlush int) int {
+	reserved := r.controlPlaneConns() + checksumOffPoolConns
+	want := maxRead + maxWrite + maxFlush + reserved
+	limit := r.migration.MaxConnections
+	if limit <= 0 || want <= limit {
+		return want // unbounded, or the ceilings already fit
+	}
+	if floor := maxRead + reserved; limit < floor {
+		r.logger.Warn("--max-connections is below what the checksum phase pins for the whole phase; using the floor instead",
+			"max_connections", limit,
+			"pool_size", floor,
+			"read_ceiling", maxRead,
+			"reserved", reserved)
+		return floor
+	}
+	r.logger.Warn("connection budget capped; read, write and flush workers will contend for connections",
+		"max_connections", limit,
+		"requested", want,
+		"read_ceiling", maxRead,
+		"write_ceiling", maxWrite,
+		"flush_concurrency", maxFlush,
+		"reserved", reserved)
+	return limit
+}
+
 func (r *Runner) SetMetricsSink(sink metrics.Sink) {
 	r.metricsSink = sink
 }
@@ -310,10 +366,11 @@ func (r *Runner) Run(ctx context.Context) (retErr error) {
 	//
 	// This seeds the pool from the configured thread counts. Autoscaling can
 	// replace both counts (and raise their ceilings) once there is a connection
-	// to probe the instance with, so setupCopierCheckerAndReplClient grows the
-	// pool to its final size there. The pool only ever grows (via
-	// SetMaxOpenConns); later phases (checksum, cutover) ratchet it further but
-	// never shrink it.
+	// to probe the instance with, so setupCopierCheckerAndReplClient sizes the
+	// pool finally there — bounded by --max-connections, which is the one thing
+	// that can take it back *down* from the seed here. After that point it only
+	// ever grows: later phases (checksum, cutover) ratchet it further but never
+	// shrink it.
 	r.dbConfig.MaxOpenConnections = r.migration.Threads + r.migration.WriteThreads + r.controlPlaneConns() + checksumOffPoolConns
 	r.db, err = dbconn.New(r.dsn(), r.dbConfig)
 	if err != nil {
@@ -869,11 +926,10 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context, resumePosi
 	if maxRead == 0 {
 		maxRead = copier.ResolveMaxReadThreads(r.migration.Threads, false)
 	}
-	// Finalize the pool now that both ceilings are known: maxRead + maxWrite +
-	// controlPlaneConns() + checksumOffPoolConns (see the MaxOpenConnections doc
-	// in Run). Sizing for the ceilings ensures a scaled-up applier or reader pool
-	// never starves on connections. This is a no-op unless autoscaling raised a
-	// ceiling; the pool only ever grows.
+	// Finalize the pool now that every ceiling is known, bounded by
+	// --max-connections (see boundedPoolSize). Sizing for the ceilings ensures a
+	// scaled-up applier or reader pool never starves on connections. This is a
+	// no-op unless autoscaling raised a ceiling or the bound binds.
 	//
 	// The maxRead term covers the checksum as well as the copy: the checksum's
 	// transaction pool is sized to the same ceiling (see the checker's
@@ -892,7 +948,12 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context, resumePosi
 	if maxFlush == 0 {
 		maxFlush = change.DefaultFlushConcurrency // no derivation: the default applies
 	}
-	if poolSize := maxRead + maxWrite + maxFlush + r.controlPlaneConns() + checksumOffPoolConns; poolSize > r.dbConfig.MaxOpenConnections {
+	if poolSize := r.boundedPoolSize(maxRead, maxWrite, maxFlush); poolSize != r.dbConfig.MaxOpenConnections {
+		// Unlike before the bound existed this may also *shrink* the pool: Run
+		// sized it from the configured thread counts, and a bound below that
+		// has to be able to take it back down. database/sql handles a lowered
+		// SetMaxOpenConns by closing idle connections and making the next
+		// checkout wait, so in-flight work finishes rather than failing.
 		r.dbConfig.MaxOpenConnections = poolSize
 		dbconn.SetPoolSize(r.db, poolSize)
 	}
