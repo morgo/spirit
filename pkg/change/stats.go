@@ -66,6 +66,52 @@ type FeedStats struct {
 	// reader being held off for minutes at a time, which is what puts the
 	// source's binlog retention at risk.
 	IsParked bool
+	// FlushShape is how wide a map-mode drain is running right now, and
+	// ConfiguredFlushShape is how wide it would run with no AIMD penalty
+	// outstanding. Both are taken from the same subscription, so they are
+	// always comparable; see mergeFlushShapes for which subscription that is.
+	//
+	// These are reported for the same reason ActiveWorkers is on the applier
+	// row: the number is no longer a constant anyone can assume. Since #1173
+	// the width is derived from the instance rather than fixed, so an operator
+	// reading a status block has no other way to learn what it is — it is not a
+	// flag they set and not a default they can look up.
+	//
+	// The pair, rather than the effective figure alone, is what makes the AIMD
+	// controller legible. A bare `flush=2x250` is ambiguous between a small
+	// instance running at its derived width and a large one that contention has
+	// halved twice, which are opposite situations. The controller does log each
+	// step it takes, but those are events in a log that may be hours deep on a
+	// migration measured in days, whereas this is state, re-rendered every
+	// status block — so a width that is stuck down is visible without going
+	// looking for it, and so is its recovery.
+	FlushShape           FlushShape
+	ConfiguredFlushShape FlushShape
+}
+
+// FlushShape is the width of a map-mode drain: how many applier batches run
+// concurrently, and how many rows each of them renders into one statement.
+//
+// The two travel together because the AIMD controller moves them together —
+// one contention step halves both, so it costs 4x, and reporting either alone
+// would understate what a backed-off feed has given up. They are also the two
+// terms of the lock footprint that produced the back-off in the first place:
+// batch size sets how many records one statement locks, concurrency sets how
+// many such statements are in flight to collide.
+type FlushShape struct {
+	Concurrency int
+	BatchSize   int
+}
+
+// rows is the shape's rows in flight, the product the two dimensions trade
+// against each other (see autoscale.FlushBounds, which holds it constant while
+// re-shaping the terms). Used to rank shapes, so that the narrowest — the one
+// actually holding throughput back — is the one reported.
+func (f FlushShape) rows() int { return f.Concurrency * f.BatchSize }
+
+// String renders the shape as it appears in the binlog row, e.g. "8x1000".
+func (f FlushShape) String() string {
+	return fmt.Sprintf("%dx%d", f.Concurrency, f.BatchSize)
 }
 
 // ParkReporter is implemented by Subscription implementations that apply
@@ -92,6 +138,45 @@ func mergeParkStats(stats *FeedStats, subs []Subscription) {
 		parks, parked := reporter.ParkStats()
 		stats.Parks += parks
 		stats.IsParked = stats.IsParked || parked
+	}
+}
+
+// FlushShapeReporter is implemented by Subscription implementations whose
+// drains have an adjustable width and can report it. Optional, for the same
+// reason ParkReporter is: a queue-mode-only or out-of-tree subscription that
+// drains serially has no shape to report and contributes nothing rather than
+// having to grow a method.
+type FlushShapeReporter interface {
+	FlushShapes() (effective, configured FlushShape)
+}
+
+// mergeFlushShapes folds the flush shapes of subs into stats, keeping the
+// narrowest effective shape and the configured shape it is narrow *relative
+// to*. The pair must stay from one subscription: mixing an effective width
+// from one with a configured width from another would render a back-off that
+// no subscription is actually experiencing.
+//
+// Narrowest rather than summed, because these are not additive — each
+// subscription drains its own table with its own width, and the number worth a
+// human's attention is the one throttling the slowest of them. That is the same
+// choice isStaler makes for the flush figures.
+//
+// Callers must not hold the client's own mutex, for the reason on
+// mergeParkStats: this reaches into each subscription.
+func mergeFlushShapes(stats *FeedStats, subs []Subscription) {
+	for _, sub := range subs {
+		reporter, ok := sub.(FlushShapeReporter)
+		if !ok {
+			continue
+		}
+		effective, configured := reporter.FlushShapes()
+		if effective.Concurrency <= 0 || configured.Concurrency <= 0 {
+			continue // a reporter with nothing to say
+		}
+		if stats.FlushShape.Concurrency > 0 && effective.rows() >= stats.FlushShape.rows() {
+			continue
+		}
+		stats.FlushShape, stats.ConfiguredFlushShape = effective, configured
 	}
 }
 
@@ -124,8 +209,8 @@ func (s FeedStats) String() string {
 	// and unlike read= below. A field that appears only while something is
 	// wrong cannot be eye-diffed against the previous status block, and the
 	// reading that matters here is the delta between blocks.
-	out := fmt.Sprintf("rotations=%d (%d forced)  parks=%d is-parked=%t  %s",
-		s.Rotations, s.ForcedRotations, s.Parks, s.IsParked, flush)
+	out := fmt.Sprintf("rotations=%d (%d forced)  parks=%d is-parked=%t%s  %s",
+		s.Rotations, s.ForcedRotations, s.Parks, s.IsParked, s.flushShapeField(), flush)
 	if s.BufferedPosition != "" {
 		// Last, and rendered whole. A GTID set gains a UUID per failover and
 		// has no upper bound on length, so putting it anywhere but the end of
@@ -143,6 +228,32 @@ func (s FeedStats) String() string {
 		out += "  read=" + s.BufferedPosition
 	}
 	return out
+}
+
+// flushShapeField renders the drain width, with a leading separator, or "" when
+// no subscription reported one.
+//
+// It sits next to parks/is-parked because it answers the same question from the
+// other end: those describe the reader being held back, this describes the
+// writer being held back, and a feed in trouble usually shows both. It sits
+// before the flush phrase rather than inside it because the shape is current
+// state while the phrase describes a flush that has already finished — one that
+// may well have run at a different width than the one printed here.
+//
+// The configured shape is appended only when it differs, following the applier
+// row's rule that a field which reads the same on every healthy run costs
+// attention without paying it back (#329). So on a healthy feed this is one
+// short field, and the *appearance* of the parenthetical is the signal that the
+// AIMD controller has stepped in — with its disappearance, some drains later,
+// the signal that the contention cleared.
+func (s FeedStats) flushShapeField() string {
+	if s.FlushShape.Concurrency <= 0 {
+		return ""
+	}
+	if s.ConfiguredFlushShape != s.FlushShape && s.ConfiguredFlushShape.Concurrency > 0 {
+		return fmt.Sprintf("  flush=%s (of %s)", s.FlushShape, s.ConfiguredFlushShape)
+	}
+	return "  flush=" + s.FlushShape.String()
 }
 
 // StatusRow renders the feed stats of srcs as the binlog row of a runner status
@@ -182,6 +293,12 @@ func StatusRow(srcs ...Source) string {
 		merged.ForcedRotations += s.ForcedRotations
 		merged.Parks += s.Parks
 		merged.IsParked = merged.IsParked || s.IsParked
+		// Narrowest across feeds, on the same reasoning as across the
+		// subscriptions of one feed, and again keeping the pair together.
+		if s.FlushShape.Concurrency > 0 &&
+			(merged.FlushShape.Concurrency <= 0 || s.FlushShape.rows() < merged.FlushShape.rows()) {
+			merged.FlushShape, merged.ConfiguredFlushShape = s.FlushShape, s.ConfiguredFlushShape
+		}
 		found = true
 	}
 	if !found {

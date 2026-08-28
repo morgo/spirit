@@ -207,6 +207,14 @@ func TestFeedStatsFromLiveFeed(t *testing.T) {
 	require.True(t, client.FeedStats().LastFlushAt.IsZero())
 	require.Contains(t, StatusRow(client), "never flushed")
 
+	// The flush shape reaches the row from a real subscription rather than
+	// from a hand-built FeedStats: the client has to reach into its
+	// subscriptions for it, the way it already does for park stats.
+	// NewClientDefaultConfig derives no width, so this is the default pair.
+	require.Contains(t, StatusRow(client), "flush=8x1000")
+	require.NotContains(t, StatusRow(client), "(of ",
+		"an unpenalized feed renders no parenthetical")
+
 	testutils.RunSQL(t, "INSERT INTO feedstatst1 (a, b) VALUES (1, 2), (3, 4)")
 	require.NoError(t, client.BlockWait(t.Context()))
 	// A single flush, as the periodic flush loop performs it.
@@ -371,4 +379,108 @@ func TestStatusRowMergesParkStats(t *testing.T) {
 	row := StatusRow(busy, idle)
 	require.Contains(t, row, "parks=10 is-parked=true")
 	require.Equal(t, row, StatusRow(idle, busy), "order must not matter")
+}
+
+// shapeStub reports a flush shape and nothing else.
+type shapeStub struct {
+	stubSubscription
+	effective  FlushShape
+	configured FlushShape
+}
+
+func (s *shapeStub) FlushShapes() (FlushShape, FlushShape) { return s.effective, s.configured }
+
+// The width is derived from the instance rather than fixed, so it is not
+// something an operator can look up — the status block is where they learn it.
+func TestFeedStatsStringRendersFlushShape(t *testing.T) {
+	require.Equal(t,
+		"rotations=0 (0 forced)  parks=0 is-parked=false  flush=8x1000  never flushed",
+		FeedStats{
+			FlushShape:           FlushShape{Concurrency: 8, BatchSize: 1000},
+			ConfiguredFlushShape: FlushShape{Concurrency: 8, BatchSize: 1000},
+		}.String())
+}
+
+// The configured shape appears only once it differs, so the *presence* of the
+// parenthetical is the AIMD signal and its disappearance is the recovery. A
+// bare "flush=2x250" cannot say which of those two situations it is.
+func TestFeedStatsStringRendersBackedOffFlushShape(t *testing.T) {
+	require.Equal(t,
+		"rotations=0 (0 forced)  parks=0 is-parked=false  flush=2x250 (of 8x1000)  never flushed",
+		FeedStats{
+			FlushShape:           FlushShape{Concurrency: 2, BatchSize: 250},
+			ConfiguredFlushShape: FlushShape{Concurrency: 8, BatchSize: 1000},
+		}.String())
+}
+
+// Both dimensions are rendered because one AIMD step halves both: reporting
+// concurrency alone would show a 2x cut where the feed has taken a 4x one.
+func TestFeedStatsStringRendersBothFlushDimensions(t *testing.T) {
+	// Batch size floored, concurrency still shrinking: the two no longer move
+	// in step, and a reader who only saw one would misjudge the other.
+	require.Contains(t,
+		FeedStats{
+			FlushShape:           FlushShape{Concurrency: 1, BatchSize: 50},
+			ConfiguredFlushShape: FlushShape{Concurrency: 8, BatchSize: 200},
+		}.String(),
+		"flush=1x50 (of 8x200)")
+}
+
+// A source that cannot report a shape omits the field rather than rendering a
+// zero, which would read as a stalled feed.
+func TestFeedStatsStringOmitsAbsentFlushShape(t *testing.T) {
+	require.Equal(t,
+		"rotations=0 (0 forced)  parks=0 is-parked=false  never flushed",
+		FeedStats{}.String())
+	require.NotContains(t,
+		FeedStats{ConfiguredFlushShape: FlushShape{Concurrency: 8, BatchSize: 1000}}.String(),
+		"flush=")
+}
+
+// Narrowest wins, because the number worth a human's attention is the one
+// throttling the slowest subscription — and the pair must stay together, or the
+// row shows a back-off no subscription is actually experiencing.
+func TestMergeFlushShapesKeepsTheNarrowestPair(t *testing.T) {
+	var stats FeedStats
+	mergeFlushShapes(&stats, []Subscription{
+		&shapeStub{
+			effective:  FlushShape{Concurrency: 8, BatchSize: 1000},
+			configured: FlushShape{Concurrency: 8, BatchSize: 1000},
+		},
+		&shapeStub{ // narrowest: 500 rows in flight
+			effective:  FlushShape{Concurrency: 2, BatchSize: 250},
+			configured: FlushShape{Concurrency: 8, BatchSize: 1000},
+		},
+		&shapeStub{
+			effective:  FlushShape{Concurrency: 4, BatchSize: 500},
+			configured: FlushShape{Concurrency: 16, BatchSize: 500},
+		},
+	})
+	require.Equal(t, FlushShape{Concurrency: 2, BatchSize: 250}, stats.FlushShape)
+	require.Equal(t, FlushShape{Concurrency: 8, BatchSize: 1000}, stats.ConfiguredFlushShape,
+		"the configured shape must come from the same subscription as the effective one")
+
+	// A subscription that does not report a shape contributes nothing rather
+	// than being counted as a zero-width drain.
+	var none FeedStats
+	mergeFlushShapes(&none, []Subscription{&stubSubscription{}})
+	require.Zero(t, none.FlushShape.Concurrency)
+}
+
+// Same rule across feeds: a sharded move reads one feed per source, and the
+// narrowest of them is the one holding the move back.
+func TestStatusRowMergesFlushShapes(t *testing.T) {
+	wide := &statsFeed{stats: FeedStats{
+		LastFlushAt:          time.Now().Add(-time.Second),
+		FlushShape:           FlushShape{Concurrency: 8, BatchSize: 1000},
+		ConfiguredFlushShape: FlushShape{Concurrency: 8, BatchSize: 1000},
+	}}
+	narrow := &statsFeed{stats: FeedStats{
+		LastFlushAt:          time.Now().Add(-2 * time.Second),
+		FlushShape:           FlushShape{Concurrency: 1, BatchSize: 125},
+		ConfiguredFlushShape: FlushShape{Concurrency: 8, BatchSize: 1000},
+	}}
+	row := StatusRow(wide, narrow)
+	require.Contains(t, row, "flush=1x125 (of 8x1000)")
+	require.Equal(t, row, StatusRow(narrow, wide), "order must not matter")
 }

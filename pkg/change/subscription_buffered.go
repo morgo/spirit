@@ -475,6 +475,27 @@ func (s *bufferedMap) ParkStats() (int64, bool) {
 	return s.timesParked.Load(), s.parked
 }
 
+// FlushShapes satisfies FlushShapeReporter with the drain width as it stands
+// now and as it would stand with no AIMD penalty outstanding.
+//
+// No lock: flushConcurrency and batchSize are set once at construction and
+// never written again, and concurrencyPenalty is atomic. The two effective
+// figures are therefore read independently and could in principle straddle a
+// penalty step taken between them, rendering a concurrency from before it and
+// a batch size from after. That is accepted rather than locked out — flushMu is
+// held for a whole drain, so taking it here would block the status block behind
+// a 20-minute flush, which is precisely the situation an operator is reading
+// the status block to diagnose.
+func (s *bufferedMap) FlushShapes() (effective, configured FlushShape) {
+	return FlushShape{
+			Concurrency: s.effectiveFlushConcurrency(),
+			BatchSize:   s.effectiveBatchSize(),
+		}, FlushShape{
+			Concurrency: s.configuredFlushConcurrency(),
+			BatchSize:   s.configuredBatchSize(),
+		}
+}
+
 // lengthLocked is Length without the Mutex, for callers that already hold it.
 //
 // flushingCount covers entries an in-flight Flush has swapped out but not yet
@@ -583,7 +604,24 @@ const minAdaptiveBatchSize = 50
 // the zero value (out-of-tree callers, bare test maps) stays serial, then
 // applies any halvings the AIMD controller has accumulated.
 func (s *bufferedMap) effectiveFlushConcurrency() int {
-	return shiftDown(max(1, s.flushConcurrency), s.concurrencyPenalty.Load(), 1)
+	return shiftDown(s.configuredFlushConcurrency(), s.concurrencyPenalty.Load(), 1)
+}
+
+// configuredFlushConcurrency is the width the drain would run at with no AIMD
+// penalty outstanding: what autoscale.FlushBounds derived, or what the caller
+// asked for. Clamped to at least 1 so the zero value (out-of-tree callers, bare
+// test maps) stays serial.
+func (s *bufferedMap) configuredFlushConcurrency() int {
+	return max(1, s.flushConcurrency)
+}
+
+// configuredBatchSize is the batch the drain would render with no AIMD penalty
+// outstanding. Zero means the caller never set one.
+func (s *bufferedMap) configuredBatchSize() int {
+	if s.batchSize <= 0 {
+		return DefaultBatchSize // out-of-tree callers, bare test maps
+	}
+	return s.batchSize
 }
 
 // effectiveBatchSize shrinks alongside concurrency, because batch size sets the
@@ -603,10 +641,7 @@ func (s *bufferedMap) effectiveFlushConcurrency() int {
 // two paths reduce different things — FlushBounds re-shapes a fixed number of
 // rows in flight, the penalty here removes rows from flight.
 func (s *bufferedMap) effectiveBatchSize() int {
-	start := s.batchSize
-	if start <= 0 {
-		start = DefaultBatchSize // out-of-tree callers, bare test maps
-	}
+	start := s.configuredBatchSize()
 	// The floor can never exceed the start. minAdaptiveBatchSize floors
 	// *shrinking*; a caller that deliberately configured fewer rows than that
 	// has not asked to be overruled, least of all by the contention path,
