@@ -129,6 +129,11 @@ type bufferedMap struct {
 	// (cutover) path must stay atomic, so both remain serial.
 	flushConcurrency int
 
+	// batchSize is the maximum rows one flush batch renders into a
+	// single statement, before the AIMD penalty shifts it down. Zero
+	// means DefaultBatchSize. See effectiveBatchSize.
+	batchSize int
+
 	// logger is supplied by the change.Source that owns this subscription.
 	// We keep only a *slog.Logger (not a back-pointer to the source) so the
 	// bufferedMap stays source-agnostic and can be reused by alternative
@@ -306,6 +311,15 @@ type BufferedSubscriptionConfig struct {
 	// set it; the in-tree clients pass DefaultFlushConcurrency. Queue-
 	// mode and under-lock flushes are always serial regardless.
 	FlushConcurrency int
+
+	// BatchSize is the maximum number of rows one flush batch renders
+	// into a single statement. Zero means DefaultBatchSize, preserving
+	// prior behaviour for callers that do not set it.
+	//
+	// It is not independent of FlushConcurrency: their product is the
+	// rows a drain has in flight, so a caller raising one should lower
+	// the other. autoscale.FlushBounds returns the pair.
+	BatchSize int
 }
 
 // NewBufferedSubscription constructs the default bufferedMap-backed
@@ -356,6 +370,7 @@ func NewBufferedSubscription(cfg BufferedSubscriptionConfig) (Subscription, erro
 		softLimitChanges:     cfg.SoftLimitChanges,
 		flushRequest:         cfg.FlushRequest,
 		flushConcurrency:     cfg.FlushConcurrency,
+		batchSize:            cfg.BatchSize,
 	}
 	sub.cond = sync.NewCond(&sub.Mutex)
 	return sub, nil
@@ -576,8 +591,24 @@ func (s *bufferedMap) effectiveFlushConcurrency() int {
 // had been ACTIVE 13 sec — roughly one clustered-index lock plus one
 // secondary-index lock per row per index. Every one of those locks is a record
 // a sibling batch can block on, for as long as the holder runs.
+//
+// The starting point is batchSize, which the runner may have already lowered
+// from DefaultBatchSize in exchange for a wider flushConcurrency (see
+// autoscale.FlushBounds). Shrinking from a smaller start is not a problem: the
+// two paths reduce different things — FlushBounds re-shapes a fixed number of
+// rows in flight, the penalty here removes rows from flight.
 func (s *bufferedMap) effectiveBatchSize() int {
-	return shiftDown(DefaultBatchSize, s.concurrencyPenalty.Load(), minAdaptiveBatchSize)
+	start := s.batchSize
+	if start <= 0 {
+		start = DefaultBatchSize // out-of-tree callers, bare test maps
+	}
+	// The floor can never exceed the start. minAdaptiveBatchSize floors
+	// *shrinking*; a caller that deliberately configured fewer rows than that
+	// has not asked to be overruled, least of all by the contention path,
+	// where raising a statement's lock footprint is the opposite of the
+	// intent. Before BatchSize was configurable the start was always
+	// DefaultBatchSize, so the two could never cross.
+	return shiftDown(start, s.concurrencyPenalty.Load(), min(minAdaptiveBatchSize, start))
 }
 
 // shiftDown halves start once per penalty step, never going below floor.

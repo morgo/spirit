@@ -92,6 +92,41 @@ const (
 	// absolute share of the box, because for the checksum it is also an up-front
 	// cost. See ReadBounds.
 	readCeilingDivisor = 2
+
+	// FlushRowsInFlight is how many buffered rows one change-feed drain has
+	// outstanding across all of its concurrent REPLACE statements. FlushBounds
+	// holds it constant across instance sizes, trading batch size for
+	// concurrency rather than adding rows.
+	//
+	// Its value is the historical change.DefaultFlushConcurrency ×
+	// change.DefaultBatchSize, so an instance small enough to hit the floors
+	// below gets exactly what it got before this derivation existed. This
+	// package cannot import pkg/change (change imports it), so the agreement is
+	// pinned by TestFlushBoundsPreservesChangeDefaults over in pkg/migration,
+	// which can see both.
+	FlushRowsInFlight = 8000
+
+	// MinFlushConcurrency is the floor on a derived flush width, equal to the
+	// historical change.DefaultFlushConcurrency. Deriving downwards was never
+	// the goal: the AIMD controller already narrows a flush that is actually
+	// contending, and it does so from evidence rather than from a core count.
+	MinFlushConcurrency = 8
+
+	// MinFlushBatchSize is the floor on a derived batch size. Below roughly this
+	// many rows a REPLACE spends more of its life on the round trip than on the
+	// rows it carries, so splitting further stops buying a smaller lock
+	// footprint and starts buying only statements. It is deliberately well above
+	// the AIMD controller's own floor (change.minAdaptiveBatchSize, 50), which
+	// is a distress value reached only after four contention steps and not a
+	// sane starting point.
+	MinFlushBatchSize = 250
+
+	// MaxFlushConcurrency caps the derived flush width. It is not an independent
+	// judgement — it is exactly where FlushRowsInFlight meets MinFlushBatchSize,
+	// i.e. the widest flush that can still hold the rows-in-flight invariant.
+	// Past this point more concurrency would mean more rows in flight, which is
+	// the trade FlushBounds exists to avoid making.
+	MaxFlushConcurrency = FlushRowsInFlight / MinFlushBatchSize
 )
 
 // Tick is how often a controller should re-evaluate. Aligned with the
@@ -230,6 +265,53 @@ func ReadBounds(vCPUs int) (start, ceiling int) {
 	ceiling = max(CeilDiv(vCPUs, readCeilingDivisor), MinReadStartThreads)
 	start = max(MinReadStartThreads, CeilDiv(vCPUs-VCPUReserve, readStartDivisor))
 	return min(start, ceiling), ceiling
+}
+
+// FlushBounds returns the concurrency and batch size a change-feed flush should
+// use on an instance of the given vCPU count. Unlike the read and write pools
+// these are not autoscaled at runtime — the flush path has its own AIMD
+// controller, driven by lock contention rather than by CPU — so this is a
+// starting point only, and the AIMD penalty shifts both terms down from here.
+//
+// The two returned values are not independent. Their product is the number of
+// rows a drain has in flight, and it is held at FlushRowsInFlight regardless of
+// instance size: a larger instance buys *more statements*, not more rows at
+// once. That is the whole point, and it is why this can be widened past the
+// historical concurrency of 8 without re-opening the deadlocks that made the
+// AIMD controller necessary in the first place.
+//
+// The reason the trade is free is that a REPLACE's collision risk scales with
+// its own lock footprint, not with how many siblings it has. A flush batch
+// takes a next-key lock per row per UNIQUE secondary index, so two batches
+// collide when any of their rows land in adjacent slots of any such index; the
+// chance of that is set by how many slots each statement claims. Concurrency
+// only sets how many claims are outstanding at once. So 32x250 and 8x1000 push
+// the same rows per unit time, but the wide-and-narrow form holds a quarter of
+// the locks per statement and is correspondingly less likely to collide —
+// strictly safer than what it replaces, not a risk traded for throughput.
+// (TestReplaceContendsOnlyOnUniqueIndexes in pkg/applier establishes the
+// premise: PK-adjacent rows do not contend, UNIQUE-secondary-adjacent rows do.)
+//
+// Callers must have already established that the instance is at least MinVCPUs;
+// below that they should not call this at all and the change package's defaults
+// apply. Small instances get today's values anyway, because the concurrency
+// floor is the historical default.
+func FlushBounds(vCPUs int) (concurrency, batchSize int) {
+	concurrency = min(max(MinFlushConcurrency, WriteStart(vCPUs)), MaxFlushConcurrency)
+	return concurrency, FlushBatchSize(concurrency)
+}
+
+// FlushBatchSize returns the batch size that pairs with the given flush
+// concurrency to hold FlushRowsInFlight rows in flight, floored at
+// MinFlushBatchSize. FlushBounds returns both halves together; this exists for
+// the caller that has already clipped the concurrency FlushBounds derived (the
+// migration runner applies ClientCeiling to it) and needs the batch size
+// re-paired to the number it is actually going to use. Re-pairing rather than
+// keeping the original batch size is the point: a narrower flush wants *larger*
+// batches to push the same rows, and the collision cost of that is the cost
+// the pre-derivation code already paid.
+func FlushBatchSize(concurrency int) int {
+	return max(MinFlushBatchSize, FlushRowsInFlight/max(1, concurrency))
 }
 
 // Limiter is a counting semaphore whose limit may change while permits are

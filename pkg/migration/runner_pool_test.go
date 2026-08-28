@@ -3,6 +3,8 @@ package migration
 import (
 	"testing"
 
+	"github.com/block/spirit/pkg/autoscale"
+	"github.com/block/spirit/pkg/change"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/stretchr/testify/require"
 )
@@ -58,6 +60,46 @@ func TestAutoscalingLeavesThreadFlagsAloneWhenItCannotEngage(t *testing.T) {
 	// and the checksum pre-creates its whole pool under the table lock, so
 	// provisioning 2x would only lengthen that lock window for capacity nothing
 	// can use.
-	require.Equal(t, threads+2*writeThreads+m.controlPlaneConns()+checksumOffPoolConns,
+	//
+	// The flush term is present even here, where nothing was derived: the drain
+	// runs change.DefaultFlushConcurrency concurrent REPLACEs on this same pool
+	// regardless of whether autoscaling engaged, and a periodic flush overlaps
+	// the copy. It was omitted from this sum until the flush shape became
+	// derivable, which meant those connections were quietly borrowed from the
+	// copier's and control plane's share.
+	require.Equal(t, threads+2*writeThreads+change.DefaultFlushConcurrency+m.controlPlaneConns()+checksumOffPoolConns,
 		m.dbConfig.MaxOpenConnections)
 }
+
+// TestFlushBoundsPreservesChangeDefaults pins the agreement between
+// autoscale's rows-in-flight budget and the change package's defaults. It lives
+// here because it is the assertion neither package can make: pkg/change imports
+// pkg/autoscale, so autoscale cannot name change.DefaultBatchSize, and the
+// budget would otherwise be a bare 8000 that drifts silently if either default
+// moved.
+//
+// The consequence of drift is not a crash, it is a behaviour change nobody asked
+// for: an instance small enough to hit the concurrency floor is supposed to
+// receive exactly the pre-derivation values, so that this whole mechanism is a
+// no-op below 16 vCPUs.
+func TestFlushBoundsPreservesChangeDefaults(t *testing.T) {
+	require.Equal(t, change.DefaultFlushConcurrency*change.DefaultBatchSize, autoscale.FlushRowsInFlight,
+		"the rows-in-flight budget must remain the historical concurrency x batch size")
+	require.Equal(t, change.DefaultFlushConcurrency, autoscale.MinFlushConcurrency,
+		"the floor must be the historical default, so a small instance is unaffected")
+	require.Greater(t, autoscale.MinFlushBatchSize, minAdaptiveBatchSizeForTest,
+		"a derived batch size must stay well above the AIMD controller's distress floor")
+
+	// Every instance size at or below the floor gets exactly today's pair.
+	for vCPUs := 1; vCPUs <= change.DefaultFlushConcurrency+autoscale.VCPUReserve; vCPUs++ {
+		concurrency, batchSize := autoscale.FlushBounds(vCPUs)
+		require.Equal(t, change.DefaultFlushConcurrency, concurrency, "at %d vCPUs", vCPUs)
+		require.Equal(t, change.DefaultBatchSize, batchSize, "at %d vCPUs", vCPUs)
+	}
+}
+
+// minAdaptiveBatchSizeForTest mirrors the change package's unexported
+// minAdaptiveBatchSize. Duplicated rather than exported: it is the AIMD
+// controller's private distress floor, and the only thing outside that package
+// with an interest in it is the assertion above.
+const minAdaptiveBatchSizeForTest = 50

@@ -697,6 +697,14 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context, resumePosi
 	// instance below, which is also the marker for "nothing can grow" — see the
 	// maxRead fallback.
 	readCeiling := 0
+	// flushConcurrency and flushBatchSize shape the change-feed drain. Like
+	// readCeiling they stay zero unless derived from the instance below, and zero
+	// means "leave the change package's defaults alone" (see
+	// ClientConfig.resolveFlushConcurrency / resolveBatchSize). Unlike the read
+	// and write pools these are not autoscaled — the drain has its own AIMD
+	// controller keyed on lock contention — so this only moves the starting
+	// point.
+	flushConcurrency, flushBatchSize := 0, 0
 	// Aurora is the one place the autoscaler can engage at all: it needs the
 	// continuous signal only the Aurora throttlers provide. Below
 	// autoscale.MinVCPUs it must not engage even there — one thread is half or
@@ -787,10 +795,32 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context, resumePosi
 			// MinVCPUs), but that invariant lives in another package, and the
 			// write side's ceiling below is capped unconditionally too.
 			readCeiling = max(min(readCeiling, clientCeiling), readStart)
+
+			// Size the change-feed drain from the instance too. This is the one
+			// derivation here that is not a thread count: it returns a
+			// (concurrency, batch size) pair whose product — the rows one drain
+			// has in flight — is the same on every instance size. A larger
+			// instance buys more concurrent REPLACE statements, each holding
+			// proportionally fewer locks, not more rows at once. See
+			// autoscale.FlushBounds for why that trade is safe rather than
+			// merely faster.
+			//
+			// The same client-side bound applies: a flush batch is built by the
+			// same datum-to-string conversion a copy batch is, so it is subject
+			// to the same local-CPU limit. The batch size is re-paired to
+			// whatever concurrency survives the cap, which keeps the rows in
+			// flight where they were rather than silently reducing drain
+			// throughput on a small pod.
+			flushConcurrency, flushBatchSize = autoscale.FlushBounds(vCPUs)
+			if flushConcurrency > clientCeiling {
+				flushConcurrency = clientCeiling
+				flushBatchSize = autoscale.FlushBatchSize(flushConcurrency)
+			}
 			r.logger.Info("autoscaling engaged: thread counts are derived from the instance; --threads and --write-threads are ignored",
 				"vcpus", vCPUs,
 				"read_threads", readStart, "max_read_threads", readCeiling,
-				"write_threads", writeStart)
+				"write_threads", writeStart,
+				"flush_concurrency", flushConcurrency, "flush_batch_size", flushBatchSize)
 			r.migration.Threads = readStart
 			r.migration.WriteThreads = writeStart
 		}
@@ -849,7 +879,20 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context, resumePosi
 	// transaction pool is sized to the same ceiling (see the checker's
 	// AutoscaleConfig below) and the copier's readers have finished by then, so
 	// the two phases reuse one allocation rather than each needing their own.
-	if poolSize := maxRead + maxWrite + r.controlPlaneConns() + checksumOffPoolConns; poolSize > r.dbConfig.MaxOpenConnections {
+	//
+	// The flush term is the drain's concurrent REPLACE statements. It was
+	// missing from this sum entirely before the derivation above existed, which
+	// meant the (then fixed) 8 concurrent flush REPLACEs were borrowing from the
+	// copier's and control plane's budget: a periodic flush overlaps the copy,
+	// so the two really do add. That was survivable at 8 and would not be at 32,
+	// so it is fixed here rather than left as a separate change — raising the
+	// concurrency without this would take the throughput straight back out
+	// through connection queueing.
+	maxFlush := flushConcurrency
+	if maxFlush == 0 {
+		maxFlush = change.DefaultFlushConcurrency // no derivation: the default applies
+	}
+	if poolSize := maxRead + maxWrite + maxFlush + r.controlPlaneConns() + checksumOffPoolConns; poolSize > r.dbConfig.MaxOpenConnections {
 		r.dbConfig.MaxOpenConnections = poolSize
 		dbconn.SetPoolSize(r.db, poolSize)
 	}
@@ -906,6 +949,10 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context, resumePosi
 	replConfig.Logger = r.logger
 	replConfig.CancelFunc = r.fatalError
 	replConfig.DBConfig = r.dbConfig
+	// Zero for either of these means the change package's own default, which is
+	// what a non-Aurora or too-small instance gets.
+	replConfig.FlushConcurrency = flushConcurrency
+	replConfig.BatchSize = flushBatchSize
 	r.replClient, err = change.NewAutoClient(ctx, r.db, r.migration.Host, r.migration.Username, *r.migration.Password, appl, replConfig, resumePosition)
 	if err != nil {
 		return err

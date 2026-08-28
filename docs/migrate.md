@@ -336,21 +336,25 @@ The band has hysteresis, so where it settles depends on which side it approaches
 
 **This flag takes over the thread counts: [threads](#threads) and [write-threads](#write-threads) are ignored when it engages.** A controller whose job is to find the right size should not also be told where to stop. Both pools are sized from the instance instead, as `start → ceiling`:
 
-| Instance | vCPUs | Apply (write) | Copy read / checksum |
-| --- | --- | --- | --- |
-| `db.r6g.large` | 2 | \* | \* |
-| `db.r6g.xlarge` | 4 | 2 → 4 | 2 → 2 |
-| `db.r6g.2xlarge` | 8 | 6 → 12 | 2 → 4 |
-| `db.r6g.4xlarge` | 16 | 14 → 28 | 4 → 8 |
-| `db.r6g.8xlarge` | 32 | 30 → 60 | 8 → 16 |
-| `db.r6g.12xlarge` | 48 | 46 → 92 | 12 → 24 |
-| `db.r6g.16xlarge` | 64 | 62 → 124 | 16 → 32 |
-| `db.r8g.24xlarge` | 96 | 94 → 188 | 24 → 48 |
-| `db.r8g.48xlarge` | 192 | 190 → 380 | 48 → 96 |
+| Instance | vCPUs | Apply (write) | Copy read / checksum | Change-feed flush |
+| --- | --- | --- | --- | --- |
+| `db.r6g.large` | 2 | \* | \* | 8 × 1000 |
+| `db.r6g.xlarge` | 4 | 2 → 4 | 2 → 2 | 8 × 1000 |
+| `db.r6g.2xlarge` | 8 | 6 → 12 | 2 → 4 | 8 × 1000 |
+| `db.r6g.4xlarge` | 16 | 14 → 28 | 4 → 8 | 14 × 571 |
+| `db.r6g.8xlarge` | 32 | 30 → 60 | 8 → 16 | 30 × 266 |
+| `db.r6g.12xlarge` | 48 | 46 → 92 | 12 → 24 | 32 × 250 |
+| `db.r6g.16xlarge` | 64 | 62 → 124 | 16 → 32 | 32 × 250 |
+| `db.r8g.24xlarge` | 96 | 94 → 188 | 24 → 48 | 32 × 250 |
+| `db.r8g.48xlarge` | 192 | 190 → 380 | 48 → 96 | 32 × 250 |
 
-\* Below 4 vCPUs autoscaling does not engage at all and both counts stay as configured — see the bottom of this section.
+\* Below 4 vCPUs autoscaling does not engage at all: the two thread counts stay exactly as you configured them via [threads](#threads) and [write-threads](#write-threads) — see the bottom of this section. The flush shape is not a flag, so it is not "as configured" in the same sense; it simply stays at the change feed's own default of `8 × 1000`, which is also what every non-Aurora target and every derived concurrency at or below 8 gets.
 
 For a size not listed: write threads start at `vCPUs - 2` (minimum 1) and may reach twice that; read threads start at `ceil((vCPUs - 2) / 4)` (minimum 2) and may reach `ceil(vCPUs / 2)`. `vCPUs` is read from `@@innodb_buffer_pool_instances`, and the resolved counts are logged once at startup. The lower bound is always 1 — the controller may shed below the starting value. Note `xlarge`, the smallest size that engages: its read bounds meet at 2, so the read side can shed but not grow there.
+
+The flush column is a pair — concurrent `REPLACE` statements × rows per statement — and reads differently from the other two. It is not a range, because the flush is not steered by the utilization band: it has its own controller keyed on *lock contention* rather than on CPU, which narrows both terms on a deadlock or lock-wait and widens them back after a run of clean drains. What the instance size sets is only where that controller starts. And the **product is constant at 8000 on every size**: a larger instance buys more concurrent statements, each holding proportionally fewer row locks, not more rows in flight at once.
+
+That trade is what makes it safe to go past the previous fixed width of 8. A flush batch takes a next-key lock per row per `UNIQUE` secondary index, so two batches collide when any of their rows land in adjacent slots of any such index — a risk set by how many slots each *statement* claims, not by how many siblings it has. `32 × 250` and `8 × 1000` therefore push the same rows per unit time, but the wide-and-narrow form holds a quarter of the locks per statement and collides correspondingly less often. Sizes at or below 8 derived concurrency get exactly the previous `8 × 1000`, so nothing changes below `4xlarge`.
 
 The two shapes are deliberately different. Write threads spend most of their life parked on a redo-log flush, so a count above the vCPU count is not oversubscription; it is what keeps the log busy, and it is why the redo-aware signal excludes those waiters. A read thread scanning a table that is already in the buffer pool is pure CPU, so the same count really does compete with the application for cores — oversubscribing readers is how a checksum ends up degrading the workload it was supposed to be invisible to. The read side therefore starts at about a quarter of the instance and earns its way up through the utilization band.
 
@@ -364,7 +368,7 @@ This exists because the sizes above are derived entirely from the target, on the
 
 A `--threads`/`--write-threads` you set yourself is *not* capped — an explicitly named number is yours — but the same mismatch is warned about once.
 
-The connection pool is pre-sized for every ceiling, so scaled-up threads never starve on connections. When budgeting proxy or server connection limits, assume up to `ceil(vCPUs / 2)` read connections and `2 × (vCPUs - 2)` write connections rather than the fixed-pool formula above. (One exception: when the threads signal is running in its redo-aware mode *and* [max-commit-latency](#max-commit-latency) is disabled with `--max-commit-latency=0`, the write-side upper bound stays at the starting value — see below.)
+The connection pool is pre-sized for every ceiling, so scaled-up threads never starve on connections. When budgeting proxy or server connection limits, assume up to `ceil(vCPUs / 2)` read connections, `2 × (vCPUs - 2)` write connections, and the flush concurrency from the table above (up to 32) rather than the fixed-pool formula above. The flush term is a recent addition to that budget: the change feed has always run concurrent `REPLACE` statements on this pool, and a periodic flush overlaps the copy, but until the flush width became derivable those connections were borrowed from the copier's share instead of being provisioned. (One exception: when the threads signal is running in its redo-aware mode *and* [max-commit-latency](#max-commit-latency) is disabled with `--max-commit-latency=0`, the write-side upper bound stays at the starting value — see below.)
 
 One consequence to be aware of: on a well-provisioned target where the writers always keep pace, the queue is drained the instant chunks arrive — which is exactly what "read-limited" looks like — so the read pool tends to ramp well above its starting size early in the copy. That ramp is additive (one thread per ~15s), so on a large instance the read side takes a few minutes to reach its ceiling; overall load remains governed by the utilization band and, ultimately, the hard-stop throttle.
 

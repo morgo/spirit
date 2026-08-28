@@ -74,6 +74,63 @@ func TestWriteStart(t *testing.T) {
 	}
 }
 
+// TestFlushBounds pins the change-feed drain's sizing. The invariant is the
+// point of the function, so it is asserted separately from the individual
+// numbers: the rows one drain has in flight must not grow with the instance.
+// That is what makes widening the flush past the historical concurrency of 8
+// safe — a wider flush holds the same rows in *smaller* statements, and a
+// REPLACE's collision risk scales with its own lock footprint rather than with
+// how many siblings it has.
+func TestFlushBounds(t *testing.T) {
+	assert.Equal(t, 32, MaxFlushConcurrency,
+		"the cap should fall out of FlushRowsInFlight / MinFlushBatchSize, not be set independently")
+	for _, tc := range []struct {
+		vCPUs, concurrency, batchSize int
+	}{
+		{4, 8, 1000},   // xlarge: the floor is binding, so this is exactly today's behaviour
+		{8, 8, 1000},   // 2xlarge: WriteStart is 6, still under the floor
+		{16, 14, 571},  // 4xlarge: the first size that widens past the historical 8
+		{32, 30, 266},  // 8xlarge
+		{64, 32, 250},  // 16xlarge: the concurrency cap binds
+		{96, 32, 250},  // 24xlarge: the instance that motivated this
+		{192, 32, 250}, // and it stays put above it
+	} {
+		concurrency, batchSize := FlushBounds(tc.vCPUs)
+		assert.Equal(t, tc.concurrency, concurrency, "concurrency for %d vCPUs", tc.vCPUs)
+		assert.Equal(t, tc.batchSize, batchSize, "batch size for %d vCPUs", tc.vCPUs)
+	}
+	// The invariant, over every size the derivation can see. Rows in flight may
+	// come in slightly *under* the budget (integer division of the budget by the
+	// concurrency) but must never exceed it: exceeding it is the one thing that
+	// would turn this from a re-shaping into a genuine increase in exposure.
+	for vCPUs := 1; vCPUs <= 256; vCPUs++ {
+		concurrency, batchSize := FlushBounds(vCPUs)
+		assert.GreaterOrEqual(t, concurrency, MinFlushConcurrency,
+			"a derivation must never narrow the flush below the historical default (%d vCPUs)", vCPUs)
+		assert.LessOrEqual(t, concurrency, MaxFlushConcurrency, "at %d vCPUs", vCPUs)
+		assert.GreaterOrEqual(t, batchSize, MinFlushBatchSize, "at %d vCPUs", vCPUs)
+		assert.LessOrEqual(t, concurrency*batchSize, FlushRowsInFlight,
+			"rows in flight must not grow with the instance (%d vCPUs: %d x %d)", vCPUs, concurrency, batchSize)
+	}
+}
+
+// TestFlushBatchSize covers the re-pairing entry point the migration runner
+// uses after ClientCeiling has clipped the concurrency FlushBounds derived.
+func TestFlushBatchSize(t *testing.T) {
+	for _, tc := range []struct {
+		concurrency, want int
+	}{
+		{0, FlushRowsInFlight},  // degenerate input: treated as one statement
+		{-1, FlushRowsInFlight}, // likewise, rather than dividing by a negative
+		{1, FlushRowsInFlight},
+		{8, 1000}, // the historical pair
+		{32, 250},
+		{64, MinFlushBatchSize}, // past the cap the floor takes over
+	} {
+		assert.Equalf(t, tc.want, FlushBatchSize(tc.concurrency), "concurrency=%d", tc.concurrency)
+	}
+}
+
 // TestReadBounds pins the read-side sizing against the instance sizes it is
 // meant to describe. The invariant matters more than the individual numbers:
 // the ceiling must never exceed half the instance, because for the checksum the

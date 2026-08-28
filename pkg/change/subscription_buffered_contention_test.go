@@ -224,6 +224,109 @@ func TestFlushConcurrencyAdaptsAndRecovers(t *testing.T) {
 	require.Equal(t, DefaultBatchSize, sub.effectiveBatchSize())
 }
 
+// TestDerivedFlushShapeAdapts pins the AIMD controller against a
+// configured pair rather than the historical default one: a large instance
+// arrives here already wide and narrow (autoscale.FlushBounds), and the
+// penalty must shift *both* terms down from where the derivation left them
+// rather than from the package constants.
+//
+// The distinction matters because the two mechanisms reduce different things.
+// FlushBounds re-shapes a fixed number of rows in flight — same rows, smaller
+// statements — and does so once, from the instance size. The penalty removes
+// rows from flight, repeatedly, from observed contention. A penalty applied to
+// DefaultBatchSize instead of the derived batch size would silently *raise* the
+// batch size of a narrowed 32x250 drain to 500, which is the wrong direction at
+// exactly the moment the drain is telling us it is colliding.
+func TestDerivedFlushShapeAdapts(t *testing.T) {
+	sub := newByteCapBufferedMap(&countingApplier{}, false)
+	// The pair a 24xlarge derives.
+	sub.flushConcurrency, sub.batchSize = 32, 250
+
+	require.Equal(t, 32, sub.effectiveFlushConcurrency())
+	require.Equal(t, 250, sub.effectiveBatchSize(), "the derived batch size, not DefaultBatchSize")
+	require.Equal(t, 8000, sub.effectiveFlushConcurrency()*sub.effectiveBatchSize(),
+		"the derived pair holds the same rows in flight as the historical 8x1000")
+
+	sub.adaptFlushConcurrency(true)
+	require.Equal(t, 16, sub.effectiveFlushConcurrency())
+	require.Equal(t, 125, sub.effectiveBatchSize(), "shrinks from the derived value")
+
+	// Four steps in, concurrency is at 2 and the batch size has reached the
+	// distress floor — from a lower start it gets there sooner, which is the
+	// intended reading of a drain that was already using small statements and
+	// is colliding anyway.
+	sub.adaptFlushConcurrency(true)
+	sub.adaptFlushConcurrency(true)
+	sub.adaptFlushConcurrency(true)
+	require.Equal(t, 2, sub.effectiveFlushConcurrency())
+	require.Equal(t, minAdaptiveBatchSize, sub.effectiveBatchSize())
+
+	// And recovery returns to the derived pair, not to the defaults.
+	for range 10 * cleanDrainsToRecover {
+		sub.adaptFlushConcurrency(false)
+	}
+	require.Equal(t, 32, sub.effectiveFlushConcurrency())
+	require.Equal(t, 250, sub.effectiveBatchSize())
+}
+
+// TestZeroBatchSizeFallsBackToDefault pins the zero value, which is what every
+// caller that does not derive a pair passes: out-of-tree change.Source
+// implementations, a non-Aurora target, and an instance below
+// autoscale.MinVCPUs. Zero must mean DefaultBatchSize, never a zero-row batch.
+func TestZeroBatchSizeFallsBackToDefault(t *testing.T) {
+	sub := newByteCapBufferedMap(&countingApplier{}, false)
+	require.Zero(t, sub.batchSize)
+	require.Equal(t, DefaultBatchSize, sub.effectiveBatchSize())
+
+	// A negative value takes the same path. ClientConfig.resolveBatchSize
+	// clamps that to 1 before it reaches here, so this is only reachable by an
+	// out-of-tree caller filling BufferedSubscriptionConfig directly — for which
+	// the default is a better answer than a zero-row batch.
+	sub.batchSize = -1
+	require.Equal(t, DefaultBatchSize, sub.effectiveBatchSize())
+}
+
+// TestSmallBatchSizeIsNeverRaised pins the one direction the adaptive floor
+// must not move. minAdaptiveBatchSize floors *shrinking*, so a caller that
+// configured fewer rows than that keeps them: a contention step that grew a
+// 1-row statement to 50 would be enlarging a statement's lock footprint at
+// exactly the moment the drain reported collisions, and would make a small
+// BatchSize impossible to hold.
+//
+// Only reachable since BatchSize became configurable — before that the start
+// was always DefaultBatchSize, comfortably above the floor.
+func TestSmallBatchSizeIsNeverRaised(t *testing.T) {
+	for _, configured := range []int{1, 10, minAdaptiveBatchSize - 1} {
+		sub := newByteCapBufferedMap(&countingApplier{}, false)
+		// Wide enough that the contention step actually fires: the penalty is
+		// only taken while there is still something to narrow, and a drain
+		// already at concurrency 1 has nothing.
+		sub.flushConcurrency, sub.batchSize = DefaultFlushConcurrency, configured
+		require.Equal(t, configured, sub.effectiveBatchSize(), "no penalty yet")
+
+		sub.adaptFlushConcurrency(true)
+		require.Less(t, sub.effectiveFlushConcurrency(), DefaultFlushConcurrency,
+			"sanity: the penalty was taken, so the batch size was recomputed")
+		require.Equal(t, configured, sub.effectiveBatchSize(),
+			"a penalty must never raise a configured batch size of %d", configured)
+
+		for range 10 {
+			sub.adaptFlushConcurrency(true)
+		}
+		require.Equal(t, configured, sub.effectiveBatchSize(),
+			"still %d after the penalty has run to the floor", configured)
+	}
+
+	// A start above the floor still shrinks to it, which is what the floor is
+	// there for.
+	sub := newByteCapBufferedMap(&countingApplier{}, false)
+	sub.flushConcurrency, sub.batchSize = DefaultFlushConcurrency, minAdaptiveBatchSize*4
+	for range 10 {
+		sub.adaptFlushConcurrency(true)
+	}
+	require.Equal(t, minAdaptiveBatchSize, sub.effectiveBatchSize())
+}
+
 // TestAdaptFlushConcurrencyFloorsAtOne guards the penalty from running away
 // while pinned at the floor: an unbounded penalty would make recovery take
 // proportionally longer once the contention finally clears.
