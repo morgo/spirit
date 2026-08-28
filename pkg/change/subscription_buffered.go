@@ -134,6 +134,11 @@ type bufferedMap struct {
 	// means DefaultBatchSize. See effectiveBatchSize.
 	batchSize int
 
+	// partitioner holds the unique secondary indexes a drain may partition
+	// its batches by, resolved lazily on first use. See
+	// subscription_buffered_partition.go.
+	partitioner flushPartitioner
+
 	// logger is supplied by the change.Source that owns this subscription.
 	// We keep only a *slog.Logger (not a back-pointer to the source) so the
 	// bufferedMap stays source-agnostic and can be reused by alternative
@@ -1019,31 +1024,25 @@ type mapFlushBatch struct {
 // cancellation) stay in the snapshot for the caller to merge back.
 // Returns false when any entry was deferred.
 func (s *bufferedMap) drainMapSnapshot(ctx context.Context, snapshot map[string]bufferedChange, applyWatermarkFilter bool) (bool, error) {
-	var batches []*mapFlushBatch
-	current := &mapFlushBatch{}
-	var batchStmtBytes int64
 	allChangesFlushed := true
 
-	cutBatch := func() {
-		if len(current.keys) > 0 {
-			batches = append(batches, current)
-			current = &mapFlushBatch{}
-			batchStmtBytes = 0
-		}
-	}
-
-	// Map iteration order is randomized, so batch membership differs between
-	// flushes. That does not affect the retry below: pass 2 re-applies the very
-	// same mapFlushBatch values pass 1 built, so a contended batch retries as
-	// itself regardless of iteration order.
+	// Map iteration order is randomized, so unpartitioned batch membership
+	// differs between flushes. That does not affect the retry below: pass 2
+	// re-applies the very same mapFlushBatch values pass 1 built, so a contended
+	// batch retries as itself regardless of how it was assembled.
 	//
-	// An earlier revision sorted by primary key here, on the theory that a
-	// consistent lock-acquisition order would help. It would not: the observed
+	// An earlier revision sorted by *primary key* here, on the theory that a
+	// consistent lock-acquisition order would help. It would not, and the reason
+	// is worth keeping because it is what points at the sort below: the observed
 	// deadlock cycle inverts between the clustered index and a secondary UNIQUE
 	// index, and secondary key order is unrelated to primary key order, so
-	// PK-sorted batches still interleave there. Narrowing concurrency is what
-	// breaks the cycle. See block/spirit#1168.
-	batchSize := s.effectiveBatchSize()
+	// PK-sorted batches still interleave there. The clustered index was never
+	// the conflict surface to begin with — a REPLACE's conflict there is with an
+	// exact PK, so under READ COMMITTED it takes a record lock and no gap, and
+	// PK neighbours cannot collide at all. Sorting by a *unique secondary* index
+	// is the version of that idea which addresses the surface that does collide.
+	// See block/spirit#1168 and subscription_buffered_partition.go.
+	rows := make([]drainRow, 0, len(snapshot))
 	for key, change := range snapshot {
 		// Keys the copier may have a read in flight for are deferred to a
 		// later flush; see mustDeferKey. The chunker is internally
@@ -1054,28 +1053,22 @@ func (s *bufferedMap) drainMapSnapshot(ctx context.Context, snapshot map[string]
 			allChangesFlushed = false
 			continue
 		}
-		// Cut the batch when either cap is reached: the (possibly reduced)
-		// batch-size limit, or the estimated rendered statement size would
-		// exceed the byte budget the copy path also uses. Without the byte
-		// cap, buffered wide rows (LONGTEXT / BLOB) can render into a single
-		// REPLACE larger than max_allowed_packet — a deterministic,
-		// non-retryable failure. A single row over the budget still flushes,
-		// alone in its own batch (a row can't be split).
-		rowBytes := renderedBytesOfChange(change.logicalRow, change.originalKey)
-		if batchLen := len(current.keys); batchLen >= batchSize ||
-			(batchLen > 0 && batchStmtBytes+rowBytes > applier.MaxStatementSizeBytes) {
-			cutBatch()
-		}
-		current.keys = append(current.keys, key)
-		current.storedBytes += sizeOfBufferedChange(key, change)
-		if change.logicalRow.IsDeleted {
-			current.deleteKeys = append(current.deleteKeys, change.originalKey)
-		} else {
-			current.upsertRows = append(current.upsertRows, change.logicalRow)
-		}
-		batchStmtBytes += rowBytes
+		rows = append(rows, drainRow{key: key, change: change})
 	}
-	cutBatch()
+
+	// Pick the unique secondary index whose values are most clustered across
+	// this drain's own rows, and sort by it. Sorting is what turns "batches are
+	// disjoint by key" into "batches are disjoint by *index range*": rows that
+	// sit close together in that index end up in the same statement, where they
+	// cannot conflict, instead of being scattered across concurrent ones by map
+	// iteration order. nil means there is nothing worth partitioning by — no
+	// usable unique secondary index, or a drain with no rows — in which case
+	// batching stays exactly as it was.
+	chosen := choosePartitionIndex(s.partitionIndexes(ctx), rows)
+	if chosen != nil {
+		sortRowsByIndex(rows, chosen)
+	}
+	batches := s.buildBatches(rows, chosen)
 
 	if len(batches) == 0 {
 		// Every key was watermark-deferred. The drain produced no evidence about
@@ -1089,7 +1082,47 @@ func (s *bufferedMap) drainMapSnapshot(ctx context.Context, snapshot map[string]
 	// Batches that lose to lock contention are collected rather than failing
 	// the drain — see retryContendedBatches for why that is safe and why the
 	// retry has to be serial.
-	contended, complete, err := s.applyBatchesConcurrent(ctx, snapshot, batches)
+	//
+	// When the drain is partitioned, the batches are contiguous ranges of the
+	// chosen index and go out in two stripes — evens, then odds — so that no
+	// two batches in flight together are neighbours in that index. Handing the
+	// sorted list straight to the limiter would undo most of the benefit: the
+	// in-flight window is roughly contiguous, so neighbours would run together
+	// and every batch boundary would become a candidate collision. See
+	// stripeBatches.
+	//
+	// The dispatch budget spans the whole drain, not each stripe. It is
+	// computed here and passed down for that reason — two stripes each granted
+	// a full drainDispatchBudget would silently double how long one flush may
+	// hold flushMu.
+	stripes := [][]*mapFlushBatch{batches}
+	if chosen != nil {
+		stripes = stripeBatches(batches)
+	}
+	deadline := time.Now().Add(drainDispatchBudget)
+	var (
+		contended []*mapFlushBatch
+		complete  = true
+		err       error
+	)
+	for _, stripe := range stripes {
+		var (
+			stripeContended []*mapFlushBatch
+			stripeComplete  bool
+		)
+		stripeContended, stripeComplete, err = s.applyBatchesConcurrent(ctx, snapshot, stripe, deadline)
+		contended = append(contended, stripeContended...)
+		if err != nil {
+			break
+		}
+		if !stripeComplete {
+			// The budget is spent. Do not start the next stripe: its batches are
+			// still in the snapshot and will be reattached, which is strictly
+			// better than beginning work the budget does not cover.
+			complete = false
+			break
+		}
+	}
 	if !complete {
 		// The dispatch budget expired. Everything unscheduled is still in the
 		// snapshot and will be reattached; report the drain as incomplete so no
@@ -1172,9 +1205,76 @@ func (s *bufferedMap) drainMapSnapshot(ctx context.Context, snapshot map[string]
 	return allChangesFlushed, nil
 }
 
+// buildBatches turns the drain's rows into applier round trips.
+//
+// When idx is non-nil the rows arrive sorted by that index and each batch is a
+// contiguous range of it, with cut points nudged to fall where the leading key
+// value changes (cutAtValueBoundary) so a run of rows sharing a leading value —
+// physically adjacent records, the guaranteed-collision case — is not split
+// across two batches.
+//
+// Both caps from before still apply and in the same order of precedence: the
+// (possibly AIMD-reduced) batch size, and the estimated rendered statement
+// size. The byte cap is not negotiable for correctness the way the row cap is —
+// buffered wide rows (LONGTEXT / BLOB) can render into a single REPLACE larger
+// than max_allowed_packet, which is a deterministic, non-retryable failure — so
+// it overrides the boundary alignment and cuts early. A single row over the
+// budget still flushes alone in its own batch, since a row cannot be split.
+func (s *bufferedMap) buildBatches(rows []drainRow, idx *partitionIndex) []*mapFlushBatch {
+	batchSize := s.effectiveBatchSize()
+	var batches []*mapFlushBatch
+	for i := 0; i < len(rows); {
+		// Every batch must consume at least one row. The loop's only progress
+		// is i = j at the bottom, so a batch that ended where it started would
+		// spin here forever, allocating an empty batch per turn until the
+		// process died.
+		//
+		// It cannot happen today: effectiveBatchSize floors at 1, and every
+		// return in cutAtValueBoundary is past its start. The clamp is here
+		// because that invariant lives in two other functions — one of them in
+		// another file — and neither says a caller's loop termination depends
+		// on it. One comparison per batch against a hung migration is worth
+		// making even at probability zero.
+		//
+		// Clamped *before* the cut rather than after, because
+		// cutAtValueBoundary reads rows[hardEnd-1] and so needs the same
+		// guarantee its caller does; a guard placed after the call would only
+		// have replaced the hang with a panic.
+		end := max(min(i+batchSize, len(rows)), i+1)
+		if idx != nil {
+			end = cutAtValueBoundary(rows, idx, i, end)
+		}
+		batch := &mapFlushBatch{}
+		var batchStmtBytes int64
+		j := i
+		for ; j < end; j++ {
+			r := rows[j]
+			rowBytes := renderedBytesOfChange(r.change.logicalRow, r.change.originalKey)
+			if len(batch.keys) > 0 && batchStmtBytes+rowBytes > applier.MaxStatementSizeBytes {
+				break
+			}
+			batch.keys = append(batch.keys, r.key)
+			batch.storedBytes += sizeOfBufferedChange(r.key, r.change)
+			if r.change.logicalRow.IsDeleted {
+				batch.deleteKeys = append(batch.deleteKeys, r.change.originalKey)
+			} else {
+				batch.upsertRows = append(batch.upsertRows, r.change.logicalRow)
+			}
+			batchStmtBytes += rowBytes
+		}
+		batches = append(batches, batch)
+		i = j
+	}
+	return batches
+}
+
 // applyBatchesConcurrent runs batches through the applier with up to
 // effectiveFlushConcurrency in flight, returning the batches that failed on
 // InnoDB lock contention (1205/1213) for the caller to retry serially.
+//
+// deadline bounds *dispatch* and is supplied by the caller rather than computed
+// here, because a partitioned drain calls this once per stripe and the budget
+// belongs to the drain.
 //
 // Contention does *not* cancel the group. Every other error class does, exactly
 // as before: those are not self-inflicted and retrying at a narrower width
@@ -1184,7 +1284,7 @@ func (s *bufferedMap) drainMapSnapshot(ctx context.Context, snapshot map[string]
 // (the previous behaviour) threw away batches that were about to land and made
 // the whole drain fail, which is what pinned the buffer at its soft limit and
 // froze the flushed position.
-func (s *bufferedMap) applyBatchesConcurrent(ctx context.Context, snapshot map[string]bufferedChange, batches []*mapFlushBatch) ([]*mapFlushBatch, bool, error) {
+func (s *bufferedMap) applyBatchesConcurrent(ctx context.Context, snapshot map[string]bufferedChange, batches []*mapFlushBatch, deadline time.Time) ([]*mapFlushBatch, bool, error) {
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(s.effectiveFlushConcurrency())
 	// Workers delete their batch's entries as they land, so they only
@@ -1209,7 +1309,6 @@ func (s *bufferedMap) applyBatchesConcurrent(ctx context.Context, snapshot map[s
 	// batch *starts* after the deadline"; the loop check is just a cheap early
 	// exit. Overrun is therefore one in-flight batch's latency, which is the
 	// least that can be promised without abandoning work already under way.
-	deadline := time.Now().Add(drainDispatchBudget)
 	var budgetSpent atomic.Bool
 	for _, batch := range batches {
 		if gctx.Err() != nil {
