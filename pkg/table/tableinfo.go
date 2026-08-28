@@ -337,6 +337,96 @@ func (t *TableInfo) DescIndex(keyName string) ([]string, error) {
 	return cols, nil
 }
 
+// UniqueIndex describes one UNIQUE secondary index: its name and its columns
+// in key order. The order matters to callers reasoning about adjacency, since
+// only the leading column decides where a record sorts relative to records with
+// a different leading value.
+type UniqueIndex struct {
+	Name    string
+	Columns []string
+}
+
+// UniqueSecondaryIndexes returns the table's UNIQUE secondary indexes, PRIMARY
+// excluded. It is a live query rather than part of SetInfo because only the
+// change feed's flush partitioning needs it, and it needs it once per
+// subscription.
+//
+// This set is exactly the conflict surface between two concurrent REPLACE
+// statements on PK-disjoint rows. A *non-unique* secondary index is keyed
+// (indexed columns, PK), so PK-disjoint rows always occupy distinct records
+// there and cannot collide however equal their indexed values are. A *unique*
+// secondary index is keyed on the indexed columns alone, and InnoDB's duplicate
+// detection takes a next-key lock — gap included — so rows with merely
+// *adjacent* values collide. The clustered index does not belong here either:
+// a REPLACE's conflict there is with the row bearing that exact PK, which under
+// READ COMMITTED is a record lock with no gap. See
+// TestReplaceContendsOnlyOnUniqueIndexes in pkg/applier, which establishes all
+// three against a real server.
+//
+// Indexes with a NULL COLUMN_NAME are skipped: those are functional indexes,
+// whose key is an expression rather than a stored column, so a caller holding a
+// row image cannot compute where the row sorts in them.
+func (t *TableInfo) UniqueSecondaryIndexes(ctx context.Context) ([]UniqueIndex, error) {
+	// A TableInfo built by NewTableInfoFromMeta carries metadata with no server
+	// behind it (strata's pkg/vstream does this), so this is an ordinary state to
+	// be in rather than a caller error — but it must be an error and not a nil
+	// dereference, which is what an unguarded t.db gives.
+	if t.db == nil {
+		return nil, fmt.Errorf("table %s.%s has no database handle: index metadata is unavailable", t.SchemaName, t.TableName)
+	}
+	rows, err := t.db.QueryContext(ctx, `SELECT INDEX_NAME, COLUMN_NAME FROM INFORMATION_SCHEMA.STATISTICS
+		WHERE table_schema=DATABASE() AND TABLE_NAME=? AND NON_UNIQUE=0 AND INDEX_NAME<>'PRIMARY'
+		ORDER BY INDEX_NAME, SEQ_IN_INDEX`,
+		t.TableName,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if err := rows.Close(); err != nil {
+			slog.Error("failed to close rows", "error", err)
+		}
+	}()
+	var (
+		indexes  []UniqueIndex
+		skipping = make(map[string]bool)
+	)
+	byName := make(map[string]int)
+	for rows.Next() {
+		var name string
+		var col sql.NullString
+		if err := rows.Scan(&name, &col); err != nil {
+			return nil, err
+		}
+		if !col.Valid {
+			// A functional index. Drop whatever was collected for it: a
+			// partially usable key order is worse than none, because a caller
+			// would sort by a prefix and believe it had the whole key.
+			skipping[name] = true
+			continue
+		}
+		if skipping[name] {
+			continue
+		}
+		pos, ok := byName[name]
+		if !ok {
+			byName[name] = len(indexes)
+			indexes = append(indexes, UniqueIndex{Name: name})
+			pos = len(indexes) - 1
+		}
+		indexes[pos].Columns = append(indexes[pos].Columns, col.String)
+	}
+	if rows.Err() != nil {
+		return nil, rows.Err()
+	}
+	// A functional column may appear after a stored one, so the drop above can
+	// leave a half-built entry behind. Filter at the end rather than trying to
+	// unwind in the loop.
+	return slices.DeleteFunc(indexes, func(idx UniqueIndex) bool {
+		return skipping[idx.Name] || len(idx.Columns) == 0
+	}), nil
+}
+
 // setPrimaryKey sets the primary key and also the primary key type.
 // A primary key can contain multiple columns.
 func (t *TableInfo) setPrimaryKey(ctx context.Context) error {
