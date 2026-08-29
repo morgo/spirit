@@ -249,11 +249,16 @@ func (r *Runner) controlPlaneConns() int {
 // below the floor is reported and raised rather than obeyed: refusing to hang
 // is worth more than honouring the number exactly.
 //
-// One deliberate leak: the checksum ratchets the pool +2 above whatever this
-// returns, for the two queries it runs outside its checked-out transaction
-// pool. Those are the connections that must not queue behind anything, so the
-// effective ceiling is bound+2 rather than bound. Two connections is not the
-// difference between fitting on a server and not.
+// One deliberate leak: the checksum ratchets the live pool +2 above whatever
+// this returns (the SetPoolSize call in (*Runner).checksum). That ratchet
+// predates this budget, and the three things its comment names — background
+// flushing, the checkpoint thread, and replaceChunk's off-pool connections —
+// are all already accounted for in the sum above, by controlPlaneConns and
+// checksumOffPoolConns respectively. So it is now plain headroom rather than a
+// reserve for anything in particular, and the effective ceiling is bound+2
+// rather than bound. Left alone here on purpose: two connections is not the
+// difference between fitting on a server and not, and removing it belongs in a
+// change that can argue about the checksum's own budget.
 func (r *Runner) boundedPoolSize(maxRead, maxWrite, maxFlush int) int {
 	reserved := r.controlPlaneConns() + checksumOffPoolConns
 	want := maxRead + maxWrite + maxFlush + reserved
@@ -928,8 +933,13 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context, resumePosi
 	}
 	// Finalize the pool now that every ceiling is known, bounded by
 	// --max-connections (see boundedPoolSize). Sizing for the ceilings ensures a
-	// scaled-up applier or reader pool never starves on connections. This is a
-	// no-op unless autoscaling raised a ceiling or the bound binds.
+	// scaled-up applier or reader pool never starves on connections.
+	//
+	// This resizes even when autoscaling never engaged. Run seeded the pool from
+	// the configured thread counts with no flush term at all, and the sum below
+	// adds one, plus a write ceiling that is 2x the configured count on any
+	// target. Autoscaling and the bound change how far the pool moves from that
+	// seed, not whether it moves.
 	//
 	// The maxRead term covers the checksum as well as the copy: the checksum's
 	// transaction pool is sized to the same ceiling (see the checker's
