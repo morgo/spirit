@@ -51,24 +51,15 @@ type Migration struct {
 	// MaxConnections is the size of the main connection pool, set verbatim and
 	// never recomputed (see the MaxOpenConnections assignment in Runner.Run).
 	//
-	// It exists because the pool used to be a sum of every worker ceiling —
-	// read, write, and change-feed flush, plus headroom — resized again whenever
-	// one of those ceilings moved, and ratcheted a further +2 when the checksum
-	// began. That sum was spirit's demand, and it is not spirit's to spend: the
-	// budget it draws on is the server's max_connections, shared with the
-	// production workload. On a large instance the derived ceilings add up to
-	// well over a hundred connections, and when the server has less spare than
-	// that the copy does not slow down, it dies on `Error 1040: Too many
-	// connections`.
+	// The connections it spends are the server's max_connections, shared with
+	// the production workload, so this is spirit's claim on someone else's
+	// budget rather than a description of what spirit could use. Ask for more
+	// than the server can spare and the copy does not slow down, it dies on
+	// `Error 1040: Too many connections`.
 	//
-	// A single number is also the only shape an operator can budget against.
-	// With a max_user_connections on the migration user, a pool that grows when
-	// spirit reaches a particular phase is not something you can subtract.
-	//
-	// The ceilings still exist — they bound how far the copier scales its own
-	// workers — and they can exceed this. When they do, the workers contend for
-	// connections instead of each being guaranteed one, which costs throughput
-	// and nothing else.
+	// The thread ceilings bound how far the copier scales its own workers and
+	// can exceed this. When they do, the workers contend for connections instead
+	// of each being guaranteed one, which costs throughput and nothing else.
 	//
 	// Zero means "use the default" (normalizeOptions fills it in), matching
 	// Threads and WriteThreads. Negative is rejected by Validate, as is any

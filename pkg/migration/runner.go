@@ -294,26 +294,14 @@ func (r *Runner) Run(ctx context.Context) (retErr error) {
 	r.dbConfig.TLSMode = r.migration.TLSMode
 	r.dbConfig.TLSCertificatePath = r.migration.TLSCertificatePath
 	// The pool is --max-connections, verbatim and once. Nothing recomputes it,
-	// no phase ratchets it, and no ceiling derived later raises it.
+	// no phase ratchets it, and no ceiling derived later raises it — an operator
+	// budgeting against max_user_connections needs a number they can subtract.
 	//
-	// It used to be a sum of every worker ceiling — read, write, flush, plus
-	// headroom for the periodic control-plane queries — resized again whenever
-	// one of those ceilings moved. That sum stated what spirit would use if it
-	// were the only thing on the server, which it never is: the connections come
-	// out of the server's max_connections, shared with the production workload,
-	// and on a large instance the derived ceilings add up to well over a hundred.
-	// A migration that wants more than the server can spare does not slow down,
-	// it dies on `Error 1040: Too many connections`.
-	//
-	// A single number is also the only shape an operator can budget against. If
-	// the migration user has a max_user_connections, the pool has to be a value
-	// they can subtract, not a sum with a ratchet in the middle of it — see the
-	// note on the other pools in the max-connections docs.
-	//
-	// Above it the workers contend for connections instead of each holding one,
-	// which costs throughput and nothing else: a worker waiting on checkout is a
-	// worker that will eventually run. Below minPoolSize the migration cannot
-	// finish at all, which Migration.Validate rejects up front.
+	// The copier, applier, drain and control-plane queries all share it, and
+	// their ceilings can add up to more than it holds. Then they contend for
+	// connections instead of each holding one, which costs throughput and
+	// nothing else: a worker waiting on checkout is a worker that will
+	// eventually run. Migration.Validate rejects a value too small to finish on.
 	r.dbConfig.MaxOpenConnections = r.migration.MaxConnections
 	r.db, err = dbconn.New(r.dsn(), r.dbConfig)
 	if err != nil {
@@ -1760,19 +1748,6 @@ func (r *Runner) initChunkers() error {
 // checksum creates the checksum which opens the read view
 func (r *Runner) checksum(ctx context.Context) error {
 	if err := r.status.Do(status.Checksum, func() error {
-		// No pool resize here. This used to ratchet +2 for background flushing,
-		// the checkpoint thread and replaceChunk's off-pool connections, back
-		// when the pool was sized to the copy phase's needs and the checksum's
-		// were extra. The pool is now --max-connections for the whole migration
-		// (see the MaxOpenConnections doc in (*Runner).Run), so a phase that
-		// stepped over it would be the one thing that made the number unusable
-		// as a budget: an operator with a max_user_connections cannot subtract a
-		// value that grows when spirit reaches a particular phase.
-		//
-		// The checksum's own needs did not go away — they are why
-		// Migration.Validate refuses a --max-connections that cannot hold the
-		// read transactions it pins for the whole phase.
-
 		// Run the checksum with internal retry logic.
 		//
 		// We do not invalidate the checkpoint on a checksum error. The dumper

@@ -66,10 +66,8 @@ func TestAutoscalingLeavesThreadFlagsAloneWhenItCannotEngage(t *testing.T) {
 // with a max_user_connections can subtract one number and be done.
 //
 // It asserts the live pool rather than the config, and after a full run rather
-// than at setup, because that is where the property used to break. Sizing was
-// spread across a seed in Run, a re-derivation once the autoscaling ceilings
-// were known, and a +2 the checksum ratcheted on when it started — each an
-// independent chance to step over the number, and the last one did.
+// than at setup, because a phase that resizes r.db does so through
+// dbconn.SetPoolSize and would leave the config untouched.
 func TestPoolSizeIsExactlyMaxConnections(t *testing.T) {
 	testutils.NewTestTable(t, "pool_verbatim",
 		`CREATE TABLE pool_verbatim (id INT NOT NULL PRIMARY KEY, pad VARCHAR(32))`)
