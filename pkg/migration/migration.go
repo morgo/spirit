@@ -22,6 +22,12 @@ import (
 // tag (pkg/move), since the two flags are independently defaulted.
 const defaultWriteThreads = 4
 
+// defaultThreads must match the `default:"4"` kong tag on Migration.Threads, for
+// the same reason defaultWriteThreads does. Validate reads it because it runs
+// before normalizeOptions, so a programmatic caller's zero has to be resolved to
+// the number the migration will actually use before it can be checked.
+const defaultThreads = 4
+
 // defaultMaxConnections must match the `default:"128"` kong tag on
 // Migration.MaxConnections, for the same reason defaultWriteThreads does: a
 // programmatic caller that leaves the field unset must land where the CLI does.
@@ -156,13 +162,23 @@ func (m *Migration) Validate() error {
 				minPoolSize, m.MaxConnections)
 		}
 		// The checksum's read transactions each pin a connection for the whole
-		// phase whether or not a worker has one checked out, and the chunk
-		// repair and boundary prefetch run outside that pool (see
-		// checksumOffPoolConns). A pool that cannot hold both leaves chunk
-		// dispatch with nothing to check out, which is a stall, not slowness.
-		if pinned := m.Threads + checksumOffPoolConns; m.MaxConnections < pinned {
-			return fmt.Errorf("--max-connections (%d) is below what the checksum holds open for the whole phase: %d read transactions plus %d off-pool queries; use at least %d, or lower --threads",
-				m.MaxConnections, m.Threads, checksumOffPoolConns, pinned)
+		// phase whether or not a worker has one checked out, so the pool has to
+		// hold them *plus* everything that has to keep running alongside them:
+		// the checksum's own off-pool queries, the control plane, and the drain
+		// (see checksumPhaseReserve). A pool that only just fits the
+		// transactions is not a slow checksum, it is a checksum during which the
+		// drain cannot check out a connection at all.
+		//
+		// Threads is read through defaultThreads because zero here means "use
+		// the default" and normalizeOptions has not run yet — validating the 0
+		// would accept a pool that the 4 it becomes cannot run on.
+		threads := m.Threads
+		if threads == 0 {
+			threads = defaultThreads
+		}
+		if pinned := threads + minChecksumPhaseReserve; m.MaxConnections < pinned {
+			return fmt.Errorf("--max-connections (%d) is below what the checksum phase needs: %d pinned read transactions plus %d reserved for off-pool queries, the control plane and the drain; use at least %d, or lower --threads",
+				m.MaxConnections, threads, minChecksumPhaseReserve, pinned)
 		}
 	}
 	return nil
@@ -191,7 +207,7 @@ func (m *Migration) normalizeOptions() (stmts []*statement.AbstractStatement, er
 		m.TargetChunkSize = table.DefaultTargetChunkBytes
 	}
 	if m.Threads == 0 {
-		m.Threads = 4
+		m.Threads = defaultThreads
 	}
 	// A non-positive WriteThreads is filled in rather than rejected, matching
 	// Threads above. Zero used to mean "auto-size from the instance", so anyone

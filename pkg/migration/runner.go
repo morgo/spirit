@@ -220,33 +220,78 @@ const checksumOffPoolConns = 2
 // Throttler polls are NOT counted here — they run on the dedicated monitorDB
 // pool (see the monitorDB field).
 func (r *Runner) controlPlaneConns() int {
-	return len(r.changes) + 2
+	return len(r.changes) + controlPlaneFixedConns
 }
 
-// readCeilingForPool bounds a read ceiling to what the connection pool can hold.
+// controlPlaneFixedConns is the part of controlPlaneConns that does not scale
+// with the number of change tables: the checkpoint INSERT and the
+// replication-flush poll.
+const controlPlaneFixedConns = 2
+
+// drainReserveConns is what the change-feed drain keeps while the checksum runs.
+// One connection, not the flush concurrency: a narrow drain is a slow drain and
+// that is a fine trade, but a drain with nothing to check out does not advance
+// the binlog position at all, and that position has to keep moving or the
+// migration runs out its retention window. Slow is a late migration; stopped is
+// a failed one.
+const drainReserveConns = 1
+
+// checksumPhaseReserve is the number of connections that must stay checkout-able
+// while the checksum holds its read transactions open.
 //
-// Read workers are the one kind that cannot simply queue. The checksum turns
-// this ceiling into transactions, opens all of them serially under the table
-// lock (they must share one snapshot instant, so none can be added later — see
+// The checksum is the only phase that pins connections rather than borrowing
+// them: every transaction in its pool holds one for the whole phase whether or
+// not a worker has it checked out. So anything that has to keep running
+// alongside it needs its share carved out of the pool up front — the checksum's
+// own off-pool queries (checksumOffPoolConns), the control-plane queries, and
+// the drain. The copier and applier are not in the reserve because they have
+// finished by the time the checksum starts.
+func (r *Runner) checksumPhaseReserve() int {
+	return checksumOffPoolConns + r.controlPlaneConns() + drainReserveConns
+}
+
+// minChecksumPhaseReserve is checksumPhaseReserve for the smallest migration
+// there is, one change table. Migration.Validate needs the number before the
+// statement has been parsed into change tables, so it uses this lower bound; the
+// runtime fit in setupCopierCheckerAndReplClient uses the real count.
+const minChecksumPhaseReserve = checksumOffPoolConns + controlPlaneFixedConns + 1 + drainReserveConns
+
+// readBoundsForPool fits a read start and ceiling into the connection pool.
+//
+// Read workers are the one kind that cannot simply queue. The checksum turns the
+// ceiling into transactions, opens all of them serially under the table lock
+// (they must share one snapshot instant, so none can be added later — see
 // SingleChecker.initConnPool), and each holds its connection for the whole phase
 // whether or not a worker has it checked out. A ceiling the pool cannot hold is
 // therefore not a slow checksum, it is one that blocks on connection checkout
 // with a table lock held.
 //
+// The start is fitted along with the ceiling, and that is the whole reason this
+// takes both. A ceiling alone does not survive its consumers: checksum.NewChecker
+// resolves max(Autoscale.MaxThreads, Concurrency) and the copier's
+// resolveReadCeiling does the same, because a pool that begins above its cap
+// cannot be controlled. Both are right on their own terms, so lowering only the
+// ceiling gets floored straight back up to the start and the fit becomes a no-op
+// in exactly the case it was written for — autoscaling, where the start is
+// instance-derived and can be larger than the pool the operator configured.
+//
 // Migration.Validate covers the configured thread count. It cannot cover this
-// one: under autoscaling the ceiling comes from an instance vCPU count that is
-// only known after the probe, long after flag parsing. So it is bounded here
-// instead — and bounding the ceiling rather than growing the pool is the right
-// way round, because the ceiling is a number spirit derived for itself while the
-// pool is one the operator gave it.
+// one: under autoscaling both numbers come from an instance vCPU count that is
+// only known after the probe, long after flag parsing. And fitting the bounds
+// rather than growing the pool is the right way round, because these are numbers
+// spirit derived for itself while the pool is one the operator gave it.
 //
 // A non-positive maxConnections means no pool size was resolved (a Runner built
 // directly, bypassing normalizeOptions); there is nothing to fit to.
-func readCeilingForPool(maxRead, maxConnections int) int {
+func readBoundsForPool(start, ceiling, maxConnections, reserve int) (int, int) {
 	if maxConnections <= 0 {
-		return maxRead
+		return start, ceiling
 	}
-	return min(maxRead, maxConnections-checksumOffPoolConns)
+	// At least one reader, even on a pool too small to honour the reserve:
+	// zero read workers is a migration that cannot make progress at all, which
+	// is strictly worse than one contending with its own control plane.
+	fit := max(1, maxConnections-reserve)
+	return min(start, fit), min(ceiling, fit)
 }
 
 func (r *Runner) SetMetricsSink(sink metrics.Sink) {
@@ -324,15 +369,23 @@ func (r *Runner) Run(ctx context.Context) (retErr error) {
 	// budgeting against max_user_connections needs a number they can subtract.
 	//
 	// The copier, applier, drain and control-plane queries all share it, and
-	// their ceilings can add up to more than it holds. Then they contend for
-	// connections instead of each holding one, which costs throughput and
-	// nothing else: a worker waiting on checkout is a worker that will
-	// eventually run.
+	// their ceilings can add up to more than it holds. For the copier and the
+	// applier that costs throughput and nothing else: a worker waiting on
+	// checkout is a worker that will eventually run, and the work it was going
+	// to do is still there when it does.
 	//
-	// Read workers are the exception, because the checksum pins one connection
-	// per transaction for a whole phase. Migration.Validate rejects a pool that
-	// cannot hold the configured count; readCeilingForPool handles the count
-	// autoscaling derives later.
+	// Two paths are not like that:
+	//
+	//   - Read workers, because the checksum pins one connection per transaction
+	//     for a whole phase — a ceiling the pool cannot hold blocks on checkout
+	//     with a table lock held. Migration.Validate rejects a pool that cannot
+	//     hold the configured count; readBoundsForPool handles the count
+	//     autoscaling derives later.
+	//   - The drain, because its work expires. A flush batch queueing behind a
+	//     saturated copy is spending the binlog retention window, and running out
+	//     of that window ends the migration rather than slowing it. It is why the
+	//     drain has a reserve during the checksum (drainReserveConns) rather than
+	//     being left to contend like the copier.
 	r.dbConfig.MaxOpenConnections = r.migration.MaxConnections
 	r.db, err = dbconn.New(r.dsn(), r.dbConfig)
 	if err != nil {
@@ -886,12 +939,19 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context, resumePosi
 	if maxRead == 0 {
 		maxRead = copier.ResolveMaxReadThreads(r.migration.Threads, false)
 	}
-	if fitted := readCeilingForPool(maxRead, r.migration.MaxConnections); fitted != maxRead {
-		r.logger.Warn("read ceiling derived from the instance does not fit the connection pool; capping it",
-			"read_ceiling", maxRead,
+	// Fit both read bounds to the pool. The start matters as much as the ceiling
+	// here: r.migration.Threads is what the checksum takes as its Concurrency and
+	// what the copier takes as its starting read-worker count, and both of them
+	// floor the ceiling back up to it (see readBoundsForPool). Under autoscaling
+	// this is the number the block above replaced with readStart, so it is
+	// instance-derived and has never been checked against the operator's pool.
+	if fitStart, fitCeiling := readBoundsForPool(r.migration.Threads, maxRead, r.migration.MaxConnections, r.checksumPhaseReserve()); fitStart != r.migration.Threads || fitCeiling != maxRead {
+		r.logger.Warn("read thread bounds do not fit the connection pool; capping them",
+			"threads", r.migration.Threads, "capped_threads", fitStart,
+			"read_ceiling", maxRead, "capped_read_ceiling", fitCeiling,
 			"max_connections", r.migration.MaxConnections,
-			"capped_to", fitted)
-		maxRead = fitted
+			"reserved", r.checksumPhaseReserve())
+		r.migration.Threads, maxRead = fitStart, fitCeiling
 	}
 	r.checkpointTable = table.NewTableInfo(r.db, r.changes[0].table.SchemaName, r.checkpointTableName())
 

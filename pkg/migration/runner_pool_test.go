@@ -136,33 +136,93 @@ func TestMaxConnectionsDefaultMatchesItsFlag(t *testing.T) {
 	require.Equal(t, defaultMaxConnections, m.MaxConnections)
 }
 
-// TestReadCeilingForPool covers the one worker count that cannot be left to
+// TestReadBoundsForPool covers the one worker count that cannot be left to
 // queue. The checksum opens a transaction per read thread, serially, under the
-// table lock, and each holds its connection for the whole phase — so a ceiling
-// the pool cannot hold blocks on checkout with that lock held.
+// table lock, and each holds its connection for the whole phase — so bounds the
+// pool cannot hold block on checkout with that lock held.
 //
-// Validate cannot catch this case: under autoscaling the ceiling comes from an
-// instance vCPU count read long after flag parsing, and has nothing to do with
+// Validate cannot catch this case: under autoscaling both numbers come from an
+// instance vCPU count read long after flag parsing, and have nothing to do with
 // --threads.
-func TestReadCeilingForPool(t *testing.T) {
-	// Room to spare: the ceiling is whatever was derived.
-	require.Equal(t, 32, readCeilingForPool(32, defaultMaxConnections))
+func TestReadBoundsForPool(t *testing.T) {
+	// A single-table migration, which is what minChecksumPhaseReserve describes.
+	const reserve = minChecksumPhaseReserve
 
-	// Exactly enough, counting the two off-pool queries the checksum also runs.
-	require.Equal(t, 30, readCeilingForPool(30, 32))
+	// Room to spare: the bounds are whatever was derived.
+	start, ceiling := readBoundsForPool(16, 32, defaultMaxConnections, reserve)
+	require.Equal(t, 16, start)
+	require.Equal(t, 32, ceiling)
+
+	// Exactly enough, counting the reserve the checksum phase cannot run without.
+	start, ceiling = readBoundsForPool(16, 32-reserve, 32, reserve)
+	require.Equal(t, 16, start)
+	require.Equal(t, 32-reserve, ceiling)
 
 	// One short. The ceiling gives way, not the pool: the ceiling is a number
 	// spirit derived for itself, the pool is one the operator set.
-	require.Equal(t, 30, readCeilingForPool(31, 32))
+	_, ceiling = readBoundsForPool(16, 32-reserve+1, 32, reserve)
+	require.Equal(t, 32-reserve, ceiling)
 
-	// A 96-vCPU instance derives a ceiling of 48 from autoscale.ReadBounds, and
-	// --threads was never involved — this is the case Validate cannot see.
-	require.Equal(t, 18, readCeilingForPool(48, 20))
+	// The start is fitted too. This is the case that used to survive the fit:
+	// a 96-vCPU instance derives (24, 48) from autoscale.ReadBounds, the
+	// operator's pool is 20, and both consumers floor the ceiling back up to the
+	// start — so lowering only the ceiling changed nothing.
+	start, ceiling = readBoundsForPool(24, 48, 20, reserve)
+	require.Equal(t, 20-reserve, start)
+	require.Equal(t, 20-reserve, ceiling)
+
+	// Never zero readers. A pool too small to honour the reserve still has to
+	// run: contending with the control plane beats not copying at all.
+	start, ceiling = readBoundsForPool(24, 48, reserve, reserve)
+	require.Equal(t, 1, start)
+	require.Equal(t, 1, ceiling)
 
 	// No pool size resolved (a Runner built directly, bypassing
 	// normalizeOptions): there is nothing to fit to, so nothing is changed.
-	require.Equal(t, 48, readCeilingForPool(48, 0))
-	require.Equal(t, 48, readCeilingForPool(48, -1))
+	start, ceiling = readBoundsForPool(24, 48, 0, reserve)
+	require.Equal(t, 24, start)
+	require.Equal(t, 48, ceiling)
+	start, ceiling = readBoundsForPool(24, 48, -1, reserve)
+	require.Equal(t, 24, start)
+	require.Equal(t, 48, ceiling)
+}
+
+// TestReadBoundsSurviveTheirConsumers is the assertion the unit test above
+// cannot make on its own: that the fitted numbers are still the numbers the
+// checksum builds its transaction pool with.
+//
+// Both consumers deliberately floor the ceiling at the start —
+// checksum.NewChecker takes max(Autoscale.MaxThreads, Concurrency) and the
+// copier's resolveReadCeiling does the same, because a pool that begins above
+// its cap cannot be controlled. That is correct on its own terms and it is
+// exactly why the start has to be fitted as well: fitting the ceiling alone is
+// undone one call later, silently, in the autoscaling regime the fit exists for.
+//
+// So this walks the real derivation — autoscale.ReadBounds for the instance,
+// readBoundsForPool for the pool, then the consumers' max() — and asserts the
+// composed result leaves the reserve intact.
+func TestReadBoundsSurviveTheirConsumers(t *testing.T) {
+	const reserve = minChecksumPhaseReserve
+
+	// vCPU counts spanning autoscale.ReadBounds, against pools from far too
+	// small to comfortable. The small pools are the point: they are the ones
+	// where the derived bounds and the operator's budget disagree.
+	for _, vCPUs := range []int{16, 32, 64, 96, 128} {
+		for _, maxConnections := range []int{8, 16, 20, 32, 64, defaultMaxConnections} {
+			readStart, readCeiling := autoscale.ReadBounds(vCPUs)
+			start, ceiling := readBoundsForPool(readStart, readCeiling, maxConnections, reserve)
+
+			// What checksum.NewChecker and copier.resolveReadCeiling resolve to.
+			effective := max(ceiling, start)
+
+			require.LessOrEqual(t, effective+reserve, maxConnections,
+				"at %d vCPUs with --max-connections=%d: the checksum pins %d connections for the whole phase, leaving %d of %d for the reserve",
+				vCPUs, maxConnections, effective, maxConnections-effective, maxConnections)
+			require.GreaterOrEqual(t, effective, 1,
+				"at %d vCPUs with --max-connections=%d: a migration needs at least one reader",
+				vCPUs, maxConnections)
+		}
+	}
 }
 
 // TestValidateMaxConnections covers the checks that took over from the runtime
@@ -184,7 +244,7 @@ func TestValidateMaxConnections(t *testing.T) {
 	}
 
 	require.NoError(t, valid(defaultMaxConnections).Validate())
-	require.NoError(t, valid(minPoolSize+checksumOffPoolConns).Validate(),
+	require.NoError(t, valid(4+minChecksumPhaseReserve).Validate(),
 		"a small but workable pool is the operator asking for a slow migration, which is allowed")
 
 	// Zero is "use the default" (normalizeOptions fills it in), on the same
@@ -198,12 +258,20 @@ func TestValidateMaxConnections(t *testing.T) {
 	require.ErrorContains(t, valid(minPoolSize-1).Validate(), "for the cutover to run",
 		"below the cutover's minimum the migration cannot finish, only fail late")
 
-	// Above minPoolSize but below what the checksum pins: its read transactions
-	// hold their connections for the whole phase, so chunk dispatch would have
-	// nothing left to check out.
+	// Above minPoolSize but below what the checksum phase needs: its read
+	// transactions hold their connections for the whole phase, so the control
+	// plane and the drain would have nothing left to check out.
 	pinning := valid(minPoolSize + 1)
 	pinning.Threads = 32
 	err := pinning.Validate()
-	require.ErrorContains(t, err, "below what the checksum holds open")
+	require.ErrorContains(t, err, "below what the checksum phase needs")
 	require.ErrorContains(t, err, "lower --threads", "the error must name a way out")
+
+	// A zero Threads means "use the default", and Validate runs before
+	// normalizeOptions fills it in. Checking the 0 rather than the 4 it becomes
+	// would accept a pool the migration then stalls on.
+	unset := valid(defaultThreads + minChecksumPhaseReserve - 1)
+	unset.Threads = 0
+	require.ErrorContains(t, unset.Validate(), "below what the checksum phase needs",
+		"an unset --threads must be validated as the default it resolves to")
 }
