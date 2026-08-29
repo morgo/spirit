@@ -716,11 +716,26 @@ func (s *bufferedMap) effectiveBatchSize() int {
 // progress.
 //
 // The lock-footprint cost of the wider statement is real but bounded: the cap is
-// the batch this drain would have used at DefaultFlushConcurrency, so the widest
-// statement load shedding can produce is one the pre-derivation code produced
-// routinely. Past that point — a floor-clamped shed, or a batch already at or
-// above the cap — the re-pairing stops and rows genuinely leave flight, which is
-// the correct behaviour once there is no cheap trade left to make.
+// DefaultBatchSize, the batch spirit used before any of this was derivable, so
+// the widest statement load shedding can produce is one the pre-derivation code
+// produced routinely.
+//
+// For a FlushBounds-derived pair that is the same thing as "the batch this drain
+// would have used at DefaultFlushConcurrency" — concurrency x batch is
+// FlushRowsInFlight, so at a width of 8 the batch is DefaultBatchSize either
+// way. The cap is written as the constant rather than derived from the ratio
+// because a caller that sets FlushConcurrency and BatchSize itself is under no
+// obligation to sit on that budget, and re-pairing such a shape by its own
+// implied ratio could produce a statement far wider than anything spirit has
+// shipped.
+//
+// The max() is the other half of that bargain: a caller who already configured a
+// batch above DefaultBatchSize keeps it. The cap is here to stop load shedding
+// widening statements, not to shrink one the caller chose.
+//
+// Past the cap — or on a floor-clamped shed — the re-pairing stops and rows
+// genuinely leave flight, which is the correct behaviour once there is no cheap
+// trade left to make.
 func (s *bufferedMap) repairedForLoad(batch int) int {
 	before, after := s.contendedFlushConcurrency(), s.effectiveFlushConcurrency()
 	if after <= 0 || before <= after {

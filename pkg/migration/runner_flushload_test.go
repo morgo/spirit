@@ -2,8 +2,11 @@ package migration
 
 import (
 	"context"
+	"io"
+	"log/slog"
 	"testing"
 
+	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/throttler"
 	"github.com/stretchr/testify/require"
 )
@@ -64,14 +67,27 @@ func TestFlushUnderLoadReadsLoadSignalsOnly(t *testing.T) {
 // dropped rather than failing anything, and the drain's own tests all drive the
 // controller directly — so without this, removing the UnderLoad assignment
 // leaves both packages green and the feed running unshed.
+//
+// The other fields are asserted for the same reason, not for completeness'
+// sake: a dropped CancelFunc turns a fatal schema change into a migration that
+// keeps running against a table it no longer understands, a dropped DBConfig
+// costs the feed its TLS settings, and a dropped Logger sends the drain's own
+// shed warnings to slog.Default() where nothing collects them. Sentinels rather
+// than nil checks, so an assignment that is present but sourced from the wrong
+// field still fails.
 func TestReplClientConfigCarriesTheLoadSignal(t *testing.T) {
-	r := &Runner{migration: &Migration{}}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	dbConfig := dbconn.NewDBConfig()
+	r := &Runner{migration: &Migration{}, logger: logger, dbConfig: dbConfig}
 	cfg := r.replClientConfig(32, 250)
 
 	require.NotNil(t, cfg.UnderLoad, "the drain must be given a load signal")
 	require.False(t, cfg.UnderLoad(), "and it must be callable before setup resolves a throttler")
 	require.Equal(t, 32, cfg.FlushConcurrency)
 	require.Equal(t, 250, cfg.BatchSize)
+	require.Same(t, logger, cfg.Logger, "the feed must log where the runner logs")
+	require.Same(t, dbConfig, cfg.DBConfig, "the feed must dial with the runner's connection settings")
+	require.NotNil(t, cfg.CancelFunc, "the feed must be able to abort the migration it is feeding")
 
 	// Zero is passed through as zero rather than being resolved here: the
 	// change package reads it as "use my default", which is what a non-Aurora
