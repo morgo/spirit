@@ -731,7 +731,11 @@ func (s *bufferedMap) effectiveBatchSize() int {
 //
 // The max() is the other half of that bargain: a caller who already configured a
 // batch above DefaultBatchSize keeps it. The cap is here to stop load shedding
-// widening statements, not to shrink one the caller chose.
+// widening statements, not to shrink one the caller chose. It compares against
+// the *configured* batch rather than the one passed in, because the one passed
+// in has already been through the contention controller — capping against a
+// halved batch would quietly retract the allowance the moment contention landed
+// a single step.
 //
 // Past the cap — or on a floor-clamped shed — the re-pairing stops and rows
 // genuinely leave flight, which is the correct behaviour once there is no cheap
@@ -741,12 +745,18 @@ func (s *bufferedMap) repairedForLoad(batch int) int {
 	if after <= 0 || before <= after {
 		return batch // no load shed outstanding, or it was clamped to nothing
 	}
-	// Integer division deliberately. FlushBounds derives a width per vCPU count,
-	// not per power of two, so a shed can land on a ratio just short of the next
-	// step; rounding that up would put *more* rows in flight than the drain had
-	// before it started shedding. Rounding down leaves a few behind, which is
-	// the safe direction for a controller whose whole job is to take load off.
-	return min(batch*(before/after), max(batch, DefaultBatchSize))
+	// Scale first, divide last. The ratio is not a whole number at most widths
+	// FlushBounds derives — it is WriteStart(vCPUs), not a power of two, so a
+	// 16-vCPU instance sheds 14 -> 8 and (before/after) would truncate to 1,
+	// returning the batch untouched and dropping 43% of the rows in flight on
+	// the one path that must not fall behind its retention window.
+	//
+	// Flooring the product keeps what the truncated ratio was there to protect:
+	// the result is never more rows in flight than the drain had before it
+	// started shedding, since after*((batch*before)/after) <= batch*before.
+	// Rounding down leaves a few rows behind, which is the safe direction for a
+	// controller whose whole job is to take load off.
+	return min((batch*before)/after, max(s.configuredBatchSize(), DefaultBatchSize))
 }
 
 // shiftDown halves start once per penalty step, never going below floor.
@@ -833,6 +843,15 @@ func (s *bufferedMap) adaptFlushConcurrency(contended bool) {
 // run — while load is a condition, and a drain that may hold flushMu for minutes
 // should be shaped by what the server looks like when it starts, not by what it
 // looked like before the previous one.
+//
+// The responsiveness bound follows from that, and is worth stating plainly: one
+// step per drain, so the controller moves at drain frequency and no faster. Under
+// the load this was written for that has been observed in the tens of seconds, so
+// a drain that starts clean runs at full width through a spike that arrives just
+// after it begins, and a shed takes a drain or two to reach the floor. That is
+// the deliberate trade — the alternative is re-reading the signal mid-drain and
+// resizing an errgroup whose limit its own workers are already holding — but it
+// means this controller damps sustained load rather than catching transients.
 func (s *bufferedMap) adaptFlushLoad() {
 	if s.underLoad == nil {
 		return // no signal wired: the width is whatever the caller configured

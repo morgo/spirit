@@ -110,6 +110,82 @@ func TestFlushLoadShedHoldsRowsInFlight(t *testing.T) {
 	require.Equal(t, autoscale.FlushRowsInFlight, sub.effectiveFlushConcurrency()*sub.effectiveBatchSize())
 }
 
+// TestFlushLoadShedHoldsRowsInFlightAtEveryDerivedWidth is the test above
+// generalized, and it is the one that matters. The 32x250 shape it uses is a
+// power of two, so its arithmetic happens to be exact; autoscale.FlushBounds
+// derives its width from WriteStart(vCPUs) = vCPUs - VCPUReserve, which is not a
+// power of two at most instance sizes. Every case here is a real (concurrency,
+// batch) pair a real instance produces.
+//
+// Grouping the re-pair as batch*(before/after) rather than (batch*before)/after
+// passes the exact cases and silently drops rows at all the rest — a 16-vCPU
+// target sheds 14 -> 8, the ratio truncates to 1, and the batch is returned
+// untouched for a 43% loss of rows in flight on the one path that must not fall
+// behind its retention window.
+func TestFlushLoadShedHoldsRowsInFlightAtEveryDerivedWidth(t *testing.T) {
+	// Spans MinVCPUs through the size at which FlushBounds saturates at 32, and
+	// deliberately includes the odd widths in between.
+	for _, vCPUs := range []int{12, 14, 16, 18, 20, 24, 26, 32, 34, 40, 48, 64, 96, 128} {
+		concurrency, batchSize := autoscale.FlushBounds(vCPUs)
+
+		sub := newByteCapBufferedMap(&countingApplier{}, false)
+		sub.flushConcurrency, sub.batchSize = concurrency, batchSize
+		sub.underLoad = func() bool { return true }
+
+		before := sub.effectiveFlushConcurrency() * sub.effectiveBatchSize()
+
+		// Shed all the way to the floor.
+		for range 20 {
+			sub.adaptFlushLoad()
+		}
+		require.Equal(t, DefaultFlushConcurrency, sub.effectiveFlushConcurrency(),
+			"at %d vCPUs the shed must reach the floor and stop", vCPUs)
+
+		after := sub.effectiveFlushConcurrency() * sub.effectiveBatchSize()
+
+		// Never more than the drain had before it started shedding: the whole
+		// point of flooring rather than rounding.
+		require.LessOrEqual(t, after, before,
+			"at %d vCPUs (%dx%d): shedding must not put more rows in flight than it started with",
+			vCPUs, concurrency, batchSize)
+
+		// And no meaningful loss. The remainder of one integer division is the
+		// only slack allowed — at most the concurrency it is divided by.
+		require.GreaterOrEqual(t, after, before-sub.effectiveFlushConcurrency(),
+			"at %d vCPUs (%dx%d): the re-pair dropped rows in flight, %d -> %d, so shedding load is costing the feed progress",
+			vCPUs, concurrency, batchSize, before, after)
+	}
+}
+
+// TestFlushLoadShedRepairsAgainstTheConfiguredBatch pins the cap's reference
+// point. repairedForLoad caps the widened batch at what the caller configured
+// (or DefaultBatchSize, whichever is larger) — not at the batch it was handed,
+// which the contention controller may already have halved. Capping against the
+// halved value would retract a caller's allowance the moment a single contention
+// step landed, narrowing the width without the widening that pays for it.
+func TestFlushLoadShedRepairsAgainstTheConfiguredBatch(t *testing.T) {
+	sub := newByteCapBufferedMap(&countingApplier{}, false)
+	// A caller who sized the drain themselves, above DefaultBatchSize.
+	sub.flushConcurrency, sub.batchSize = 32, 2000
+	sub.underLoad = func() bool { return true }
+
+	// One contention step: 32 -> 16 wide, 2000 -> 1000 per statement.
+	sub.concurrencyPenalty.Store(1)
+	require.Equal(t, 16, sub.effectiveFlushConcurrency())
+	require.Equal(t, 1000, sub.effectiveBatchSize())
+	contended := 16 * 1000
+
+	// Now shed on load, 16 -> 8. The re-pair must restore the rows contention
+	// left in flight, which needs a batch of 2000 — above DefaultBatchSize, and
+	// therefore only reachable if the cap reads the configured batch.
+	sub.adaptFlushLoad()
+	require.Equal(t, 8, sub.effectiveFlushConcurrency())
+	require.Equal(t, 2000, sub.effectiveBatchSize(),
+		"the cap must be the configured batch, not the contention-shifted one")
+	require.Equal(t, contended, sub.effectiveFlushConcurrency()*sub.effectiveBatchSize(),
+		"a load shed must preserve the rows contention left in flight, not shrink them again")
+}
+
 // TestFlushLoadShedNeverWidensPastTheHistoricalBatch caps the other side of the
 // trade. Re-pairing buys statement count with lock footprint, and a batch takes
 // a next-key lock per row per UNIQUE secondary index — the exact surface the
