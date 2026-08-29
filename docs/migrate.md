@@ -432,6 +432,8 @@ Values that cannot work are rejected at startup rather than discovered mid-migra
 
 Both are hard stops rather than slow paths: below them a migration does not run slower, it stalls holding a table lock or an open read view.
 
+Under [autoscaling](#enable-experimental-autoscaling) the read ceiling comes from the instance rather than from `threads`, so it is not known at startup and cannot be validated there. If that derived ceiling does not fit the pool, Spirit lowers the ceiling — it will not grow the pool past the number you set. This is logged, and only bites if you set `max-connections` below half the target's vCPU count.
+
 A negative value is rejected. A pool whose size Spirit cannot state is what this flag exists to remove.
 
 ### max-commit-latency

@@ -223,6 +223,32 @@ func (r *Runner) controlPlaneConns() int {
 	return len(r.changes) + 2
 }
 
+// readCeilingForPool bounds a read ceiling to what the connection pool can hold.
+//
+// Read workers are the one kind that cannot simply queue. The checksum turns
+// this ceiling into transactions, opens all of them serially under the table
+// lock (they must share one snapshot instant, so none can be added later — see
+// SingleChecker.initConnPool), and each holds its connection for the whole phase
+// whether or not a worker has it checked out. A ceiling the pool cannot hold is
+// therefore not a slow checksum, it is one that blocks on connection checkout
+// with a table lock held.
+//
+// Migration.Validate covers the configured thread count. It cannot cover this
+// one: under autoscaling the ceiling comes from an instance vCPU count that is
+// only known after the probe, long after flag parsing. So it is bounded here
+// instead — and bounding the ceiling rather than growing the pool is the right
+// way round, because the ceiling is a number spirit derived for itself while the
+// pool is one the operator gave it.
+//
+// A non-positive maxConnections means no pool size was resolved (a Runner built
+// directly, bypassing normalizeOptions); there is nothing to fit to.
+func readCeilingForPool(maxRead, maxConnections int) int {
+	if maxConnections <= 0 {
+		return maxRead
+	}
+	return min(maxRead, maxConnections-checksumOffPoolConns)
+}
+
 func (r *Runner) SetMetricsSink(sink metrics.Sink) {
 	r.metricsSink = sink
 }
@@ -301,7 +327,12 @@ func (r *Runner) Run(ctx context.Context) (retErr error) {
 	// their ceilings can add up to more than it holds. Then they contend for
 	// connections instead of each holding one, which costs throughput and
 	// nothing else: a worker waiting on checkout is a worker that will
-	// eventually run. Migration.Validate rejects a value too small to finish on.
+	// eventually run.
+	//
+	// Read workers are the exception, because the checksum pins one connection
+	// per transaction for a whole phase. Migration.Validate rejects a pool that
+	// cannot hold the configured count; readCeilingForPool handles the count
+	// autoscaling derives later.
 	r.dbConfig.MaxOpenConnections = r.migration.MaxConnections
 	r.db, err = dbconn.New(r.dsn(), r.dbConfig)
 	if err != nil {
@@ -839,9 +870,7 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context, resumePosi
 			"write_threads", r.migration.WriteThreads)
 	}
 	// The read side's ceiling is half the instance when autoscaling engaged above
-	// (autoscale.ReadBounds). The pool below is sized for it, since readers scaled
-	// above the connection budget would just queue on the sql.DB pool, buying no
-	// extra parallelism.
+	// (autoscale.ReadBounds).
 	//
 	// A zero readCeiling means the gate above did not derive one, which is also
 	// exactly the case where neither read pool can grow: growth needs the
@@ -856,6 +885,13 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context, resumePosi
 	maxRead := readCeiling
 	if maxRead == 0 {
 		maxRead = copier.ResolveMaxReadThreads(r.migration.Threads, false)
+	}
+	if fitted := readCeilingForPool(maxRead, r.migration.MaxConnections); fitted != maxRead {
+		r.logger.Warn("read ceiling derived from the instance does not fit the connection pool; capping it",
+			"read_ceiling", maxRead,
+			"max_connections", r.migration.MaxConnections,
+			"capped_to", fitted)
+		maxRead = fitted
 	}
 	r.checkpointTable = table.NewTableInfo(r.db, r.changes[0].table.SchemaName, r.checkpointTableName())
 

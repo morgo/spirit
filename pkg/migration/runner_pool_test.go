@@ -136,6 +136,35 @@ func TestMaxConnectionsDefaultMatchesItsFlag(t *testing.T) {
 	require.Equal(t, defaultMaxConnections, m.MaxConnections)
 }
 
+// TestReadCeilingForPool covers the one worker count that cannot be left to
+// queue. The checksum opens a transaction per read thread, serially, under the
+// table lock, and each holds its connection for the whole phase — so a ceiling
+// the pool cannot hold blocks on checkout with that lock held.
+//
+// Validate cannot catch this case: under autoscaling the ceiling comes from an
+// instance vCPU count read long after flag parsing, and has nothing to do with
+// --threads.
+func TestReadCeilingForPool(t *testing.T) {
+	// Room to spare: the ceiling is whatever was derived.
+	require.Equal(t, 32, readCeilingForPool(32, defaultMaxConnections))
+
+	// Exactly enough, counting the two off-pool queries the checksum also runs.
+	require.Equal(t, 30, readCeilingForPool(30, 32))
+
+	// One short. The ceiling gives way, not the pool: the ceiling is a number
+	// spirit derived for itself, the pool is one the operator set.
+	require.Equal(t, 30, readCeilingForPool(31, 32))
+
+	// A 96-vCPU instance derives a ceiling of 48 from autoscale.ReadBounds, and
+	// --threads was never involved — this is the case Validate cannot see.
+	require.Equal(t, 18, readCeilingForPool(48, 20))
+
+	// No pool size resolved (a Runner built directly, bypassing
+	// normalizeOptions): there is nothing to fit to, so nothing is changed.
+	require.Equal(t, 48, readCeilingForPool(48, 0))
+	require.Equal(t, 48, readCeilingForPool(48, -1))
+}
+
 // TestValidateMaxConnections covers the checks that took over from the runtime
 // floor. The pool is now the flag verbatim, so a number too small to work is
 // not a slower migration — it is one that stalls partway through, holding a
