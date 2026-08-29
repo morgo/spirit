@@ -297,7 +297,7 @@ The write side of the copy — the applier's write workers — is controlled sep
 
 This flag is **ignored** when [enable-experimental-autoscaling](#enable-experimental-autoscaling) engages: the autoscaler sizes both pools from the instance instead.
 
-Internal to Spirit, the database pool is sized as `threads + write-threads + flush-concurrency + control-plane + checksum-off-pool`, then bounded by [max-connections](#max-connections). Adding the terms up is intentional because the work runs concurrently: `threads` covers the copier/checksum reads, `write-threads` covers the applier's write workers, `flush-concurrency` covers the change feed's drain, and the two headroom terms keep the periodic work from queueing behind a saturated hot path:
+Internal to Spirit, the database pool is sized as `threads + write-threads + flush-concurrency + control-plane + checksum-off-pool`, then capped at [max-connections](#max-connections). Adding the terms up is intentional because the work runs concurrently: `threads` covers the copier/checksum reads, `write-threads` covers the applier's write workers, `flush-concurrency` covers the change feed's drain, and the two headroom terms keep the periodic work from queueing behind a saturated hot path:
 
 - **flush-concurrency** is the number of `REPLACE` batches a map-mode drain has in flight (`8` by default; derived from the instance under [autoscaling](#enable-experimental-autoscaling), up to `32`). A periodic flush overlaps the copy, so these really do add rather than borrow.
 - **control-plane** is `2 + one per changed table`, for the checkpoint `INSERT`, the replication-flush poll, and the per-table statistics updater — all of which run on the same pool as the copier and applier.
@@ -405,13 +405,13 @@ Chunk sizing is separate from worker count: the checksum's chunks are sized by t
 - Type: Integer
 - Default value: `128`
 
-Bounds the size of Spirit's main connection pool.
+A hard upper bound on the size of Spirit's main connection pool. It is a safety net and nothing more — a `min()` applied wherever the pool is sized, with no phase-awareness and nothing derived from it.
 
 The pool is otherwise sized by *adding up* every worker ceiling — read, write and flush, plus headroom (see [threads](#threads)) — so that no pool can ever starve another. That sum is a statement of what Spirit would use if nothing else were running. It is not Spirit's to spend: the connections come out of the server's `max_connections`, shared with the production workload. On a large instance under [autoscaling](#enable-experimental-autoscaling) the derived ceilings add up to well over a hundred, and when the server has less spare than that the migration does not slow down — it fails outright on `Error 1040: Too many connections`.
 
-Above the bound, write and flush workers contend for connections instead of each holding one. That costs throughput and nothing else: a worker waiting on connection checkout is a worker that will eventually run. The default is set high enough that no hand-configured [threads](#threads)/[write-threads](#write-threads) pair reaches it — it binds on the derived ceilings, which is where the problem is.
+Above the cap, workers contend for connections instead of each holding one. That costs throughput and nothing else: a worker waiting on connection checkout is a worker that will eventually run. The default is set high enough that no hand-configured [threads](#threads)/[write-threads](#write-threads) pair reaches it — it binds on the derived ceilings, which is where the problem is.
 
-One term does not give way. During the checksum, every transaction in the read pool pins a connection for the whole phase whether or not a worker has it checked out, so a pool below the read ceiling plus headroom would leave chunk dispatch with no connection to get — the phase would hang rather than run slower. A `max-connections` below that floor is logged and raised to it. The checksum also ratchets the pool `+2` for the two queries it runs outside its transaction pool (see **checksum-off-pool** under [threads](#threads)), so the effective ceiling is `max-connections + 2`.
+Because it is obeyed literally, a very low value can stall a migration rather than slow it. During the checksum, every transaction in the read pool pins a connection for the whole phase whether or not a worker has it checked out, so a pool below the read ceiling plus headroom leaves chunk dispatch with no connection to get. Spirit will not silently raise a limit it was given, so keep the value comfortably above `threads` plus a handful of connections for headroom. The default leaves an enormous margin.
 
 A negative value restores the unbounded behaviour. This is not recommended, and is available for programmatic callers that were relying on it.
 

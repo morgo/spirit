@@ -109,11 +109,10 @@ func TestFlushBoundsPreservesChangeDefaults(t *testing.T) {
 // with an interest in it is the assertion above.
 const minAdaptiveBatchSizeForTest = 50
 
-// warningRecorder keeps the WARN messages a Runner logs. The pool bound's
-// warnings are not decoration: a capped pool is a deliberate throughput trade,
-// and the log line is the only place an operator learns it was made. Warning
-// when nothing was capped is therefore its own small bug — see the exact-fit
-// case below.
+// warningRecorder keeps the WARN messages a Runner logs. The cap's warning is
+// not decoration: a capped pool is a deliberate throughput trade, and the log
+// line is the only place an operator learns it was made. Warning when nothing
+// was capped is therefore its own small bug — see the exact-fit case below.
 type warningRecorder struct {
 	mu   sync.Mutex
 	msgs []string
@@ -137,100 +136,86 @@ func (h *warningRecorder) warnings() []string {
 	return append([]string(nil), h.msgs...)
 }
 
-// newPoolSizingRunner builds the smallest Runner boundedPoolSize can be called
-// on: it reads only the change count (for controlPlaneConns), the bound, and
-// the logger it warns through.
-func newPoolSizingRunner(tables, maxConnections int) (*Runner, *warningRecorder) {
+// newPoolSizingRunner builds the smallest Runner capPoolSize can be called on:
+// it reads only the cap and the logger it warns through.
+func newPoolSizingRunner(maxConnections int) (*Runner, *warningRecorder) {
 	warnings := &warningRecorder{}
 	return &Runner{
-		changes:   make([]*tableChange, tables),
 		migration: &Migration{MaxConnections: maxConnections},
 		logger:    slog.New(warnings),
 	}, warnings
 }
 
-// TestBoundedPoolSize covers the bound itself. The unbounded sum is every
-// worker ceiling added together so no pool can starve another, which is the
-// right sizing right up until the server cannot spare it — at which point the
-// migration does not slow down, it dies on Error 1040. See boundedPoolSize.
-func TestBoundedPoolSize(t *testing.T) {
-	// One change table, so reserved is controlPlaneConns (3) + the two
-	// off-pool checksum connections = 5 in every case below.
-	const reserved = 3 + checksumOffPoolConns
-
-	t.Run("under the bound the ceilings pass through untouched", func(t *testing.T) {
-		r, warnings := newPoolSizingRunner(1, 128)
-		require.Equal(t, 4+8+8+reserved, r.boundedPoolSize(4, 8, 8))
+// TestCapPoolSize covers the cap itself. Everything that sizes the pool sizes
+// it for a guarantee — every worker ceiling added together, so no pool can
+// starve another — which is the right sizing right up until the server cannot
+// spare it, at which point the migration does not slow down, it dies on
+// Error 1040. See capPoolSize.
+//
+// The cap is deliberately just min(): no floor, no phase-awareness, nothing
+// derived. A safety net that reasons about what it is catching is a safety net
+// that can be wrong about it.
+func TestCapPoolSize(t *testing.T) {
+	t.Run("under the cap the size passes through untouched", func(t *testing.T) {
+		r, warnings := newPoolSizingRunner(128)
+		require.Equal(t, 25, r.capPoolSize(25))
 		require.Empty(t, warnings.warnings())
 	})
 
-	t.Run("a sum equal to the bound is not capped", func(t *testing.T) {
-		// The comparison is <=, not <: a sum that exactly fits gets to keep
-		// every guaranteed connection. Off-by-one here would silently push the
-		// commonest hand-configured shapes into contention.
+	t.Run("a size equal to the cap is not capped", func(t *testing.T) {
+		// The comparison is <=, not <: a size that exactly fits gets to keep
+		// every guaranteed connection.
 		//
-		// At exactly the bound the two branches happen to return the same
-		// number, so the warning is the only thing that can tell them apart —
-		// and a migration told its pool was capped when it was not is a
-		// migration whose operator goes looking for throughput that was never
-		// taken away.
-		r, warnings := newPoolSizingRunner(1, 16+32+32+reserved)
-		require.Equal(t, 16+32+32+reserved, r.boundedPoolSize(16, 32, 32))
+		// At exactly the cap both branches return the same number, so the
+		// warning is the only thing that can tell them apart — and a migration
+		// told its pool was capped when it was not is a migration whose operator
+		// goes looking for throughput that was never taken away.
+		r, warnings := newPoolSizingRunner(128)
+		require.Equal(t, 128, r.capPoolSize(128))
 		require.Empty(t, warnings.warnings(), "an exact fit must not report contention")
 	})
 
 	t.Run("the derived ceilings that produced Error 1040 are capped", func(t *testing.T) {
 		// A large Aurora instance: read ceiling half the box, write ceiling
-		// twice the start, flush at autoscale.MaxFlushConcurrency. 133 wanted
-		// against a default bound of 128.
-		r, warnings := newPoolSizingRunner(1, defaultMaxConnections)
-		require.Equal(t, defaultMaxConnections, r.boundedPoolSize(32, 64, autoscale.MaxFlushConcurrency),
-			"a bound that binds must return the bound exactly, not the sum")
+		// twice the start, flush at autoscale.MaxFlushConcurrency, plus the
+		// reserves. Comfortably past the default cap.
+		want := 32 + 64 + autoscale.MaxFlushConcurrency + 3 + checksumOffPoolConns
+		require.Greater(t, want, defaultMaxConnections, "or this case proves nothing")
+
+		r, warnings := newPoolSizingRunner(defaultMaxConnections)
+		require.Equal(t, defaultMaxConnections, r.capPoolSize(want),
+			"a cap that binds must return the cap exactly, not the size asked for")
 		require.Len(t, warnings.warnings(), 1, "capping is a throughput trade and must be said out loud")
 	})
 
-	t.Run("more change tables raise the reserve, not the bound", func(t *testing.T) {
-		// controlPlaneConns scales with the change count, so a multi-table
-		// migration wants more; the bound is still the bound.
-		r, _ := newPoolSizingRunner(5, 64)
-		require.Equal(t, 64, r.boundedPoolSize(32, 64, 32))
+	t.Run("a cap below what the checksum pins is still obeyed", func(t *testing.T) {
+		// The floor this used to apply is gone on purpose. Below the read
+		// ceiling plus reserves the checksum phase will stall — every
+		// transaction in its read pool holds a connection for the whole phase —
+		// but that is the operator's number to get right. Silently raising a
+		// limit spirit was handed is the worse failure, and the default sits far
+		// above anything that could trip it.
+		r, warnings := newPoolSizingRunner(10)
+		require.Equal(t, 10, r.capPoolSize(32+64+32+5))
+		require.Len(t, warnings.warnings(), 1)
 	})
 
-	t.Run("a negative bound restores the pre-cap behaviour", func(t *testing.T) {
+	t.Run("a negative cap restores the pre-cap behaviour", func(t *testing.T) {
 		// Programmatic callers only: normalizeOptions turns a zero into the
 		// default, so unbounded has to be asked for explicitly.
-		r, warnings := newPoolSizingRunner(1, -1)
-		require.Equal(t, 32+64+32+reserved, r.boundedPoolSize(32, 64, 32))
+		r, warnings := newPoolSizingRunner(-1)
+		require.Equal(t, 133, r.capPoolSize(133))
 		require.Empty(t, warnings.warnings())
 	})
 
-	t.Run("an unfilled bound is unbounded rather than zero", func(t *testing.T) {
+	t.Run("an unfilled cap is unbounded rather than zero", func(t *testing.T) {
 		// normalizeOptions is what turns a zero into the default, and not every
 		// Runner is built through it (tests and embedders both construct
 		// Migration literals). Reading a literal zero as "cap the pool at zero
 		// connections" would deadlock the migration instantly, so it is read as
-		// "no bound set".
-		r, _ := newPoolSizingRunner(1, 0)
-		require.Equal(t, 32+64+32+reserved, r.boundedPoolSize(32, 64, 32))
-	})
-
-	t.Run("the bound is floored at what the checksum pins", func(t *testing.T) {
-		// Below maxRead+reserved the checksum phase does not get slower, it
-		// hangs: every transaction in the read pool holds its connection for
-		// the whole phase, so chunk dispatch would have nothing left to check
-		// out. Refusing to hang beats honouring the number.
-		r, warnings := newPoolSizingRunner(1, 10)
-		require.Equal(t, 32+reserved, r.boundedPoolSize(32, 64, 32),
-			"a bound below the read pin must be raised to it")
-		require.Len(t, warnings.warnings(), 1, "quietly ignoring the configured number is worse than the number")
-	})
-
-	t.Run("the floor is the read pin exactly, and write and flush get nothing", func(t *testing.T) {
-		// The floor covers the phase that cannot queue and not one connection
-		// more — write and flush workers queue there, which is the trade the
-		// bound is asking for in the first place.
-		r, _ := newPoolSizingRunner(1, 8+reserved-1)
-		require.Equal(t, 8+reserved, r.boundedPoolSize(8, 64, 32))
+		// "no cap set".
+		r, _ := newPoolSizingRunner(0)
+		require.Equal(t, 133, r.capPoolSize(133))
 	})
 }
 

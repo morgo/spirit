@@ -48,20 +48,22 @@ type Migration struct {
 	Threads      int     `name:"threads" help:"Number of concurrent threads for copy and checksum tasks. Ignored when --enable-experimental-autoscaling engages" optional:"" default:"4"`
 	WriteThreads int     `name:"write-threads" help:"Number of concurrent apply (write) threads. Ignored when --enable-experimental-autoscaling engages" optional:"" default:"4"`
 
-	// MaxConnections bounds the main connection pool. It exists because the
-	// pool is otherwise sized by *adding up* every worker ceiling — read,
-	// write, and change-feed flush — so that no pool can ever starve another.
-	// That sum is spirit's demand, and it is not spirit's to spend: the budget
-	// it draws on is the server's max_connections, shared with the production
-	// workload. On a large instance the derived ceilings add up to well over a
-	// hundred connections, and when the server has less spare than that the
-	// copy does not slow down, it dies on `Error 1040: Too many connections`.
+	// MaxConnections is a hard upper bound on the main connection pool — a
+	// loose safety net, applied as a min() wherever the pool is sized and
+	// nothing else. It exists because the pool is otherwise sized by *adding
+	// up* every worker ceiling — read, write, and change-feed flush — so that
+	// no pool can ever starve another. That sum is spirit's demand, and it is
+	// not spirit's to spend: the budget it draws on is the server's
+	// max_connections, shared with the production workload. On a large instance
+	// the derived ceilings add up to well over a hundred connections, and when
+	// the server has less spare than that the copy does not slow down, it dies
+	// on `Error 1040: Too many connections`.
 	//
-	// Above this bound the pools contend for connections instead of each
-	// holding its own, which costs throughput and nothing else. The default is
-	// set high enough that no hand-configured thread count reaches it — it
-	// binds on the derived ceilings, which is where the problem is. See
-	// Runner.boundedPoolSize for the one term that cannot give way.
+	// Above this cap the pools contend for connections instead of each holding
+	// its own, which costs throughput and nothing else. The default is set high
+	// enough that no hand-configured thread count reaches it — it binds on the
+	// derived ceilings, which is where the problem is. See Runner.capPoolSize,
+	// including the note on setting it low enough to stall the checksum.
 	//
 	// Zero means "use the default" (normalizeOptions fills it in), matching
 	// Threads and WriteThreads. A negative value means unbounded, for callers
