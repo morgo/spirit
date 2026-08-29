@@ -27,7 +27,7 @@ The shape is "gentle in the normal regime, abrupt only in emergencies". The full
 
   Increases and decreases hold independent cooldowns. A decrease also arms the increase cooldown (so a shed is not immediately undone by a signal that has not yet reflected the cut), but not the reverse: a fresh overload must be answerable at once, even right after the increase that likely caused it.
 
-- **`Ceiling`** resolves a scalable pool's upper bound: the start value when scaling is off, twice it when on. The migration runner sizes the connection pool from the same number the phases cap themselves with, so a scaled-up pool never starves on connections.
+- **`Ceiling`** resolves a scalable pool's upper bound: the start value when scaling is off, twice it when on. This bounds threads, not connections — the connection pool is `--max-connections` and does not grow to meet a ceiling, so workers scaled past it queue on checkout instead of each being guaranteed a connection.
 
 - **`ReadBounds`** derives the read side's starting size and ceiling from the instance vCPU count — `max(2, ceil((vCPUs - VCPUReserve) / 4))` up to `ceil(vCPUs / 2)`, so a `4xlarge` reads with 4 workers and may grow to 8, a `24xlarge` with 24 growing to 48. This is where the asymmetry with the write side lives: write threads mostly sit parked on a redo-log flush, so a count above the vCPU count is not oversubscription (and the redo-aware signal excludes those waiters), whereas a read thread scanning an in-buffer-pool table is pure CPU and does compete with the application for cores. The read side therefore starts at about a quarter of the instance and earns its way up through the band.
 

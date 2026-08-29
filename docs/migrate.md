@@ -411,7 +411,7 @@ Chunk sizing is separate from worker count: the checksum's chunks are sized by t
 
 The size of Spirit's main connection pool. It is set once, verbatim, and never recomputed: no phase ratchets it, and no thread ceiling derived from the instance raises it.
 
-That is deliberate, because the number has to be one an operator can budget against. Spirit's connections come out of the server's `max_connections`, shared with the production workload, and if the migration user has a `max_user_connections` the pool has to be a value you can subtract — not a sum with a ratchet in the middle of it. It used to be the latter: a seed at startup, a re-derivation once the autoscaling ceilings were known, and a `+2` the checksum added when it began. Every one of those was a chance to step over the limit.
+That is deliberate, because the number has to be one an operator can budget against. Spirit's connections come out of the server's `max_connections`, shared with the production workload, and if the migration user has a `max_user_connections` the pool has to be a value you can subtract — not a sum that moves when Spirit reaches a particular phase.
 
 Everything shares that one pool — copier reads, applier writes, the change feed's drain, and the periodic control-plane queries (see [threads](#threads) for the full list). Their ceilings can add up to more than the pool, and on a large instance under [autoscaling](#enable-experimental-autoscaling) they will. Above the pool size those workers contend for connections instead of each being guaranteed one, which costs throughput and nothing else: a worker waiting on connection checkout is a worker that will eventually run. The alternative on a busy server is `Error 1040: Too many connections`, which is not a slower migration but a dead one.
 
@@ -425,9 +425,14 @@ For a full accounting against `max_user_connections`, Spirit also opens two conn
 
 So the worst case on the target is `max-connections + 2`.
 
-Values that cannot work are rejected at startup rather than discovered mid-migration. The floor is `5`, which the cutover needs for its `LOCK TABLES` connection, its `RENAME TABLE` connection and the flush threads; and the value must also be at least `threads + 2`, because the checksum's read transactions each pin a connection for the whole phase whether or not a worker has one checked out, leaving nothing for chunk dispatch to check out. Both are hard stops: below them a migration does not run slower, it stalls holding a lock or an open read view.
+Values that cannot work are rejected at startup rather than discovered mid-migration:
 
-A negative value is rejected. It used to mean "unbounded"; a pool that Spirit cannot state a size for is exactly what this flag exists to remove.
+- **At least `5`**, which the cutover needs for its `LOCK TABLES` connection, its `RENAME TABLE` connection and the flush threads. This is also the one case where Spirit will exceed a configured pool size: a `CutOver` handed a smaller pool raises it to `5`, because the alternative is a cutover that cannot run.
+- **At least `threads + 2`**, because the checksum's read transactions each pin a connection for the whole phase whether or not a worker has one checked out, and its chunk repair and boundary prefetch run outside that pool. A pool that cannot hold both leaves chunk dispatch with nothing to check out.
+
+Both are hard stops rather than slow paths: below them a migration does not run slower, it stalls holding a table lock or an open read view.
+
+A negative value is rejected. A pool whose size Spirit cannot state is what this flag exists to remove.
 
 ### max-commit-latency
 
