@@ -223,46 +223,6 @@ func (r *Runner) controlPlaneConns() int {
 	return len(r.changes) + 2
 }
 
-// capPoolSize clamps a main-pool size to Migration.MaxConnections. Every place
-// that sizes r.db goes through it, so the flag is an upper bound on the pool for
-// the whole migration rather than for one phase of it.
-//
-// Everything that sizes the pool sizes it for a guarantee: every ceiling added
-// together, so no pool can ever starve another. As a statement of what spirit
-// would use if nothing else were running that is correct; as a claim on the
-// server it is not spirit's to make. The connections come out of the server's
-// max_connections, shared with the production workload, and on a large instance
-// the derived ceilings add up to well over a hundred. When the server has less
-// spare than that the migration does not degrade — it fails outright on
-// `Error 1040: Too many connections`, which is worse than any amount of queueing.
-//
-// So this is a loose upper bound and nothing more: a number and a min(). It does
-// not ask which pool wants the connections or which phase is running, it does
-// not recompute anything, and it never hands back more than it was asked for.
-// Above the bound the workers give way and queue on the pool instead of each
-// holding a connection, which trades throughput for survival — a worker waiting
-// on a connection is a worker that will eventually run.
-//
-// The default is far above anything spirit derives for itself, so this is inert
-// unless an operator sets it deliberately. Set very low it is still obeyed, and
-// there is a floor below which that hurts: the checksum's read transactions pin
-// their connections for the whole phase whether or not a worker has one checked
-// out (see checksumOffPoolConns), so a pool under the read ceiling plus those
-// reserves leaves chunk dispatch nothing to check out and the phase stalls. That
-// is the operator's number to get right — see the flag docs in docs/migrate.md.
-// A safety net that quietly ignored the limit it was handed would be the worse
-// failure.
-func (r *Runner) capPoolSize(want int) int {
-	limit := r.migration.MaxConnections
-	if limit <= 0 || want <= limit {
-		return want // unbounded, or it already fits
-	}
-	r.logger.Warn("connection pool capped by --max-connections; workers will contend for connections",
-		"max_connections", limit,
-		"requested", want)
-	return limit
-}
-
 func (r *Runner) SetMetricsSink(sink metrics.Sink) {
 	r.metricsSink = sink
 }
@@ -333,31 +293,28 @@ func (r *Runner) Run(ctx context.Context) (retErr error) {
 	// Map TLS configuration from migration to dbConfig
 	r.dbConfig.TLSMode = r.migration.TLSMode
 	r.dbConfig.TLSCertificatePath = r.migration.TLSCertificatePath
-	// Size the connection pool as:
+	// The pool is --max-connections, verbatim and once. Nothing recomputes it,
+	// no phase ratchets it, and no ceiling derived later raises it.
 	//
-	//	pool = threads + write-threads + controlPlaneConns() + checksumOffPoolConns
+	// It used to be a sum of every worker ceiling — read, write, flush, plus
+	// headroom for the periodic control-plane queries — resized again whenever
+	// one of those ceilings moved. That sum stated what spirit would use if it
+	// were the only thing on the server, which it never is: the connections come
+	// out of the server's max_connections, shared with the production workload,
+	// and on a large instance the derived ceilings add up to well over a hundred.
+	// A migration that wants more than the server can spare does not slow down,
+	// it dies on `Error 1040: Too many connections`.
 	//
-	//	- threads              copier + checksum read concurrency
-	//	- write-threads        replication-applier write concurrency
-	//	- controlPlaneConns()  headroom for the periodic control-plane queries
-	//	                       that also run on the main pool (checkpoint,
-	//	                       replication-flush poll, per-table stats), so they
-	//	                       don't serialize behind a single spare connection
-	//	                       once the copier + applier saturate the budget.
-	//	- checksumOffPoolConns the two queries the checksum runs outside its
-	//	                       fully-checked-out transaction pool (chunk repair
-	//	                       and chunker prefetch).
+	// A single number is also the only shape an operator can budget against. If
+	// the migration user has a max_user_connections, the pool has to be a value
+	// they can subtract, not a sum with a ratchet in the middle of it — see the
+	// note on the other pools in the max-connections docs.
 	//
-	// This seeds the pool from the configured thread counts. Autoscaling can
-	// replace both counts (and raise their ceilings) once there is a connection
-	// to probe the instance with, so setupCopierCheckerAndReplClient sizes the
-	// pool finally there. After that point it only ever grows: later phases
-	// (checksum, cutover) ratchet it further but never shrink it.
-	//
-	// Every one of those sizings, this one included, is clamped by
-	// --max-connections; see capPoolSize.
-	r.dbConfig.MaxOpenConnections = r.capPoolSize(
-		r.migration.Threads + r.migration.WriteThreads + r.controlPlaneConns() + checksumOffPoolConns)
+	// Above it the workers contend for connections instead of each holding one,
+	// which costs throughput and nothing else: a worker waiting on checkout is a
+	// worker that will eventually run. Below minPoolSize the migration cannot
+	// finish at all, which Migration.Validate rejects up front.
+	r.dbConfig.MaxOpenConnections = r.migration.MaxConnections
 	r.db, err = dbconn.New(r.dsn(), r.dbConfig)
 	if err != nil {
 		return fmt.Errorf("failed to connect to main database (DSN: %s): %w", dbconn.RedactDSN(r.dsn()), err)
@@ -912,44 +869,6 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context, resumePosi
 	if maxRead == 0 {
 		maxRead = copier.ResolveMaxReadThreads(r.migration.Threads, false)
 	}
-	// Finalize the pool now that every ceiling is known, clamped by
-	// --max-connections (see capPoolSize). Sizing for the ceilings ensures a
-	// scaled-up applier or reader pool never starves on connections.
-	//
-	// This resizes even when autoscaling never engaged. Run seeded the pool from
-	// the configured thread counts with no flush term at all, and the sum below
-	// adds one, plus a write ceiling that is 2x the configured count on any
-	// target. Autoscaling and the cap change how far the pool moves from that
-	// seed, not whether it moves.
-	//
-	// The maxRead term covers the checksum as well as the copy: the checksum's
-	// transaction pool is sized to the same ceiling (see the checker's
-	// AutoscaleConfig below) and the copier's readers have finished by then, so
-	// the two phases reuse one allocation rather than each needing their own.
-	//
-	// The flush term is the drain's concurrent REPLACE statements. It was
-	// missing from this sum entirely before the derivation above existed, which
-	// meant the (then fixed) 8 concurrent flush REPLACEs were borrowing from the
-	// copier's and control plane's budget: a periodic flush overlaps the copy,
-	// so the two really do add. That was survivable at 8 and would not be at 32,
-	// so it is fixed here rather than left as a separate change — raising the
-	// concurrency without this would take the throughput straight back out
-	// through connection queueing.
-	maxFlush := flushConcurrency
-	if maxFlush == 0 {
-		maxFlush = change.DefaultFlushConcurrency // no derivation: the default applies
-	}
-	want := maxRead + maxWrite + maxFlush + r.controlPlaneConns() + checksumOffPoolConns
-	if poolSize := r.capPoolSize(want); poolSize != r.dbConfig.MaxOpenConnections {
-		// Unlike before the cap existed this may also *shrink* the pool: Run
-		// sized it from the configured thread counts, and a cap below that has
-		// to be able to take it back down. database/sql handles a lowered
-		// SetMaxOpenConns by closing idle connections and making the next
-		// checkout wait, so in-flight work finishes rather than failing.
-		r.dbConfig.MaxOpenConnections = poolSize
-		dbconn.SetPoolSize(r.db, poolSize)
-	}
-
 	r.checkpointTable = table.NewTableInfo(r.db, r.changes[0].table.SchemaName, r.checkpointTableName())
 
 	// We always create an applier — the replication client requires one to
@@ -1841,23 +1760,18 @@ func (r *Runner) initChunkers() error {
 // checksum creates the checksum which opens the read view
 func (r *Runner) checksum(ctx context.Context) error {
 	if err := r.status.Do(status.Checksum, func() error {
-		// The checksum keeps the pool threads open, so we need to extend
-		// by more than +1 on threads as we did previously. We have:
-		// - background flushing
-		// - checkpoint thread
-		// - checksum "replaceChunk" DB connections
-		// Handle a case just in the tests not having a dbConfig.
+		// No pool resize here. This used to ratchet +2 for background flushing,
+		// the checkpoint thread and replaceChunk's off-pool connections, back
+		// when the pool was sized to the copy phase's needs and the checksum's
+		// were extra. The pool is now --max-connections for the whole migration
+		// (see the MaxOpenConnections doc in (*Runner).Run), so a phase that
+		// stepped over it would be the one thing that made the number unusable
+		// as a budget: an operator with a max_user_connections cannot subtract a
+		// value that grows when spirit reaches a particular phase.
 		//
-		// Not restored when checksum completes — by then we are past the copy
-		// phase, so the +1 backpressure between copier and applier no longer
-		// applies, and the only thing left is cutover, which itself wants at
-		// least 5 connections. Pool size grows monotonically; see the
-		// MaxOpenConnections doc in (*Runner).Run.
-		//
-		// Clamped like every other sizing: --max-connections is an upper bound
-		// on the pool, not on one phase of it, so this ratchet does not get to
-		// step over it. At the cap the call is a no-op.
-		dbconn.SetPoolSize(r.db, r.capPoolSize(r.dbConfig.MaxOpenConnections+2))
+		// The checksum's own needs did not go away — they are why
+		// Migration.Validate refuses a --max-connections that cannot hold the
+		// read transactions it pins for the whole phase.
 
 		// Run the checksum with internal retry logic.
 		//

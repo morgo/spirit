@@ -25,9 +25,9 @@ const defaultWriteThreads = 4
 // defaultMaxConnections must match the `default:"128"` kong tag on
 // Migration.MaxConnections, for the same reason defaultWriteThreads does: a
 // programmatic caller that leaves the field unset must land where the CLI does.
-// This one matters more than most, because the bound only earns its keep on the
-// large instances where the derived ceilings overflow — and those migrations are
-// as likely to be driven by an embedding orchestrator as by the CLI.
+// This one matters more than most, because it is the pool size itself rather
+// than a knob on one: a programmatic caller that landed somewhere else would be
+// running with a differently-sized pool than the same migration from the CLI.
 const defaultMaxConnections = 128
 
 var (
@@ -48,27 +48,32 @@ type Migration struct {
 	Threads      int     `name:"threads" help:"Number of concurrent threads for copy and checksum tasks. Ignored when --enable-experimental-autoscaling engages" optional:"" default:"4"`
 	WriteThreads int     `name:"write-threads" help:"Number of concurrent apply (write) threads. Ignored when --enable-experimental-autoscaling engages" optional:"" default:"4"`
 
-	// MaxConnections is a hard upper bound on the main connection pool — a
-	// loose safety net, applied as a min() wherever the pool is sized and
-	// nothing else. It exists because the pool is otherwise sized by *adding
-	// up* every worker ceiling — read, write, and change-feed flush — so that
-	// no pool can ever starve another. That sum is spirit's demand, and it is
-	// not spirit's to spend: the budget it draws on is the server's
-	// max_connections, shared with the production workload. On a large instance
-	// the derived ceilings add up to well over a hundred connections, and when
-	// the server has less spare than that the copy does not slow down, it dies
-	// on `Error 1040: Too many connections`.
+	// MaxConnections is the size of the main connection pool, set verbatim and
+	// never recomputed (see the MaxOpenConnections assignment in Runner.Run).
 	//
-	// Above this cap the pools contend for connections instead of each holding
-	// its own, which costs throughput and nothing else. The default is set high
-	// enough that no hand-configured thread count reaches it — it binds on the
-	// derived ceilings, which is where the problem is. See Runner.capPoolSize,
-	// including the note on setting it low enough to stall the checksum.
+	// It exists because the pool used to be a sum of every worker ceiling —
+	// read, write, and change-feed flush, plus headroom — resized again whenever
+	// one of those ceilings moved, and ratcheted a further +2 when the checksum
+	// began. That sum was spirit's demand, and it is not spirit's to spend: the
+	// budget it draws on is the server's max_connections, shared with the
+	// production workload. On a large instance the derived ceilings add up to
+	// well over a hundred connections, and when the server has less spare than
+	// that the copy does not slow down, it dies on `Error 1040: Too many
+	// connections`.
+	//
+	// A single number is also the only shape an operator can budget against.
+	// With a max_user_connections on the migration user, a pool that grows when
+	// spirit reaches a particular phase is not something you can subtract.
+	//
+	// The ceilings still exist — they bound how far the copier scales its own
+	// workers — and they can exceed this. When they do, the workers contend for
+	// connections instead of each being guaranteed one, which costs throughput
+	// and nothing else.
 	//
 	// Zero means "use the default" (normalizeOptions fills it in), matching
-	// Threads and WriteThreads. A negative value means unbounded, for callers
-	// that want the pre-cap behaviour back.
-	MaxConnections int `name:"max-connections" help:"Maximum size of the main connection pool. Read, write and flush workers contend for connections above this rather than each being guaranteed one" optional:"" default:"128"`
+	// Threads and WriteThreads. Negative is rejected by Validate, as is any
+	// value too small for the migration to finish on; see minPoolSize.
+	MaxConnections int `name:"max-connections" help:"Size of the main connection pool. Copier, applier and flush workers all share it, and contend for connections rather than each being guaranteed one" optional:"" default:"128"`
 
 	// EnableExperimentalAutoscaling turns on dynamic thread scaling driven by
 	// throttler feedback. When it engages (an Aurora target with at least
@@ -116,10 +121,28 @@ type Migration struct {
 	useTestThrottler bool
 }
 
+// minPoolSize is the smallest --max-connections a migration can complete on.
+//
+// The cutover sets the number: it needs the LOCK TABLES connection, the RENAME
+// TABLE connection and the flush threads, and unlike every other phase it
+// cannot trade connections for time — below the minimum it does not run slower,
+// it cannot run. See CutOver.Run, which holds the same number and will raise a
+// pool that arrives under it.
+//
+// Nothing else gets a say. The copy, the checksum and the drain all queue on a
+// small pool and finish eventually, so a low --max-connections is the operator
+// asking for a slow migration, which is theirs to ask for.
+const minPoolSize = 5
+
 // Validate is called by Kong after parsing to reject invalid flag values.
 // Zero values mean "use the default" (normalizeOptions fills them in), so they
 // are not rejected here; only explicitly-negative or otherwise invalid values
-// are caught. There are currently no cross-flag combination checks.
+// are caught.
+//
+// The cross-flag check on MaxConnections is the exception, and it is here
+// because it has nowhere else to be: the pool is set to that number verbatim
+// and never recomputed, so a number too small to work is a migration that
+// stalls somewhere in the middle rather than one that fails at startup.
 func (m *Migration) Validate() error {
 	if m.Threads < 0 {
 		return fmt.Errorf("--threads must be non-negative, got %d", m.Threads)
@@ -132,6 +155,24 @@ func (m *Migration) Validate() error {
 	}
 	if m.CheckpointMaxAge < 0 {
 		return fmt.Errorf("--checkpoint-max-age must be non-negative, got %s", m.CheckpointMaxAge)
+	}
+	if m.MaxConnections < 0 {
+		return fmt.Errorf("--max-connections must be non-negative, got %d", m.MaxConnections)
+	}
+	if m.MaxConnections > 0 {
+		if m.MaxConnections < minPoolSize {
+			return fmt.Errorf("--max-connections must be at least %d for the cutover to run, got %d",
+				minPoolSize, m.MaxConnections)
+		}
+		// The checksum's read transactions each pin a connection for the whole
+		// phase whether or not a worker has one checked out, and the chunk
+		// repair and boundary prefetch run outside that pool (see
+		// checksumOffPoolConns). A pool that cannot hold both leaves chunk
+		// dispatch with nothing to check out, which is a stall, not slowness.
+		if pinned := m.Threads + checksumOffPoolConns; m.MaxConnections < pinned {
+			return fmt.Errorf("--max-connections (%d) is below what the checksum holds open for the whole phase: %d read transactions plus %d off-pool queries; use at least %d, or lower --threads",
+				m.MaxConnections, m.Threads, checksumOffPoolConns, pinned)
+		}
 	}
 	return nil
 }

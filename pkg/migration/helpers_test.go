@@ -107,6 +107,15 @@ func WithWriteThreads(n int) RunnerOption {
 	}
 }
 
+// WithMaxConnections sets the size of the main connection pool. It is the pool
+// size verbatim, not a ceiling on a computed one — see the MaxOpenConnections
+// assignment in (*Runner).Run.
+func WithMaxConnections(n int) RunnerOption {
+	return func(m *Migration) {
+		m.MaxConnections = n
+	}
+}
+
 // WithAutoscaling enables the experimental thread autoscaler. Note that it only
 // engages against an Aurora target, and when it does it overrides both Threads
 // and WriteThreads (see setupCopierCheckerAndReplClient).
