@@ -117,19 +117,21 @@ var acTick = autoscale.Tick
 
 // ResolveMaxReadThreads resolves the upper bound the read-worker pool may
 // scale to: the read-side mirror of throttler.ResolveMaxWriteThreads, and like
-// it a thin naming of autoscale.Ceiling. Exported so the migration runner sizes
-// the connection pool from the same formula the copier caps the pool with —
-// readers scaled above the connection budget would just queue on the sql.DB
-// pool, silently buying no extra parallelism.
+// it a thin naming of autoscale.Ceiling. Exported because the migration runner
+// resolves this ceiling itself when it has no instance to derive one from, and
+// passes it back through CopierConfig.
+//
+// It bounds threads, not connections. Readers scaled past the size of the
+// sql.DB pool queue on checkout and buy no extra parallelism — the pool is
+// --max-connections and does not grow to meet a raised ceiling.
 func ResolveMaxReadThreads(start int, autoscaleEnabled bool) int {
 	return autoscale.Ceiling(start, autoscaleEnabled)
 }
 
 // resolveReadCeiling picks the ceiling for the read-worker pool. A positive
 // configured value wins: the migration runner derives one from the instance
-// (autoscale.ReadBounds) and sizes its connection pool to match, so a scaled-up
-// pool never starves on connections. Callers with no view of the instance leave
-// it zero and get the Concurrency-relative formula instead. Either way the
+// (autoscale.ReadBounds) and passes it in. Callers with no view of the instance
+// leave it zero and get the Concurrency-relative formula instead. Either way the
 // ceiling is floored at the starting count, since a pool that begins above its
 // cap cannot be controlled.
 func resolveReadCeiling(configured, concurrency int) int {

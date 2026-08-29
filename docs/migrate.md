@@ -22,6 +22,7 @@ spirit migrate --host mydb:3306 --username root --password secret \
 - [host](#host)
 - [lock-wait-timeout](#lock-wait-timeout)
 - [max-commit-latency](#max-commit-latency)
+- [max-connections](#max-connections)
 - [password](#password)
 - [replica-dsn](#replica-dsn)
   - [Replica TLS Behavior](#replica-tls-behavior)
@@ -296,10 +297,20 @@ The write side of the copy — the applier's write workers — is controlled sep
 
 This flag is **ignored** when [enable-experimental-autoscaling](#enable-experimental-autoscaling) engages: the autoscaler sizes both pools from the instance instead.
 
-Internal to Spirit, the database pool is sized as `threads + write-threads + control-plane + checksum-off-pool`. This is intentional because copy writes run concurrently to copy reads and checksums: `threads` covers the copier/checksum work and `write-threads` covers the applier's write workers, while the two headroom terms keep the periodic work from queueing behind a saturated hot path:
+`threads` does not size the connection pool. The pool is [max-connections](#max-connections) and nothing else, and everything below shares it concurrently:
 
-- **control-plane** is `2 + one per changed table`, for the checkpoint `INSERT`, the replication-flush poll, and the per-table statistics updater — all of which run on the same pool as the copier and applier. The replication flush itself has no dedicated per-connection budget: a map-mode drain applies up to `8` batches concurrently (see [write-threads](#write-threads)) from the shared pool, borrowing capacity the copier is not using. Worst case — a drain overlapping a saturated copy — the flush batches briefly queue on connection checkout; during post-copy catch-up, when only the flush is running, the idle copier's share of the pool is available to it.
-- **checksum-off-pool** is a fixed `2`, for the two things the checksum does outside its `REPEATABLE READ` transaction pool: repairing a mismatched chunk, and the chunker's `LIMIT 1 OFFSET n` boundary prefetch. Both are serialized, so one connection each. The transaction pool itself is provisioned separately and every one of its transactions pins a connection for the whole phase, so there is no incidental slack for these to borrow.
+- **the copier and checksum reads**, `threads` of them.
+- **the applier's write workers**, [write-threads](#write-threads) of them, or up to twice that under [autoscaling](#enable-experimental-autoscaling).
+- **the change feed's drain**, `8` concurrent `REPLACE` batches by default and up to `32` under autoscaling. A periodic flush overlaps the copy, so these really do add rather than borrow.
+- **the control plane**, `2 + one per changed table`: the checkpoint `INSERT`, the replication-flush poll, and the per-table statistics updater.
+- **the checksum's off-pool queries**, a fixed `2`: repairing a mismatched chunk, and the chunker's `LIMIT 1 OFFSET n` boundary prefetch. Both are serialized, so one connection each. The checksum's `REPEATABLE READ` transaction pool is separate, and every one of its transactions pins a connection for the whole phase, so there is no incidental slack for these two to borrow.
+
+Added up, those can exceed `max-connections` on a large instance under autoscaling. For the copier and the applier that is expected and harmless: they queue on connection checkout instead of each being guaranteed one, which costs throughput and nothing else — a worker waiting on checkout is a worker that will eventually run, and the work it was going to do is still there when it does.
+
+Two of them are not like that, and both are protected:
+
+- **Read workers**, because the checksum pins a connection per transaction for a whole phase. Bounds the pool cannot hold would block on checkout with a table lock held, so `threads` is validated against the pool at startup and any ceiling derived later is fitted to it.
+- **The drain**, because its work expires. A flush batch queueing behind a saturated copy is spending the binlog retention window, and running out of that window ends the migration rather than slowing it. The drain therefore keeps a reserved connection through the checksum instead of contending for one.
 
 Throttler polling is not counted: it runs on a dedicated monitoring pool.
 
@@ -368,7 +379,9 @@ This exists because the sizes above are derived entirely from the target, on the
 
 A `--threads`/`--write-threads` you set yourself is *not* capped — an explicitly named number is yours — but the same mismatch is warned about once.
 
-The connection pool is pre-sized for every ceiling, so scaled-up threads never starve on connections. When budgeting proxy or server connection limits, assume up to `ceil(vCPUs / 2)` read connections, `2 × (vCPUs - 2)` write connections, and the flush concurrency from the table above (up to 32) rather than the fixed-pool formula above. The flush term is a recent addition to that budget: the change feed has always run concurrent `REPLACE` statements on this pool, and a periodic flush overlaps the copy, but until the flush width became derivable those connections were borrowed from the copier's share instead of being provisioned. (One exception: when the threads signal is running in its redo-aware mode *and* [max-commit-latency](#max-commit-latency) is disabled with `--max-commit-latency=0`, the write-side upper bound stays at the starting value — see below.)
+There is a second cap, on the target side: these are thread ceilings, not connections. The connection pool is [max-connections](#max-connections) regardless, and from `12xlarge` upward the ceilings above add up to more than its default of `128` (at 48 vCPUs: `92 + 24 + 32` plus headroom). Past that point the scaled-up workers contend for connections rather than each being guaranteed one — which is the intended behaviour, since the alternative on a busy server is `Error 1040: Too many connections`. Raise `--max-connections` if the server has the headroom to give.
+
+When budgeting proxy or server connection limits, use `max-connections` and do not try to reconstruct it from the ceilings: it is one number for the whole migration, by design. (One exception to the ceilings themselves: when the threads signal is running in its redo-aware mode *and* [max-commit-latency](#max-commit-latency) is disabled with `--max-commit-latency=0`, the write-side upper bound stays at the starting value — see below.)
 
 One consequence to be aware of: on a well-provisioned target where the writers always keep pace, the queue is drained the instant chunks arrive — which is exactly what "read-limited" looks like — so the read pool tends to ramp well above its starting size early in the copy. That ramp is additive (one thread per ~15s), so on a large instance the read side takes a few minutes to reach its ceiling; overall load remains governed by the utilization band and, ultimately, the hard-stop throttle.
 
@@ -395,6 +408,38 @@ As with the copy phase, a signal that stops updating does not keep being acted o
 One structural constraint shapes this: the checksum's snapshot transaction pool **cannot grow** once the brief table lock is released, because every transaction must take its read view at the same instant. It is therefore provisioned up front at whatever ceiling scaling could actually reach: `ceil(vCPUs / 2)` where the flag engages on Aurora, and plain [threads](#threads) everywhere else — both without the flag, and with the flag on a target where growth is impossible anyway (non-Aurora, or under 4 vCPUs). It reuses the read-side connection budget, since the copier's readers have finished by the time the checksum runs. An idle pooled transaction costs one connection and no extra history retention, so over-provisioning is cheap in resources. What it is not cheap in is lock time: the transactions are started serially under the table lock, so the ceiling directly lengthens that window. This is the reason the read-side ceiling is half the instance rather than all of it.
 
 Chunk sizing is separate from worker count: the checksum's chunks are sized by the dynamic chunker against a fixed 5s time budget (`table.ChunkerDefaultTarget`, not a flag — and not the copier's [`--target-chunk-size`](#target-chunk-size) byte budget), and scaling only changes how many are in flight at once.
+
+### max-connections
+
+- Type: Integer
+- Default value: `128`
+
+The size of Spirit's main connection pool. It is set once, verbatim, and never recomputed: no phase ratchets it, and no thread ceiling derived from the instance raises it.
+
+That is deliberate, because the number has to be one an operator can budget against. Spirit's connections come out of the server's `max_connections`, shared with the production workload, and if the migration user has a `max_user_connections` the pool has to be a value you can subtract — not a sum that moves when Spirit reaches a particular phase.
+
+Everything shares that one pool — copier reads, applier writes, the change feed's drain, and the periodic control-plane queries (see [threads](#threads) for the full list). Their ceilings can add up to more than the pool, and on a large instance under [autoscaling](#enable-experimental-autoscaling) they will. Above the pool size the copier and applier contend for connections instead of each being guaranteed one, which costs throughput and nothing else. The alternative on a busy server is `Error 1040: Too many connections`, which is not a slower migration but a dead one. Read workers and the drain are the two exceptions, and are given reserved capacity rather than left to contend — see [threads](#threads).
+
+For a full accounting against `max_user_connections`, Spirit also opens two connection pools outside this one, both small and both fixed:
+
+| Pool | Size | When |
+| ---- | ---- | ---- |
+| main | `max-connections` | always |
+| throttler monitor | `2` | only on a target with a continuous load signal (currently Aurora) |
+| replica lag checker | `max-connections` | only with [replica-dsn](#replica-dsn) — and on the *replica*, not the target |
+
+So the worst case on the target is `max-connections + 2`.
+
+Values that cannot work are rejected at startup rather than discovered mid-migration:
+
+- **At least `5`**, which the cutover needs for its `LOCK TABLES` connection, its `RENAME TABLE` connection and the flush threads. This is also the one case where Spirit will exceed a configured pool size: a `CutOver` handed a smaller pool raises it to `5`, because the alternative is a cutover that cannot run.
+- **At least `threads + 6`**, because the checksum's read transactions each pin a connection for the whole phase whether or not a worker has one checked out. The `6` is what has to keep running alongside them: `2` for the checksum's own chunk repair and boundary prefetch, `3` for the control plane on a single-table migration, and `1` for the drain. A pool that only just fits the transactions is not a slow checksum — it is a checksum during which the drain cannot check out a connection at all.
+
+Both are hard stops rather than slow paths: below them a migration does not run slower, it stalls holding a table lock or an open read view.
+
+Under [autoscaling](#enable-experimental-autoscaling) both read bounds come from the instance rather than from `threads`, so they are not known at startup and cannot be validated there. If they do not fit the pool, Spirit lowers them — it will not grow the pool past the number you set. Both the starting count and the ceiling are lowered, not just the ceiling: the checksum and the copier each floor their ceiling at the starting count, so lowering one without the other would have no effect. This is logged, and only bites if you set `max-connections` below half the target's vCPU count.
+
+A negative value is rejected. A pool whose size Spirit cannot state is what this flag exists to remove.
 
 ### max-commit-latency
 
