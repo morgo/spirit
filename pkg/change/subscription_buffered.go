@@ -223,6 +223,23 @@ type bufferedMap struct {
 	concurrencyPenalty atomic.Int64
 	cleanDrains        atomic.Int64
 
+	// loadPenalty is the number of halvings applied to flushConcurrency on
+	// account of *server load* rather than lock contention, from the UnderLoad
+	// signal. It is a second, independent term rather than more steps on
+	// concurrencyPenalty because the two want opposite things from batch size:
+	// contention narrows the batch as well, to shrink a statement's lock
+	// footprint, while load widens it, to hold the same rows in flight across
+	// fewer statements. Folding them together would mean one signal silently
+	// undoing the other's batch decision. See adaptFlushLoad and
+	// effectiveBatchSize.
+	loadPenalty     atomic.Int64
+	cleanLoadDrains atomic.Int64
+
+	// underLoad is ClientConfig.UnderLoad, or nil when the caller supplied no
+	// signal — in which case loadPenalty never moves and the drain behaves
+	// exactly as it did before load shedding existed.
+	underLoad func() bool
+
 	// Counters for the bookend log emitted on watermark-optimization transitions.
 	keysAdded        atomic.Int64
 	keysDroppedAbove atomic.Int64
@@ -325,6 +342,10 @@ type BufferedSubscriptionConfig struct {
 	// rows a drain has in flight, so a caller raising one should lower
 	// the other. autoscale.FlushBounds returns the pair.
 	BatchSize int
+
+	// UnderLoad is ClientConfig.UnderLoad: the server-load signal the drain
+	// narrows itself on. Optional; nil disables load shedding entirely.
+	UnderLoad func() bool
 }
 
 // NewBufferedSubscription constructs the default bufferedMap-backed
@@ -376,6 +397,7 @@ func NewBufferedSubscription(cfg BufferedSubscriptionConfig) (Subscription, erro
 		flushRequest:         cfg.FlushRequest,
 		flushConcurrency:     cfg.FlushConcurrency,
 		batchSize:            cfg.BatchSize,
+		underLoad:            cfg.UnderLoad,
 	}
 	sub.cond = sync.NewCond(&sub.Mutex)
 	return sub, nil
@@ -604,7 +626,35 @@ const minAdaptiveBatchSize = 50
 // the zero value (out-of-tree callers, bare test maps) stays serial, then
 // applies any halvings the AIMD controller has accumulated.
 func (s *bufferedMap) effectiveFlushConcurrency() int {
+	return shiftDown(s.contendedFlushConcurrency(), s.loadPenalty.Load(), s.loadShedFloor())
+}
+
+// contendedFlushConcurrency is the width after the contention controller but
+// before load shedding. It is the input to the load shift and the reference the
+// batch size is re-paired against, so it exists separately rather than being
+// inlined into both.
+func (s *bufferedMap) contendedFlushConcurrency() int {
 	return shiftDown(s.configuredFlushConcurrency(), s.concurrencyPenalty.Load(), 1)
+}
+
+// loadShedFloor is how narrow load shedding alone may make the drain:
+// DefaultFlushConcurrency, the width every flush ran at before the width became
+// instance-derived.
+//
+// The floor is the whole safety argument. Load shedding can give back the
+// widening that autoscaling introduced and nothing more, so its worst case is
+// the shape spirit shipped for years — it cannot invent a new starvation mode
+// for a change feed that must keep advancing the binlog position. On an instance
+// too small to have been widened the floor equals the configured width and the
+// signal does nothing at all, which is right: that migration never acquired the
+// problem.
+//
+// min() against the contention width keeps the two controllers from fighting.
+// shiftDown's floor is a max(), so a floor above the value it was handed would
+// *raise* it — a contention penalty that had already narrowed below 8 would be
+// silently undone by a load signal asking for less concurrency, not more.
+func (s *bufferedMap) loadShedFloor() int {
+	return min(s.contendedFlushConcurrency(), DefaultFlushConcurrency)
 }
 
 // configuredFlushConcurrency is the width the drain would run at with no AIMD
@@ -648,7 +698,40 @@ func (s *bufferedMap) effectiveBatchSize() int {
 	// where raising a statement's lock footprint is the opposite of the
 	// intent. Before BatchSize was configurable the start was always
 	// DefaultBatchSize, so the two could never cross.
-	return shiftDown(start, s.concurrencyPenalty.Load(), min(minAdaptiveBatchSize, start))
+	batch := shiftDown(start, s.concurrencyPenalty.Load(), min(minAdaptiveBatchSize, start))
+	return s.repairedForLoad(batch)
+}
+
+// repairedForLoad widens a batch by however much load shedding narrowed the
+// concurrency, so that the same number of rows stays in flight across fewer,
+// larger statements.
+//
+// This is the entire reason shedding on load is affordable. autoscale.FlushBounds
+// holds concurrency x batch constant at FlushRowsInFlight, so 32x250 and 8x1000
+// move the same rows; what differs is how many statements — and therefore how
+// many server threads and connections — it takes to move them. The load signal
+// is a thread count, so narrowing the concurrency addresses the signal almost
+// exactly, while re-pairing the batch keeps the drain's throughput. A feed that
+// must not fall behind its retention window gets to shed load without shedding
+// progress.
+//
+// The lock-footprint cost of the wider statement is real but bounded: the cap is
+// the batch this drain would have used at DefaultFlushConcurrency, so the widest
+// statement load shedding can produce is one the pre-derivation code produced
+// routinely. Past that point — a floor-clamped shed, or a batch already at or
+// above the cap — the re-pairing stops and rows genuinely leave flight, which is
+// the correct behaviour once there is no cheap trade left to make.
+func (s *bufferedMap) repairedForLoad(batch int) int {
+	before, after := s.contendedFlushConcurrency(), s.effectiveFlushConcurrency()
+	if after <= 0 || before <= after {
+		return batch // no load shed outstanding, or it was clamped to nothing
+	}
+	// Integer division deliberately. FlushBounds derives a width per vCPU count,
+	// not per power of two, so a shed can land on a ratio just short of the next
+	// step; rounding that up would put *more* rows in flight than the drain had
+	// before it started shedding. Rounding down leaves a few behind, which is
+	// the safe direction for a controller whose whole job is to take load off.
+	return min(batch*(before/after), max(batch, DefaultBatchSize))
 }
 
 // shiftDown halves start once per penalty step, never going below floor.
@@ -707,6 +790,68 @@ func (s *bufferedMap) adaptFlushConcurrency(contended bool) {
 		"concurrency", s.effectiveFlushConcurrency(),
 		"batch_size", s.effectiveBatchSize(),
 		"configured", configured,
+	)
+}
+
+// adaptFlushLoad feeds the server's load signal into the concurrency limit, the
+// same AIMD shape adaptFlushConcurrency uses for lock contention but on the
+// other signal and against a much higher floor.
+//
+// It exists because the flush was the one write path that could not see load.
+// The drain is deliberately never throttled — the binlog position has to keep
+// advancing — and the original reasoning was that the throttler would slow the
+// *copier* on the flush's behalf. That works only while the flush is a small,
+// fixed share of the load. Once its width became instance-derived the two write
+// paths were sized independently from the same vCPU count, and under sustained
+// load the copier would shed to a handful of workers while the flush held full
+// width: the side that could yield did all the yielding, and the side that could
+// not became the dominant load. The total barely moved, and the copy — the only
+// thing whose completion would have ended the load — was the part that starved.
+//
+// So the drain sheds too, but differently from the copier: narrower, never
+// paused, floored at DefaultFlushConcurrency (see loadShedFloor), and with the
+// batch re-paired so rows in flight are preserved (see repairedForLoad). It gives
+// up statements, not progress.
+//
+// Sampled at the top of a drain rather than the bottom, unlike the contention
+// controller. Contention is an outcome — it can only be known once the drain has
+// run — while load is a condition, and a drain that may hold flushMu for minutes
+// should be shaped by what the server looks like when it starts, not by what it
+// looked like before the previous one.
+func (s *bufferedMap) adaptFlushLoad() {
+	if s.underLoad == nil {
+		return // no signal wired: the width is whatever the caller configured
+	}
+	if s.underLoad() {
+		s.cleanLoadDrains.Store(0)
+		// Once the floor is reached there is nothing left to give, and further
+		// steps would only make recovery take proportionally longer when the
+		// load clears. Same guard as the contention path, for the same reason.
+		if s.effectiveFlushConcurrency() <= s.loadShedFloor() {
+			return
+		}
+		penalty := s.loadPenalty.Add(1)
+		s.logger.Warn("narrowing flush concurrency under server load",
+			"table", s.table.SchemaName+"."+s.table.TableName,
+			"concurrency", s.effectiveFlushConcurrency(),
+			"batch_size", s.effectiveBatchSize(),
+			"floor", s.loadShedFloor(),
+			"penalty", penalty,
+		)
+		return
+	}
+	if s.loadPenalty.Load() <= 0 {
+		return // already at the contention controller's width
+	}
+	if s.cleanLoadDrains.Add(1) < cleanDrainsToRecover {
+		return
+	}
+	s.cleanLoadDrains.Store(0)
+	s.loadPenalty.Add(-1)
+	s.logger.Info("restoring flush concurrency after load cleared",
+		"table", s.table.SchemaName+"."+s.table.TableName,
+		"concurrency", s.effectiveFlushConcurrency(),
+		"batch_size", s.effectiveBatchSize(),
 	)
 }
 
@@ -1025,6 +1170,11 @@ type mapFlushBatch struct {
 // Returns false when any entry was deferred.
 func (s *bufferedMap) drainMapSnapshot(ctx context.Context, snapshot map[string]bufferedChange, applyWatermarkFilter bool) (bool, error) {
 	allChangesFlushed := true
+
+	// Shape this drain to the load the server is under right now, before either
+	// width is read below. The contention controller runs at the other end, on
+	// the outcome; see adaptFlushLoad for why this one cannot wait for that.
+	s.adaptFlushLoad()
 
 	// Map iteration order is randomized, so unpartitioned batch membership
 	// differs between flushes. That does not affect the retry below: pass 2

@@ -98,6 +98,27 @@ type ClientConfig struct {
 	// flight. See autoscale.FlushBounds, which is what sets both when
 	// the migration runner sizes them from the instance.
 	BatchSize int
+
+	// UnderLoad reports whether the target is currently loaded enough that the
+	// flush should narrow. Nil (the zero value) means no signal, and the drain
+	// runs at its configured width exactly as it did before this existed.
+	//
+	// This is the change feed's only view of server load, and it exists because
+	// the feed was previously the one write path with no such view at all. The
+	// flush is deliberately not throttled — the binlog position has to keep
+	// advancing or the migration loses its retention window — and the original
+	// reasoning was that the copier would absorb the load on its behalf. That
+	// held while the flush was a fixed 8 batches wide. Once the width became
+	// instance-derived (up to 32) the absorbing side kept shedding while the
+	// widened side never did, so under sustained load the copier would shed to
+	// almost nothing while the flush stayed at full width and the total barely
+	// moved. See bufferedMap.adaptFlushLoad.
+	//
+	// It is a func rather than a throttler because the change feed has no
+	// business importing one, and because the migration runner swaps its
+	// throttler during setup — a value captured at construction would be the
+	// wrong one.
+	UnderLoad func() bool
 }
 
 // resolveFlushConcurrency normalizes the FlushConcurrency knob for the
