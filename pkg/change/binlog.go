@@ -127,6 +127,10 @@ type binlogClient struct {
 	// DefaultBatchSize.
 	batchSize int
 
+	// underLoad is ClientConfig.UnderLoad, handed to every subscription so the
+	// drain can narrow itself when the target is loaded. Nil disables it.
+	underLoad func() bool
+
 	// flushRequests receives the subscription that parked on its soft
 	// memory limit. runPeriodicFlush selects on it and flushes that
 	// subscription first — the all-subscription pass visits the
@@ -177,6 +181,7 @@ func NewBinlogClient(db *sql.DB, host string, username, password string, appl ap
 		subscriptionSoftLimitChanges: softLimitChanges,
 		flushConcurrency:             config.resolveFlushConcurrency(),
 		batchSize:                    config.resolveBatchSize(),
+		underLoad:                    config.UnderLoad,
 		flushRequests:                make(chan Subscription, 1),
 	}
 }
@@ -204,6 +209,7 @@ func (c *binlogClient) AddSubscription(currentTable, newTable *table.TableInfo, 
 		FlushRequest:     c.flushRequests,
 		FlushConcurrency: c.flushConcurrency,
 		BatchSize:        c.batchSize,
+		UnderLoad:        c.underLoad,
 	})
 	if err != nil {
 		return fmt.Errorf("could not build subscription for table %s.%s: %w", currentTable.SchemaName, currentTable.TableName, err)

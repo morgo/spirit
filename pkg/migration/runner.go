@@ -1001,14 +1001,7 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context, resumePosi
 	// automatic: a resumed migration stays in the coordinate scheme its
 	// checkpoint was written in (resumePosition), and a fresh one uses GTIDs
 	// whenever the server has them enabled.
-	replConfig := change.NewClientDefaultConfig()
-	replConfig.Logger = r.logger
-	replConfig.CancelFunc = r.fatalError
-	replConfig.DBConfig = r.dbConfig
-	// Zero for either of these means the change package's own default, which is
-	// what a non-Aurora or too-small instance gets.
-	replConfig.FlushConcurrency = flushConcurrency
-	replConfig.BatchSize = flushBatchSize
+	replConfig := r.replClientConfig(flushConcurrency, flushBatchSize)
 	r.replClient, err = change.NewAutoClient(ctx, r.db, r.migration.Host, r.migration.Username, *r.migration.Password, appl, replConfig, resumePosition)
 	if err != nil {
 		return err
@@ -1134,6 +1127,50 @@ func (r *Runner) currentThrottler() throttler.Throttler {
 	r.throttlerMu.RLock()
 	defer r.throttlerMu.RUnlock()
 	return r.throttler
+}
+
+// replClientConfig assembles the change client's configuration from the flush
+// shape the caller derived. Extracted from setupCopierCheckerAndReplClient so
+// the wiring can be asserted directly: every field here is a behaviour of the
+// feed that is otherwise only reachable through a full migration, and a dropped
+// assignment would silently disable the feature it carries rather than fail.
+func (r *Runner) replClientConfig(flushConcurrency, flushBatchSize int) *change.ClientConfig {
+	cfg := change.NewClientDefaultConfig()
+	cfg.Logger = r.logger
+	cfg.CancelFunc = r.fatalError
+	cfg.DBConfig = r.dbConfig
+	// Zero for either of these means the change package's own default, which is
+	// what a non-Aurora or too-small instance gets.
+	cfg.FlushConcurrency = flushConcurrency
+	cfg.BatchSize = flushBatchSize
+	cfg.UnderLoad = r.flushUnderLoad
+	return cfg
+}
+
+// flushUnderLoad is the change feed's load signal (change.ClientConfig.UnderLoad):
+// whether the target is loaded enough that the drain should narrow itself.
+//
+// It reads GradualOnly, the same restriction the write-thread autoscaler and the
+// checksum use, so the drain reacts to the Aurora *load* signals and not to
+// replica lag. Lag is an SLO budget rather than a load gauge, and the flush is
+// the one path that cannot afford to be paced by a budget: narrowing it does not
+// reduce the lag it would be reacting to, while the binlog position it stops
+// advancing is a retention deadline. GradualOnly returns a Noop when there is no
+// continuous signal — a non-Aurora target — so the drain keeps its configured
+// width there, which is correct: without a load gauge there is nothing to shed
+// against.
+//
+// Resolved per call rather than captured, because setup replaces the throttler
+// (setThrottler) after the change client is built, and nil until it does. The
+// nil check is belt-and-braces — GradualOnly already answers a nil throttler
+// with a Noop — but a drain must not panic on a signal it consults for advice,
+// and that should not rest on another package's nil handling.
+func (r *Runner) flushUnderLoad() bool {
+	t := r.currentThrottler()
+	if t == nil {
+		return false
+	}
+	return throttler.GradualOnly(t).IsThrottled()
 }
 
 // setThrottlerOnPhases hands the resolved throttler to every phase that paces
