@@ -11,17 +11,20 @@ import (
 // Ceiling resolves the upper bound of a scalable pool: the start value when
 // scaling is disabled (so the pool cannot move), twice it when enabled.
 //
-// It is here rather than in either phase because the migration runner sizes the
-// connection pool from the same number the phases cap themselves with — threads
-// scaled above the connection budget would just queue on the sql.DB pool,
-// buying no parallelism — and three copies of "2 ×" invite drift. Callers with
-// an extra rule of their own wrap this rather than reimplementing it (see
-// throttler.ResolveMaxWriteThreads, which additionally refuses to grow the write
-// pool when the redo-aware signal has no commit-latency backstop).
+// It is here rather than in either phase because three copies of "2 ×" invite
+// drift, and because the migration runner resolves the same ceilings itself to
+// hand back to the phases. Callers with an extra rule of their own wrap this
+// rather than reimplementing it (see throttler.ResolveMaxWriteThreads, which
+// additionally refuses to grow the write pool when the redo-aware signal has no
+// commit-latency backstop).
 //
-// The floor of 1 matters for pool sizing: a zero or negative start would
-// otherwise under-budget the connection pool for a phase that always runs at
-// least one worker.
+// This is a thread ceiling and not a connection budget. Threads scaled past the
+// size of the sql.DB pool they share queue on checkout and buy no parallelism;
+// the pool is --max-connections and does not grow to meet them.
+//
+// The floor of 1: a zero or negative start would hand a phase that always runs
+// at least one worker a ceiling it already exceeds, which its controller has no
+// way to steer down from.
 func Ceiling(start int, enabled bool) int {
 	start = max(start, 1)
 	if !enabled {
