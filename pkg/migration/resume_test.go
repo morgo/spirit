@@ -164,8 +164,12 @@ func TestCheckpoint(t *testing.T) {
 	require.Contains(t, r.Status(), "\n  copier    0.00%  0/11040  chunk-size=0  eta=")
 	// The rows the change feed and the checkpoint dumper used to log for
 	// themselves, plus the applier pipeline snapshot.
-	require.Contains(t, r.Status(), "\n  applier queue=")
-	require.Contains(t, r.Status(), "write-p90=")
+	// No write worker has started yet, so the applier row is the idle one. Its
+	// rolling percentiles would every one read 0s here and describe nothing —
+	// rendering them is how an already-stopped pipeline came to look live on
+	// the applyChangeset row.
+	require.Contains(t, r.Status(), "\n  applier queue=0/128  workers=0  idle")
+	require.NotContains(t, r.Status(), "write-p90=")
 	require.Contains(t, r.Status(), "\n  binlog  deltas=0  rotations=")
 	require.Contains(t, r.Status(), "\n  ckpt    never")
 
