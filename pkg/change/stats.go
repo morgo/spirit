@@ -162,26 +162,38 @@ func parkState(subs []Subscription) (parks int64, parked bool) {
 // parkWatch samples park state so a caller can ask afterwards whether the
 // reader hit its soft limit while something else was happening.
 type parkWatch struct {
-	parks int64
+	parks  int64
+	parked bool
 }
 
-// watchParks captures the park counter as it stands now.
+// watchParks captures park state as it stands now.
 func watchParks(subs []Subscription) parkWatch {
-	parks, _ := parkState(subs)
-	return parkWatch{parks: parks}
+	parks, parked := parkState(subs)
+	return parkWatch{parks: parks, parked: parked}
 }
 
-// readerWasBlocked reports whether the change reader is parked now, or parked
-// at any point since the watch was taken.
+// readerWasBlocked reports whether the change reader was parked at any point
+// from the watch being taken to now.
 //
-// Both halves are needed. The instantaneous flag alone misses the case where a
-// drain frees enough space to unpark the reader moments before the caller
-// looks; the counter alone misses a reader that was already parked before the
-// watch began and has stayed that way. Together they answer "is this feed
-// producing faster than it is draining?", which is the question.
+// All three terms are load-bearing, and each covers a case the others miss:
+//
+//   - parked at watch time. A drain frees buffer space, so the reader it had
+//     parked can be running again by the time the caller looks — with no new
+//     park event to show for it, because it never had to park twice. This is
+//     the first iteration of a catch-up loop entered on a saturated feed,
+//     which is exactly when the wait must not happen.
+//   - parked now. Covers a reader that was already parked before the watch and
+//     has stayed that way, where the counter does not move either.
+//   - the counter advanced. Covers a park that began and ended inside the
+//     window, invisible to both endpoint samples.
+//
+// Together they answer "is this feed producing at least as fast as it is
+// draining?", which is the question. Stickiness is bounded to one iteration:
+// each pass of a Flush loop takes a fresh watch, so a feed that genuinely
+// catches up stops reporting blocked on the next pass rather than latching.
 func (w parkWatch) readerWasBlocked(subs []Subscription) bool {
 	parks, parked := parkState(subs)
-	return parked || parks > w.parks
+	return w.parked || parked || parks > w.parks
 }
 
 // FlushShapeReporter is implemented by Subscription implementations whose

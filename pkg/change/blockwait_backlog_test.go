@@ -50,26 +50,39 @@ func TestBacklogWorthDraining(t *testing.T) {
 	require.False(t, backlogWorthDraining(binlogTrivialThreshold, false, false))
 }
 
-// TestParkWatchDetectsATransientPark pins the half of the park signal that the
-// instantaneous flag cannot supply. A drain frees buffer space and so unparks
-// the reader; sample only "is it parked right now" straight afterwards and a
-// reader that spent the whole drain parked reads as healthy. The counter
-// closes that window.
-func TestParkWatchDetectsATransientPark(t *testing.T) {
-	sub := &fakeParkReporter{}
-	subs := []Subscription{sub}
+// TestParkWatchDetectsAParkAtEitherEnd pins all three terms of the park
+// signal. Each covers a case the other two miss, and dropping any one of them
+// silently reintroduces the 30s wait on some subset of iterations.
+func TestParkWatchDetectsAParkAtEitherEnd(t *testing.T) {
+	// A quiet feed: nothing parked before, during or after.
+	quiet := &fakeParkReporter{}
+	quietSubs := []Subscription{quiet}
+	require.False(t, watchParks(quietSubs).readerWasBlocked(quietSubs),
+		"a reader that never parked is keeping up, so the wait is the right call")
 
-	watch := watchParks(subs)
-	require.False(t, watch.readerWasBlocked(subs), "nothing has parked yet")
+	// Parked when the watch was taken, then freed by the drain and never
+	// parked again: the counter does not move and the flag reads false, so
+	// only the recorded initial state catches this. It is the first iteration
+	// of a catch-up loop entered on a saturated feed — precisely when the wait
+	// must not happen.
+	unparkedByTheDrain := &fakeParkReporter{parks: 8143, parked: true}
+	unparkedSubs := []Subscription{unparkedByTheDrain}
+	watch := watchParks(unparkedSubs)
+	unparkedByTheDrain.parked = false
+	require.True(t, watch.readerWasBlocked(unparkedSubs),
+		"a reader the drain unparked was still blocked for that drain")
 
-	// Parked and released while the drain ran: not parked now, but it was.
-	sub.parks = 3
-	sub.parked = false
-	require.True(t, watch.readerWasBlocked(subs),
+	// Parked and released entirely inside the window: invisible at both
+	// endpoints, caught by the counter alone.
+	transient := &fakeParkReporter{}
+	transientSubs := []Subscription{transient}
+	transientWatch := watchParks(transientSubs)
+	transient.parks = 3
+	require.True(t, transientWatch.readerWasBlocked(transientSubs),
 		"a park that came and went during the drain still means the reader is not keeping up")
 
-	// Already parked before the watch, and still parked: the counter does not
-	// move, so the instantaneous flag is what catches this one.
+	// Already parked before the watch and still parked: the counter does not
+	// move either, so the instantaneous flag is what catches this one.
 	steady := &fakeParkReporter{parks: 9, parked: true}
 	steadySubs := []Subscription{steady}
 	require.True(t, watchParks(steadySubs).readerWasBlocked(steadySubs))
