@@ -129,8 +129,8 @@ const (
 	blockWaitStallThreshold = 3
 )
 
-// periodicFlushStopping reports whether a failed periodic flush failed only
-// because StopPeriodicFlush cancelled it mid-drain, in which case the
+// periodicFlushStopping reports whether a flush that just failed inside
+// runPeriodicFlush failed because the loop is shutting down, in which case the
 // goroutine should return quietly rather than log.
 //
 // The loop only selects on ctx.Done() at the top, so a cancellation that
@@ -141,8 +141,22 @@ const (
 // that printed five "error flushing ..." lines at the exact moment the copy
 // completed, which reads as a failure in the phase transition rather than as
 // the phase transition working.
-func periodicFlushStopping(ctx context.Context, err error) bool {
-	return errors.Is(err, context.Canceled) || ctx.Err() != nil
+//
+// It deliberately does not consult the error's identity, only the context's.
+// StopPeriodicFlush cancels exactly the context this loop passes to the flush,
+// so by the time a shutdown-origin error is observed ctx.Err() is already set —
+// cancellation records the error before it wakes anything — and the same holds
+// for the parent migration context dying. Testing errors.Is(err,
+// context.Canceled) as well would add nothing for that case and would open one
+// the loop cannot survive: a context.Canceled originating *below* this loop's
+// context would end runPeriodicFlush with a bare return and no log, and the
+// loop cannot be restarted, because it does not clear periodicFlushCancel on
+// the way out and StartPeriodicFlush is a no-op while that is non-nil. The
+// migration would then run on with no periodic flush at all — changeset
+// growing, position frozen, nothing surfaced — which is this function's own
+// failure class with the evidence removed.
+func periodicFlushStopping(ctx context.Context) bool {
+	return ctx.Err() != nil
 }
 
 // backlogWorthDraining reports whether a Flush loop should drain again
@@ -177,14 +191,28 @@ func periodicFlushStopping(ctx context.Context, err error) bool {
 // one more drain, a wrong "wait" costs DefaultTimeout, so this should err
 // toward draining.
 //
-// lastFlushComplete is what keeps either trigger from becoming a hot loop. A
-// flush that could not drain everything it held — keys deferred behind the
-// copier's watermark, which no amount of re-flushing reaches until the copier
-// advances — would defer exactly the same keys if repeated at once, and would
-// leave the reader parked while it did. Those fall through to BlockWait so its
-// poll paces the retry, which is the pre-existing behaviour for that case.
-func backlogWorthDraining(pending int, readerWasBlocked, lastFlushComplete bool) bool {
-	if !lastFlushComplete {
+// redrainCanProgress is what keeps either trigger from becoming a hot loop, and
+// it is a narrower question than "did the last flush drain everything". Three
+// things make a drain report allChangesFlushed=false and they do not want the
+// same answer:
+//
+//   - Keys deferred behind the copier's watermark, and batches that lost to
+//     lock contention twice. Repeating the flush at once re-defers exactly the
+//     same work and leaves the reader parked while it does, so these fall
+//     through to BlockWait and let its poll pace the retry. That is the
+//     pre-existing behaviour for those cases.
+//   - A drain that spent its dispatch budget (drainDispatchBudget). Its
+//     remaining batches were never *attempted*, and a fresh drain gets a fresh
+//     budget that would land them — so this one must re-drain. It is also, by
+//     construction, a feed that is not keeping up: the budget is a five-minute
+//     backstop, and the production drain that motivated it ran 21m37s over
+//     ~452k changes. Treating it as "nothing more to do" would switch this fix
+//     off in part of the regime it exists for.
+//
+// The callers compute it as "last flush complete, or cut short by its budget";
+// see drainHitBudget.
+func backlogWorthDraining(pending int, readerWasBlocked, redrainCanProgress bool) bool {
+	if !redrainCanProgress {
 		return false
 	}
 	return readerWasBlocked || pending >= binlogTrivialThreshold

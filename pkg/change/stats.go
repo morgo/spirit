@@ -196,6 +196,30 @@ func (w parkWatch) readerWasBlocked(subs []Subscription) bool {
 	return w.parked || parked || parks > w.parks
 }
 
+// DrainBudgetReporter is implemented by Subscription implementations that bound
+// how long one flush spends dispatching work and can report whether the last
+// one hit that bound. Optional, for the same reason ParkReporter is: a
+// subscription that always drains what it holds has nothing to report.
+type DrainBudgetReporter interface {
+	LastDrainHitBudget() bool
+}
+
+// drainHitBudget reports whether any of subs cut its last drain short on a
+// dispatch budget, as opposed to on the eligibility of the work left over.
+// ORed, because one subscription with unattempted batches is enough to make an
+// immediate re-drain productive; see backlogWorthDraining.
+//
+// Callers must not hold the client's own mutex — see mergeParkStats.
+func drainHitBudget(subs []Subscription) bool {
+	for _, sub := range subs {
+		reporter, ok := sub.(DrainBudgetReporter)
+		if ok && reporter.LastDrainHitBudget() {
+			return true
+		}
+	}
+	return false
+}
+
 // FlushShapeReporter is implemented by Subscription implementations whose
 // drains have an adjustable width and can report it. Optional, for the same
 // reason ParkReporter is: a queue-mode-only or out-of-tree subscription that

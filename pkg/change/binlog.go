@@ -87,9 +87,9 @@ type binlogClient struct {
 	lastFlushDuration time.Duration
 	lastFlushRows     int
 	// lastFlushComplete is that flush's allChangesFlushed result: whether
-	// every subscription drained everything it held. Flush reads it to tell a
-	// backlog it can work through from one it cannot — see
-	// backlogWorthDraining.
+	// every subscription drained everything it held. Flush reads it, alongside
+	// each subscription's LastDrainHitBudget, to tell a backlog it can work
+	// through from one it cannot — see backlogWorthDraining.
 	lastFlushComplete bool
 
 	// rotations counts binlog rotations followed by the reader. See
@@ -1261,7 +1261,8 @@ func (c *binlogClient) FeedStats() FeedStats {
 func (c *binlogClient) Flush(ctx context.Context) error {
 	for {
 		// Repeat in a loop until the changeset length is trivial
-		parks := watchParks(c.subs.Snapshot())
+		subs := c.subs.Snapshot()
+		parks := watchParks(subs)
 		if err := c.flush(ctx, false, nil); err != nil {
 			return err
 		}
@@ -1270,9 +1271,14 @@ func (c *binlogClient) Flush(ctx context.Context) error {
 		// succeeding. See backlogWorthDraining — this is the case the comment
 		// below used to describe as merely "a lot to do", which turned out to
 		// cost 30s of idling per drain.
-		if backlogWorthDraining(c.GetDeltaLen(), parks.readerWasBlocked(c.subs.Snapshot()), c.lastFlushWasComplete()) {
+		//
+		// pending is sampled once, so the logged figure is the one the branch
+		// was decided on rather than a second reading taken next to it.
+		pending := c.GetDeltaLen()
+		redrainCanProgress := c.lastFlushWasComplete() || drainHitBudget(subs)
+		if backlogWorthDraining(pending, parks.readerWasBlocked(subs), redrainCanProgress) {
 			c.logger.Debug("reader is not keeping up, draining again instead of waiting on it",
-				"pending", c.GetDeltaLen())
+				"pending", pending)
 			continue
 		}
 		// BlockWait to ensure we've read everything from the server
@@ -1362,7 +1368,7 @@ func (c *binlogClient) runPeriodicFlush(ctx context.Context, interval time.Durat
 			// pass still runs afterwards for position advancement.
 			trigger = "soft-limit-park"
 			if _, err := parked.Flush(ctx, false, nil); err != nil {
-				if periodicFlushStopping(ctx, err) {
+				if periodicFlushStopping(ctx) {
 					return
 				}
 				c.logger.Error("error flushing parked subscription", "error", err)
@@ -1375,7 +1381,7 @@ func (c *binlogClient) runPeriodicFlush(ctx context.Context, interval time.Durat
 		// we allow this to run, and then expect that if it is under load the throttler
 		// will kick in and slow down the copy-rows.
 		if err := c.flush(ctx, false, nil); err != nil {
-			if periodicFlushStopping(ctx, err) {
+			if periodicFlushStopping(ctx) {
 				return
 			}
 			c.logger.Error("error flushing binary log", "error", err)

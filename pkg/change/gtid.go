@@ -90,8 +90,9 @@ type gtidClient struct {
 	lastFlushDuration time.Duration
 	lastFlushRows     int
 	// lastFlushComplete is that flush's allChangesFlushed result: whether
-	// every subscription drained everything it held. Flush reads it to tell a
-	// backlog it can work through from one it cannot — see Flush.
+	// every subscription drained everything it held. Flush reads it, alongside
+	// each subscription's LastDrainHitBudget, to tell a backlog it can work
+	// through from one it cannot — see backlogWorthDraining.
 	lastFlushComplete bool
 
 	// rotations counts binlog rotations seen on the stream. Position
@@ -1241,13 +1242,16 @@ func (c *gtidClient) FeedStats() FeedStats {
 // Flush satisfies Source. Same shape as binlogClient.Flush.
 func (c *gtidClient) Flush(ctx context.Context) error {
 	for {
-		parks := watchParks(c.subs.Snapshot())
+		subs := c.subs.Snapshot()
+		parks := watchParks(subs)
 		if err := c.flush(ctx, false, nil); err != nil {
 			return err
 		}
-		if backlogWorthDraining(c.GetDeltaLen(), parks.readerWasBlocked(c.subs.Snapshot()), c.lastFlushWasComplete()) {
+		pending := c.GetDeltaLen()
+		redrainCanProgress := c.lastFlushWasComplete() || drainHitBudget(subs)
+		if backlogWorthDraining(pending, parks.readerWasBlocked(subs), redrainCanProgress) {
 			c.logger.Debug("reader is not keeping up, draining again instead of waiting on it",
-				"pending", c.GetDeltaLen())
+				"pending", pending)
 			continue
 		}
 		if err := c.BlockWait(ctx); err != nil {
@@ -1315,7 +1319,7 @@ func (c *gtidClient) runPeriodicFlush(ctx context.Context, interval time.Duratio
 			// pass still runs afterwards for position advancement.
 			trigger = "soft-limit-park"
 			if _, err := parked.Flush(ctx, false, nil); err != nil {
-				if periodicFlushStopping(ctx, err) {
+				if periodicFlushStopping(ctx) {
 					return
 				}
 				c.logger.Error("error flushing parked subscription", "error", err)
@@ -1325,7 +1329,7 @@ func (c *gtidClient) runPeriodicFlush(ctx context.Context, interval time.Duratio
 		startLoop := time.Now()
 		c.logger.Debug("starting periodic flush of GTID changeset", "trigger", trigger)
 		if err := c.flush(ctx, false, nil); err != nil {
-			if periodicFlushStopping(ctx, err) {
+			if periodicFlushStopping(ctx) {
 				return
 			}
 			c.logger.Error("error flushing GTID changeset", "error", err)

@@ -2,9 +2,8 @@ package change
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -39,16 +38,52 @@ func TestBacklogWorthDraining(t *testing.T) {
 	require.False(t, backlogWorthDraining(binlogTrivialThreshold-1, false, true))
 	require.False(t, backlogWorthDraining(0, false, true))
 
-	// The hot-loop guard, which overrides both triggers. A flush that could not
-	// drain everything it held has keys deferred behind the copier's watermark;
-	// re-running it at once would defer the same keys and leave the reader
-	// parked while it did. These fall through to BlockWait so its poll paces
-	// the retry, which is the behaviour that predates this change.
+	// The hot-loop guard, which overrides both triggers. A flush whose leftovers
+	// are not eligible yet — keys deferred behind the copier's watermark, or
+	// batches that lost to lock contention twice — would defer exactly the same
+	// work if re-run at once, and would leave the reader parked while it did.
+	// These fall through to BlockWait so its poll paces the retry, which is the
+	// behaviour that predates this change.
 	require.False(t, backlogWorthDraining(DefaultSubscriptionSoftLimitChanges, true, false),
-		"an incomplete flush must not spin: the deferred keys need the copier to advance")
+		"an ineligible backlog must not spin: those keys need the copier to advance")
 	require.False(t, backlogWorthDraining(0, true, false))
 	require.False(t, backlogWorthDraining(binlogTrivialThreshold, false, false))
+
+	// But the guard is about eligibility, not about completeness. A drain that
+	// spent its dispatch budget is also incomplete, and it is the opposite case:
+	// its remaining batches were never attempted, so a fresh drain lands them.
+	// Callers pass that in as redrainCanProgress even though the flush reported
+	// allChangesFlushed=false — see the drainHitBudget term at the call sites.
+	// Getting this wrong would switch the fix off under saturation, which is the
+	// load it exists for.
+	require.True(t, backlogWorthDraining(0, true, true),
+		"a budget-truncated drain must re-drain, not wait out DefaultTimeout")
 }
+
+// TestDrainHitBudgetAcrossSubscriptions pins the aggregation. One subscription
+// with unattempted batches is enough to make an immediate re-drain productive,
+// and a subscription that cannot report contributes nothing rather than reading
+// as either answer.
+func TestDrainHitBudgetAcrossSubscriptions(t *testing.T) {
+	require.False(t, drainHitBudget(nil))
+	require.False(t, drainHitBudget([]Subscription{&fakeParkReporter{}}),
+		"a subscription that does not implement DrainBudgetReporter must not vote")
+
+	finished := &fakeBudgetReporter{}
+	truncated := &fakeBudgetReporter{hitBudget: true}
+	require.False(t, drainHitBudget([]Subscription{finished, finished}))
+	require.True(t, drainHitBudget([]Subscription{finished, truncated}),
+		"one subscription with batches it never started is enough")
+}
+
+// fakeBudgetReporter is a Subscription that only implements
+// DrainBudgetReporter, which is all drainHitBudget consults.
+type fakeBudgetReporter struct {
+	Subscription
+	hitBudget bool
+}
+
+func (f *fakeBudgetReporter) LastDrainHitBudget() bool { return f.hitBudget }
 
 // TestParkWatchDetectsAParkAtEitherEnd pins all three terms of the park
 // signal. Each covers a case the other two miss, and dropping any one of them
@@ -109,23 +144,28 @@ func (f *fakeParkReporter) ParkStats() (int64, bool) { return f.parks, f.parked 
 // flush. Logging that at Error printed five "error flushing ..." lines at the
 // exact moment the copy completed, which reads as the phase transition failing
 // rather than working.
+//
+// The decision is made on the context alone, deliberately: StopPeriodicFlush
+// cancels exactly the context the loop hands to the flush, so a shutdown is
+// always visible there, whereas a context.Canceled that did *not* come from
+// this context would end the loop silently and unrestartably. See
+// periodicFlushStopping.
 func TestPeriodicFlushStopping(t *testing.T) {
+	// A live context means the flush failed on its own account, whatever it
+	// reported — including a bare context.Canceled from somewhere below, which
+	// has to be logged rather than treated as a shutdown.
 	live := t.Context()
-
-	// A cancelled flush is the shutdown path, whether we learn it from the
-	// error or from the context.
-	require.True(t, periodicFlushStopping(live, context.Canceled))
-	require.True(t, periodicFlushStopping(live, fmt.Errorf("flush aborted: %w", context.Canceled)),
-		"the check must see through wrapping")
+	require.False(t, periodicFlushStopping(live))
 
 	stopped, stopCancel := context.WithCancel(context.Background())
 	stopCancel()
-	require.True(t, periodicFlushStopping(stopped, errors.New("some driver error")),
-		"a cancelled context means we are stopping regardless of what the flush reported")
+	require.True(t, periodicFlushStopping(stopped),
+		"a cancelled context is the shutdown path regardless of what the flush reported")
 
-	// A real failure on a live context still has to be logged: this is the case
-	// the Error line exists for.
-	require.False(t, periodicFlushStopping(live, errors.New("deadlock found when trying to get lock")))
-	require.False(t, periodicFlushStopping(live, context.DeadlineExceeded),
-		"a flush that timed out on its own deadline is a real failure, not a shutdown")
+	// A deadline is a cancellation too, and StartPeriodicFlush derives its
+	// context from the migration's — so a migration-wide deadline expiring is
+	// also a stop, not a flush failure.
+	expired, expiredCancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer expiredCancel()
+	require.True(t, periodicFlushStopping(expired))
 }
