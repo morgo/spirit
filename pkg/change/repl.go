@@ -2,6 +2,7 @@
 package change
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
@@ -127,6 +128,67 @@ const (
 	// remaining negligible relative to DefaultTimeout.
 	blockWaitStallThreshold = 3
 )
+
+// periodicFlushStopping reports whether a failed periodic flush failed only
+// because StopPeriodicFlush cancelled it mid-drain, in which case the
+// goroutine should return quietly rather than log.
+//
+// The loop only selects on ctx.Done() at the top, so a cancellation that
+// arrives while a flush is in flight surfaces as a context error from the
+// flush itself. That is the normal shutdown path — every migration passes
+// through it at postCopyPhase, which calls StopPeriodicFlush before draining
+// the backlog synchronously — and it was being logged at Error. In production
+// that printed five "error flushing ..." lines at the exact moment the copy
+// completed, which reads as a failure in the phase transition rather than as
+// the phase transition working.
+func periodicFlushStopping(ctx context.Context, err error) bool {
+	return errors.Is(err, context.Canceled) || ctx.Err() != nil
+}
+
+// backlogWorthDraining reports whether a Flush loop should drain again
+// immediately rather than calling BlockWait. Both clients' Flush loops consult
+// it between the drain and the wait.
+//
+// BlockWait waits for the buffered position to reach the source's current one.
+// While a real backlog is still queued that wait is not merely unproductive,
+// it is self-defeating: a subscription sitting at its soft memory limit parks
+// the reader, a parked reader cannot advance the buffered position, and the
+// flush this loop would skip is the only thing that can unpark it. The wait
+// therefore blocks on the very condition it is waiting for, burns
+// DefaultTimeout, and returns to the top of the loop having achieved nothing.
+//
+// Observed in production on a feed ~482M GTIDs behind: 30s in BlockWait per 4s
+// drain, so the flush ran ~12% of the time while the reader stayed parked and
+// the binlog retention window burned down eight times faster than it needed
+// to. The catch-up loop was losing to a wait it was itself preventing.
+//
+// readerWasBlocked is the primary signal, because it is the exact condition
+// rather than a proxy for it: if the reader parked, it stopped ingesting, and
+// a position that cannot advance is one BlockWait cannot wait for. Note that
+// the pending count could not stand in for it — the soft limit is applied on
+// bytes as well as change count (SubscriptionSoftLimitBytes), so a wide-row
+// table parks the reader at a pending count far below any threshold worth
+// setting, which is precisely when the stall would go unnoticed.
+//
+// pending is kept as a second trigger for the case where park cannot fire at
+// all: a caller that disabled the soft limits has no park signal, and a large
+// buffered backlog is then the only evidence that draining beats waiting. The
+// two are ORed rather than ANDed deliberately — a wrong "drain again" costs
+// one more drain, a wrong "wait" costs DefaultTimeout, so this should err
+// toward draining.
+//
+// lastFlushComplete is what keeps either trigger from becoming a hot loop. A
+// flush that could not drain everything it held — keys deferred behind the
+// copier's watermark, which no amount of re-flushing reaches until the copier
+// advances — would defer exactly the same keys if repeated at once, and would
+// leave the reader parked while it did. Those fall through to BlockWait so its
+// poll paces the retry, which is the pre-existing behaviour for that case.
+func backlogWorthDraining(pending int, readerWasBlocked, lastFlushComplete bool) bool {
+	if !lastFlushComplete {
+		return false
+	}
+	return readerWasBlocked || pending >= binlogTrivialThreshold
+}
 
 var (
 	// maxRecreateAttempts is the maximum number of streamer recreation attempts before giving up.

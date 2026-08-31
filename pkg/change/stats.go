@@ -141,6 +141,49 @@ func mergeParkStats(stats *FeedStats, subs []Subscription) {
 	}
 }
 
+// parkState reports the aggregate park counter and current park flag across
+// subs, on the same summing/ORing basis as mergeParkStats. Separate from it
+// because Flush wants the pair on its own, not folded into a FeedStats.
+//
+// Callers must not hold the client's own mutex — see mergeParkStats.
+func parkState(subs []Subscription) (parks int64, parked bool) {
+	for _, sub := range subs {
+		reporter, ok := sub.(ParkReporter)
+		if !ok {
+			continue
+		}
+		subParks, subParked := reporter.ParkStats()
+		parks += subParks
+		parked = parked || subParked
+	}
+	return parks, parked
+}
+
+// parkWatch samples park state so a caller can ask afterwards whether the
+// reader hit its soft limit while something else was happening.
+type parkWatch struct {
+	parks int64
+}
+
+// watchParks captures the park counter as it stands now.
+func watchParks(subs []Subscription) parkWatch {
+	parks, _ := parkState(subs)
+	return parkWatch{parks: parks}
+}
+
+// readerWasBlocked reports whether the change reader is parked now, or parked
+// at any point since the watch was taken.
+//
+// Both halves are needed. The instantaneous flag alone misses the case where a
+// drain frees enough space to unpark the reader moments before the caller
+// looks; the counter alone misses a reader that was already parked before the
+// watch began and has stayed that way. Together they answer "is this feed
+// producing faster than it is draining?", which is the question.
+func (w parkWatch) readerWasBlocked(subs []Subscription) bool {
+	parks, parked := parkState(subs)
+	return parked || parks > w.parks
+}
+
 // FlushShapeReporter is implemented by Subscription implementations whose
 // drains have an adjustable width and can report it. Optional, for the same
 // reason ParkReporter is: a queue-mode-only or out-of-tree subscription that

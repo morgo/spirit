@@ -133,6 +133,17 @@ const buildNoiseFloor = time.Millisecond
 // Nothing is lost by trimming: every field stays on Stats, and the metrics
 // sink emits them all, which is what dashboards should read anyway.
 func (s Stats) String() string {
+	// With no live write workers there is no pipeline to describe, and the
+	// rolling percentiles hold whatever it was doing before it stopped. Render
+	// them and they read as current: an applyChangeset row reported
+	// "wait-p50=6.404s write-p50=7.312s write-p90=14.026s" byte-identical
+	// across six consecutive 30s samples, describing a copier that had already
+	// finished — while the flush those numbers were being read as evidence
+	// about does not use these workers at all. Queue occupancy is still worth
+	// printing, because work queued against zero workers is a real anomaly.
+	if s.ActiveWorkers == 0 {
+		return fmt.Sprintf("queue=%d/%d  workers=0  idle", s.QueueDepth, s.QueueCap)
+	}
 	out := fmt.Sprintf("queue=%d/%d  workers=%d  wait-p50=%v  write-p50=%v  write-p90=%v",
 		s.QueueDepth,
 		s.QueueCap,
