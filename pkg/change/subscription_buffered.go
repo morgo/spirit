@@ -261,6 +261,12 @@ type bufferedMap struct {
 	// progress — that is the whole point of reporting it.
 	parked bool
 
+	// lastDrainHitBudget records whether the most recent Flush left work
+	// behind because it ran out of dispatch budget, rather than because that
+	// work was not eligible. Written once per Flush under flushMu and read
+	// afterwards by the clients' Flush loops; see LastDrainHitBudget.
+	lastDrainHitBudget atomic.Bool
+
 	pkIsMemoryComparable bool
 }
 
@@ -495,6 +501,19 @@ func (s *bufferedMap) ParkStats() (int64, bool) {
 	s.Lock()
 	defer s.Unlock()
 	return s.timesParked.Load(), s.parked
+}
+
+// LastDrainHitBudget satisfies DrainBudgetReporter: it reports whether the most
+// recent Flush left work behind because it ran out of dispatch budget rather
+// than because the work was not eligible to go yet.
+//
+// No lock, and deliberately no flushMu: the value is written once per Flush
+// while flushMu is held, and the caller is the client's own Flush loop reading
+// it immediately after that Flush returned. Taking flushMu here would queue the
+// read behind the next drain — up to drainDispatchBudget — which is the opposite
+// of what a loop deciding whether to drain again needs.
+func (s *bufferedMap) LastDrainHitBudget() bool {
+	return s.lastDrainHitBudget.Load()
 }
 
 // FlushShapes satisfies FlushShapeReporter with the drain width as it stands
@@ -1096,6 +1115,15 @@ func (s *bufferedMap) Flush(ctx context.Context, underLock bool, locks []*dbconn
 	s.flushMu.Lock()
 	defer s.flushMu.Unlock()
 
+	// Publish why this drain fell short, however it returns. The clients' Flush
+	// loops read it to tell a drain that merely ran out of budget — where a
+	// fresh drain lands the batches this one never attempted — from one whose
+	// leftovers are not eligible yet, where an immediate retry would defer the
+	// same work again. See backlogWorthDraining. It stays false on the underLock
+	// path, which is serial, has no budget, and must drain completely.
+	hitBudget := false
+	defer func() { s.lastDrainHitBudget.Store(hitBudget) }()
+
 	if underLock {
 		s.Lock()
 		defer s.Unlock()
@@ -1144,7 +1172,11 @@ func (s *bufferedMap) Flush(ctx context.Context, underLock bool, locks []*dbconn
 
 	allChangesFlushed = true
 	if len(snapshot) > 0 {
-		mapAllFlushed, err := s.drainMapSnapshot(ctx, snapshot, applyWatermarkFilter)
+		mapAllFlushed, mapHitBudget, err := s.drainMapSnapshot(ctx, snapshot, applyWatermarkFilter)
+		// Recorded before the error check: a drain can spend its budget and then
+		// fail, and the flag describes what the drain left behind rather than how
+		// it ended.
+		hitBudget = mapHitBudget
 		if err != nil {
 			return false, err
 		}
@@ -1164,6 +1196,7 @@ func (s *bufferedMap) Flush(ctx context.Context, underLock bool, locks []*dbconn
 			// entries that were only reattached, so it has to hold the position
 			// back — the same contract the map drain's truncation uses.
 			allChangesFlushed = false
+			hitBudget = true
 		}
 	}
 	return allChangesFlushed, nil
@@ -1201,9 +1234,15 @@ type mapFlushBatch struct {
 // rest of the drain is still running. Entries deferred by the
 // low-watermark filter (and the unapplied remainder after an error or
 // cancellation) stay in the snapshot for the caller to merge back.
-// Returns false when any entry was deferred.
-func (s *bufferedMap) drainMapSnapshot(ctx context.Context, snapshot map[string]bufferedChange, applyWatermarkFilter bool) (bool, error) {
+//
+// The first result is false when any entry was deferred, for any reason. The
+// second narrows that to the one reason an immediate re-drain gets past —
+// batches the dispatch budget never let it start — which is what the clients'
+// Flush loops need to tell "come back later" from "come back now"; see
+// backlogWorthDraining.
+func (s *bufferedMap) drainMapSnapshot(ctx context.Context, snapshot map[string]bufferedChange, applyWatermarkFilter bool) (bool, bool, error) {
 	allChangesFlushed := true
+	hitDispatchBudget := false
 
 	// Shape this drain to the load the server is under right now, before either
 	// width is read below. The contention controller runs at the other end, on
@@ -1259,7 +1298,7 @@ func (s *bufferedMap) drainMapSnapshot(ctx context.Context, snapshot map[string]
 		// contention either way, so it must not advance the clean-drain streak —
 		// otherwise a run of all-deferred flushes would widen the concurrency
 		// back out on the strength of having applied nothing at all.
-		return allChangesFlushed, nil
+		return allChangesFlushed, false, nil
 	}
 
 	// Pass 1: apply concurrently at the current (possibly reduced) width.
@@ -1310,8 +1349,11 @@ func (s *bufferedMap) drainMapSnapshot(ctx context.Context, snapshot map[string]
 	if !complete {
 		// The dispatch budget expired. Everything unscheduled is still in the
 		// snapshot and will be reattached; report the drain as incomplete so no
-		// client publishes a position that covers it.
+		// client publishes a position that covers it, and report *why* so the
+		// client's Flush loop re-drains rather than waiting — those batches were
+		// never attempted, and a fresh drain gets a fresh budget for them.
 		allChangesFlushed = false
+		hitDispatchBudget = true
 		s.logger.Warn("flush drain exceeded its dispatch budget; deferring the remainder",
 			"table", s.table.SchemaName+"."+s.table.TableName,
 			"budget", drainDispatchBudget.String(),
@@ -1326,7 +1368,7 @@ func (s *bufferedMap) drainMapSnapshot(ctx context.Context, snapshot map[string]
 		// restore the full width, and feeding it in as "contended" would
 		// penalise the width for an unrelated non-retryable error that merely
 		// happened to land in the same drain as someone else's 1213.
-		return false, err
+		return false, hitDispatchBudget, err
 	}
 
 	// Pass 2: whatever contended in pass 1 goes again, one batch at a time.
@@ -1350,7 +1392,7 @@ func (s *bufferedMap) drainMapSnapshot(ctx context.Context, snapshot map[string]
 			// counter for no benefit. It is only an accounting figure — the
 			// error is what decides the drain.
 			s.batchesDeferred.Add(int64(deferred))
-			return false, err
+			return false, hitDispatchBudget, err
 		}
 		if deferred > 0 {
 			// Contention that outlived the serial pass is deferred, not failed.
@@ -1381,12 +1423,15 @@ func (s *bufferedMap) drainMapSnapshot(ctx context.Context, snapshot map[string]
 				"total_batches", len(batches),
 			)
 			s.adaptFlushConcurrency(true)
-			return false, nil
+			// Contended batches were attempted and lost, so they are not a reason
+			// to re-drain at once; hitDispatchBudget still travels, because a drain
+			// can spend its budget and contend in the same pass.
+			return false, hitDispatchBudget, nil
 		}
 		s.serialRecoveries.Add(1)
 	}
 	s.adaptFlushConcurrency(len(contended) > 0)
-	return allChangesFlushed, nil
+	return allChangesFlushed, hitDispatchBudget, nil
 }
 
 // buildBatches turns the drain's rows into applier round trips.

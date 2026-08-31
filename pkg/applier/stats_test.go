@@ -104,13 +104,22 @@ func TestStatsString(t *testing.T) {
 			"build-p50=30ms  handoff-p50=2ms",
 		s.String())
 
-	require.Equal(t,
-		"queue=0/0  workers=0  wait-p50=0s  write-p50=0s  write-p90=0s",
-		Stats{}.String())
+	// No live workers: the percentiles describe a pipeline that is not running,
+	// so they are withheld rather than rendered as if current. Queue occupancy
+	// survives, because work queued against zero workers is worth seeing.
+	require.Equal(t, "queue=0/0  workers=0  idle", Stats{}.String())
+	require.Equal(t, "queue=7/128  workers=0  idle", Stats{
+		QueueDepth:   7,
+		QueueCap:     128,
+		QueueWaitP50: 6404 * time.Millisecond,
+		WriteTimeP50: 7312 * time.Millisecond,
+		WriteTimeP90: 14026 * time.Millisecond,
+	}.String())
 
-	// Sub-millisecond noise rounds away.
+	// Sub-millisecond noise rounds away. Needs a live worker, or the line is
+	// the idle one and carries no percentiles at all.
 	require.Contains(t,
-		Stats{WriteTimeP50: 1499 * time.Microsecond}.String(),
+		Stats{ActiveWorkers: 1, WriteTimeP50: 1499 * time.Microsecond}.String(),
 		"write-p50=1ms")
 }
 

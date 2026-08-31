@@ -399,6 +399,12 @@ func TestBufferedMapFlushWithoutLockRespectsWatermark(t *testing.T) {
 	require.Equal(t, 1, sub.Length(), "Key 5 (at watermark) should remain in the map")
 	require.Equal(t, int64(4), sub.keysAdded.Load(), "all four HasChanged calls should have incremented keysAdded")
 	require.Equal(t, int64(1), sub.keysSkippedBelow.Load(), "key 5 should be counted as skipped-below-low-watermark")
+	// The other half of the incomplete-drain distinction: this drain fell short
+	// on eligibility, not on budget, so an immediate re-flush would defer key 5
+	// again. backlogWorthDraining relies on this reading false to let BlockWait
+	// pace the retry instead.
+	require.False(t, sub.LastDrainHitBudget(),
+		"a watermark-deferred drain must not look like one a fresh budget would finish")
 
 	// Verify that 3 rows (below watermark) were copied to the new table
 	var count int

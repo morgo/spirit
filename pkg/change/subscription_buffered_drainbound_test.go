@@ -159,6 +159,8 @@ func TestDrainDispatchBudgetDefersTheRemainder(t *testing.T) {
 	require.NoError(t, err, "running out of budget is not an error")
 	require.False(t, allFlushed, "a truncated drain must not report the position as advanceable")
 	require.Positive(t, sub.drainsTimedOut.Load())
+	require.True(t, sub.LastDrainHitBudget(),
+		"batches the budget never started are worth re-draining for at once, not waiting on")
 
 	// Some batches landed and the rest are still buffered — nothing was lost.
 	applied := 0
@@ -183,6 +185,7 @@ func TestDrainDispatchBudgetDefersTheRemainder(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, allFlushed)
 	require.Zero(t, sub.Length())
+	require.False(t, sub.LastDrainHitBudget(), "the flag describes the last drain, not any drain")
 }
 
 // TestDrainDispatchBudgetBoundsQueueModeToo covers the store the map drain's
@@ -206,6 +209,8 @@ func TestDrainDispatchBudgetBoundsQueueModeToo(t *testing.T) {
 	require.NoError(t, err, "running out of budget is not an error")
 	require.False(t, allFlushed, "the queue remainder must hold the position back")
 	require.Positive(t, sub.drainsTimedOut.Load())
+	require.True(t, sub.LastDrainHitBudget(),
+		"the queue remainder is unattempted work too, and the map path must not be the only one to say so")
 
 	applied := 0
 	for _, call := range fake.upserts() {
@@ -283,6 +288,7 @@ func TestDrainWithinBudgetStillReportsComplete(t *testing.T) {
 	require.True(t, allFlushed)
 	require.Zero(t, sub.Length())
 	require.Zero(t, sub.drainsTimedOut.Load())
+	require.False(t, sub.LastDrainHitBudget())
 }
 
 // The production defaults must be ordered so the count cap binds first and the

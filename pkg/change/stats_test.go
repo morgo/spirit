@@ -166,7 +166,7 @@ func TestGTIDFeedStats(t *testing.T) {
 	require.Equal(t, "rotations=0 (0 forced)  parks=0 is-parked=false  never flushed", StatusRow(c))
 
 	c.rotations.Store(2)
-	c.recordFlush(time.Now().Add(-5*time.Millisecond), 42)
+	c.recordFlush(time.Now().Add(-5*time.Millisecond), 42, true)
 
 	stats := c.FeedStats()
 	require.Equal(t, int64(2), stats.Rotations)

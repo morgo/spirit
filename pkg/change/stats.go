@@ -141,6 +141,85 @@ func mergeParkStats(stats *FeedStats, subs []Subscription) {
 	}
 }
 
+// parkState reports the aggregate park counter and current park flag across
+// subs, on the same summing/ORing basis as mergeParkStats. Separate from it
+// because Flush wants the pair on its own, not folded into a FeedStats.
+//
+// Callers must not hold the client's own mutex — see mergeParkStats.
+func parkState(subs []Subscription) (parks int64, parked bool) {
+	for _, sub := range subs {
+		reporter, ok := sub.(ParkReporter)
+		if !ok {
+			continue
+		}
+		subParks, subParked := reporter.ParkStats()
+		parks += subParks
+		parked = parked || subParked
+	}
+	return parks, parked
+}
+
+// parkWatch samples park state so a caller can ask afterwards whether the
+// reader hit its soft limit while something else was happening.
+type parkWatch struct {
+	parks  int64
+	parked bool
+}
+
+// watchParks captures park state as it stands now.
+func watchParks(subs []Subscription) parkWatch {
+	parks, parked := parkState(subs)
+	return parkWatch{parks: parks, parked: parked}
+}
+
+// readerWasBlocked reports whether the change reader was parked at any point
+// from the watch being taken to now.
+//
+// All three terms are load-bearing, and each covers a case the others miss:
+//
+//   - parked at watch time. A drain frees buffer space, so the reader it had
+//     parked can be running again by the time the caller looks — with no new
+//     park event to show for it, because it never had to park twice. This is
+//     the first iteration of a catch-up loop entered on a saturated feed,
+//     which is exactly when the wait must not happen.
+//   - parked now. Covers a reader that was already parked before the watch and
+//     has stayed that way, where the counter does not move either.
+//   - the counter advanced. Covers a park that began and ended inside the
+//     window, invisible to both endpoint samples.
+//
+// Together they answer "is this feed producing at least as fast as it is
+// draining?", which is the question. Stickiness is bounded to one iteration:
+// each pass of a Flush loop takes a fresh watch, so a feed that genuinely
+// catches up stops reporting blocked on the next pass rather than latching.
+func (w parkWatch) readerWasBlocked(subs []Subscription) bool {
+	parks, parked := parkState(subs)
+	return w.parked || parked || parks > w.parks
+}
+
+// DrainBudgetReporter is implemented by Subscription implementations that bound
+// how long one flush spends dispatching work and can report whether the last
+// one hit that bound. Optional, for the same reason ParkReporter is: a
+// subscription that always drains what it holds has nothing to report.
+type DrainBudgetReporter interface {
+	LastDrainHitBudget() bool
+}
+
+// drainHitBudget reports whether any of subs cut its last drain short on a
+// dispatch budget, as opposed to on the eligibility of the work left over.
+// ORed, because one subscription with unattempted batches is enough to make an
+// immediate re-drain productive; see backlogWorthDraining.
+//
+// Callers must not hold the client's own mutex — see mergeParkStats.
+func drainHitBudget(subs []Subscription) bool {
+	for _, sub := range subs {
+		reporter, ok := sub.(DrainBudgetReporter)
+		if ok && reporter.LastDrainHitBudget() {
+			return true
+		}
+	}
+	return false
+}
+
 // FlushShapeReporter is implemented by Subscription implementations whose
 // drains have an adjustable width and can report it. Optional, for the same
 // reason ParkReporter is: a queue-mode-only or out-of-tree subscription that

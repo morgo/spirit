@@ -89,6 +89,11 @@ type gtidClient struct {
 	lastFlushAt       time.Time
 	lastFlushDuration time.Duration
 	lastFlushRows     int
+	// lastFlushComplete is that flush's allChangesFlushed result: whether
+	// every subscription drained everything it held. Flush reads it, alongside
+	// each subscription's LastDrainHitBudget, to tell a backlog it can work
+	// through from one it cannot — see backlogWorthDraining.
+	lastFlushComplete bool
 
 	// rotations counts binlog rotations seen on the stream. Position
 	// tracking here is by GTID, so this is reported for diagnostics only.
@@ -1151,7 +1156,7 @@ func (c *gtidClient) flush(ctx context.Context, underLock bool, locks []*dbconn.
 		}
 		c.mu.Unlock()
 	}
-	c.recordFlush(start, batch)
+	c.recordFlush(start, batch, allChangesFlushed)
 	return nil
 }
 
@@ -1161,7 +1166,7 @@ func (c *gtidClient) flush(ctx context.Context, underLock bool, locks []*dbconn.
 // is exactly the case a caller watching for a feed losing ground needs to see.
 //
 // GetDeltaLen takes no lock of its own, so it is called before acquiring c.mu.
-func (c *gtidClient) recordFlush(start time.Time, batch int) {
+func (c *gtidClient) recordFlush(start time.Time, batch int, complete bool) {
 	residual := c.GetDeltaLen()
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -1170,6 +1175,16 @@ func (c *gtidClient) recordFlush(start time.Time, batch int) {
 	c.lastFlushAt = time.Now()
 	c.lastFlushDuration = time.Since(start)
 	c.lastFlushRows = batch
+	c.lastFlushComplete = complete
+}
+
+// lastFlushWasComplete reports whether the most recent flush drained every
+// subscription. Flush uses it to decide whether re-draining a backlog
+// immediately would make progress or just re-defer the same keys.
+func (c *gtidClient) lastFlushWasComplete() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.lastFlushComplete
 }
 
 // FlushResidual satisfies Source.
@@ -1227,8 +1242,17 @@ func (c *gtidClient) FeedStats() FeedStats {
 // Flush satisfies Source. Same shape as binlogClient.Flush.
 func (c *gtidClient) Flush(ctx context.Context) error {
 	for {
+		subs := c.subs.Snapshot()
+		parks := watchParks(subs)
 		if err := c.flush(ctx, false, nil); err != nil {
 			return err
+		}
+		pending := c.GetDeltaLen()
+		redrainCanProgress := c.lastFlushWasComplete() || drainHitBudget(subs)
+		if backlogWorthDraining(pending, parks.readerWasBlocked(subs), redrainCanProgress) {
+			c.logger.Debug("reader is not keeping up, draining again instead of waiting on it",
+				"pending", pending)
+			continue
 		}
 		if err := c.BlockWait(ctx); err != nil {
 			c.logger.Warn("error waiting for GTID reader to catch up", "error", err)
@@ -1295,6 +1319,9 @@ func (c *gtidClient) runPeriodicFlush(ctx context.Context, interval time.Duratio
 			// pass still runs afterwards for position advancement.
 			trigger = "soft-limit-park"
 			if _, err := parked.Flush(ctx, false, nil); err != nil {
+				if periodicFlushStopping(ctx) {
+					return
+				}
 				c.logger.Error("error flushing parked subscription", "error", err)
 			}
 		case <-ticker.C:
@@ -1302,6 +1329,9 @@ func (c *gtidClient) runPeriodicFlush(ctx context.Context, interval time.Duratio
 		startLoop := time.Now()
 		c.logger.Debug("starting periodic flush of GTID changeset", "trigger", trigger)
 		if err := c.flush(ctx, false, nil); err != nil {
+			if periodicFlushStopping(ctx) {
+				return
+			}
 			c.logger.Error("error flushing GTID changeset", "error", err)
 		}
 		// Debug, not Info — see binlogClient.runPeriodicFlush (#329).
