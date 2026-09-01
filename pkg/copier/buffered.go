@@ -97,6 +97,7 @@ func (c *buffered) CopyChunk(ctx context.Context, chunk *table.Chunk) error {
 		return fmt.Errorf("failed to read chunk data: %w", err)
 	}
 	chunk.ActualBytes = rowsByteSize(rows)
+	chunk.SourceRows = uint64(len(rows))
 	// The callback runs on the applier's feedback coordinator goroutine; done
 	// closes only after feedback and metrics are sent, so both have completed
 	// before CopyChunk returns. Empty chunks take the same path — the applier
@@ -420,6 +421,7 @@ func (c *buffered) readWorker(ctx context.Context, quit <-chan struct{}) error {
 		// size the next chunk against a byte budget (memory-based dynamic
 		// chunking). Harmless when the chunker is in time mode — it ignores it.
 		chunk.ActualBytes = rowsByteSize(rows)
+		chunk.SourceRows = uint64(len(rows))
 
 		// Handle empty chunks immediately
 		if len(rows) == 0 {
