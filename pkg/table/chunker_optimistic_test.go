@@ -450,12 +450,46 @@ func TestOptimisticPrefetchChunking(t *testing.T) {
 	require.NoError(t, chunker.Open())
 	require.False(t, chunker.chunkPrefetchingEnabled)
 
+	// Feed back the REAL row count for each chunk, not a placeholder: that is
+	// what the prefetch entry gate reads, so a hardcoded value would make this
+	// test pass without saying anything about a 300B gap. Cost the chunk in
+	// proportion to the rows it really held, the way the checksum's server-side
+	// CRC does.
+	episodes, prefetchChunks, chunks := 0, 0, 0
+	wasPrefetching := false
 	for !chunker.finalChunkSent {
 		chunk, err := chunker.Next()
 		require.NoError(t, err)
-		chunker.Feedback(chunk, 100*time.Millisecond, 1) // way too short.
+		chunks++
+		if wasPrefetching {
+			prefetchChunks++
+		}
+		if chunker.chunkPrefetchingEnabled && !wasPrefetching {
+			episodes++
+		}
+		wasPrefetching = chunker.chunkPrefetchingEnabled
+
+		var rows uint64
+		countQuery := "SELECT COUNT(*) FROM tprefetch WHERE " + chunk.String()
+		require.NoError(t, db.QueryRowContext(t.Context(), countQuery).Scan(&rows))
+		chunker.Feedback(chunk, time.Duration(rows)*8*time.Microsecond, rows)
 	}
 	require.True(t, chunker.chunkPrefetchingEnabled)
+
+	// One prefetch episode per gap in the fixture (300B, 600B, 900B), each
+	// entered off measured emptiness rather than off a cheap chunk.
+	require.Equal(t, 3, episodes)
+	require.Positive(t, prefetchChunks)
+
+	// The gap crossings are real crossings, not entry/exit flaps, so none of
+	// them counted against the rejection backstop.
+	require.Zero(t, chunker.prefetchRejections)
+
+	// And the whole table is covered in far fewer chunks than the flapping
+	// chunker needed: it used to re-ramp from StartingChunkSize after every
+	// episode. Generous bound — the point is the order of magnitude, not a
+	// golden number.
+	require.Less(t, chunks, 300, "prefetch episodes must not each cost a re-ramp to the ceiling")
 }
 
 func TestOptimisticChunkerReset(t *testing.T) {
