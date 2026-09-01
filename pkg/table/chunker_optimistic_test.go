@@ -678,3 +678,139 @@ func TestOptimisticChunkerReservedWordTableName(t *testing.T) {
 
 	require.NoError(t, opt.Close())
 }
+
+// denseChunkerForTest returns an optimistic chunker over a synthetic table with
+// a wide, gap-free BIGINT key space, using the time signal and the production
+// chunk time target.
+func denseChunkerForTest(t *testing.T) *chunkerOptimistic {
+	t.Helper()
+	ti := &TableInfo{
+		minValue:          Datum{Val: int64(1), Tp: signedType},
+		maxValue:          Datum{Val: int64(1_000_000_000), Tp: signedType},
+		EstimatedRows:     1_000_000_000,
+		SchemaName:        "test",
+		TableName:         "dense",
+		QuotedTableName:   "`dense`",
+		KeyColumns:        []string{"id"},
+		keyColumnsMySQLTp: []string{"bigint"},
+		keyDatums:         []datumTp{signedType},
+		KeyIsAutoInc:      true,
+		Columns:           []string{"id", "name"},
+	}
+	ti.statisticsLastUpdated = time.Now()
+	chunker := &chunkerOptimistic{
+		Ti:                ti,
+		dynamicChunkSizer: dynamicChunkSizer{ChunkerTarget: ChunkerDefaultTarget},
+		watermarkTracker:  watermarkTracker{lowerBoundWatermarkMap: make(map[string]*Chunk)},
+		logger:            slog.Default(),
+	}
+	chunker.SetDynamicChunking(true)
+	require.NoError(t, chunker.Open())
+	return chunker
+}
+
+// TestOptimisticNoPrefetchOnDenseKeySpace is a regression test for the prefetch
+// flap. On a dense table every healthy chunk satisfies the old prefetch-entry
+// condition — the sizer is pinned at MaxDynamicRowSize and still wants to grow
+// while the p90 sits well inside the chunk time target — because a chunk being
+// cheap says nothing about whether the key space has gaps. That is the normal
+// state of a checksum chunk (a server-side CRC against a 5s budget), so the
+// chunker switched to prefetch, immediately discovered the key space was dense,
+// switched back with the chunk size reset to StartingChunkSize, and had to ramp
+// ~130 chunks back to the ceiling — forever.
+func TestOptimisticNoPrefetchOnDenseKeySpace(t *testing.T) {
+	chunker := denseChunkerForTest(t)
+
+	// Walk the table, feeding back what a dense table really reports: the chunk
+	// covered as many rows as it was wide, and it cost time in proportion to
+	// those rows. 8us/row puts a full 100k-row chunk at 800ms, which is inside
+	// a fifth of the 5s target — the shape observed in production, where a
+	// 100k-row checksum chunk lands either side of 1s.
+	for range 200 {
+		chunk, err := chunker.Next()
+		require.NoError(t, err)
+		rows := chunk.ChunkSize
+		chunker.Feedback(chunk, time.Duration(rows)*8*time.Microsecond, rows)
+		require.False(t, chunker.chunkPrefetchingEnabled,
+			"must not switch to prefetch on a gap-free key space")
+	}
+
+	// And having found nothing to slow it down, the sizer should be parked at
+	// the ceiling rather than endlessly re-ramping from StartingChunkSize.
+	require.Equal(t, uint64(MaxDynamicRowSize), chunker.chunkSize)
+}
+
+// TestOptimisticPrefetchRestoresChunkSize covers the other half of the prefetch
+// flap: leaving prefetch mode used to reset the chunk size to
+// StartingChunkSize, so even a legitimate gap crossing was paid for with a
+// ~130-chunk ramp back to the ceiling. Prefetch is only ever entered from the
+// ceiling, so that is the size to come back to.
+func TestOptimisticPrefetchRestoresChunkSize(t *testing.T) {
+	db, err := sql.Open("mysql", testutils.DSN())
+	require.NoError(t, err)
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Logf("failed to close db: %v", err)
+		}
+	}()
+
+	testutils.RunSQL(t, `DROP TABLE IF EXISTS tprefetch_dense`)
+	testutils.RunSQL(t, `CREATE TABLE tprefetch_dense (
+		id BIGINT NOT NULL AUTO_INCREMENT,
+		pad VARCHAR(10) NULL,
+		PRIMARY KEY (id)
+	)`)
+	// ~11K rows with no gaps at all, so the prefetch query's OFFSET lands well
+	// inside MaxDynamicRowSize keys and prefetch is abandoned immediately.
+	testutils.RunSQL(t, `INSERT INTO tprefetch_dense (pad) VALUES (NULL)`)
+	for range 3 {
+		testutils.RunSQL(t, `INSERT INTO tprefetch_dense (pad) SELECT NULL FROM tprefetch_dense a JOIN tprefetch_dense b JOIN tprefetch_dense c`)
+	}
+	testutils.RunSQL(t, `INSERT INTO tprefetch_dense (pad) SELECT NULL FROM tprefetch_dense a JOIN tprefetch_dense b LIMIT 10000`)
+
+	t1 := newTableInfo4Test("test", "tprefetch_dense")
+	t1.db = db
+	require.NoError(t, t1.SetInfo(t.Context()))
+	chunker := &chunkerOptimistic{
+		Ti:                t1,
+		dynamicChunkSizer: dynamicChunkSizer{ChunkerTarget: ChunkerDefaultTarget},
+		watermarkTracker:  watermarkTracker{lowerBoundWatermarkMap: make(map[string]*Chunk)},
+		logger:            slog.Default(),
+	}
+	chunker.SetDynamicChunking(true)
+	require.NoError(t, chunker.Open())
+
+	// Enter prefetch the way the sizer does, from the ceiling.
+	chunker.chunkSize = MaxDynamicRowSize
+	chunker.switchToPrefetch()
+	require.True(t, chunker.chunkPrefetchingEnabled)
+	require.Equal(t, uint64(StartingChunkSize), chunker.chunkSize)
+
+	// One prefetch chunk is enough to discover the key space is dense.
+	chunker.chunkPtr = Datum{Val: int64(1), Tp: signedType}
+	chunk, err := chunker.nextChunkByPrefetching()
+	require.NoError(t, err)
+	require.False(t, chunker.chunkPrefetchingEnabled)
+	require.Equal(t, uint64(MaxDynamicRowSize), chunker.chunkSize,
+		"leaving prefetch must restore the pre-prefetch chunk size, not ramp from scratch")
+
+	// The chunk that triggered the exit is labelled with the offset that built
+	// it, not with the size the next chunk will use.
+	require.Equal(t, uint64(StartingChunkSize), chunk.ChunkSize)
+
+	// The episode was abandoned on its first chunk, so it counts as a
+	// rejection, and re-entry is closed until fresh density evidence has
+	// accumulated under the restored chunk size.
+	require.Equal(t, 1, chunker.prefetchRejections)
+	require.False(t, chunker.prefetchWouldHelp(MaxDynamicRowSize+1))
+
+	// After maxPrefetchRejections the chunker stops trying at all, so the log
+	// stays quiet even on a table that sits on the boundary between the entry
+	// gate and prefetch's own exit test.
+	chunker.prefetchRejections = maxPrefetchRejections
+	for range keySpaceDensityWindow {
+		chunker.keyDensity.record(MaxDynamicRowSize, 0) // as sparse as it gets
+	}
+	require.True(t, chunker.keyDensity.sparse())
+	require.False(t, chunker.prefetchWouldHelp(MaxDynamicRowSize+1))
+}

@@ -30,6 +30,23 @@ type chunkerOptimistic struct {
 	// The chunk prefetching algorithm is used when the chunker detects
 	// that there are very large gaps in the sequence.
 	chunkPrefetchingEnabled bool
+	// keyDensity is how that detection is made: it measures keys-per-row over
+	// recent chunks, which is what "large gaps in the sequence" means. See
+	// keySpaceDensity for why chunk cost cannot stand in for it.
+	keyDensity keySpaceDensity
+	// prePrefetchChunkSize is the chunk size that was in effect when the
+	// current prefetch episode began, restored when the episode ends.
+	prePrefetchChunkSize uint64
+	// prefetchChunks counts chunks dispatched in the current prefetch episode,
+	// so an episode abandoned on its first chunk can be recognised as a
+	// rejection rather than a completed gap crossing.
+	prefetchChunks int
+	// prefetchRejections counts episodes rejected on their first chunk. After
+	// maxPrefetchRejections we stop trying for the rest of the run: the entry
+	// gate and the exit test read the same key space, so if they disagree twice
+	// this table sits on the boundary between them and re-testing it costs more
+	// than prefetch can win.
+	prefetchRejections int
 
 	// Progress tracking: the implementation here is up to the chunker,
 	// and for the optimistic chunker it is based on the progress
@@ -47,14 +64,24 @@ type chunkerOptimistic struct {
 
 var _ MappedChunker = &chunkerOptimistic{}
 
+// maxPrefetchRejections is how many prefetch episodes may be abandoned on their
+// first chunk before the chunker gives up on prefetch for the rest of the run.
+// See chunkerOptimistic.prefetchRejections.
+const maxPrefetchRejections = 2
+
 // nextChunkByPrefetching uses prefetching instead of feedback to determine the chunk size.
 // It is used when the chunker detects that there are very large gaps in the sequence.
 // When this mode is enabled, the chunkSize is "reset" to 1000 rows, so we know that
 // t.chunkSize is reliable. It is also expanded again based on feedback.
 func (t *chunkerOptimistic) nextChunkByPrefetching() (*Chunk, error) {
+	// The OFFSET this chunk is built from, captured before leavePrefetch below
+	// can change t.chunkSize. The returned chunk must be labelled with the size
+	// that produced it, not with whatever the next chunk will use.
+	offset := t.chunkSize
+	t.prefetchChunks++
 	key := QuoteColumns(t.Ti.KeyColumns[:1])
 	query := fmt.Sprintf("SELECT %s FROM %s WHERE %s > ? ORDER BY %s LIMIT 1 OFFSET %d",
-		key, t.Ti.QuotedTableName, key, key, t.chunkSize,
+		key, t.Ti.QuotedTableName, key, key, offset,
 	)
 	//nolint: noctx // too much refactoring to add context here
 	rows, err := t.Ti.db.Query(query, t.chunkPtr.String())
@@ -84,16 +111,11 @@ func (t *chunkerOptimistic) nextChunkByPrefetching() (*Chunk, error) {
 		// on non-numeric Datums (binary PK); in that case the prefetching
 		// optimization simply doesn't apply — fall through.
 		if rng, err := maxVal.Range(minVal); err == nil && rng < MaxDynamicRowSize {
-			t.logger.Warn("disabling chunk prefetching",
-				"min-val", minVal,
-				"max-val", maxVal,
-				"max-dynamic-row-size", MaxDynamicRowSize)
-			t.chunkSize = StartingChunkSize // reset
-			t.chunkPrefetchingEnabled = false
+			t.leavePrefetch(minVal, maxVal, rng, offset)
 		}
 
 		return &Chunk{
-			ChunkSize:  t.chunkSize,
+			ChunkSize:  offset,
 			Key:        t.Ti.KeyColumns,
 			LowerBound: &Boundary{[]Datum{minVal}, true},
 			UpperBound: &Boundary{[]Datum{maxVal}, false},
@@ -111,7 +133,7 @@ func (t *chunkerOptimistic) nextChunkByPrefetching() (*Chunk, error) {
 	// on the final chunk.
 	t.finalChunkSent = true
 	return &Chunk{
-		ChunkSize:  t.chunkSize,
+		ChunkSize:  offset,
 		Key:        t.Ti.KeyColumns,
 		LowerBound: &Boundary{[]Datum{t.chunkPtr}, true},
 		Table:      t.Ti,
@@ -346,6 +368,10 @@ func (t *chunkerOptimistic) Reset() error {
 	t.inflightChunks = 0
 	t.chunkTimingInfo = []time.Duration{}
 	t.chunkPrefetchingEnabled = false
+	t.keyDensity.reset()
+	t.prePrefetchChunkSize = 0
+	t.prefetchChunks = 0
+	t.prefetchRejections = 0
 
 	// Reset progress tracking
 	atomic.StoreUint64(&t.rowsCopied, 0)
@@ -378,6 +404,8 @@ func (t *chunkerOptimistic) Feedback(chunk *Chunk, d time.Duration, actualRows u
 	atomic.AddUint64(&t.rowsCopied, chunk.ChunkSize)
 	t.chunksCopied.Add(1)
 
+	t.recordKeyDensity(chunk, actualRows)
+
 	// Check if the feedback is based on an earlier chunker size.
 	// if it is, it is misleading to incorporate feedback now.
 	// We should just skip it. We also skip if dynamic chunking is disabled.
@@ -398,23 +426,50 @@ func (t *chunkerOptimistic) Feedback(chunk *Chunk, d time.Duration, actualRows u
 	t.feedbackTime(t.logger, d, t.maybeSwitchToPrefetch)
 }
 
+// recordKeyDensity feeds one completed chunk into the key-space density window
+// that gates prefetch entry: how many keys the chunk spanned, and how many rows
+// were really in it.
+//
+// Deliberately called before Feedback's stale-feedback screen. Unlike a
+// duration, a keys/rows pair is a property of the data rather than of the chunk
+// size that happened to be in effect, so a chunk drawn under an earlier chunk
+// size is still a valid density sample — and under high copy or checksum
+// concurrency most feedback IS stale (dozens of chunks are in flight when the
+// size changes), so screening those out would leave the window permanently
+// short and prefetch permanently unreachable.
+//
+// Chunks without both bounds — the first chunk and the open-ended final one —
+// have no measurable width and are skipped. Caller holds the mutex.
+func (t *chunkerOptimistic) recordKeyDensity(chunk *Chunk, actualRows uint64) {
+	if chunk.LowerBound == nil || chunk.UpperBound == nil ||
+		len(chunk.LowerBound.Value) == 0 || len(chunk.UpperBound.Value) == 0 {
+		return
+	}
+	// Range errors on non-numeric keys (a binary PK), where prefetch does not
+	// apply anyway.
+	keys, err := chunk.UpperBound.Value[0].Range(chunk.LowerBound.Value[0])
+	if err != nil {
+		return
+	}
+	t.keyDensity.record(keys, actualRows)
+}
+
 // maybeSwitchToPrefetch is the optimistic chunker's pre-update hook for the
 // shared time-based sizer (dynamicChunkSizer.feedbackTime). When the sizer is
 // already at the max chunk size and still wants to grow while the p90 is only a
-// small fraction of the target time, the auto-increment key space has large
-// gaps — so switch to the prefetch algorithm (which finds boundaries by query)
-// instead of growing the row target further. The composite chunker has no
-// analogous mode. Caller (feedbackTime) holds the chunker's mutex.
-func (t *chunkerOptimistic) maybeSwitchToPrefetch(newTarget uint64, p90 time.Duration) {
-	if t.chunkSize == MaxDynamicRowSize && newTarget > MaxDynamicRowSize && p90*5 < t.ChunkerTarget {
-		t.logger.Warn("dynamic chunking is not working as expected",
-			"target-time", t.ChunkerTarget,
-			"p90-time", p90,
-			"new-target-rows", newTarget,
-			"max-dynamic-row-size", MaxDynamicRowSize,
-		)
-		t.switchToPrefetch()
+// small fraction of the target time, the chunker is not getting what it asked
+// for from a fixed-width chunk — a *necessary* condition for prefetch being
+// useful, but on its own not a sufficient one, so prefetchWouldHelp also
+// requires the key space to measure sparse. The composite chunker has no
+// analogous mode. Caller (feedbackTime) holds the chunker's mutex. Returns true
+// when it switched, so the sizer skips the target it just computed for the mode
+// we are leaving.
+func (t *chunkerOptimistic) maybeSwitchToPrefetch(newTarget uint64, p90 time.Duration) bool {
+	if p90*5 >= t.ChunkerTarget || !t.prefetchWouldHelp(newTarget) {
+		return false
 	}
+	t.switchToPrefetch("target-time", t.ChunkerTarget, "p90-time", p90)
+	return true
 }
 
 // maybeSwitchToPrefetchBytes is the byte-signal twin of maybeSwitchToPrefetch,
@@ -422,26 +477,106 @@ func (t *chunkerOptimistic) maybeSwitchToPrefetch(newTarget uint64, p90 time.Dur
 // the chunk is pinned at the row ceiling but the p90 in-memory size is still
 // under a fifth of the byte budget, which over a large auto-increment gap means
 // chunks keep coming back near-empty. Caller (feedbackBytes) holds the mutex.
-func (t *chunkerOptimistic) maybeSwitchToPrefetchBytes(newTarget uint64, p90Bytes uint64) {
-	if t.chunkSize == MaxDynamicRowSize && newTarget > MaxDynamicRowSize && p90Bytes*5 < t.TargetChunkBytes {
-		t.logger.Warn("dynamic chunking is not working as expected",
-			"target-bytes", t.TargetChunkBytes,
-			"p90-bytes", p90Bytes,
-			"new-target-rows", newTarget,
-			"max-dynamic-row-size", MaxDynamicRowSize,
-		)
-		t.switchToPrefetch()
+func (t *chunkerOptimistic) maybeSwitchToPrefetchBytes(newTarget uint64, p90Bytes uint64) bool {
+	if p90Bytes*5 >= t.TargetChunkBytes || !t.prefetchWouldHelp(newTarget) {
+		return false
 	}
+	t.switchToPrefetch("target-bytes", t.TargetChunkBytes, "p90-bytes", p90Bytes)
+	return true
+}
+
+// prefetchWouldHelp reports whether the signal-independent preconditions for
+// entering prefetch mode hold: the sizer is pinned at the row ceiling and still
+// wants to grow, the key space has actually been measured as sparse, and we
+// have not already tried and been rejected too many times.
+//
+// The density check is the one that matters. Without it the caller's condition
+// ("pinned at the ceiling, and chunks are cheap") is satisfied by every healthy
+// chunk on a dense table — most obviously in the checksum, where a chunk is a
+// server-side CRC sized against a 5s budget, so 100k dense rows come back in
+// well under a fifth of it. That produced an endless entry/exit flap: prefetch
+// was entered, nextChunkByPrefetching found the key space dense and left again,
+// and the chunk size ping-ponged between StartingChunkSize and the ceiling for
+// the whole run. Caller holds the mutex.
+func (t *chunkerOptimistic) prefetchWouldHelp(newTarget uint64) bool {
+	if t.chunkPrefetchingEnabled {
+		// Already prefetching. Re-entering would reset the row offset back to
+		// StartingChunkSize mid-gap, undoing the growth this episode has
+		// already earned — reachable because a prefetch episode's own chunks
+		// feed the sizer and can carry it back up to the ceiling.
+		return false
+	}
+	if t.chunkSize != MaxDynamicRowSize || newTarget <= MaxDynamicRowSize {
+		return false
+	}
+	if t.prefetchRejections >= maxPrefetchRejections {
+		return false
+	}
+	return t.keyDensity.sparse()
 }
 
 // switchToPrefetch flips the optimistic chunker into prefetch mode, where the
 // next boundary is found by query rather than by advancing a fixed row count —
-// the only efficient way to cross a large gap in the key space. Caller holds
-// the mutex.
-func (t *chunkerOptimistic) switchToPrefetch() {
-	t.logger.Warn("switching to prefetch algorithm")
-	t.chunkSize = StartingChunkSize // reset
+// the only efficient way to cross a large gap in the key space. signalAttrs are
+// the log attributes describing whichever budget (time or bytes) raised the
+// alarm. Caller holds the mutex.
+func (t *chunkerOptimistic) switchToPrefetch(signalAttrs ...any) {
+	keys, rows := t.keyDensity.totals()
+	t.logger.Info("large gaps found in the key space; switching to the chunk prefetch algorithm",
+		append([]any{
+			"window-keys", keys,
+			"window-rows", rows,
+			"chunk-size", t.chunkSize,
+		}, signalAttrs...)...)
+	t.prePrefetchChunkSize = t.chunkSize
+	t.prefetchChunks = 0
 	t.chunkPrefetchingEnabled = true
+	t.setChunkSize(StartingChunkSize)
+	t.keyDensity.reset()
+}
+
+// leavePrefetch returns the chunker to fixed-width chunking, having found that
+// the `offset` rows the prefetch query walked span fewer than MaxDynamicRowSize
+// keys — the gap is behind us.
+//
+// The chunk size is restored to what it was when prefetch was entered rather
+// than reset to StartingChunkSize. That reset was the expensive half of the
+// prefetch flap: the sizer grows by at most MaxDynamicStepFactor per feedback
+// window, so climbing StartingChunkSize -> MaxDynamicRowSize costs ~130 chunks,
+// every one of them a fraction of the size the table can sustain. Prefetch is
+// only ever entered from the ceiling, so the restored size is one this table has
+// already been measured to sustain; if the region past the gap cannot, the
+// sizer — and panicShrink ahead of it — brings it down within a window.
+// Caller holds the mutex.
+func (t *chunkerOptimistic) leavePrefetch(minVal, maxVal Datum, keys, offset uint64) {
+	restore := t.prePrefetchChunkSize
+	if restore == 0 {
+		// Prefetch was enabled without going through switchToPrefetch (the test
+		// suite does this). Keep the historical behavior for that case.
+		restore = StartingChunkSize
+	}
+	// An episode abandoned on its very first chunk never crossed a gap: the
+	// entry gate and this test disagreed about the same key space.
+	rejected := t.prefetchChunks <= 1
+	if rejected {
+		t.prefetchRejections++
+	}
+	t.logger.Info("key space is dense again; leaving the chunk prefetch algorithm",
+		"min-val", minVal,
+		"max-val", maxVal,
+		"keys", keys,
+		"rows", offset,
+		"max-dynamic-row-size", MaxDynamicRowSize,
+		"prefetch-chunks", t.prefetchChunks,
+		"chunk-size", restore,
+	)
+	if rejected && t.prefetchRejections >= maxPrefetchRejections {
+		t.logger.Info("prefetching keeps being abandoned on its first chunk; not trying it again for this table",
+			"attempts", t.prefetchRejections)
+	}
+	t.chunkPrefetchingEnabled = false
+	t.setChunkSize(restore)
+	t.keyDensity.reset()
 }
 
 // GetLowWatermark returns the highest known value that has been safely copied,
@@ -477,6 +612,9 @@ func (t *chunkerOptimistic) open() (err error) {
 	t.finalChunkSent = false
 	t.chunkSize = StartingChunkSize
 	t.inflightChunks = 0
+	t.keyDensity.reset()
+	t.prePrefetchChunkSize = 0
+	t.prefetchChunks = 0
 
 	// Initialize progress tracking
 	atomic.StoreUint64(&t.rowsCopied, 0)
