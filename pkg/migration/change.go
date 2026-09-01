@@ -51,15 +51,21 @@ func (c *tableChange) createNewTable(ctx context.Context) error {
 // We first attempt to do this using ALGORITHM=COPY so we don't burn
 // an INSTANT version. But surprisingly this is not supported for all DDLs (issue #277)
 func (c *tableChange) alterNewTable(ctx context.Context) error {
-	// The user's ALTER clause is spliced in with %r: it is raw SQL that may
+	// Not necessarily the user's ALTER verbatim: check constraint names have to
+	// be rewritten for the new table. See newTableAlter.
+	alter, err := c.newTableAlter(ctx)
+	if err != nil {
+		return err
+	}
+	// The ALTER clause is spliced in with %r: it is raw SQL that may
 	// legitimately contain % characters (e.g. COMMENT '100%new'), which must
 	// not be interpreted as format specifiers.
 	if err := dbconn.Exec(ctx, c.runner.db, "ALTER TABLE %n %r, ALGORITHM=COPY",
-		c.newTable.TableName, sqlescape.RawSQL(c.stmt.TrimAlter())); err != nil {
+		c.newTable.TableName, sqlescape.RawSQL(alter)); err != nil {
 		// Retry without the ALGORITHM=COPY. If there is a second error, then the DDL itself
 		// is not supported. It could be a syntax error, in which case we return the second error,
 		// which will probably be easier to read because it is unaltered.
-		if err := dbconn.Exec(ctx, c.runner.db, "ALTER TABLE %n %r", c.newTable.TableName, sqlescape.RawSQL(c.stmt.Alter)); err != nil {
+		if err := dbconn.Exec(ctx, c.runner.db, "ALTER TABLE %n %r", c.newTable.TableName, sqlescape.RawSQL(alter)); err != nil {
 			return err
 		}
 	}

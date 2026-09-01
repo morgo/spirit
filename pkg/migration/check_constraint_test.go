@@ -1,7 +1,9 @@
 package migration
 
 import (
+	"database/sql"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 
@@ -187,6 +189,123 @@ func TestCheckConstraintAddColumn(t *testing.T) {
 
 	_, err = tt.DB.ExecContext(t.Context(), "INSERT INTO chk_addcol (val) VALUES (1)")
 	require.NoError(t, err, "valid row should be accepted")
+}
+
+// TestCheckConstraintReplaceSameName covers the common "widen an enum-style
+// CHECK" idiom: drop a named CHECK constraint and immediately re-add it under
+// the same name. MySQL accepts this directly, but the copy algorithm cannot
+// replay it verbatim on the _new table: CREATE TABLE .. LIKE renames the
+// constraint, so DROP CHECK by the original name is "not found" (error 3821),
+// and the original name is still owned by the source table, so re-adding it
+// would be a "duplicate check constraint name" (error 3822).
+func TestCheckConstraintReplaceSameName(t *testing.T) {
+	t.Parallel()
+	tt := testutils.NewTestTable(t, "chk_replace", `CREATE TABLE chk_replace (
+		id INT NOT NULL PRIMARY KEY AUTO_INCREMENT,
+		state VARCHAR(32) NOT NULL,
+		CONSTRAINT chk_replace_state CHECK (state IN ('processing', 'succeeded', 'failed'))
+	)`)
+	testutils.RunSQL(t, `INSERT INTO chk_replace (state) VALUES ('processing'), ('succeeded'), ('failed')`)
+
+	m := NewTestRunner(t, "chk_replace",
+		`DROP CHECK chk_replace_state,
+		 ADD CONSTRAINT chk_replace_state CHECK (state IN ('processing', 'succeeded', 'failed', 'warning'))`)
+	require.NoError(t, m.Run(t.Context()))
+	require.False(t, m.usedInstantDDL)
+	require.NoError(t, m.Close())
+
+	var count int
+	require.NoError(t, tt.DB.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM chk_replace").Scan(&count))
+	require.Equal(t, 3, count)
+
+	// The widened constraint is in force: the new value is accepted...
+	_, err := tt.DB.ExecContext(t.Context(), "INSERT INTO chk_replace (state) VALUES ('warning')")
+	require.NoError(t, err, "the re-added CHECK constraint should accept the new value")
+
+	// ...and a value outside the new list is still rejected.
+	_, err = tt.DB.ExecContext(t.Context(), "INSERT INTO chk_replace (state) VALUES ('bogus')")
+	require.Error(t, err, "the re-added CHECK constraint should reject unlisted values")
+
+	// The name the user asked for is not what the constraint ends up with: the
+	// old table still owned it while the new table was being built, so MySQL
+	// generated a <table>_chk_<n> name instead. This is the same thing that
+	// happens to every CHECK constraint a copy migration copies (issue #418).
+	names := checkConstraintNames(t, tt.DB, "chk_replace")
+	require.Len(t, names, 1)
+	require.NotEqual(t, "chk_replace_state", names[0])
+	require.True(t, strings.HasPrefix(names[0], "chk_replace_chk_"),
+		"expected a server-generated name, got %q", names[0])
+}
+
+// TestCheckConstraintNotEnforcedOnCopyPath switches a named CHECK constraint to
+// NOT ENFORCED in an ALTER that also forces a rebuild, so the ALTER CHECK clause
+// has to be retargeted at the new table's name for that constraint.
+func TestCheckConstraintNotEnforcedOnCopyPath(t *testing.T) {
+	t.Parallel()
+	tt := testutils.NewTestTable(t, "chk_enforce", `CREATE TABLE chk_enforce (
+		id INT NOT NULL PRIMARY KEY AUTO_INCREMENT,
+		val INT NOT NULL,
+		CONSTRAINT chk_enforce_valpos CHECK (val > 0)
+	)`)
+	testutils.RunSQL(t, `INSERT INTO chk_enforce (val) VALUES (1), (2)`)
+
+	m := NewTestRunner(t, "chk_enforce", "ALTER CHECK chk_enforce_valpos NOT ENFORCED, ENGINE=InnoDB")
+	require.NoError(t, m.Run(t.Context()))
+	require.False(t, m.usedInstantDDL)
+	require.NoError(t, m.Close())
+
+	_, err := tt.DB.ExecContext(t.Context(), "INSERT INTO chk_enforce (val) VALUES (-1)")
+	require.NoError(t, err, "a NOT ENFORCED CHECK constraint should not reject anything")
+}
+
+// checkConstraintNames returns the names of the table's CHECK constraints.
+func checkConstraintNames(t *testing.T, db *sql.DB, tableName string) []string {
+	t.Helper()
+	rows, err := db.QueryContext(t.Context(), `SELECT cc.CONSTRAINT_NAME
+		FROM information_schema.CHECK_CONSTRAINTS cc
+		JOIN information_schema.TABLE_CONSTRAINTS tc
+		  ON tc.CONSTRAINT_SCHEMA = cc.CONSTRAINT_SCHEMA
+		  AND tc.CONSTRAINT_NAME = cc.CONSTRAINT_NAME
+		WHERE tc.CONSTRAINT_SCHEMA = DATABASE() AND tc.TABLE_NAME = ?`, tableName)
+	require.NoError(t, err)
+	defer rows.Close() //nolint:errcheck // test cleanup
+	var names []string
+	for rows.Next() {
+		var name string
+		require.NoError(t, rows.Scan(&name))
+		names = append(names, name)
+	}
+	require.NoError(t, rows.Err())
+	return names
+}
+
+// TestCheckConstraintDropOnCopyPath drops a named CHECK constraint in an ALTER
+// that also forces a table rebuild, so it takes the copy path rather than
+// INSTANT DDL. The DROP CHECK has to be retargeted at the name CREATE TABLE ..
+// LIKE gave the constraint on the _new table.
+func TestCheckConstraintDropOnCopyPath(t *testing.T) {
+	t.Parallel()
+	tt := testutils.NewTestTable(t, "chk_dropcopy", `CREATE TABLE chk_dropcopy (
+		id INT NOT NULL PRIMARY KEY AUTO_INCREMENT,
+		c1 INT NOT NULL,
+		c2 INT NOT NULL,
+		CONSTRAINT chk_dropcopy_c1pos CHECK (c1 > 0),
+		CONSTRAINT chk_dropcopy_c2pos CHECK (c2 > 0)
+	)`)
+	testutils.RunSQL(t, `INSERT INTO chk_dropcopy (c1, c2) VALUES (1, 1), (2, 2)`)
+
+	// ENGINE=InnoDB forces a rebuild, so this cannot be INSTANT.
+	m := NewTestRunner(t, "chk_dropcopy", "DROP CHECK chk_dropcopy_c1pos, ENGINE=InnoDB")
+	require.NoError(t, m.Run(t.Context()))
+	require.False(t, m.usedInstantDDL)
+	require.NoError(t, m.Close())
+
+	// c1 is now unconstrained, c2 is still constrained.
+	_, err := tt.DB.ExecContext(t.Context(), "INSERT INTO chk_dropcopy (c1, c2) VALUES (-1, 1)")
+	require.NoError(t, err, "the dropped CHECK constraint should no longer be enforced")
+
+	_, err = tt.DB.ExecContext(t.Context(), "INSERT INTO chk_dropcopy (c1, c2) VALUES (1, -1)")
+	require.Error(t, err, "the remaining CHECK constraint should still be enforced")
 }
 
 // TestCheckConstraintAddNewCheckConstraint tests adding a new CHECK constraint
