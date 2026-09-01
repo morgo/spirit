@@ -478,6 +478,29 @@ func TestCheckConstraintReplaceNotEnforcedKeepsName(t *testing.T) {
 	require.NoError(t, err, "an unenforced constraint should reject nothing")
 }
 
+// TestCheckConstraintRewrittenAlterErrorNamesStatement covers the error message
+// for a rewritten ALTER that fails for some unrelated reason. It has to say what
+// was actually run, because the statement is no longer the user's and MySQL can
+// report a constraint name they have never seen.
+func TestCheckConstraintRewrittenAlterErrorNamesStatement(t *testing.T) {
+	t.Parallel()
+	testutils.NewTestTable(t, "chk_errmsg", `CREATE TABLE chk_errmsg (
+		id INT NOT NULL PRIMARY KEY AUTO_INCREMENT,
+		val INT NOT NULL,
+		CONSTRAINT chk_errmsg_valpos CHECK (val > 0)
+	)`)
+	testutils.RunSQL(t, `INSERT INTO chk_errmsg (val) VALUES (1)`)
+
+	// The DROP CHECK is rewritten for the new table; the ADD COLUMN then fails
+	// because the column already exists.
+	m := NewTestRunner(t, "chk_errmsg", "DROP CHECK chk_errmsg_valpos, ADD COLUMN id INT")
+	err := m.Run(t.Context())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "applied to the new table as")
+	require.Contains(t, err.Error(), "_chk_errmsg_new_chk_1")
+	require.NoError(t, m.Close())
+}
+
 // tableCheckConstraints returns the table's CHECK constraints as a map of name to
 // whether the constraint is enforced.
 func tableCheckConstraints(t *testing.T, db *sql.DB, tableName string) map[string]bool {

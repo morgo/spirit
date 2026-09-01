@@ -64,9 +64,18 @@ func (c *tableChange) alterNewTable(ctx context.Context) error {
 	if err := dbconn.Exec(ctx, c.runner.db, "ALTER TABLE %n %r, ALGORITHM=COPY",
 		c.newTable.TableName, sqlescape.RawSQL(alter)); err != nil {
 		// Retry without the ALGORITHM=COPY. If there is a second error, then the DDL itself
-		// is not supported. It could be a syntax error, in which case we return the second error,
-		// which will probably be easier to read because it is unaltered.
+		// is not supported. It could be a syntax error, in which case we return the second
+		// error, which will probably be easier to read because spirit's own ALGORITHM=COPY
+		// is not on the end of it. The clauses can still differ from what the user wrote:
+		// newTableAlter rewrites check constraint names for the new table, so either error
+		// may quote a server-generated name in place of the user's symbol.
 		if err := dbconn.Exec(ctx, c.runner.db, "ALTER TABLE %n %r", c.newTable.TableName, sqlescape.RawSQL(alter)); err != nil {
+			if alter != c.stmt.TrimAlter() {
+				// Say which statement failed, since it is not the one the user
+				// wrote and the error can name a constraint they have never seen.
+				return fmt.Errorf("%w (applied to the new table as: ALTER TABLE %s %s)",
+					err, c.newTable.TableName, alter)
+			}
 			return err
 		}
 	}
