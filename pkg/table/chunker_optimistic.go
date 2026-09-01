@@ -34,8 +34,24 @@ type chunkerOptimistic struct {
 	// recent chunks, which is what "large gaps in the sequence" means. See
 	// keySpaceDensity for why chunk cost cannot stand in for it.
 	keyDensity keySpaceDensity
-	// prePrefetchChunkSize is the chunk size that was in effect when the
-	// current prefetch episode began, restored when the episode ends.
+	// lastDenseChunkSize is the most recent fixed-width chunk size that was
+	// validated against real rows: a chunk of that width came back holding at
+	// least one row, so its cost (time, or in-memory bytes) was actually
+	// measured. It is what prefetch restores on exit, and it is deliberately
+	// NOT simply the chunk size at entry — see prePrefetchChunkSize.
+	lastDenseChunkSize uint64
+	// prePrefetchChunkSize is the size the current prefetch episode will restore
+	// when it ends, captured at entry from lastDenseChunkSize.
+	//
+	// The chunk size in effect at entry is the wrong thing to restore. Reaching
+	// MaxDynamicRowSize is not evidence the table can sustain 100k-row chunks:
+	// over a gap the chunks are *empty*, and empty chunks are precisely what
+	// drive the size up (near-zero durations on the time signal; see
+	// calculateNewTargetChunkBytes for the byte signal, where a zero-byte p90
+	// deliberately returns a target above the ceiling so prefetch can fire). So
+	// the entry-time size can be one no real row has ever been measured under,
+	// and restoring it would have the copier materialize up to 100k wide rows in
+	// one read before any ActualBytes feedback could shrink it.
 	prePrefetchChunkSize uint64
 	// prefetchChunks counts chunks dispatched in the current prefetch episode,
 	// so an episode abandoned on its first chunk can be recognised as a
@@ -369,6 +385,7 @@ func (t *chunkerOptimistic) Reset() error {
 	t.chunkTimingInfo = []time.Duration{}
 	t.chunkPrefetchingEnabled = false
 	t.keyDensity.reset()
+	t.lastDenseChunkSize = 0
 	t.prePrefetchChunkSize = 0
 	t.prefetchChunks = 0
 	t.prefetchRejections = 0
@@ -451,7 +468,25 @@ func (t *chunkerOptimistic) recordKeyDensity(chunk *Chunk, actualRows uint64) {
 	if err != nil {
 		return
 	}
-	t.keyDensity.record(keys, actualRows)
+	// Prefer the producer's own count of rows read. actualRows is the applier's
+	// affected-row count on the copy path, and `INSERT IGNORE` does not count a
+	// row the binlog applier already wrote to the new table — so in an
+	// insert-hot region a dense chunk can report zero rows and be mistaken for a
+	// gap. See Chunk.SourceRows for why falling back on zero is safe.
+	rows := actualRows
+	if chunk.SourceRows > 0 {
+		rows = chunk.SourceRows
+	}
+	t.keyDensity.record(keys, rows)
+
+	// Remember the last chunk size proven against real rows, which is what
+	// prefetch restores on exit. keys == ChunkSize identifies a fixed-width
+	// chunk (next() builds those as chunkPtr..chunkPtr+chunkSize) and excludes a
+	// prefetch chunk, whose ChunkSize is a row offset while its width is the gap
+	// it crossed — restoring a prefetch offset would defeat the whole point.
+	if rows > 0 && keys == chunk.ChunkSize {
+		t.lastDenseChunkSize = chunk.ChunkSize
+	}
 }
 
 // maybeSwitchToPrefetch is the optimistic chunker's pre-update hook for the
@@ -528,7 +563,7 @@ func (t *chunkerOptimistic) switchToPrefetch(signalAttrs ...any) {
 			"window-rows", rows,
 			"chunk-size", t.chunkSize,
 		}, signalAttrs...)...)
-	t.prePrefetchChunkSize = t.chunkSize
+	t.prePrefetchChunkSize = t.lastDenseChunkSize
 	t.prefetchChunks = 0
 	t.chunkPrefetchingEnabled = true
 	t.setChunkSize(StartingChunkSize)
@@ -539,20 +574,23 @@ func (t *chunkerOptimistic) switchToPrefetch(signalAttrs ...any) {
 // the `offset` rows the prefetch query walked span fewer than MaxDynamicRowSize
 // keys — the gap is behind us.
 //
-// The chunk size is restored to what it was when prefetch was entered rather
+// The chunk size is restored to the last one validated against real rows rather
 // than reset to StartingChunkSize. That reset was the expensive half of the
 // prefetch flap: the sizer grows by at most MaxDynamicStepFactor per feedback
 // window, so climbing StartingChunkSize -> MaxDynamicRowSize costs ~130 chunks,
-// every one of them a fraction of the size the table can sustain. Prefetch is
-// only ever entered from the ceiling, so the restored size is one this table has
-// already been measured to sustain; if the region past the gap cannot, the
-// sizer — and panicShrink ahead of it — brings it down within a window.
-// Caller holds the mutex.
+// every one of them a fraction of the size the table can sustain. Restoring a
+// measured size skips the ramp without betting on a size no row was ever read
+// under (see prePrefetchChunkSize); if the region past the gap cannot sustain
+// it after all, the sizer — and panicShrink ahead of it — brings it down within
+// a window. Caller holds the mutex.
 func (t *chunkerOptimistic) leavePrefetch(minVal, maxVal Datum, keys, offset uint64) {
 	restore := t.prePrefetchChunkSize
 	if restore == 0 {
-		// Prefetch was enabled without going through switchToPrefetch (the test
-		// suite does this). Keep the historical behavior for that case.
+		// Either no fixed-width chunk has ever come back with rows in it (a
+		// table whose gap starts at the very first chunk), or prefetch was
+		// enabled without going through switchToPrefetch (the test suite does
+		// this). Both cases have nothing measured to return to, so fall back to
+		// the historical conservative reset.
 		restore = StartingChunkSize
 	}
 	// An episode abandoned on its very first chunk never crossed a gap: the
@@ -613,8 +651,16 @@ func (t *chunkerOptimistic) open() (err error) {
 	t.chunkSize = StartingChunkSize
 	t.inflightChunks = 0
 	t.keyDensity.reset()
+	t.lastDenseChunkSize = 0
 	t.prePrefetchChunkSize = 0
 	t.prefetchChunks = 0
+	// prefetchRejections is deliberately NOT cleared here, unlike in Reset().
+	// open() also runs on the OpenAtWatermark resume path, and how sparse this
+	// table's key space is does not change because we reopened at a watermark —
+	// so what we learned about prefetch being unhelpful is still true, and
+	// re-learning it costs another two episodes and another two log lines per
+	// resume. Reset() does clear it, because its contract is "as if Open() was
+	// just called" on a fresh chunker.
 
 	// Initialize progress tracking
 	atomic.StoreUint64(&t.rowsCopied, 0)

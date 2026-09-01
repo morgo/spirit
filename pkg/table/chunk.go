@@ -25,6 +25,24 @@ type Chunk struct {
 	// time when dynamicChunkSizer.TargetChunkBytes is set. Zero for the
 	// checksum path, which reads server-side and never sees the bytes.
 	ActualBytes uint64
+
+	// SourceRows is the companion of ActualBytes: the number of rows the
+	// producer actually read from the source for this chunk. Like ActualBytes it
+	// is transient and absent from the checkpoint JSON.
+	//
+	// It exists because the row count reaching Feedback() is not the rows
+	// *present*. On the copy path that argument is the applier's affected-row
+	// count from `INSERT IGNORE`, which skips any row the binlog applier had
+	// already written to the new table — so a fully dense chunk can report far
+	// fewer rows than it holds, or zero. The optimistic chunker's key-space
+	// density signal needs rows present, not rows written, or it reads an
+	// insert-hot region as a gap (see chunkerOptimistic.recordKeyDensity).
+	//
+	// Zero from producers that never hold the rows themselves — the checksum
+	// aggregates its CRC server-side — which is also what an empty chunk
+	// reports, and the two are interchangeable for density purposes because an
+	// empty chunk's affected-row count is zero too.
+	SourceRows uint64
 }
 
 // Boundary is used by chunk for lower or upper boundary

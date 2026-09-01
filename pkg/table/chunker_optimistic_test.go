@@ -485,11 +485,18 @@ func TestOptimisticPrefetchChunking(t *testing.T) {
 	// them counted against the rejection backstop.
 	require.Zero(t, chunker.prefetchRejections)
 
-	// And the whole table is covered in far fewer chunks than the flapping
-	// chunker needed: it used to re-ramp from StartingChunkSize after every
-	// episode. Generous bound — the point is the order of magnitude, not a
-	// golden number.
-	require.Less(t, chunks, 300, "prefetch episodes must not each cost a re-ramp to the ceiling")
+	// And the whole table is covered in fewer chunks than the flapping chunker
+	// needed (430 on this fixture), because an episode no longer ends with a
+	// reset to StartingChunkSize.
+	//
+	// The margin here is deliberately modest. On a gapped table the restore is
+	// the last size proven against real rows, which for this fixture is earned
+	// on the 11k-row dense prefix and so is small — resuming at the ceiling the
+	// *empty* gap chunks bought would cover the table in ~192 chunks but would
+	// hand the buffered copier an unmeasured 100k-row read (see
+	// TestOptimisticPrefetchRestoreIsMeasured). This bound is here to catch a
+	// regression back to per-episode re-ramping, not to pin a golden number.
+	require.Less(t, chunks, 400, "prefetch episodes must not each cost a full re-ramp")
 }
 
 func TestOptimisticChunkerReset(t *testing.T) {
@@ -814,6 +821,19 @@ func TestOptimisticPrefetchRestoresChunkSize(t *testing.T) {
 	chunker.SetDynamicChunking(true)
 	require.NoError(t, chunker.Open())
 
+	// Prove a chunk size against real rows first — only a measured size is
+	// eligible to be restored (see prePrefetchChunkSize).
+	chunker.chunkSize = MaxDynamicRowSize
+	proven := &Chunk{
+		ChunkSize:  MaxDynamicRowSize,
+		Key:        t1.KeyColumns,
+		LowerBound: &Boundary{[]Datum{{Val: int64(1), Tp: signedType}}, true},
+		UpperBound: &Boundary{[]Datum{{Val: int64(1 + MaxDynamicRowSize), Tp: signedType}}, false},
+		Table:      t1,
+	}
+	chunker.Feedback(proven, time.Second, MaxDynamicRowSize)
+	require.Equal(t, uint64(MaxDynamicRowSize), chunker.lastDenseChunkSize)
+
 	// Enter prefetch the way the sizer does, from the ceiling.
 	chunker.chunkSize = MaxDynamicRowSize
 	chunker.switchToPrefetch()
@@ -826,7 +846,7 @@ func TestOptimisticPrefetchRestoresChunkSize(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, chunker.chunkPrefetchingEnabled)
 	require.Equal(t, uint64(MaxDynamicRowSize), chunker.chunkSize,
-		"leaving prefetch must restore the pre-prefetch chunk size, not ramp from scratch")
+		"leaving prefetch must restore the measured chunk size, not ramp from scratch")
 
 	// The chunk that triggered the exit is labelled with the offset that built
 	// it, not with the size the next chunk will use.
@@ -847,4 +867,88 @@ func TestOptimisticPrefetchRestoresChunkSize(t *testing.T) {
 	}
 	require.True(t, chunker.keyDensity.sparse())
 	require.False(t, chunker.prefetchWouldHelp(MaxDynamicRowSize+1))
+}
+
+// TestOptimisticPrefetchRestoreIsMeasured covers the memory bound on the
+// restore. Reaching MaxDynamicRowSize is not evidence the table can sustain
+// 100k-row chunks: over a gap the chunks are empty, and empty chunks are
+// exactly what drive the size to the ceiling (a zero-byte p90 deliberately
+// returns a target above it so prefetch can fire). Restoring the entry-time
+// size would therefore hand the buffered copier a 100k-row read on a table of
+// 16KB rows — ~1.6GB per worker — before any ActualBytes feedback could shrink
+// it. The restore must be a size real rows were measured under.
+func TestOptimisticPrefetchRestoreIsMeasured(t *testing.T) {
+	chunker := denseChunkerForTest(t)
+	chunker.TargetChunkBytes = DefaultTargetChunkBytes // buffered copier: byte signal
+
+	const wideRowBytes = 16 * 1024 // 16KB rows: ~1000 of them fill the budget
+
+	// Phase 1: wide rows. The sizer settles on a row count that fits the byte
+	// budget, and every one of those chunks is validated against real rows.
+	for range 60 {
+		chunk, err := chunker.Next()
+		require.NoError(t, err)
+		chunk.SourceRows = chunk.ChunkSize
+		chunk.ActualBytes = chunk.ChunkSize * wideRowBytes
+		chunker.Feedback(chunk, time.Millisecond, chunk.ChunkSize)
+	}
+	measured := chunker.lastDenseChunkSize
+	require.NotZero(t, measured)
+	require.Less(t, measured, uint64(MaxDynamicRowSize),
+		"16KB rows cannot fit the byte budget at the row ceiling")
+
+	// Phase 2: a large empty gap. Zero-byte chunks walk the row target up to the
+	// ceiling and the density window fills with genuine emptiness, so prefetch
+	// legitimately engages.
+	for range 400 {
+		if chunker.chunkPrefetchingEnabled {
+			break
+		}
+		chunk, err := chunker.Next()
+		require.NoError(t, err)
+		chunk.SourceRows = 0
+		chunk.ActualBytes = 0
+		chunker.Feedback(chunk, time.Microsecond, 0)
+	}
+	// Entry implies the gap carried the row target to the ceiling — that is a
+	// precondition in prefetchWouldHelp — and switchToPrefetch has since reset
+	// the live size to the prefetch offset, so the ceiling is not observable
+	// here. What matters is what the episode will restore.
+	require.True(t, chunker.chunkPrefetchingEnabled, "a real gap must still engage prefetch")
+
+	// It restores the wide-row size measured before the gap, not the ceiling the
+	// empty chunks bought.
+	require.Equal(t, measured, chunker.prePrefetchChunkSize)
+	require.Less(t, chunker.prePrefetchChunkSize, uint64(MaxDynamicRowSize))
+}
+
+// TestOptimisticPrefetchDensityUsesSourceRows covers the other half of the
+// signal's fidelity. On the copy path the row count reaching Feedback is the
+// applier's affected-row count from `INSERT IGNORE`, which does not count a row
+// the binlog applier already wrote to the new table. In an insert-hot tail every
+// row of a chunk can already be present, so affectedRows is 0 on a fully dense
+// chunk — which would read as a gap and enter prefetch on dense data. The
+// producer's own count of rows read takes precedence.
+func TestOptimisticPrefetchDensityUsesSourceRows(t *testing.T) {
+	chunker := denseChunkerForTest(t)
+
+	for range 200 {
+		chunk, err := chunker.Next()
+		require.NoError(t, err)
+		// Dense chunk, but the binlog applier got there first: nothing was
+		// newly inserted, so INSERT IGNORE reports zero affected rows.
+		chunk.SourceRows = chunk.ChunkSize
+		chunker.Feedback(chunk, time.Duration(chunk.ChunkSize)*8*time.Microsecond, 0)
+		require.False(t, chunker.chunkPrefetchingEnabled,
+			"rows already written by the binlog applier are not a gap")
+	}
+	require.Equal(t, uint64(MaxDynamicRowSize), chunker.chunkSize)
+
+	// Sanity check the fixture really is the dangerous one: with only the
+	// affected-row count to go on, the same chunks read as pure gap.
+	var affectedOnly keySpaceDensity
+	for range keySpaceDensityWindow {
+		affectedOnly.record(MaxDynamicRowSize, 0)
+	}
+	require.True(t, affectedOnly.sparse())
 }
