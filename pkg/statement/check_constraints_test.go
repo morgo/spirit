@@ -58,6 +58,19 @@ func TestAlterWithRenamedCheckConstraints(t *testing.T) {
 			"ALTER CHECK `_t1_new_chk_2` NOT ENFORCED",
 			nil,
 		},
+		// Switching enforcement on is the clause that has to reach the copy
+		// algorithm: MySQL supports only ALGORITHM=COPY for it.
+		{
+			"ALTER TABLE t1 ALTER CHECK chk_b ENFORCED",
+			"ALTER CHECK `_t1_new_chk_2` ENFORCED",
+			nil,
+		},
+		// A re-added constraint keeps its enforcement state when it loses its name.
+		{
+			"ALTER TABLE t1 DROP CHECK chk_a, ADD CONSTRAINT chk_a CHECK (a > 0) NOT ENFORCED",
+			"DROP CHECK `_t1_new_chk_1`, ADD CHECK(`a`>0) NOT ENFORCED",
+			[]string{"chk_a"},
+		},
 		// The drop-and-re-add idiom: the re-added constraint loses its symbol,
 		// because the table being replaced still holds that name.
 		{
