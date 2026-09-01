@@ -501,6 +501,101 @@ func TestCheckConstraintRewrittenAlterErrorNamesStatement(t *testing.T) {
 	require.NoError(t, m.Close())
 }
 
+// TestCheckConstraintDropWithTenPlusConstraints drops a named CHECK constraint
+// from a table that has more than nine of them. That is where the two tables'
+// constraint listings stop corresponding position by position: SHOW CREATE TABLE
+// sorts CHECK constraints by name, and the tenth copy CREATE TABLE .. LIKE makes
+// is named _<table>_new_chk_10, which sorts between _chk_1 and _chk_2. Pairing by
+// listing position retargets the DROP CHECK at some other constraint.
+func TestCheckConstraintDropWithTenPlusConstraints(t *testing.T) {
+	t.Parallel()
+	tt := testutils.NewTestTable(t, "chk_many", `CREATE TABLE chk_many (
+		id INT NOT NULL PRIMARY KEY AUTO_INCREMENT,
+		c01 INT NOT NULL DEFAULT 1,
+		c02 INT NOT NULL DEFAULT 1,
+		c03 INT NOT NULL DEFAULT 1,
+		c04 INT NOT NULL DEFAULT 1,
+		c05 INT NOT NULL DEFAULT 1,
+		c06 INT NOT NULL DEFAULT 1,
+		c07 INT NOT NULL DEFAULT 1,
+		c08 INT NOT NULL DEFAULT 1,
+		c09 INT NOT NULL DEFAULT 1,
+		c10 INT NOT NULL DEFAULT 1,
+		c11 INT NOT NULL DEFAULT 1,
+		CONSTRAINT chk_many_c01 CHECK (c01 > 0),
+		CONSTRAINT chk_many_c02 CHECK (c02 > 0),
+		CONSTRAINT chk_many_c03 CHECK (c03 > 0),
+		CONSTRAINT chk_many_c04 CHECK (c04 > 0),
+		CONSTRAINT chk_many_c05 CHECK (c05 > 0),
+		CONSTRAINT chk_many_c06 CHECK (c06 > 0),
+		CONSTRAINT chk_many_c07 CHECK (c07 > 0),
+		CONSTRAINT chk_many_c08 CHECK (c08 > 0),
+		CONSTRAINT chk_many_c09 CHECK (c09 > 0),
+		CONSTRAINT chk_many_c10 CHECK (c10 > 0),
+		CONSTRAINT chk_many_c11 CHECK (c11 > 0)
+	)`)
+	testutils.RunSQL(t, `INSERT INTO chk_many (id) VALUES (1), (2)`)
+
+	// ENGINE=InnoDB forces a rebuild, so this cannot be INSTANT.
+	m := NewTestRunner(t, "chk_many", "DROP CHECK chk_many_c05, ENGINE=InnoDB")
+	require.NoError(t, m.Run(t.Context()))
+	require.False(t, m.usedInstantDDL)
+	require.NoError(t, m.Close())
+
+	require.Len(t, tableCheckConstraints(t, tt.DB, "chk_many"), 10)
+
+	// Only c05 lost its constraint. The columns whose generated names sort out
+	// of order are the ones a positional pairing drops instead.
+	_, err := tt.DB.ExecContext(t.Context(), "INSERT INTO chk_many (c05) VALUES (-1)")
+	require.NoError(t, err, "the dropped CHECK constraint should no longer be enforced")
+
+	for _, column := range []string{"c01", "c02", "c03", "c04", "c06", "c07", "c08", "c09", "c10", "c11"} {
+		_, err = tt.DB.ExecContext(t.Context(),
+			fmt.Sprintf("INSERT INTO chk_many (%s) VALUES (-1)", column))
+		require.Error(t, err, "the CHECK constraint on %s should still be enforced", column)
+	}
+}
+
+// TestCheckConstraintDropAmongIdenticalExpressions is the same mispairing as
+// TestCheckConstraintDropWithTenPlusConstraints, on a table where the
+// expressions cannot tell the constraints apart. Comparing expressions catches a
+// mispairing when they differ; here only enforcement differs, so getting the
+// pairing wrong silently drops a constraint the user did not name and leaves the
+// one they dropped in force.
+func TestCheckConstraintDropAmongIdenticalExpressions(t *testing.T) {
+	t.Parallel()
+	tt := testutils.NewTestTable(t, "chk_dup", `CREATE TABLE chk_dup (
+		id INT NOT NULL PRIMARY KEY AUTO_INCREMENT,
+		val INT NOT NULL,
+		CONSTRAINT chk_dup_01 CHECK (val > 0) NOT ENFORCED,
+		CONSTRAINT chk_dup_02 CHECK (val > 0) NOT ENFORCED,
+		CONSTRAINT chk_dup_03 CHECK (val > 0) NOT ENFORCED,
+		CONSTRAINT chk_dup_04 CHECK (val > 0) NOT ENFORCED,
+		CONSTRAINT chk_dup_05 CHECK (val > 0),
+		CONSTRAINT chk_dup_06 CHECK (val > 0) NOT ENFORCED,
+		CONSTRAINT chk_dup_07 CHECK (val > 0) NOT ENFORCED,
+		CONSTRAINT chk_dup_08 CHECK (val > 0) NOT ENFORCED,
+		CONSTRAINT chk_dup_09 CHECK (val > 0) NOT ENFORCED,
+		CONSTRAINT chk_dup_10 CHECK (val > 0) NOT ENFORCED,
+		CONSTRAINT chk_dup_11 CHECK (val > 0) NOT ENFORCED
+	)`)
+	testutils.RunSQL(t, `INSERT INTO chk_dup (val) VALUES (1), (2)`)
+
+	m := NewTestRunner(t, "chk_dup", "DROP CHECK chk_dup_05, ENGINE=InnoDB")
+	require.NoError(t, m.Run(t.Context()))
+	require.False(t, m.usedInstantDDL)
+	require.NoError(t, m.Close())
+
+	// The only enforced constraint was the one that was dropped.
+	constraints := tableCheckConstraints(t, tt.DB, "chk_dup")
+	require.Len(t, constraints, 10)
+	require.False(t, slices.Contains(slices.Collect(maps.Values(constraints)), true),
+		"no constraint should be enforced after dropping the only enforced one: %v", constraints)
+
+	_, err := tt.DB.ExecContext(t.Context(), "INSERT INTO chk_dup (val) VALUES (-1)")
+	require.NoError(t, err, "the dropped CHECK constraint should no longer be enforced")
+}
+
 // tableCheckConstraints returns the table's CHECK constraints as a map of name to
 // whether the constraint is enforced.
 func tableCheckConstraints(t *testing.T, db *sql.DB, tableName string) map[string]bool {

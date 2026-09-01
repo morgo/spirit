@@ -1,9 +1,12 @@
 package migration
 
 import (
+	"cmp"
 	"context"
 	"database/sql"
 	"fmt"
+	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/block/spirit/pkg/dbconn"
@@ -138,10 +141,14 @@ func (c *tableChange) newTableAlter(ctx context.Context) (string, error) {
 // altered (lower-cased, because MySQL matches these names case-insensitively)
 // to the name the same constraint has on the _new table.
 //
-// CREATE TABLE .. LIKE copies check constraints in declaration order, so the
-// two tables' constraints correspond positionally. Their expressions are
-// compared to confirm that, rather than trusting the ordering and retargeting a
-// DROP CHECK at some other constraint.
+// SHOW CREATE TABLE lists check constraints sorted by name, and CREATE TABLE ..
+// LIKE numbers its copies _<table>_chk_1 .. _<table>_chk_N in the order it reads
+// the source, which is that same name-sorted order. The copies are then listed
+// name-sorted too, and those names sort as strings, so _chk_10 comes back between
+// _chk_1 and _chk_2: the two listings only correspond once the copies are put
+// back in numeric order. Their expressions and enforcement are compared
+// afterwards to confirm the pairing, rather than trusting the ordering and
+// retargeting a DROP CHECK at some other constraint.
 func (c *tableChange) checkConstraintRenames(ctx context.Context) (map[string]string, error) {
 	source, err := checkConstraints(ctx, c.runner.db, c.table.TableName)
 	if err != nil {
@@ -155,9 +162,12 @@ func (c *tableChange) checkConstraintRenames(ctx context.Context) (map[string]st
 		return nil, fmt.Errorf("table %s has %d CHECK constraint(s) but its copy %s has %d",
 			c.table.TableName, len(source), c.newTable.TableName, len(newTable))
 	}
+	if err := sortByGeneratedNumber(newTable, c.newTable.TableName); err != nil {
+		return nil, err
+	}
 	renames := make(map[string]string, len(source))
 	for i := range source {
-		if !checkExpressionsEqual(source[i], newTable[i]) {
+		if !checkConstraintsMatch(source[i], newTable[i]) {
 			return nil, fmt.Errorf("CHECK constraint %s on %s does not match %s on its copy %s",
 				source[i].Name, c.table.TableName, newTable[i].Name, c.newTable.TableName)
 		}
@@ -166,7 +176,36 @@ func (c *tableChange) checkConstraintRenames(ctx context.Context) (map[string]st
 	return renames, nil
 }
 
-// checkConstraints returns the table's CHECK constraints in declaration order.
+// sortByGeneratedNumber puts a table's check constraints in the order MySQL
+// generated their names in, i.e. by the number in <table>_chk_<n> rather than by
+// the string that number appears in. It is only for the names on a table created
+// by CREATE TABLE .. LIKE, which are always server-generated: a name that does
+// not follow the pattern means the assumption the pairing rests on is wrong, so
+// it is an error rather than something to sort around.
+func sortByGeneratedNumber(constraints statement.Constraints, tableName string) error {
+	numbers := make(map[string]int, len(constraints))
+	prefix := strings.ToLower(tableName) + "_chk_"
+	for _, constraint := range constraints {
+		suffix, ok := strings.CutPrefix(strings.ToLower(constraint.Name), prefix)
+		if !ok {
+			return fmt.Errorf("CHECK constraint %s on %s is not named the way CREATE TABLE .. LIKE names the constraints it copies (%s<n>), so it cannot be matched to a constraint on the table being altered",
+				constraint.Name, tableName, prefix)
+		}
+		number, err := strconv.Atoi(suffix)
+		if err != nil {
+			return fmt.Errorf("CHECK constraint %s on %s does not end in the number CREATE TABLE .. LIKE appends to the constraints it copies, so it cannot be matched to a constraint on the table being altered",
+				constraint.Name, tableName)
+		}
+		numbers[constraint.Name] = number
+	}
+	slices.SortFunc(constraints, func(a, b statement.Constraint) int {
+		return cmp.Compare(numbers[a.Name], numbers[b.Name])
+	})
+	return nil
+}
+
+// checkConstraints returns the table's CHECK constraints as SHOW CREATE TABLE
+// lists them, which is sorted by name.
 func checkConstraints(ctx context.Context, db *sql.DB, tableName string) (statement.Constraints, error) {
 	var name, createTable string
 	if err := db.QueryRowContext(ctx,
@@ -190,10 +229,17 @@ func checkConstraints(ctx context.Context, db *sql.DB, tableName string) (statem
 	return constraints, nil
 }
 
-// checkExpressionsEqual reports whether two CHECK constraints have the same
-// expression. Both sides come from SHOW CREATE TABLE and are parsed the same
-// way, so MySQL's own canonical rendering makes the comparison textual.
-func checkExpressionsEqual(a, b statement.Constraint) bool {
+// checkConstraintsMatch reports whether two CHECK constraints are the same
+// constraint: same expression, same enforcement. Both sides come from SHOW
+// CREATE TABLE and are parsed the same way, so MySQL's own canonical rendering
+// makes the expression comparison textual. Enforcement is part of the
+// comparison because constraints can share an expression and differ only in
+// whether it is enforced, and dropping the wrong one of those pair would leave
+// the table enforcing a rule the user dropped - with nothing to report.
+func checkConstraintsMatch(a, b statement.Constraint) bool {
+	if a.NotEnforced != b.NotEnforced {
+		return false
+	}
 	if a.Expression == nil || b.Expression == nil {
 		return a.Expression == b.Expression
 	}
