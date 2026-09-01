@@ -272,6 +272,7 @@ There are some restrictions to `--statement`:
 - When sending multiple statements, all statements must be `ALTER TABLE` statements.
 - When sending multiple statements, the `INSTANT` and `INPLACE` optimizations will be skipped. This means that metadata-only changes that would execute instantly if submitted alone will require a full table copy.
 - When sending multiple statements, all statements must operate on tables in the same underlying database (aka schema).
+- `CHECK` constraint names are not preserved by a table copy. MySQL requires them to be unique per schema rather than per table, so the copy of your table cannot carry your names while your table still exists — it gets server-generated `<table>_chk_<n>` names instead. Statements that refer to a `CHECK` constraint by name still work: Spirit rewrites the name to match the copy. That includes dropping a constraint and re-adding it under the same name (widening an allowed-values list, say), but the re-added constraint is server-named too, and Spirit logs a warning saying so.
 
 ### target-chunk-size
 
