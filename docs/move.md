@@ -132,6 +132,17 @@ The in-memory byte budget the buffered copier sizes each copy chunk against. Mov
 
 A Go MySQL DSN for the target database. Tables will be created here automatically from the source schema.
 
+A table that already exists on the target is used as-is, provided it is empty and its schema matches the source. "Matches" permits the target to be *stricter* in two specific ways, so a declaratively-managed target does not have to mirror artifacts of its unsharded source:
+
+- the source's column-level `AUTO_INCREMENT` may be absent on the target (its ids come from elsewhere, e.g. a Vitess sequence);
+- a column the source declares nullable may be `NOT NULL` on the target — for example a shard key, which cannot be NULL in a sharded keyspace.
+
+The reverse of either — a target looser than its source — is still a mismatch and fails pre-flight, as does any other difference (column types, charset, collation, indexes, constraints). The error reports the `ALTER` that would reconcile the target.
+
+A `NOT NULL` target column does not make Move filter or rewrite source rows. If the source data does contain a NULL there, the move fails rather than silently substituting a value — at row-hashing time for a sharded target, otherwise at the checksum.
+
+Failing at the checksum is correct but slow. The copy writes with `INSERT IGNORE`, which stores the type's implicit default instead of erroring, so the NULL is only detected once the [initial checksum](#two-checksum-model) compares the rows; that checksum repairs and retries up to three times, and every attempt re-copies the chunk, re-coerces the same NULL and finds it again before the run gives up. On a table large enough to be worth moving this way, that is hours of copying and verifying to learn something a single `SELECT 1 FROM <table> WHERE <column> IS NULL LIMIT 1` answers up front. Confirm the column holds no NULLs before starting the copy.
+
 ### threads
 
 - Type: Integer
