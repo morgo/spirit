@@ -1795,7 +1795,7 @@ func TestDiff_DiffOptions(t *testing.T) {
 // the move SOURCE, the validated schema is the physical TARGET, and the rule
 // being asserted is that a target may be *stricter* than its source (NOT NULL
 // where the source permits NULL) but never looser. See
-// move/check.targetSchemaDiff.
+// move/check.TargetSchemaDiff.
 func TestDiff_IgnoreNotNullRelaxation(t *testing.T) {
 	tests := []struct {
 		name string

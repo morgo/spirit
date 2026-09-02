@@ -38,7 +38,7 @@ type DiffOptions struct {
 	// gaining or losing NOT NULL is a real change.
 	//
 	// It is enabled by the move-tables target checks (see
-	// move/check.targetSchemaDiff), where the reference is the move's SOURCE and
+	// move/check.TargetSchemaDiff), where the reference is the move's SOURCE and
 	// the validated schema is its physical TARGET. What that permits is a target
 	// column declared NOT NULL where the source still permits NULL — an
 	// unsharded source moving into a sharded target whose shard key must be

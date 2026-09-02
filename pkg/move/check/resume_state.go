@@ -72,7 +72,7 @@ func resumeStateCheck(ctx context.Context, r Resources, logger *slog.Logger) err
 			// names-only comparison let a target with the same columns but a
 			// different type/charset/collation pass resume validation; on a
 			// resume whose checksum watermark already covers the affected chunk,
-			// that mismatch would never be re-verified. targetSchemaDiff compares
+			// that mismatch would never be re-verified. TargetSchemaDiff compares
 			// types, charset, collation, indexes and constraints while ignoring
 			// AUTO_INCREMENT counters and other instance-specific noise. It is
 			// the same comparison target_state ran before the copy, so a move
@@ -85,7 +85,7 @@ func resumeStateCheck(ctx context.Context, r Resources, logger *slog.Logger) err
 			if err != nil {
 				return fmt.Errorf("failed to read target %d schema for table '%s': %w", i, sourceTable.TableName, err)
 			}
-			diff, err := targetSchemaDiff(sourceTable.TableName, sourceCreate, targetCreate)
+			diff, err := TargetSchemaDiff(sourceTable.TableName, sourceCreate, targetCreate)
 			if err != nil {
 				return fmt.Errorf("failed to compare schema for table '%s' on target %d: %w", sourceTable.TableName, i, err)
 			}

@@ -100,7 +100,7 @@ func validateExistingTargetTable(ctx context.Context, target applier.Target, tab
 	// source utf8mb4_bin vs target utf8mb4_0900_ai_ci): REPLACE/INSERT IGNORE
 	// would then collapse rows that differ only by case, and the mismatch would
 	// surface only much later at checksum time (or never, on a resume whose
-	// watermark already covers the affected chunk). targetSchemaDiff compares
+	// watermark already covers the affected chunk). TargetSchemaDiff compares
 	// column types, charset, collation, indexes and constraints while ignoring
 	// instance-specific noise like AUTO_INCREMENT counters, and forgiving the
 	// ways a sharded target is deliberately stricter than its unsharded source
@@ -113,7 +113,7 @@ func validateExistingTargetTable(ctx context.Context, target applier.Target, tab
 	if err != nil {
 		return fmt.Errorf("failed to read target %d schema for table '%s': %w", targetIndex, tableName, err)
 	}
-	diff, err := targetSchemaDiff(tableName, sourceCreate, targetCreate)
+	diff, err := TargetSchemaDiff(tableName, sourceCreate, targetCreate)
 	if err != nil {
 		return fmt.Errorf("failed to compare schema for table '%s' on target %d: %w", tableName, targetIndex, err)
 	}
