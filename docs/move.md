@@ -139,9 +139,9 @@ A table that already exists on the target is used as-is, provided it is empty an
 
 The reverse of either — a target looser than its source — is still a mismatch and fails pre-flight, as does any other difference (column types, charset, collation, indexes, constraints). The error reports the `ALTER` that would reconcile the target.
 
-A `NOT NULL` target column does not make Move filter or rewrite source rows. If the source data does contain a NULL there, the move fails rather than silently substituting a value — at row-hashing time for a sharded target, otherwise at the checksum.
+A `NOT NULL` target column does not make Move filter or rewrite source rows. If the source data does contain a NULL there, the move fails rather than silently substituting a value — at row-hashing time for a sharded target, and otherwise on the copy batch carrying the row: MySQL coerces the NULL to the column's implicit default and raises a warning, and Move fails on warnings it does not explicitly tolerate, precisely because on an `INSERT IGNORE` the warning is the only evidence a row was not stored as read.
 
-Failing at the checksum is correct but slow. The copy writes with `INSERT IGNORE`, which stores the type's implicit default instead of erroring, so the NULL is only detected once the [initial checksum](#two-checksum-model) compares the rows; that checksum repairs and retries up to three times, and every attempt re-copies the chunk, re-coerces the same NULL and finds it again before the run gives up. On a table large enough to be worth moving this way, that is hours of copying and verifying to learn something a single `SELECT 1 FROM <table> WHERE <column> IS NULL LIMIT 1` answers up front. Confirm the column holds no NULLs before starting the copy.
+The failure is therefore immediate, but it still arrives later than it needs to: not until the copy reaches the chunk holding that row, which on a table large enough to be worth moving this way is hours, and reported as a MySQL warning code against a batch rather than as "this column has NULLs". A single `SELECT 1 FROM <table> WHERE <column> IS NULL LIMIT 1` per tightened column answers it up front. Confirm the column holds no NULLs before starting the copy.
 
 ### threads
 
