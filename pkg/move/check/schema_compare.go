@@ -83,21 +83,22 @@ func schemaDiff(table, wantCreate, gotCreate string) (string, error) {
 //
 // The relaxation cannot mask a NULL that actually exists. On a sharded target
 // the row never reaches an INSERT: the applier hashes the shard key first and a
-// NULL fails there. For any other tightened column, both copy paths write with
-// INSERT IGNORE (the copier's INSERT IGNORE ... SELECT, the applier's
-// INSERT IGNORE ... VALUES), and IGNORE downgrades the would-be
-// ER_BAD_NULL_ERROR to a warning and stores the type's implicit default
-// instead — regardless of row count, so this does not depend on batching. The
-// checksum then reports the mismatch, because ColumnMapping.ChecksumExprs
-// compares an explicit ISNULL() digit per column, which differs even for a
-// VARCHAR NOT NULL whose implicit default is the empty string.
+// NULL fails there. For any other tightened column MySQL does coerce it —
+// Spirit runs a non-strict sql_mode (conn.go sets NO_AUTO_VALUE_ON_ZERO alone)
+// and its copy writes are INSERT IGNORE, so the would-be ER_BAD_NULL_ERROR
+// becomes a warning and the implicit default is stored — but the write does not
+// survive that. RetryableTransaction reads SHOW WARNINGS after every statement
+// and fails on any warning it does not explicitly tolerate, which is what
+// dbconn.UnsafeWarningError is for: on an IGNORE statement the warning is the
+// only evidence the copy lost data. The row's batch takes the whole run down
+// with it, and because the error is fatal it is not retried.
 //
-// So the outcome is a failed move, never a silently altered value — but it is
-// an expensive failure: the initial checker runs with FixDifferences and three
-// retries, so each attempt re-copies the chunk, re-coerces the NULL, and finds
-// it again before the run gives up. Callers that want the failure in seconds
-// rather than hours should probe the tightened columns for NULLs before
-// starting the copy.
+// So the outcome is a failed move, never a silently altered value, and the
+// failure is immediate rather than deferred to the checksum. It is still worth
+// probing the tightened columns for NULLs before starting the copy: unchecked,
+// the run dies whenever the copier reaches the chunk holding that row — hours,
+// on a table large enough to want this relaxation — and reports a raw warning
+// code against a batch rather than naming the column.
 //
 // One note for maintainers: what is exported is this function and not the
 // options it builds, deliberately. The nullability tolerance is directional —

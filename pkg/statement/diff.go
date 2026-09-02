@@ -55,8 +55,10 @@ type DiffOptions struct {
 	// the copy and the checksum compare values, and every column's NULL-ness is
 	// compared explicitly (see ColumnMapping.ChecksumExprs, which emits an
 	// ISNULL() digit per column). A tightened column whose source data holds no
-	// NULLs is therefore identical on both sides, and one that does hold a NULL
-	// is reported as a mismatch rather than hidden by this option.
+	// NULLs is therefore identical on both sides, and this option hides nothing
+	// about the rows themselves. One that does hold a NULL fails the move
+	// instead of being accepted, and fails before the checksum ever runs — see
+	// move/check.TargetSchemaDiff for where and why.
 	IgnoreNotNullRelaxation bool
 
 	// IgnoreEngine skips diffing the ENGINE table option.
