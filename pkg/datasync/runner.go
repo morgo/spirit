@@ -1072,7 +1072,7 @@ func (r *Runner) createTargetTables(ctx context.Context) error {
 // the target alone would not make the copy correct.
 //
 // The comparison is deliberately exact, unlike move's source->target check
-// (move/check.targetSchemaDiff), which forgives a target that drops the
+// (move/check.TargetSchemaDiff), which forgives a target that drops the
 // source's column-level AUTO_INCREMENT or is stricter about NULL. Neither
 // relaxation transfers, because the two gates guard different states:
 //

@@ -39,30 +39,47 @@ func showCreateTable(ctx context.Context, db *sql.DB, schema, table string) (str
 //
 // This is the comparison for two schemas that must be IDENTICAL — today
 // sources[0] against every other source (source_schema_consistency). Use
-// targetSchemaDiff for a source→target comparison, which additionally forgives
+// TargetSchemaDiff for a source→target comparison, which additionally forgives
 // a target that is deliberately stricter.
 func schemaDiff(table, wantCreate, gotCreate string) (string, error) {
 	return statement.DiffCreateTables(table, wantCreate, gotCreate, moveDiffOptions())
 }
 
-// targetSchemaDiff compares a move's SOURCE table against a pre-created TARGET
-// table, and is the comparison the source→target checks use (target_state,
-// resume_state). It is schemaDiff plus one further relaxation, in one
-// direction only: a target column may be NOT NULL where the source permits
-// NULL.
+// TargetSchemaDiff compares a move's SOURCE table against a pre-created TARGET
+// table and returns a runnable ALTER TABLE statement describing how they differ,
+// or an empty string if the move will accept the target as it stands. It is the
+// comparison the source→target checks use (target_state, resume_state).
 //
-// That is what statement.IgnoreNotNullRelaxation does: it lets the schema being
-// validated be stricter than its reference. Here the target is the validated
-// schema, so it must be passed as DiffCreateTables' "got" and the source as
-// "want" — the other way round would forgive the opposite, dangerous direction,
-// which is why the option and the argument order stay together in this one
-// function.
+// Two divergences are tolerated, and only these two. Both are a target that is
+// deliberately stricter or leaner than the unsharded source it moves from, so
+// that a declaratively-managed target does not have to mirror artifacts of its
+// source:
 //
-// A sharded target needs this. A Vitess primary vindex cannot map NULL to a
-// keyspace id, so the target declares its shard key NOT NULL — while the source
-// may still permit NULL because the ALTER to tighten it was never affordable on
-// a multi-terabyte unsharded table. Refusing that move forced operators to
-// choose between a correct target schema and being able to move into it at all.
+//   - the source's column-level AUTO_INCREMENT may be absent on the target,
+//     whose ids come from elsewhere (e.g. a Vitess sequence);
+//   - a column the source declares nullable may be NOT NULL on the target — a
+//     shard key, typically, which cannot be NULL in a sharded keyspace.
+//
+// Anything else is a difference, the reverse of either included: a target looser
+// than its source fails, as does any change to types, charset, collation,
+// indexes or constraints. See statement.DiffCreateTables for the
+// canonicalization rules underneath.
+//
+// It is exported because "which divergences does a move tolerate" must have
+// exactly one definition. A caller that wants to know in advance whether a move
+// will accept a given target — strata's `keyspace move-tables` previews it
+// before the operator confirms anything — would otherwise reassemble the option
+// set by hand, and drift in either direction is a bug: the caller blocks a move
+// that would have succeeded, or promises one that fails here in pre-flight.
+// Adding to or removing from the tolerated set is therefore a change in public
+// behaviour, not an internal one.
+//
+// The nullability tolerance exists because refusing it forced a choice. A
+// Vitess primary vindex cannot map NULL to a keyspace id, so a sharded target
+// must declare its shard key NOT NULL — while the source may still permit NULL
+// because the ALTER to tighten it was never affordable on a multi-terabyte
+// unsharded table. Without this, an operator had to pick between a correct
+// target schema and being able to move into it at all.
 //
 // The relaxation cannot mask a NULL that actually exists. On a sharded target
 // the row never reaches an INSERT: the applier hashes the shard key first and a
@@ -81,7 +98,17 @@ func schemaDiff(table, wantCreate, gotCreate string) (string, error) {
 // it again before the run gives up. Callers that want the failure in seconds
 // rather than hours should probe the tightened columns for NULLs before
 // starting the copy.
-func targetSchemaDiff(table, sourceCreate, targetCreate string) (string, error) {
+//
+// One note for maintainers: what is exported is this function and not the
+// options it builds, deliberately. The nullability tolerance is directional —
+// statement.IgnoreNotNullRelaxation lets the schema being *validated* be
+// stricter than its *reference*, and here the target is the validated schema, so
+// it must reach DiffCreateTables as "got" with the source as "want". Handing a
+// caller the options would hand them that trap: passed the other way round they
+// forgive the opposite, dangerous direction, silently and with no diff to show
+// for it. The parameter names below are what prevents that, which is why the
+// option and the argument order never leave this function.
+func TargetSchemaDiff(table, sourceCreate, targetCreate string) (string, error) {
 	diffOpts := moveDiffOptions()
 	diffOpts.IgnoreNotNullRelaxation = true
 	return statement.DiffCreateTables(table, sourceCreate, targetCreate, diffOpts)

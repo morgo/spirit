@@ -33,7 +33,7 @@ func TestSchemaDiffIgnoresColumnAutoIncrement(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, diff, "a column-level AUTO_INCREMENT difference must not be reported as a schema mismatch")
 
-	diff, err = targetSchemaDiff("corder", source, target)
+	diff, err = TargetSchemaDiff("corder", source, target)
 	require.NoError(t, err)
 	require.Empty(t, diff, "the source→target comparison must ignore column AUTO_INCREMENT too")
 }
@@ -56,7 +56,7 @@ func TestTargetSchemaDiffIgnoresNotNullOnTarget(t *testing.T) {
 		"  PRIMARY KEY (`order_id`)\n" +
 		") ENGINE=InnoDB"
 
-	diff, err := targetSchemaDiff("corder", source, target)
+	diff, err := TargetSchemaDiff("corder", source, target)
 	require.NoError(t, err)
 	require.Empty(t, diff, "a target that tightens a nullable source column must not be reported as a mismatch")
 }
@@ -77,7 +77,7 @@ func TestTargetSchemaDiffRejectsNullableTarget(t *testing.T) {
 		"  PRIMARY KEY (`order_id`)\n" +
 		") ENGINE=InnoDB"
 
-	diff, err := targetSchemaDiff("corder", source, target)
+	diff, err := TargetSchemaDiff("corder", source, target)
 	require.NoError(t, err)
 	require.NotEmpty(t, diff, "a target that drops a NOT NULL the source had must still be reported")
 	require.Contains(t, diff, "customer_id", "the reported diff should name the mismatched column")
@@ -124,10 +124,129 @@ func TestTargetSchemaDiffNarrowNotNullRelaxation(t *testing.T) {
 		"  PRIMARY KEY (`order_id`)\n" +
 		") ENGINE=InnoDB"
 
-	diff, err := targetSchemaDiff("corder", source, target)
+	diff, err := TargetSchemaDiff("corder", source, target)
 	require.NoError(t, err)
 	require.NotEmpty(t, diff, "a type change on a tightened column must still be reported")
 	require.Contains(t, diff, "customer_id", "the reported diff should name the mismatched column")
+}
+
+// TestTargetSchemaDiffPublicContract pins what TargetSchemaDiff promises now
+// that it is exported: an empty diff means "the move will accept this target",
+// and the tolerated set is exactly two divergences. External callers preview a
+// move by calling this and testing the result against "" — strata's
+// `keyspace move-tables` does, before the operator confirms — so a tolerance
+// added or removed here changes their verdict too, and a case moving between
+// these two lists is a deliberate public behaviour change, not a refactor.
+func TestTargetSchemaDiffPublicContract(t *testing.T) {
+	const source = "CREATE TABLE `corder` (\n" +
+		"  `order_id` bigint NOT NULL AUTO_INCREMENT,\n" +
+		"  `customer_id` bigint DEFAULT NULL,\n" +
+		"  `sku` varchar(128) DEFAULT NULL,\n" +
+		"  PRIMARY KEY (`order_id`),\n" +
+		"  KEY `idx_customer_id` (`customer_id`)\n" +
+		") ENGINE=InnoDB"
+
+	tests := []struct {
+		name     string
+		target   string
+		accepted bool
+	}{
+		{
+			name:     "identical",
+			target:   source,
+			accepted: true,
+		},
+		{
+			name: "target drops column AUTO_INCREMENT",
+			target: "CREATE TABLE `corder` (\n" +
+				"  `order_id` bigint NOT NULL,\n" +
+				"  `customer_id` bigint DEFAULT NULL,\n" +
+				"  `sku` varchar(128) DEFAULT NULL,\n" +
+				"  PRIMARY KEY (`order_id`),\n" +
+				"  KEY `idx_customer_id` (`customer_id`)\n" +
+				") ENGINE=InnoDB",
+			accepted: true,
+		},
+		{
+			name: "target tightens a nullable column",
+			target: "CREATE TABLE `corder` (\n" +
+				"  `order_id` bigint NOT NULL AUTO_INCREMENT,\n" +
+				"  `customer_id` bigint NOT NULL,\n" +
+				"  `sku` varchar(128) DEFAULT NULL,\n" +
+				"  PRIMARY KEY (`order_id`),\n" +
+				"  KEY `idx_customer_id` (`customer_id`)\n" +
+				") ENGINE=InnoDB",
+			accepted: true,
+		},
+		{
+			// The move this whole relaxation exists for: a sharded target
+			// takes its ids from a sequence and its shard key cannot be NULL.
+			name: "target does both at once",
+			target: "CREATE TABLE `corder` (\n" +
+				"  `order_id` bigint NOT NULL,\n" +
+				"  `customer_id` bigint NOT NULL,\n" +
+				"  `sku` varchar(128) DEFAULT NULL,\n" +
+				"  PRIMARY KEY (`order_id`),\n" +
+				"  KEY `idx_customer_id` (`customer_id`)\n" +
+				") ENGINE=InnoDB",
+			accepted: true,
+		},
+		{
+			name: "target changes a column type",
+			target: "CREATE TABLE `corder` (\n" +
+				"  `order_id` bigint NOT NULL AUTO_INCREMENT,\n" +
+				"  `customer_id` bigint DEFAULT NULL,\n" +
+				"  `sku` varbinary(128) DEFAULT NULL,\n" +
+				"  PRIMARY KEY (`order_id`),\n" +
+				"  KEY `idx_customer_id` (`customer_id`)\n" +
+				") ENGINE=InnoDB",
+			accepted: false,
+		},
+		{
+			name: "target drops a column",
+			target: "CREATE TABLE `corder` (\n" +
+				"  `order_id` bigint NOT NULL AUTO_INCREMENT,\n" +
+				"  `customer_id` bigint DEFAULT NULL,\n" +
+				"  PRIMARY KEY (`order_id`),\n" +
+				"  KEY `idx_customer_id` (`customer_id`)\n" +
+				") ENGINE=InnoDB",
+			accepted: false,
+		},
+		{
+			name: "target adds a column",
+			target: "CREATE TABLE `corder` (\n" +
+				"  `order_id` bigint NOT NULL AUTO_INCREMENT,\n" +
+				"  `customer_id` bigint DEFAULT NULL,\n" +
+				"  `sku` varchar(128) DEFAULT NULL,\n" +
+				"  `note` varchar(64) DEFAULT NULL,\n" +
+				"  PRIMARY KEY (`order_id`),\n" +
+				"  KEY `idx_customer_id` (`customer_id`)\n" +
+				") ENGINE=InnoDB",
+			accepted: false,
+		},
+		{
+			name: "target drops an index",
+			target: "CREATE TABLE `corder` (\n" +
+				"  `order_id` bigint NOT NULL AUTO_INCREMENT,\n" +
+				"  `customer_id` bigint DEFAULT NULL,\n" +
+				"  `sku` varchar(128) DEFAULT NULL,\n" +
+				"  PRIMARY KEY (`order_id`)\n" +
+				") ENGINE=InnoDB",
+			accepted: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			diff, err := TargetSchemaDiff("corder", source, tt.target)
+			require.NoError(t, err)
+			if tt.accepted {
+				require.Empty(t, diff, "the move must accept this target")
+			} else {
+				require.NotEmpty(t, diff, "the move must reject this target")
+			}
+		})
+	}
 }
 
 // TestSchemaDiffDetectsRealMismatch ensures the AUTO_INCREMENT relaxation is
