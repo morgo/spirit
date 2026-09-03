@@ -29,9 +29,10 @@ func init() {
 // _old table, which spirit cannot drop and which no longer receives writes:
 // referential integrity ends up enforced against a stale snapshot. See #1182.
 func hasForeignKeysCheck(ctx context.Context, r Resources, logger *slog.Logger) error {
-	sql := `SELECT * FROM information_schema.referential_constraints WHERE
+	sql := `SELECT 1 FROM information_schema.referential_constraints WHERE
 	(constraint_schema=? AND table_name=?)
-	or (unique_constraint_schema=? AND referenced_table_name=?)`
+	or (unique_constraint_schema=? AND referenced_table_name=?)
+	LIMIT 1`
 	rows, err := r.DB.QueryContext(ctx, sql, r.Table.SchemaName, r.Table.TableName, r.Table.SchemaName, r.Table.TableName)
 	if err != nil {
 		return err
