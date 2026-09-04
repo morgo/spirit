@@ -472,6 +472,31 @@ func (a *AbstractStatement) CheckConstraintsReferenced() []string {
 	return names
 }
 
+// GenericConstraintDrops returns the names in this ALTER's DROP CONSTRAINT
+// clauses - the subset of CheckConstraintsReferenced that does not say which
+// kind of constraint it means. DROP CHECK and ALTER CHECK do say, so they are
+// not returned.
+//
+// MySQL resolves such a name against the table's CHECK, FOREIGN KEY, UNIQUE and
+// PRIMARY KEY constraints, which are separate namespaces, and refuses the ALTER
+// when more than one of them holds it: "Table has multiple constraints with the
+// name 'x'. Please use constraint specific 'DROP' clause" (error 3939). A caller
+// that resolves the name itself has to reproduce that rather than pick one.
+func (a *AbstractStatement) GenericConstraintDrops() []string {
+	alterStmt, ok := a.AsAlterTable()
+	if !ok {
+		return nil
+	}
+	var names []string
+	for _, spec := range alterStmt.Specs {
+		if spec.Tp == ast.AlterTableDropConstraint &&
+			spec.Constraint != nil && spec.Constraint.Name != "" {
+			names = append(names, spec.Constraint.Name)
+		}
+	}
+	return names
+}
+
 // AlterWithRenamedCheckConstraints returns this ALTER's clauses with its check
 // constraint symbols rewritten for a table other than the one the user named:
 // the copy algorithm's _new table, which holds the same check constraints under
