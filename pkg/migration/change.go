@@ -116,7 +116,18 @@ func (c *tableChange) newTableAlter(ctx context.Context) (string, error) {
 	if len(c.stmt.CheckConstraintsReferenced()) == 0 {
 		return c.stmt.TrimAlter(), nil
 	}
-	renames, err := c.checkConstraintRenames(ctx)
+	source, err := tableDefinition(ctx, c.runner.db, c.table.TableName)
+	if err != nil {
+		return "", err
+	}
+	if err := rejectAmbiguousConstraintDrop(c.stmt, source, c.table.TableName); err != nil {
+		return "", err
+	}
+	newTable, err := tableDefinition(ctx, c.runner.db, c.newTable.TableName)
+	if err != nil {
+		return "", err
+	}
+	renames, err := c.checkConstraintRenames(source, newTable)
 	if err != nil {
 		return "", err
 	}
@@ -137,6 +148,52 @@ func (c *tableChange) newTableAlter(ctx context.Context) (string, error) {
 	return alter, nil
 }
 
+// rejectAmbiguousConstraintDrop refuses an ALTER whose DROP CONSTRAINT names a
+// constraint MySQL itself would not resolve, before newTableAlter retargets it
+// at the check constraint of that name and quietly makes the migration mean
+// something the statement does not.
+//
+// A table may hold the same symbol in more than one constraint namespace -
+// UNIQUE KEY `dup` alongside CONSTRAINT `dup` CHECK (..) is legal - and MySQL
+// rejects a DROP CONSTRAINT that cannot tell them apart: "Table has multiple
+// constraints with the name 'dup'" (error 3939).
+//
+// Spirit does not inherit that rejection. The direct-DDL attempt does get
+// error 3939 back from the user's table, but a direct-DDL failure is the
+// ordinary signal to use the copy algorithm instead, so it is discarded. The
+// copy then applies the ALTER to the _new table, where CREATE TABLE .. LIKE
+// has renamed the check constraint (see newTableAlter) and left only one `dup`
+// behind: the clause resolves there and drops the check constraint while
+// keeping the unique key - a table the user never asked for, reported as
+// success.
+//
+// The foreign key namespace is not consulted: spirit refuses a table with
+// foreign keys long before this point.
+func rejectAmbiguousConstraintDrop(stmt *statement.AbstractStatement, def *statement.CreateTable, tableName string) error {
+	for _, name := range stmt.GenericConstraintDrops() {
+		var owners []string
+		for _, constraint := range def.GetConstraints() {
+			if constraint.Type == "CHECK" && strings.EqualFold(constraint.Name, name) {
+				owners = append(owners, "CHECK constraint")
+			}
+		}
+		for _, index := range def.GetIndexes() {
+			// MySQL resolves DROP CONSTRAINT against unique and primary keys
+			// only, so a non-unique index of the same name is not a clash.
+			// GetIndexes names the primary key "PRIMARY", which is the symbol
+			// MySQL matches it under.
+			if (index.Type == "UNIQUE" || index.Type == "PRIMARY KEY") && strings.EqualFold(index.Name, name) {
+				owners = append(owners, index.Type)
+			}
+		}
+		if len(owners) > 1 {
+			return fmt.Errorf("table %s has multiple constraints named %s (%s), so DROP CONSTRAINT %s is ambiguous and MySQL rejects it: name the one you mean with a constraint specific clause such as DROP CHECK or DROP KEY",
+				tableName, name, strings.Join(owners, ", "), name)
+		}
+	}
+	return nil
+}
+
 // checkConstraintRenames maps each check constraint name on the table being
 // altered (lower-cased, because MySQL matches these names case-insensitively)
 // to the name the same constraint has on the _new table.
@@ -149,15 +206,9 @@ func (c *tableChange) newTableAlter(ctx context.Context) (string, error) {
 // back in numeric order. Their expressions and enforcement are compared
 // afterwards to confirm the pairing, rather than trusting the ordering and
 // retargeting a DROP CHECK at some other constraint.
-func (c *tableChange) checkConstraintRenames(ctx context.Context) (map[string]string, error) {
-	source, err := checkConstraints(ctx, c.runner.db, c.table.TableName)
-	if err != nil {
-		return nil, err
-	}
-	newTable, err := checkConstraints(ctx, c.runner.db, c.newTable.TableName)
-	if err != nil {
-		return nil, err
-	}
+func (c *tableChange) checkConstraintRenames(sourceDef, newTableDef *statement.CreateTable) (map[string]string, error) {
+	source := checkConstraints(sourceDef)
+	newTable := checkConstraints(newTableDef)
 	if len(source) != len(newTable) {
 		return nil, fmt.Errorf("table %s has %d CHECK constraint(s) but its copy %s has %d",
 			c.table.TableName, len(source), c.newTable.TableName, len(newTable))
@@ -204,9 +255,8 @@ func sortByGeneratedNumber(constraints statement.Constraints, tableName string) 
 	return nil
 }
 
-// checkConstraints returns the table's CHECK constraints as SHOW CREATE TABLE
-// lists them, which is sorted by name.
-func checkConstraints(ctx context.Context, db *sql.DB, tableName string) (statement.Constraints, error) {
+// tableDefinition returns the table's SHOW CREATE TABLE, parsed.
+func tableDefinition(ctx context.Context, db *sql.DB, tableName string) (*statement.CreateTable, error) {
 	var name, createTable string
 	if err := db.QueryRowContext(ctx,
 		sqlescape.MustEscapeSQL("SHOW CREATE TABLE %n", tableName)).Scan(&name, &createTable); err != nil {
@@ -220,13 +270,19 @@ func checkConstraints(ctx context.Context, db *sql.DB, tableName string) (statem
 	if err != nil {
 		return nil, fmt.Errorf("could not parse the definition of table %s: %w", tableName, err)
 	}
+	return createStmt, nil
+}
+
+// checkConstraints returns the table's CHECK constraints as SHOW CREATE TABLE
+// lists them, which is sorted by name.
+func checkConstraints(def *statement.CreateTable) statement.Constraints {
 	var constraints statement.Constraints
-	for _, constraint := range createStmt.GetConstraints() {
+	for _, constraint := range def.GetConstraints() {
 		if constraint.Type == "CHECK" {
 			constraints = append(constraints, constraint)
 		}
 	}
-	return constraints, nil
+	return constraints
 }
 
 // checkConstraintsMatch reports whether two CHECK constraints are the same

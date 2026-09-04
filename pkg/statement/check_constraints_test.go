@@ -30,6 +30,30 @@ func TestCheckConstraintsReferenced(t *testing.T) {
 	}
 }
 
+func TestGenericConstraintDrops(t *testing.T) {
+	tests := []struct {
+		statement string
+		expected  []string
+	}{
+		// Only DROP CONSTRAINT leaves the constraint type unsaid.
+		{"ALTER TABLE t1 DROP CONSTRAINT dup", []string{"dup"}},
+		{"ALTER TABLE t1 DROP CONSTRAINT a, DROP CONSTRAINT b", []string{"a", "b"}},
+		{"ALTER TABLE t1 DROP CONSTRAINT dup, ENGINE=InnoDB", []string{"dup"}},
+		// These say which kind they mean, so MySQL resolves them in one
+		// namespace and they can never be ambiguous.
+		{"ALTER TABLE t1 DROP CHECK dup", nil},
+		{"ALTER TABLE t1 ALTER CHECK dup NOT ENFORCED", nil},
+		{"ALTER TABLE t1 DROP FOREIGN KEY dup", nil},
+		{"ALTER TABLE t1 DROP KEY dup", nil},
+		{"ALTER TABLE t1 ADD CONSTRAINT dup CHECK (a > 0)", nil},
+		{"CREATE TABLE t1 (a INT)", nil},
+	}
+	for _, test := range tests {
+		stmts := MustNew(test.statement)
+		assert.Equal(t, test.expected, stmts[0].GenericConstraintDrops(), test.statement)
+	}
+}
+
 func TestAlterWithRenamedCheckConstraints(t *testing.T) {
 	// Names as they are on the table the ALTER will actually be applied to,
 	// keyed by the name on the table the user named.

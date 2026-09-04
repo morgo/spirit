@@ -596,6 +596,95 @@ func TestCheckConstraintDropAmongIdenticalExpressions(t *testing.T) {
 	require.NoError(t, err, "the dropped CHECK constraint should no longer be enforced")
 }
 
+// TestDropConstraintAmbiguousWithUniqueKey covers a DROP CONSTRAINT whose name
+// is held by both a CHECK constraint and a unique key. MySQL refuses to guess
+// which one is meant (error 3939), and Spirit must refuse too: it applies the
+// ALTER to the _new table, where CREATE TABLE .. LIKE has renamed the check
+// constraint, so the name is no longer ambiguous there and the copy would drop
+// the check constraint, keep the unique key, and report success.
+func TestDropConstraintAmbiguousWithUniqueKey(t *testing.T) {
+	t.Parallel()
+	tt := testutils.NewTestTable(t, "chk_ambig", `CREATE TABLE chk_ambig (
+		id INT NOT NULL PRIMARY KEY AUTO_INCREMENT,
+		name VARCHAR(32) NOT NULL,
+		val INT NOT NULL,
+		CONSTRAINT dup UNIQUE (name),
+		CONSTRAINT dup CHECK (val > 0)
+	)`)
+	testutils.RunSQL(t, `INSERT INTO chk_ambig (name, val) VALUES ('a', 1), ('b', 2)`)
+
+	// MySQL rejects this statement outright, so run it to confirm the premise
+	// rather than assuming it.
+	_, err := tt.DB.ExecContext(t.Context(), "ALTER TABLE chk_ambig DROP CONSTRAINT dup")
+	require.ErrorContains(t, err, "multiple constraints with the name")
+
+	m := NewTestRunner(t, "chk_ambig", "DROP CONSTRAINT dup")
+	err = m.Run(t.Context())
+	require.ErrorContains(t, err, "ambiguous")
+	require.NoError(t, m.Close())
+
+	// Neither constraint was dropped.
+	require.Equal(t, map[string]bool{"dup": true}, tableCheckConstraints(t, tt.DB, "chk_ambig"))
+	_, err = tt.DB.ExecContext(t.Context(), "INSERT INTO chk_ambig (name, val) VALUES ('c', -1)")
+	require.Error(t, err, "the CHECK constraint should still be enforced")
+	_, err = tt.DB.ExecContext(t.Context(), "INSERT INTO chk_ambig (name, val) VALUES ('a', 1)")
+	require.Error(t, err, "the unique key should still be enforced")
+
+	// DROP CHECK says which one is meant, so it is not ambiguous and goes ahead.
+	m = NewTestRunner(t, "chk_ambig", "DROP CHECK dup, ENGINE=InnoDB")
+	require.NoError(t, m.Run(t.Context()))
+	require.NoError(t, m.Close())
+	require.Empty(t, tableCheckConstraints(t, tt.DB, "chk_ambig"))
+	_, err = tt.DB.ExecContext(t.Context(), "INSERT INTO chk_ambig (name, val) VALUES ('c', -1)")
+	require.NoError(t, err, "the CHECK constraint should have been dropped")
+}
+
+// TestDropConstraintAmbiguousWithPrimaryKey is the same clash against the
+// primary key, which MySQL matches under the symbol PRIMARY even though
+// SHOW CREATE TABLE prints no name for it.
+func TestDropConstraintAmbiguousWithPrimaryKey(t *testing.T) {
+	t.Parallel()
+	tt := testutils.NewTestTable(t, "chk_ambig_pk", `CREATE TABLE chk_ambig_pk (
+		id INT NOT NULL PRIMARY KEY AUTO_INCREMENT,
+		val INT NOT NULL,
+		CONSTRAINT `+"`PRIMARY`"+` CHECK (val > 0)
+	)`)
+	testutils.RunSQL(t, "INSERT INTO chk_ambig_pk (val) VALUES (1), (2)")
+
+	m := NewTestRunner(t, "chk_ambig_pk", "DROP CONSTRAINT `PRIMARY`")
+	require.ErrorContains(t, m.Run(t.Context()), "ambiguous")
+	require.NoError(t, m.Close())
+
+	require.Equal(t, map[string]bool{"PRIMARY": true}, tableCheckConstraints(t, tt.DB, "chk_ambig_pk"))
+}
+
+// TestDropConstraintResolvesToUniqueKey pins the case the ambiguity check must
+// not fire on: the name is held by a unique key only, so it is unambiguous even
+// though the table has check constraints for the rewriting to consider.
+func TestDropConstraintResolvesToUniqueKey(t *testing.T) {
+	t.Parallel()
+	tt := testutils.NewTestTable(t, "chk_uq_only", `CREATE TABLE chk_uq_only (
+		id INT NOT NULL PRIMARY KEY AUTO_INCREMENT,
+		name VARCHAR(32) NOT NULL,
+		val INT NOT NULL,
+		CONSTRAINT uq_chk_uq_only_name UNIQUE (name),
+		CONSTRAINT chk_uq_only_valpos CHECK (val > 0)
+	)`)
+	testutils.RunSQL(t, `INSERT INTO chk_uq_only (name, val) VALUES ('a', 1), ('b', 2)`)
+
+	m := NewTestRunner(t, "chk_uq_only", "DROP CONSTRAINT uq_chk_uq_only_name")
+	require.NoError(t, m.Run(t.Context()))
+	require.NoError(t, m.Close())
+
+	// The unique key is gone and the check constraint - renamed by the copy, as
+	// every copied check constraint is - is still enforced.
+	_, err := tt.DB.ExecContext(t.Context(), "INSERT INTO chk_uq_only (name, val) VALUES ('a', 1)")
+	require.NoError(t, err, "the unique key should have been dropped")
+	require.Len(t, tableCheckConstraints(t, tt.DB, "chk_uq_only"), 1)
+	_, err = tt.DB.ExecContext(t.Context(), "INSERT INTO chk_uq_only (name, val) VALUES ('c', -1)")
+	require.Error(t, err, "the CHECK constraint should still be enforced")
+}
+
 // tableCheckConstraints returns the table's CHECK constraints as a map of name to
 // whether the constraint is enforced.
 func tableCheckConstraints(t *testing.T, db *sql.DB, tableName string) map[string]bool {
