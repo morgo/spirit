@@ -922,6 +922,64 @@ func TestOptimisticPrefetchRestoreIsMeasured(t *testing.T) {
 	require.Less(t, chunker.prePrefetchChunkSize, uint64(MaxDynamicRowSize))
 }
 
+// TestOptimisticPrefetchRestoreIgnoresSparseChunks is the same memory bound as
+// TestOptimisticPrefetchRestoreIsMeasured over the gap that is sparse rather
+// than empty — the case a `rows > 0` test for "was this size measured?" lets
+// through.
+//
+// A chunk holding a handful of rows across its whole width measures the cost of
+// those few rows, not of a full chunk of that size. And thinly-populated chunks
+// are precisely what carry the sizer to the ceiling, so accepting them records
+// the ceiling as measured from the very evidence that makes prefetch fire: one
+// row per chunk is enough to "prove" a 100k-row chunk no full chunk was ever
+// read at. The restore then hands the buffered copier the ~1.6GB read that
+// prePrefetchChunkSize exists to prevent.
+func TestOptimisticPrefetchRestoreIgnoresSparseChunks(t *testing.T) {
+	chunker := denseChunkerForTest(t)
+	chunker.TargetChunkBytes = DefaultTargetChunkBytes // buffered copier: byte signal
+
+	const wideRowBytes = 16 * 1024 // 16KB rows: ~1000 of them fill the budget
+
+	// Phase 1: full chunks of wide rows, as in the empty-gap case.
+	for range 60 {
+		chunk, err := chunker.Next()
+		require.NoError(t, err)
+		chunk.SourceRows = chunk.ChunkSize
+		chunk.ActualBytes = chunk.ChunkSize * wideRowBytes
+		chunker.Feedback(chunk, time.Millisecond, chunk.ChunkSize)
+	}
+	measured := chunker.lastDenseChunkSize
+	require.NotZero(t, measured)
+	require.Less(t, measured, uint64(MaxDynamicRowSize))
+
+	// Phase 2: a sparse gap. Every chunk carries a few real rows no matter how
+	// wide it gets, so it stays far enough under the byte budget to keep the
+	// sizer growing and to pass the entry gate, while the density window sees
+	// well over minKeysPerRowForPrefetch keys per row.
+	const sparseRows = 150
+	require.Less(t, uint64(sparseRows*wideRowBytes)*5, uint64(DefaultTargetChunkBytes),
+		"a sparse chunk has to stay under the prefetch entry gate")
+	for range 400 {
+		if chunker.chunkPrefetchingEnabled {
+			break
+		}
+		chunk, err := chunker.Next()
+		require.NoError(t, err)
+		chunk.SourceRows = sparseRows
+		chunk.ActualBytes = sparseRows * wideRowBytes
+		chunker.Feedback(chunk, time.Millisecond, sparseRows)
+	}
+	require.True(t, chunker.chunkPrefetchingEnabled, "a sparse gap must still engage prefetch")
+
+	// The sparse chunks are not evidence of anything the copier can afford, so
+	// the restore is still the size phase 1 measured.
+	require.Equal(t, measured, chunker.prePrefetchChunkSize,
+		"a chunk that came back nearly empty must not count as a measured size")
+	require.LessOrEqual(t, chunker.prePrefetchChunkSize*wideRowBytes,
+		uint64(DefaultTargetChunkBytes),
+		"the restored size must fit the byte budget it was measured against")
+}
+
 // TestOptimisticPrefetchDensityUsesSourceRows covers the other half of the
 // signal's fidelity. On the copy path the row count reaching Feedback is the
 // applier's affected-row count from `INSERT IGNORE`, which does not count a row
