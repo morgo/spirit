@@ -85,6 +85,18 @@ var _ MappedChunker = &chunkerOptimistic{}
 // See chunkerOptimistic.prefetchRejections.
 const maxPrefetchRejections = 2
 
+// minChunkFullnessDivisor is how full a fixed-width chunk must come back before
+// its size counts as measured and becomes eligible for prefetch to restore: at
+// least one row per this many keys of width, i.e. half full.
+//
+// Half rather than full because real tables have small gaps throughout, and
+// requiring every key to hold a row would mean nothing is ever recorded and
+// leaving prefetch would always fall back to the StartingChunkSize ramp. Half
+// bounds the cost a restored size can understate by 2x, which the sizer's own
+// feedback absorbs in one window and which sits well inside panicShrink's 5x
+// threshold. See chunkerOptimistic.lastDenseChunkSize.
+const minChunkFullnessDivisor = 2
+
 // nextChunkByPrefetching uses prefetching instead of feedback to determine the chunk size.
 // It is used when the chunker detects that there are very large gaps in the sequence.
 // When this mode is enabled, the chunkSize is "reset" to 1000 rows, so we know that
@@ -484,7 +496,17 @@ func (t *chunkerOptimistic) recordKeyDensity(chunk *Chunk, actualRows uint64) {
 	// chunk (next() builds those as chunkPtr..chunkPtr+chunkSize) and excludes a
 	// prefetch chunk, whose ChunkSize is a row offset while its width is the gap
 	// it crossed — restoring a prefetch offset would defeat the whole point.
-	if rows > 0 && keys == chunk.ChunkSize {
+	//
+	// The chunk also has to have come back reasonably *full*, not merely
+	// non-empty. A chunk holding a handful of rows across its whole width
+	// measures the cost of those few rows, not of a full chunk of that size —
+	// and thinly-populated chunks are exactly what carry the sizer to the
+	// ceiling to begin with, so accepting them would validate the ceiling from
+	// the very evidence that makes prefetch fire. That is the case
+	// prePrefetchChunkSize exists to exclude, and `rows > 0` does not exclude
+	// it: over a gap that is sparse rather than empty, one row per chunk is
+	// enough to "prove" a 100k-row chunk that no full chunk was ever read at.
+	if rows*minChunkFullnessDivisor >= chunk.ChunkSize && keys == chunk.ChunkSize {
 		t.lastDenseChunkSize = chunk.ChunkSize
 	}
 }
