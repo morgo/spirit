@@ -57,6 +57,10 @@ source privileges depend on the change feed:
   the source does not have GTIDs enabled (the file+offset reader issues
   `FLUSH BINARY LOGS`)
 
+A source that cannot grant the built-in feed privileges must use a
+programmatically injected `change.Source`; the CLI no longer has a mode that
+runs without a change stream.
+
 ## Configuration
 
 - [source-dsn](#source-dsn)
@@ -173,3 +177,8 @@ Sync-specific notes:
   on the file+offset client even after GTIDs are enabled on the source, and a
   GTID checkpoint fails with a clear error if the source no longer has GTIDs
   enabled.
+- **Legacy copy-only checkpoints have no stream position.** When upgrading a
+  target with one of these checkpoints, Sync warns and starts the change stream
+  at the current source head. Changes made after the old checkpoint are not
+  replayed immediately; the continuous checksum finds and repairs that gap as
+  it walks the target.

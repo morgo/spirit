@@ -1188,6 +1188,18 @@ func (r *Runner) startResume(ctx context.Context, watermark, pos string) error {
 			return err
 		}
 	}
+	if err := r.startResumeChangeSource(ctx, watermark, pos); err != nil {
+		return err
+	}
+	return r.checkpointTbl().Create(ctx)
+}
+
+// startResumeChangeSource disables copy-time filtering and opens the change
+// source at the checkpointed position. A checkpoint can have copy progress but
+// no stream position (notably legacy copy-only checkpoints); those must start
+// at the current head, leaving the continuous checksum to repair changes made
+// since the checkpoint.
+func (r *Runner) startResumeChangeSource(ctx context.Context, watermark, pos string) error {
 	if err := r.replClient.SetWatermarkOptimization(ctx, false); err != nil {
 		return err
 	}
@@ -1198,12 +1210,19 @@ func (r *Runner) startResume(ctx context.Context, watermark, pos string) error {
 		if err := r.replClient.StartFromPosition(streamCtx, pos); err != nil {
 			return fmt.Errorf("failed to resume change source from position %q: %w", pos, err)
 		}
-	} else if err := r.replClient.Start(streamCtx); err != nil {
-		// No saved position (prior attempt failed before checkpointing):
-		// start the feed fresh; changes apply with the optimization off.
+		return nil
+	}
+
+	if watermark != "" {
+		r.logger.Warn("checkpoint has copy progress but no change-stream position; starting the stream at the current source head, so the target may be stale until the continuous checksum repairs changes made since the checkpoint",
+			"watermark", watermark)
+	} else {
+		r.logger.Info("checkpoint has no copy watermark or change-stream position; starting the stream at the current source head")
+	}
+	if err := r.replClient.Start(streamCtx); err != nil {
 		return fmt.Errorf("failed to start change source: %w", err)
 	}
-	return r.checkpointTbl().Create(ctx)
+	return nil
 }
 
 // checkpointTbl returns a handle to datasync's checkpoint table on the target.

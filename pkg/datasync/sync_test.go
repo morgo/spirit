@@ -1,8 +1,10 @@
 package datasync
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"log/slog"
 	"reflect"
 	"strconv"
 	"sync"
@@ -899,6 +901,15 @@ func TestSyncVerifyExistingTargetTableRequiresExactSchema(t *testing.T) {
 			target: "CREATE TABLE t1 (id BIGINT PRIMARY KEY, customer_id BIGINT DEFAULT NULL)",
 		},
 		{
+			// This is the state after applying the ALTER named by a prior
+			// schema-divergence error. Pin that the reconciled target passes the
+			// gate even though replaying the historical DDL prevents the old
+			// end-to-end test from continuing in always-streaming mode.
+			name:   "target reconciled with suggested ALTER",
+			source: "CREATE TABLE t1 (id BIGINT PRIMARY KEY, customer_id BIGINT DEFAULT NULL, added VARCHAR(64) NOT NULL DEFAULT 'x')",
+			target: "CREATE TABLE t1 (id BIGINT PRIMARY KEY, customer_id BIGINT DEFAULT NULL, added VARCHAR(64) NOT NULL DEFAULT 'x')",
+		},
+		{
 			// Accepted by move — a sharded target's shard key cannot be NULL —
 			// and rejected here.
 			name:     "target stricter about NULL",
@@ -987,7 +998,38 @@ func TestSyncResumeSourceSchemaChanged(t *testing.T) {
 
 	// The unchanged table must not be implicated in the failure.
 	require.NotContains(t, runErr.Error(), "t2")
+}
 
+type resumeSource struct {
+	change.Source
+	started               bool
+	watermarkOptimization bool
+}
+
+func (s *resumeSource) SetWatermarkOptimization(_ context.Context, enabled bool) error {
+	s.watermarkOptimization = enabled
+	return nil
+}
+
+func (s *resumeSource) Start(context.Context) error {
+	s.started = true
+	return nil
+}
+
+func TestStartResumeChangeSourceWarnsWhenCopyProgressHasNoStreamPosition(t *testing.T) {
+	var logs bytes.Buffer
+	source := &resumeSource{watermarkOptimization: true}
+	r := &Runner{
+		replClient: source,
+		logger:     slog.New(slog.NewTextHandler(&logs, nil)),
+	}
+
+	require.NoError(t, r.startResumeChangeSource(t.Context(), "finished-watermark", ""))
+	require.True(t, source.started)
+	require.False(t, source.watermarkOptimization)
+	require.Contains(t, logs.String(), "checkpoint has copy progress but no change-stream position")
+	require.Contains(t, logs.String(), "target may be stale until the continuous checksum repairs changes")
+	require.Contains(t, logs.String(), "watermark=finished-watermark")
 }
 
 // TestSyncTargetSchemaVerifyIgnoresDeferredIndexes guards the resume-time schema
