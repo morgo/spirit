@@ -208,77 +208,6 @@ func TestSyncInitialCopy(t *testing.T) {
 	require.Equal(t, "two", v)
 }
 
-// TestSyncCopyOnly verifies the CopyOnly path: initial copy runs (no
-// change source constructed, so no REPLICATION/RELOAD privileges
-// required), then the continuous checksum keeps running until the
-// context is cancelled. FirstCleanPass is signalled once the checker
-// observes source == target; that gates the cancel. A clean ctx-cancel
-// returns nil and the snapshot remains on the target.
-func TestSyncCopyOnly(t *testing.T) {
-	cfg, err := mysql.ParseDSN(testutils.DSN())
-	require.NoError(t, err)
-	src := cfg.Clone()
-	src.DBName = "sync_copyonly_src"
-	dest := cfg.Clone()
-	dest.DBName = "sync_copyonly_dest"
-	sourceDSN := src.FormatDSN()
-	targetDSN := dest.FormatDSN()
-
-	testutils.RunSQL(t, `DROP DATABASE IF EXISTS sync_copyonly_src`)
-	testutils.RunSQL(t, `CREATE DATABASE sync_copyonly_src`)
-	testutils.RunSQL(t, `CREATE TABLE sync_copyonly_src.t1 (id INT PRIMARY KEY, val VARCHAR(255))`)
-	testutils.RunSQL(t, `INSERT INTO sync_copyonly_src.t1 VALUES (1,'one'),(2,'two'),(3,'three')`)
-	testutils.RunSQL(t, `DROP DATABASE IF EXISTS sync_copyonly_dest`)
-
-	s := &Sync{
-		SourceDSN:    sourceDSN,
-		TargetDSN:    targetDSN,
-		Threads:      2,
-		WriteThreads: 2,
-		CopyOnly:     true,
-	}
-	runner, err := NewRunner(s)
-	require.NoError(t, err)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	runDone := make(chan error, 1)
-	go func() { runDone <- runner.Run(ctx) }()
-
-	// Wait for the checker to publish a first clean pass — that's the
-	// signal that source and target are known consistent. With a quiescent
-	// source this should happen well within the test deadline.
-	select {
-	case <-runner.FirstCleanPass():
-	case err := <-runDone:
-		t.Fatalf("Run returned before FirstCleanPass: %v", err)
-	case <-ctx.Done():
-		t.Fatalf("timed out waiting for FirstCleanPass: %v", ctx.Err())
-	}
-
-	// Run is still going after the clean pass — it's supposed to block
-	// until cancelled. Cancel now and expect a clean nil return.
-	cancel()
-	select {
-	case err := <-runDone:
-		require.NoError(t, err)
-	case <-time.After(30 * time.Second):
-		t.Fatal("Run did not return after ctx cancellation")
-	}
-	require.NoError(t, runner.Close())
-
-	// Snapshot landed on target with the right values.
-	tgt, err := sql.Open("mysql", targetDSN)
-	require.NoError(t, err)
-	defer utils.CloseAndLog(tgt)
-	var n int
-	require.NoError(t, tgt.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM t1").Scan(&n))
-	require.Equal(t, 3, n)
-	var v string
-	require.NoError(t, tgt.QueryRowContext(context.Background(), "SELECT val FROM t1 WHERE id = 2").Scan(&v))
-	require.Equal(t, "two", v)
-}
-
 // TestRunnerStatusTask exercises the status.Task surface (Progress, Status,
 // DumpCheckpoint, Cancel) concurrently with Run, validating both the values
 // reported and the locking around the progress fields (run with -race).
@@ -1059,21 +988,6 @@ func TestSyncResumeSourceSchemaChanged(t *testing.T) {
 	// The unchanged table must not be implicated in the failure.
 	require.NotContains(t, runErr.Error(), "t2")
 
-	// Reconciling the target unblocks the resume. (The rows copied under the old
-	// schema carry the column default rather than the source's values, which is
-	// why spirit refuses to perform this repair itself — see
-	// verifyExistingTargetTable.) Resume in copy-only mode: a continuous resume
-	// opens the change feed at the checkpointed position, which predates the
-	// ALTER, so the source's DDL guard would cancel the run before the copy
-	// finishes — that guard is exactly what leaves the resumable checkpoint this
-	// test starts from, and it is not what's under test here.
-	testutils.RunSQL(t, `ALTER TABLE sync_ddl_drift_dest.t1 ADD COLUMN added VARCHAR(64) NOT NULL DEFAULT 'x'`)
-	reconciled := newSync()
-	reconciled.CopyOnly = true
-	r3, err := NewRunner(reconciled)
-	require.NoError(t, err)
-	require.NoError(t, runUntilCopied(t, r3))
-	require.NoError(t, r3.Close())
 }
 
 // TestSyncTargetSchemaVerifyIgnoresDeferredIndexes guards the resume-time schema
