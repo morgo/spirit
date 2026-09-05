@@ -1421,7 +1421,7 @@ func (r *Runner) resolveResumePosition(rawPos string) (string, error) {
 		return "", fmt.Errorf("checkpoint position %q carries no source identity (it was written by an older spirit version), so it cannot be verified to belong to the current source server; re-run with --force to discard it and start a fresh sync",
 			payload.Position)
 	}
-	if payload.ServerUUID != r.sourceUUID {
+	if !strings.EqualFold(payload.ServerUUID, r.sourceUUID) {
 		return "", fmt.Errorf("checkpoint position %q was recorded on a different source server (checkpoint server_uuid=%s addr=%s; current source server_uuid=%s addr=%s): a binlog file:position is only valid on the server that wrote it, and resuming here would silently skip or replay the wrong changes (typical after a failover, replica promotion, or source rebuild). Re-run with --force to discard the checkpoint and start a fresh sync",
 			payload.Position, payload.ServerUUID, payload.SourceAddr, r.sourceUUID, r.source.config.Addr)
 	}

@@ -1489,3 +1489,21 @@ func TestSyncResumeGTIDIdentity(t *testing.T) {
 		require.Equal(t, pos, got)
 	}
 }
+
+func TestSyncResumeSourceIdentityCaseInsensitive(t *testing.T) {
+	r := &Runner{
+		sync:       &Sync{},
+		sourceUUID: "abcdef01-2345-6789-abcd-ef0123456789",
+	}
+	position := "binlog.000123:456"
+	wrapped, err := encodeSyncPosition(
+		position,
+		"ABCDEF01-2345-6789-ABCD-EF0123456789",
+		"old-host:3306",
+	)
+	require.NoError(t, err)
+
+	got, err := r.resolveResumePosition(wrapped)
+	require.NoError(t, err)
+	require.Equal(t, position, got)
+}
