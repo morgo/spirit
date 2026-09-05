@@ -12,12 +12,13 @@ import (
 // the same database. Check the selected schemas and, when they overlap, the
 // server UUIDs before any target writes or destructive recovery.
 func RequireDifferentDatabase(ctx context.Context, source, target *sql.DB) error {
-	var sourceSchema, targetSchema string
-	if err := source.QueryRowContext(ctx, "SELECT DATABASE()").Scan(&sourceSchema); err != nil {
-		return fmt.Errorf("read source database identity: %w", err)
+	sourceSchema, err := selectedDatabase(ctx, source, "source")
+	if err != nil {
+		return err
 	}
-	if err := target.QueryRowContext(ctx, "SELECT DATABASE()").Scan(&targetSchema); err != nil {
-		return fmt.Errorf("read target database identity: %w", err)
+	targetSchema, err := selectedDatabase(ctx, target, "target")
+	if err != nil {
+		return err
 	}
 	// Be conservative about case: servers may fold database names. Distinct
 	// schema names remain valid even on the same server, including test setups.
@@ -38,4 +39,15 @@ func RequireDifferentDatabase(ctx context.Context, source, target *sql.DB) error
 		return fmt.Errorf("source and target refer to the same database %q on server %s; refusing to modify the source", sourceSchema, sourceUUID)
 	}
 	return nil
+}
+
+func selectedDatabase(ctx context.Context, db *sql.DB, role string) (string, error) {
+	var schema sql.NullString
+	if err := db.QueryRowContext(ctx, "SELECT DATABASE()").Scan(&schema); err != nil {
+		return "", fmt.Errorf("read %s database identity: %w", role, err)
+	}
+	if !schema.Valid || schema.String == "" {
+		return "", fmt.Errorf("%s connection has no selected database; specify one in its DSN", role)
+	}
+	return schema.String, nil
 }
