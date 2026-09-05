@@ -5,7 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+
+	"github.com/go-sql-driver/mysql"
 )
+
+// erUnknownSystemVariable is MySQL error 1193 (ER_UNKNOWN_SYSTEM_VARIABLE),
+// returned when selecting a system variable the server predates.
+const erUnknownSystemVariable = 1193
 
 func init() {
 	registerCheck("configuration", configurationCheck, ScopePreflight)
@@ -49,6 +55,23 @@ func configurationCheck(ctx context.Context, r Resources, logger *slog.Logger) e
 		if binlogRowValueOptions != "" {
 			return fmt.Errorf("source %d: binlog_row_value_options must be empty for move operations", i)
 		}
+		// binlog_transaction_compression=ON delivers every transaction wrapped
+		// in a compressed Transaction_payload event. The change client can
+		// decode these — it has to, because any session can enable the setting
+		// for its own transactions regardless of the global value — but as a
+		// server-wide default it is not a supported configuration. Queried
+		// separately from the batch above because the variable only exists on
+		// MySQL 8.0.20+; on older servers compression cannot be enabled at
+		// all, so unknown-variable passes the check.
+		var binlogTransactionCompression string
+		err = src.DB.QueryRowContext(ctx, `SELECT @@global.binlog_transaction_compression`).Scan(&binlogTransactionCompression)
+		if err != nil {
+			if myErr, ok := errors.AsType[*mysql.MySQLError](err); !ok || myErr.Number != erUnknownSystemVariable {
+				return fmt.Errorf("source %d: %w", i, err)
+			}
+		} else if binlogTransactionCompression != "0" {
+			return fmt.Errorf("source %d: binlog_transaction_compression must be OFF for move operations", i)
+		}
 		if logBin != "1" {
 			return fmt.Errorf("source %d: log_bin must be enabled", i)
 		}
@@ -64,24 +87,10 @@ func configurationCheck(ctx context.Context, r Resources, logger *slog.Logger) e
 			// visibility assumption (see issue #818).
 			return fmt.Errorf("source %d: binlog_order_commits must be ON (this is the MySQL default; setting it OFF allows commit reordering that breaks Spirit's binlog→applier visibility assumption)", i)
 		}
-		// GTID-specific preflight, applied per-source so an inconsistent N:M
-		// cluster (one shard with gtid_mode=ON, another OFF) is caught here
-		// rather than failing mid-stream on the misconfigured shard.
-		if r.GTID {
-			var gtidMode, enforceGTIDConsistency string
-			if err := src.DB.QueryRowContext(ctx,
-				`SELECT @@global.gtid_mode, @@global.enforce_gtid_consistency`).Scan(
-				&gtidMode, &enforceGTIDConsistency,
-			); err != nil {
-				return fmt.Errorf("source %d: %w", i, err)
-			}
-			if gtidMode != "ON" {
-				return fmt.Errorf("source %d: --gtid requires gtid_mode=ON (current: %s)", i, gtidMode)
-			}
-			if enforceGTIDConsistency != "ON" {
-				return fmt.Errorf("source %d: --gtid requires enforce_gtid_consistency=ON (current: %s)", i, enforceGTIDConsistency)
-			}
-		}
+		// There is no GTID preflight here: each source's change source is
+		// selected automatically (change.NewAutoClient probes gtid_mode /
+		// enforce_gtid_consistency per source), so a source without GTIDs
+		// simply gets the binlog file+position client rather than an error.
 	}
 	return nil
 }

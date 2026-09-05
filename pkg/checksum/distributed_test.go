@@ -35,6 +35,7 @@ func (a *noopDistributedApplier) UpsertRows(context.Context, *table.ColumnMappin
 
 func (a *noopDistributedApplier) Wait(context.Context) error { return nil }
 func (a *noopDistributedApplier) Stop() error                { return nil }
+func (a *noopDistributedApplier) Stats() applier.Stats       { return applier.Stats{} }
 func (a *noopDistributedApplier) GetTargets() []applier.Target {
 	return nil
 }
@@ -47,18 +48,22 @@ func (s *noopChangeSource) AddSubscription(_, _ *table.TableInfo, _ table.Mapped
 func (s *noopChangeSource) Start(context.Context) error                     { return nil }
 func (s *noopChangeSource) StartFromPosition(context.Context, string) error { return nil }
 func (s *noopChangeSource) Position() string                                { return "" }
+func (s *noopChangeSource) CurrentPosition(context.Context) (string, error) { return "", nil }
 func (s *noopChangeSource) Flush(context.Context) error                     { return nil }
 func (s *noopChangeSource) FlushUnderTableLock(context.Context, []*dbconn.TableLock) error {
 	return nil
 }
 func (s *noopChangeSource) BlockWait(context.Context) error { return nil }
 func (s *noopChangeSource) GetDeltaLen() int                { return 0 }
+
+func (s *noopChangeSource) FlushResidual() (int, int) { return 0, 0 }
 func (s *noopChangeSource) SetWatermarkOptimization(context.Context, bool) error {
 	return nil
 }
 func (s *noopChangeSource) StartPeriodicFlush(context.Context, time.Duration) {}
 func (s *noopChangeSource) StopPeriodicFlush()                                {}
 func (s *noopChangeSource) AllChangesFlushed() bool                           { return true }
+func (s *noopChangeSource) Stop()                                             {}
 func (s *noopChangeSource) Close()                                            {}
 
 func TestDistributedCheckerHonorsYieldTimeoutConfig(t *testing.T) {
@@ -215,6 +220,136 @@ func TestFixCorruptWithApplier(t *testing.T) {
 	require.Equal(t, "0/3 0.00%", checker.GetProgress().String())
 	require.NoError(t, checker.Run(t.Context())) // should be fixed!
 	require.Equal(t, "3/3 100.00%", checker.GetProgress().String())
+}
+
+// TestDistributedRetryDoesNotVacuouslyPass is the distributed analog of
+// TestRetryDoesNotVacuouslyPass (single checker). A failed pass leaves
+// isInvalid=true; if a retry attempt does not clear it, isHealthy() stays
+// false, the attempt dispatches zero chunks, and Run reports "checksum
+// passed" with zero rows verified. Unlike the single checker,
+// DistributedChecker.Run returns hard errors immediately (no retry
+// continue), so the poisoned-retry path is reached by reusing the checker
+// for a subsequent Run — the same reuse pattern as move's
+// continuous-checksum loop. The second Run must fail again on the
+// still-divergent data, not return nil.
+func TestDistributedRetryDoesNotVacuouslyPass(t *testing.T) {
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	newDBName, _ := testutils.CreateUniqueTestDatabase(t)
+
+	testutils.RunSQL(t, "DROP TABLE IF EXISTS retrypoison_dist_t1")
+	testutils.RunSQL(t, "CREATE TABLE retrypoison_dist_t1 (a INT NOT NULL, b INT, c INT, PRIMARY KEY (a))")
+	testutils.RunSQL(t, "INSERT INTO retrypoison_dist_t1 VALUES (1, 2, 3)")
+
+	testutils.RunSQL(t, "CREATE TABLE "+newDBName+".retrypoison_dist_t1 LIKE retrypoison_dist_t1")
+	testutils.RunSQL(t, "INSERT INTO "+newDBName+".retrypoison_dist_t1 VALUES (1, 9, 9)") // divergent row
+
+	destCfg := cfg.Clone()
+	destCfg.DBName = newDBName
+
+	src, err := dbconn.New(cfg.FormatDSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(src)
+	dest, err := dbconn.New(destCfg.FormatDSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(dest)
+
+	t1 := table.NewTableInfo(src, "test", "retrypoison_dist_t1")
+	require.NoError(t, t1.SetInfo(t.Context()))
+	t2 := table.NewTableInfo(dest, newDBName, "retrypoison_dist_t1")
+	require.NoError(t, t2.SetInfo(t.Context()))
+
+	target := applier.Target{DB: dest, KeyRange: "0", Config: destCfg}
+	app, err := applier.NewSingleTargetApplier(target, applier.NewApplierDefaultConfig())
+	require.NoError(t, err)
+
+	feed := change.NewBinlogClient(src, cfg.Addr, cfg.User, cfg.Passwd, app, change.NewClientDefaultConfig())
+	defer feed.Close()
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
+	require.NoError(t, err)
+	require.NoError(t, feed.AddSubscription(t1, t2, chunker))
+	require.NoError(t, feed.Start(t.Context()))
+	require.NoError(t, chunker.Open())
+
+	config := NewCheckerDefaultConfig()
+	config.Applier = app
+	config.FixDifferences = false // surface the mismatch as an error
+	config.MaxRetries = 2
+	checker, err := NewChecker([]*sql.DB{src}, chunker, []change.Source{feed}, config)
+	require.NoError(t, err)
+
+	// The first Run fails on the divergent row and returns immediately,
+	// leaving the checker poisoned (isInvalid=true) for the next Run.
+	err = checker.Run(t.Context())
+	require.ErrorContains(t, err, "checksum mismatch")
+
+	// A second Run on the same checker must start healthy, re-verify the
+	// still-divergent data, and fail again. Without the isInvalid resets (at
+	// Run entry and between retry attempts) this returned nil ("checksum
+	// passed") having checked zero chunks.
+	err = checker.Run(t.Context())
+	require.Error(t, err)
+	require.ErrorContains(t, err, "checksum mismatch")
+}
+
+// TestDistributedRunResetsPriorInvalidState is the distributed analog of
+// TestRunResetsPriorInvalidState (single checker): a prior Run that errored
+// WITHOUT recording differences (e.g. a transient connection failure) leaves
+// isInvalid=true and differencesFound==0. A reused checker's next Run must
+// start healthy — otherwise attempt 1 skips every chunk (isHealthy()==false),
+// sees differencesFound==0, and returns nil having verified zero rows.
+func TestDistributedRunResetsPriorInvalidState(t *testing.T) {
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	newDBName, _ := testutils.CreateUniqueTestDatabase(t)
+
+	testutils.RunSQL(t, "DROP TABLE IF EXISTS runpoison_dist_t1")
+	testutils.RunSQL(t, "CREATE TABLE runpoison_dist_t1 (a INT NOT NULL, b INT, c INT, PRIMARY KEY (a))")
+	testutils.RunSQL(t, "INSERT INTO runpoison_dist_t1 VALUES (1, 2, 3), (2, 2, 3)")
+
+	testutils.RunSQL(t, "CREATE TABLE "+newDBName+".runpoison_dist_t1 LIKE runpoison_dist_t1")
+	testutils.RunSQL(t, "INSERT INTO "+newDBName+".runpoison_dist_t1 SELECT * FROM runpoison_dist_t1")
+
+	destCfg := cfg.Clone()
+	destCfg.DBName = newDBName
+
+	src, err := dbconn.New(cfg.FormatDSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(src)
+	dest, err := dbconn.New(destCfg.FormatDSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(dest)
+
+	t1 := table.NewTableInfo(src, "test", "runpoison_dist_t1")
+	require.NoError(t, t1.SetInfo(t.Context()))
+	t2 := table.NewTableInfo(dest, newDBName, "runpoison_dist_t1")
+	require.NoError(t, t2.SetInfo(t.Context()))
+
+	target := applier.Target{DB: dest, KeyRange: "0", Config: destCfg}
+	app, err := applier.NewSingleTargetApplier(target, applier.NewApplierDefaultConfig())
+	require.NoError(t, err)
+
+	feed := change.NewBinlogClient(src, cfg.Addr, cfg.User, cfg.Passwd, app, change.NewClientDefaultConfig())
+	defer feed.Close()
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
+	require.NoError(t, err)
+	require.NoError(t, feed.AddSubscription(t1, t2, chunker))
+	require.NoError(t, feed.Start(t.Context()))
+	require.NoError(t, chunker.Open())
+
+	config := NewCheckerDefaultConfig()
+	config.Applier = app
+	checker, err := NewChecker([]*sql.DB{src}, chunker, []change.Source{feed}, config)
+	require.NoError(t, err)
+	distChecker, ok := checker.(*DistributedChecker)
+	require.True(t, ok)
+	// Simulate the state left by a prior errored Run that found no differences.
+	distChecker.setInvalid(true)
+
+	// The data is identical, so the pass must succeed — with real work done.
+	require.NoError(t, checker.Run(t.Context()))
+	require.True(t, chunker.IsRead(), "the chunker must be fully read; a vacuous pass reads no chunks")
+	require.Positive(t, checker.GetProgress().RowsChecked, "rows must actually be verified")
 }
 
 func TestDistributedChecksum(t *testing.T) {

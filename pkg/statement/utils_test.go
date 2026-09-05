@@ -140,10 +140,14 @@ func TestHelperFunctions(t *testing.T) {
 		require.NoError(t, err)
 		require.Nil(t, ct1.getPrimaryKeyIndex())
 
-		// Table with inline primary key (column-level)
+		// Table with inline primary key (column-level): normalization
+		// materializes it into a table-level PRIMARY KEY index.
 		ct2, err := ParseCreateTable("CREATE TABLE t2 (id INT PRIMARY KEY)")
 		require.NoError(t, err)
-		require.Nil(t, ct2.getPrimaryKeyIndex()) // inline PK is not in Indexes
+		pk2 := ct2.getPrimaryKeyIndex()
+		require.NotNil(t, pk2)
+		require.Equal(t, "PRIMARY KEY", pk2.Type)
+		require.Equal(t, []string{"id"}, pk2.Columns)
 
 		// Table with table-level primary key
 		ct3, err := ParseCreateTable("CREATE TABLE t3 (id INT, PRIMARY KEY (id))")

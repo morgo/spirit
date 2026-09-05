@@ -117,9 +117,8 @@ type Recopier interface {
 // Default values applied by NewContinuousChecker for zero-valued config
 // fields. Exported so callers can reference them when tuning.
 const (
-	DefaultContinuousConcurrency     = 4
-	DefaultContinuousMaxQueueSize    = 1024
-	DefaultContinuousTargetChunkTime = 1 * time.Second
+	DefaultContinuousConcurrency  = 4
+	DefaultContinuousMaxQueueSize = 1024
 )
 
 // Shared continuous-checksum pacing. Vars (not consts) so tests can shorten
@@ -154,10 +153,6 @@ type ContinuousCheckerConfig struct {
 	// exceeded, Run returns an error rather than silently falling behind on
 	// verification. Default 1024.
 	MaxQueueSize int
-
-	// TargetChunkTime, if set, is passed through to chunker feedback so the
-	// walker tunes chunk size to roughly this duration. Default 1s.
-	TargetChunkTime time.Duration
 
 	// Recopier is invoked when the retry path detects stable target
 	// divergence (src CRC unchanged across a retry window, target still
@@ -438,9 +433,6 @@ func NewContinuousChecker(
 	}
 	if cfg.MaxQueueSize <= 0 {
 		cfg.MaxQueueSize = DefaultContinuousMaxQueueSize
-	}
-	if cfg.TargetChunkTime <= 0 {
-		cfg.TargetChunkTime = DefaultContinuousTargetChunkTime
 	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()

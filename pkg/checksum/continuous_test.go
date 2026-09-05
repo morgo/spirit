@@ -83,6 +83,8 @@ func (c *testChunker) Feedback(chunk *table.Chunk, duration time.Duration, actua
 	defer c.mu.Unlock()
 	c.feedback = append(c.feedback, table.FeedbackCall{Chunk: chunk, Duration: duration, ActualRows: actualRows, Timestamp: time.Now()})
 }
+func (c *testChunker) RowsCopied() uint64 { return 0 }
+
 func (c *testChunker) Progress() (uint64, uint64, uint64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -185,11 +187,10 @@ func runUntil(t *testing.T, c *ContinuousChecker) (stop func() error, errCh <-ch
 // silent logger.
 func fastConfig() ContinuousCheckerConfig {
 	return ContinuousCheckerConfig{
-		Concurrency:     4,
-		RetryDelay:      50 * time.Millisecond,
-		MaxQueueSize:    16,
-		TargetChunkTime: time.Second,
-		Logger:          slog.New(slog.NewTextHandler(testWriter{}, &slog.HandlerOptions{Level: slog.LevelError})),
+		Concurrency:  4,
+		RetryDelay:   50 * time.Millisecond,
+		MaxQueueSize: 16,
+		Logger:       slog.New(slog.NewTextHandler(testWriter{}, &slog.HandlerOptions{Level: slog.LevelError})),
 	}
 }
 
@@ -591,14 +592,18 @@ func (f *fakeFeed) AddSubscription(_, _ *table.TableInfo, _ table.MappedChunker)
 func (f *fakeFeed) Start(context.Context) error                                        { return nil }
 func (f *fakeFeed) StartFromPosition(context.Context, string) error                    { return nil }
 func (f *fakeFeed) Position() string                                                   { return "" }
+func (f *fakeFeed) CurrentPosition(context.Context) (string, error)                    { return "", nil }
 func (f *fakeFeed) FlushUnderTableLock(context.Context, []*dbconn.TableLock) error     { return nil }
 func (f *fakeFeed) BlockWait(context.Context) error                                    { return nil }
 func (f *fakeFeed) GetDeltaLen() int                                                   { return 0 }
-func (f *fakeFeed) SetWatermarkOptimization(context.Context, bool) error               { return nil }
-func (f *fakeFeed) StartPeriodicFlush(context.Context, time.Duration)                  {}
-func (f *fakeFeed) StopPeriodicFlush()                                                 {}
-func (f *fakeFeed) AllChangesFlushed() bool                                            { return true }
-func (f *fakeFeed) Close()                                                             {}
+
+func (f *fakeFeed) FlushResidual() (int, int)                            { return 0, 0 }
+func (f *fakeFeed) SetWatermarkOptimization(context.Context, bool) error { return nil }
+func (f *fakeFeed) StartPeriodicFlush(context.Context, time.Duration)    {}
+func (f *fakeFeed) StopPeriodicFlush()                                   {}
+func (f *fakeFeed) AllChangesFlushed() bool                              { return true }
+func (f *fakeFeed) Stop()                                                {}
+func (f *fakeFeed) Close()                                               {}
 
 // TestDivergenceIsFatalReconcilesApplyLag is the regression test for the
 // false-positive cutover abort: a chunk that is merely behind on applying

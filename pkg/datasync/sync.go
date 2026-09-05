@@ -41,11 +41,15 @@ import (
 // programmatic callers (e.g. strata's Vitess/PlanetScale import) that
 // inject a non-MySQL change source and/or a custom applier.
 type Sync struct {
-	SourceDSN       string        `name:"source-dsn" help:"Where to sync the tables from." default:"spirit:spirit@tcp(127.0.0.1:3306)/src"`
-	TargetDSN       string        `name:"target-dsn" help:"Where to sync the tables to." default:"spirit:spirit@tcp(127.0.0.1:3306)/dest"`
-	TargetChunkTime time.Duration `name:"target-chunk-time" help:"How long each copy chunk should take." default:"5s"`
-	Threads         int           `name:"threads" help:"How many chunks to copy in parallel during the initial copy." default:"4"`
-	WriteThreads    int           `name:"write-threads" help:"How many concurrent write threads to use on the target." default:"4"`
+	SourceDSN string `name:"source-dsn" help:"Where to sync the tables from." default:"spirit:spirit@tcp(127.0.0.1:3306)/src"`
+	TargetDSN string `name:"target-dsn" help:"Where to sync the tables to." default:"spirit:spirit@tcp(127.0.0.1:3306)/dest"`
+	// TargetChunkSize is the in-memory byte budget the buffered copier sizes each
+	// copy chunk against (see table.DefaultTargetChunkBytes). Sync always uses the
+	// buffered copier. A zero value means "use the default" (the runner fills it
+	// in). The Kong default below must stay equal to table.DefaultTargetChunkBytes.
+	TargetChunkSize uint64 `name:"target-chunk-size" help:"In-memory byte budget per copy chunk (in bytes)." default:"16777216"`
+	Threads         int    `name:"threads" help:"How many chunks to copy in parallel during the initial copy." default:"4"`
+	WriteThreads    int    `name:"write-threads" help:"How many concurrent write threads to use on the target." default:"4"`
 	// FlushInterval controls how often buffered changes are applied to the
 	// target during continuous sync — i.e. the replication latency vs.
 	// batching trade-off. Defaults to change.DefaultFlushInterval.
@@ -83,12 +87,6 @@ type Sync struct {
 	// tripping the fresh-sync target-empty guard.
 	Force bool `name:"force" help:"Drop and recreate the sync's target tables (never the whole target database) when the copy cannot resume from a checkpoint." default:"false"`
 
-	// GTID switches the built-in change source from binlog file+position to
-	// MySQL GTIDs. EXPERIMENTAL — see pkg/change/gtid.go. Ignored when a
-	// pre-constructed Source is injected. Requires gtid_mode=ON and
-	// enforce_gtid_consistency=ON on the source.
-	GTID bool `name:"gtid" help:"EXPERIMENTAL: use GTID-based change source instead of binlog file+position" default:"false"`
-
 	// Source optionally provides a pre-constructed change.Source to use
 	// for replication instead of constructing a built-in MySQL-binlog
 	// client from SourceDSN. When set, the runner uses this as the change
@@ -124,9 +122,6 @@ func (s *Sync) Validate() error {
 	}
 	if s.WriteThreads < 0 {
 		return fmt.Errorf("--write-threads must be non-negative, got %d", s.WriteThreads)
-	}
-	if s.TargetChunkTime < 0 {
-		return fmt.Errorf("--target-chunk-time must be non-negative, got %s", s.TargetChunkTime)
 	}
 	if s.FlushInterval < 0 {
 		return fmt.Errorf("--flush-interval must be non-negative, got %s", s.FlushInterval)

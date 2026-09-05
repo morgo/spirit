@@ -71,12 +71,11 @@ func setupRunnerForChecksumTest(t *testing.T, dbSuffix string) (*Runner, context
 	})
 
 	move := &Move{
-		SourceDSN:       sourceDSN,
-		TargetDSN:       targetDSN,
-		TargetChunkTime: 100 * time.Millisecond,
-		Threads:         1,
-		WriteThreads:    1,
-		CreateSentinel:  false,
+		SourceDSN:    sourceDSN,
+		TargetDSN:    targetDSN,
+		Threads:      1,
+		WriteThreads: 1,
+		DeferCutOver: false,
 	}
 	r, err := NewRunner(move)
 	require.NoError(t, err)
@@ -97,7 +96,8 @@ func setupRunnerForChecksumTest(t *testing.T, dbSuffix string) (*Runner, context
 	require.NoError(t, err)
 	r.targets = []applier.Target{{KeyRange: "0", DB: tgtDB, Config: tgtCfg}}
 
-	require.NoError(t, r.setup(ctx))
+	require.NoError(t, r.setupDiscovery(ctx))
+	require.NoError(t, r.setupUnderLocks(ctx))
 	require.NoError(t, r.copier.Run(ctx))
 
 	// Bring the checksum chunker into a state where it has a low-watermark.

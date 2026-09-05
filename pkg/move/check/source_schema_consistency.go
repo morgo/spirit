@@ -7,7 +7,6 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/block/spirit/pkg/statement"
 	"github.com/block/spirit/pkg/utils"
 )
 
@@ -31,12 +30,12 @@ func init() {
 // created in newCopy.
 //
 // Two things are validated for each source 1..N-1:
-//  1. Table set: when moving everything (no explicit --table list), the source
+//  1. Table set: when moving everything (no explicit SourceTables list), the source
 //     must expose exactly the same set of tables as sources[0]. An extra or
 //     missing table is drift. When only a named subset is moved, tables outside
 //     that subset are irrelevant and ignored.
 //  2. Schema: each moved table's canonicalized CREATE TABLE must match
-//     sources[0]. See statement.SchemaDiff for the canonicalization rules (AUTO_INCREMENT
+//     sources[0]. See schemaDiff for the canonicalization rules (AUTO_INCREMENT
 //     counter values and other cosmetic table options are ignored; column
 //     types, charset, collation, indexes and constraints are compared).
 func sourceSchemaConsistencyCheck(ctx context.Context, r Resources, logger *slog.Logger) error {
@@ -102,7 +101,7 @@ func sourceSchemaConsistencyCheck(ctx context.Context, r Resources, logger *slog
 			if err != nil {
 				return fmt.Errorf("source %d (%s): failed to read schema for table '%s': %w", i, src.Config.DBName, tbl, err)
 			}
-			diff, err := statement.SchemaDiff(tbl, wantCreate[tbl], gotCreate)
+			diff, err := schemaDiff(tbl, wantCreate[tbl], gotCreate)
 			if err != nil {
 				return fmt.Errorf("source %d (%s): failed to compare schema for table '%s': %w", i, src.Config.DBName, tbl, err)
 			}

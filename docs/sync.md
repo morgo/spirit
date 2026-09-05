@@ -36,38 +36,38 @@ checkpoint rather than re-copying from scratch.
 locks, and performs no cutover, so it can run against a replica. The exact
 source privileges depend on the change feed:
 
-- **Built-in MySQL binlog source** (default, from `--source-dsn`): needs
-  `SELECT` on the source schema, `REPLICATION SLAVE` + `REPLICATION CLIENT`
-  for the binlog stream, and `RELOAD` — the binlog reader runs
-  `FLUSH BINARY LOGS` to establish/advance its start position, so it is not
-  a pure `SELECT`-only role even though it never modifies your data.
-  See [`--gtid`](#gtid) below to switch to the experimental GTID-based feed,
-  which removes the `RELOAD` / `FLUSH BINARY LOGS` requirement.
+- **Built-in MySQL source** (default, from `--source-dsn`): needs `SELECT`
+  on the source schema and `REPLICATION SLAVE` + `REPLICATION CLIENT` for
+  the change stream. When the source does **not** have GTIDs enabled, the
+  feed uses binlog file+offset coordinates and additionally needs `RELOAD` —
+  that reader runs `FLUSH BINARY LOGS` to establish/advance its start
+  position, so it is not a pure `SELECT`-only role even though it never
+  modifies your data. See [GTID auto-detection](#gtid-auto-detection).
 - **Injected `change.Source`** (e.g. a Vitess/PlanetScale VStream supplied by
   a programmatic caller): the feed is driven entirely by that source, so the
   built-in binlog privileges (`REPLICATION *`, `RELOAD`) do not apply — only
-  `SELECT` on the source schema is required for the initial copy. `--gtid` is
-  ignored when an injected source is supplied.
+  `SELECT` on the source schema is required for the initial copy. GTID
+  auto-detection does not apply to an injected source.
 
 ## Requirements
 
 - **MySQL 8.0+** on both ends
-- Source (built-in binlog feed): `binlog_format=ROW`, `log_bin=ON`, and
-  `SELECT` + `REPLICATION SLAVE` + `REPLICATION CLIENT` + `RELOAD` privileges
-  (`RELOAD` is required for the `FLUSH BINARY LOGS` the reader issues)
+- Source (built-in feed): `binlog_format=ROW`, `log_bin=ON`, and `SELECT` +
+  `REPLICATION SLAVE` + `REPLICATION CLIENT` privileges; plus `RELOAD` when
+  the source does not have GTIDs enabled (the file+offset reader issues
+  `FLUSH BINARY LOGS`)
 
 ## Configuration
 
 - [source-dsn](#source-dsn)
 - [target-dsn](#target-dsn)
-- [target-chunk-time](#target-chunk-time)
+- [target-chunk-size](#target-chunk-size)
 - [threads](#threads)
 - [write-threads](#write-threads)
 - [flush-interval](#flush-interval)
 - [defer-secondary-indexes](#defer-secondary-indexes)
 - [copy-only](#copy-only)
 - [force](#force)
-- [gtid](#gtid)
 
 ### source-dsn
 
@@ -85,14 +85,16 @@ and then followed on the change stream.
 A Go MySQL DSN for the target database. The database and tables are created
 automatically from the source schema if they do not already exist.
 
-### target-chunk-time
+### target-chunk-size
 
-- Type: Duration
-- Default value: `5s`
+- Type: Integer (bytes)
+- Default value: `16777216` (16 MiB)
 
-The target time for each chunk of rows to be copied during the initial copy.
-See the [migrate documentation](migrate.md#target-chunk-time) for how chunk
-timing adapts.
+The in-memory byte budget the buffered copier sizes each copy chunk against.
+Sync always uses the buffered copier, so this is the knob that governs copy
+chunk sizing. See the [migrate documentation](migrate.md#target-chunk-size) for
+details. Most
+users should not need to change it.
 
 ### threads
 
@@ -155,49 +157,42 @@ already completed) rather than starting over.
 - Type: Boolean
 - Default value: `false`
 
-Drop and recreate the target database at startup **unless** a resumable
+Drop and recreate the target tables corresponding to the source tables, plus
+the sync checkpoint table, **unless** a resumable
 checkpoint exists. A resumable run (checkpoint present) is left intact and
 resumes as normal; this only resets a target that is non-empty with no usable
 checkpoint, which would otherwise trip the fresh-sync target-empty guard.
+Unrelated tables in the target database are preserved. Source and target
+connections must refer to different databases, including when `--force` is set.
 Intended for testing/iterating.
 
-### gtid
+## GTID auto-detection
 
-- Type: Boolean
-- Default value: `false`
-
-> **⚠️ Experimental.** See the full caveats and on-disk-format warning in the
-> [migrate `--enable-experimental-gtid` documentation](migrate.md#enable-experimental-gtid).
-
-When set to `true`, the built-in MySQL binlog source switches from the default
-binlog **file + offset** coordinate to a MySQL **GTID set** coordinate. The
-copy phase, applier, checkpoint contract, and continuous-stream lifecycle are
-otherwise unchanged.
+Like `migrate` and `move`, Sync selects the built-in MySQL feed's coordinate
+scheme automatically — there is no flag. A source with GTIDs enabled
+(`gtid_mode=ON` and `enforce_gtid_consistency=ON`) is followed by **GTID set**
+coordinates; one without, by binlog **file + offset**. See the
+[migrate GTID auto-detection documentation](migrate.md#gtid-auto-detection)
+for the behavioural differences and the resume rules.
 
 Sync-specific notes:
 
-- **Ignored when an injected `Source` is supplied** (e.g. a programmatic caller
-  passing a Vitess/PlanetScale VStream `change.Source`) — the flag only
-  controls how Sync constructs its own MySQL binlog client.
-- **No `RELOAD` / `FLUSH BINARY LOGS` requirement.** Unlike the default
-  file+offset path, the GTID feed reads `@@GLOBAL.gtid_executed` to discover
-  positions, so the source role can drop `RELOAD` and `FLUSH BINARY LOGS` calls
-  disappear from the run. The other built-in feed privileges
-  (`SELECT`, `REPLICATION SLAVE`, `REPLICATION CLIENT`) still apply.
-- **Known limitation: no preflight check.** `spirit sync` does not yet have a
-  preflight check system the way [`migrate`](migrate.md) and [`move`](move.md)
-  do, so the GTID prerequisites below are **not** validated up-front. If the
-  source server has `gtid_mode=OFF` (or `enforce_gtid_consistency=OFF`) the
-  failure surfaces later as a stream-level error rather than a clear preflight
-  message. Validate these settings yourself before passing `--gtid`.
+- **Does not apply to an injected `Source`** (e.g. a programmatic caller
+  passing a Vitess/PlanetScale VStream `change.Source`) — auto-detection only
+  controls how Sync constructs its own MySQL client.
+- **No `RELOAD` / `FLUSH BINARY LOGS` requirement in GTID mode.** The GTID
+  feed reads `@@GLOBAL.gtid_executed` to discover positions, so the source
+  role can drop `RELOAD`, and `FLUSH BINARY LOGS` calls disappear from the
+  run. The other built-in feed privileges (`SELECT`, `REPLICATION SLAVE`,
+  `REPLICATION CLIENT`) still apply, and sources without GTIDs still need
+  `RELOAD` for the file+offset reader.
+- **Resume keeps the checkpoint's scheme.** A file+offset checkpoint resumes
+  on the file+offset client even after GTIDs are enabled on the source, and a
+  GTID checkpoint fails with a clear error if the source no longer has GTIDs
+  enabled. A [`--copy-only`](#copy-only) checkpoint records no stream
+  position, so a later full sync picks its scheme fresh from the server.
 
-**Requirements (on the source):**
-
-- `gtid_mode = ON`
-- `enforce_gtid_consistency = ON`
-
-```bash
-spirit sync --gtid \
-            --source-dsn "user:pass@tcp(source-host:3306)/mydb" \
-            --target-dsn "user:pass@tcp(target-host:3306)/mydb"
-```
+File+offset checkpoints also record the source's `@@server_uuid`. Resume refuses
+coordinates from a different server or an older checkpoint without identity;
+use `--force` to discard the partial copy and start fresh. GTID checkpoints
+remain portable across servers, subject to the normal GTID resume checks.

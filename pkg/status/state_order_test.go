@@ -23,6 +23,9 @@ import (
 //   - state.go itself documents that WaitingOnSentinelTable must sort AFTER
 //     Checksum so that `state >= Checksum` stays true while the sentinel wait
 //     blocks the cutover.
+//   - pkg/move/reversewindow.go: the ReverseWindow state sorts AFTER CutOver so
+//     the post-cutover reverse window satisfies `state >= CutOver` (fatalError
+//     becomes a no-op; the status/checkpoint dumpers stop) — intended.
 //
 // If you INTENTIONALLY reorder or insert a State, update the expected values
 // below AND audit every `>=` / `>` / `<` comparison against a State constant to
@@ -44,8 +47,9 @@ func TestStateOrder(t *testing.T) {
 		{"PostChecksum", PostChecksum, 6},
 		{"WaitingOnSentinelTable", WaitingOnSentinelTable, 7},
 		{"CutOver", CutOver, 8},
-		{"Close", Close, 9},
-		{"ErrCleanup", ErrCleanup, 10},
+		{"ReverseWindow", ReverseWindow, 9},
+		{"Close", Close, 10},
+		{"ErrCleanup", ErrCleanup, 11},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -67,6 +71,8 @@ func TestStateOrder(t *testing.T) {
 		"CutOver must sort strictly after WaitingOnSentinelTable (the sentinel wait precedes cutover)")
 	require.Greater(t, int32(CutOver), int32(PostChecksum),
 		"CutOver must sort strictly after PostChecksum")
+	require.Greater(t, int32(ReverseWindow), int32(CutOver),
+		"ReverseWindow must sort strictly after CutOver: the post-cutover reverse window is 'past cutover', so it must satisfy the same `state >= CutOver` gates (fatalError no-op; status/checkpoint dumpers stop)")
 
 	// (b cont.) Assert the FULL monotonic ordering of the declared states. The
 	// slice is written in the intended logical order; each entry must have a
@@ -84,6 +90,7 @@ func TestStateOrder(t *testing.T) {
 		{"PostChecksum", PostChecksum},
 		{"WaitingOnSentinelTable", WaitingOnSentinelTable},
 		{"CutOver", CutOver},
+		{"ReverseWindow", ReverseWindow},
 		{"Close", Close},
 		{"ErrCleanup", ErrCleanup},
 	}

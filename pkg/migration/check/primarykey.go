@@ -5,12 +5,11 @@ import (
 	"errors"
 	"log/slog"
 
-	"github.com/pingcap/tidb/pkg/parser/ast"
-	_ "github.com/pingcap/tidb/pkg/parser/test_driver"
+	"github.com/block/spirit/pkg/parser/ast"
 )
 
 func init() {
-	registerCheck("primarykey", primaryKeyCheck, ScopePreflight)
+	registerCheck("primarykey", primaryKeyCheck, ScopePreflight|ScopeStatement)
 }
 
 func primaryKeyCheck(ctx context.Context, r Resources, logger *slog.Logger) error {

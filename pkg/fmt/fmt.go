@@ -23,9 +23,9 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/block/spirit/pkg/parser/ast"
+	"github.com/block/spirit/pkg/parser/format"
 	_ "github.com/go-sql-driver/mysql"
-	"github.com/pingcap/tidb/pkg/parser/ast"
-	"github.com/pingcap/tidb/pkg/parser/format"
 
 	"github.com/block/spirit/pkg/dbconn/sqlescape"
 	"github.com/block/spirit/pkg/statement"

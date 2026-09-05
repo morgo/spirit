@@ -31,6 +31,13 @@ const (
 	// inside real server error packets.
 	errCannotConnect = 2003
 	errConnLost      = 2013
+	// errClientInteractionTimeout (4031, ER_CLIENT_INTERACTION_TIMEOUT) is
+	// written by MySQL >= 8.0.24 as a final packet when the server
+	// disconnects an idle connection (wait_timeout); the client reads it on
+	// the connection's next use. Aurora does not always deliver it — a
+	// wait_timeout kill can also surface as a bare driver.ErrBadConn — so
+	// both shapes must classify the same way.
+	errClientInteractionTimeout = 4031
 	// errReadOnly (1290), errReadOnlyTransaction (1792) and errReadOnlyMode
 	// (1836) are usually consumed by go-sql-driver when RejectReadOnly is
 	// enabled (the spirit default) and converted to driver.ErrBadConn. They
@@ -74,7 +81,7 @@ func NewDBConfig() *DBConfig {
 		LockWaitTimeout:          30,
 		InnodbLockWaitTimeout:    3,
 		MaxRetries:               3,
-		MaxOpenConnections:       32,    // default is high for historical tests. It's overwritten by the user threads count + 2 for headroom.
+		MaxOpenConnections:       32,    // default is high for historical tests; every real caller overwrites it (migrate with --max-connections, move from its thread counts).
 		RangeOptimizerMaxMemSize: 0,     // default is 8M, we set to unlimited. Not user configurable (may reconsider in the future).
 		InterpolateParams:        false, // default is false
 		ForceKill:                true,  // default is true
@@ -101,7 +108,11 @@ func NewDBConfig() *DBConfig {
 // where the server has positively reported that the statement did NOT take
 // effect, these errors are ambiguous. Callers retrying a non-idempotent
 // statement (e.g. the cutover RENAME TABLE) must verify server-side state
-// before deciding whether the statement was applied.
+// before deciding whether the statement was applied. The exception is
+// ER_CLIENT_INTERACTION_TIMEOUT (4031): the server killed the session for
+// inactivity *before* the observing statement arrived, so that statement
+// positively did not execute — verification is still safe, just guaranteed
+// to conclude "not applied".
 func IsConnectionLossError(err error) bool {
 	if errors.Is(err, driver.ErrBadConn) || errors.Is(err, mysql.ErrInvalidConn) || errors.Is(err, io.EOF) {
 		return true
@@ -111,11 +122,46 @@ func IsConnectionLossError(err error) bool {
 		return false
 	}
 	switch val.Number {
-	case errCannotConnect, errConnLost:
+	case errCannotConnect, errConnLost, errClientInteractionTimeout:
 		return true
 	default:
 		return false
 	}
+}
+
+// UnsafeWarningError reports a warning that MySQL raised on a statement Spirit
+// executed without error, and that Spirit treats as fatal. Statements such as
+// INSERT IGNORE succeed while discarding rows, so the warning is the only
+// signal that the copy would silently lose data.
+//
+// It unwraps to the underlying *mysql.MySQLError, so callers can classify the
+// warning by its code with errors.As or errors.AsType rather than by matching
+// on the message. The code matters because the same fatal branch covers
+// unrelated conditions — a NOT NULL column with no default (1364), a duplicate
+// on a unique key (1062), a value too long for its column (1406) — which a
+// caller may want to report or act on differently.
+type UnsafeWarningError struct {
+	Warning *mysql.MySQLError
+}
+
+// Error reports the warning and its code. The type is exported, so a caller can
+// hold one without a warning; Error stays callable on that value because the
+// places an error's text is read — logs, %v, a failing test — are the last
+// places a panic is affordable.
+func (e *UnsafeWarningError) Error() string {
+	if e.Warning == nil {
+		return "unsafe warning"
+	}
+	return fmt.Sprintf("unsafe warning %d: %s", e.Warning.Number, e.Warning.Message)
+}
+
+// Unwrap returns the underlying warning, or nil when the error carries none.
+// A nil return ends the chain, which is what errors.Is and errors.As expect.
+func (e *UnsafeWarningError) Unwrap() error {
+	if e.Warning == nil {
+		return nil
+	}
+	return e.Warning
 }
 
 // canRetryError looks at the MySQL error and decides if it is considered
@@ -150,6 +196,26 @@ func canRetryError(err error) bool {
 	}
 }
 
+// IsLockContentionError reports whether err is InnoDB lock contention: a lock
+// wait timeout (1205) or a deadlock (1213). Both are already covered by
+// canRetryError, but callers that can *adapt* — by backing off harder or by
+// lowering their own write concurrency — need to tell contention apart from
+// the other retryable classes, which no amount of self-throttling would fix.
+//
+// This distinction matters because contention can be self-inflicted. Spirit
+// runs on READ COMMITTED (see conn.go), so concurrent REPLACE batches with
+// disjoint primary keys never gap-conflict on the clustered index. They do
+// still take next-key locks during duplicate-key handling on every *secondary*
+// index, where "disjoint by PK" buys nothing — so a wide enough flush fan-out
+// deadlocks against itself with no external workload at all.
+func IsLockContentionError(err error) bool {
+	val, ok := errors.AsType[*mysql.MySQLError](err)
+	if !ok {
+		return false
+	}
+	return val.Number == errLockWaitTimeout || val.Number == errDeadlock
+}
+
 // DupKeyHandling selects how RetryableTransaction treats duplicate-key (1062)
 // warnings. Copy / INSERT IGNORE paths legitimately expect dup-key warnings
 // (e.g. resume re-inserts); checksum-fix DELETE/REPLACE/UPSERT paths do not and
@@ -181,6 +247,7 @@ func RetryableTransaction(ctx context.Context, db *sql.DB, dupKeyHandling DupKey
 	)
 	for i := range config.MaxRetries {
 		func() {
+			var attemptRowsAffected int64
 			// Start a transaction
 			if trx, err = db.BeginTx(ctx, nil); err != nil {
 				return
@@ -238,11 +305,14 @@ func RetryableTransaction(ctx context.Context, db *sql.DB, dupKeyHandling DupKey
 						// to be ignored. *However* if range optimization is disabled the query is going to
 						// tablescan, so it's better to just bail out and present a useful error message.
 						isFatal = true
-						err = errors.New("MySQL refused to optimize a statement because the value of 'range_optimizer_max_mem_size' is too low. Please decrease the target-chunk-time, or increase the value of 'range_optimizer_max_mem_size'")
+						err = errors.New("MySQL refused to optimize a statement because the value of 'range_optimizer_max_mem_size' is too low. Please decrease the target-chunk-size, or increase the value of 'range_optimizer_max_mem_size'")
 						return
 					default:
 						isFatal = true
-						err = fmt.Errorf("unsafe warning: %s", message)
+						err = &UnsafeWarningError{Warning: &mysql.MySQLError{
+							Number:  uint16(code),
+							Message: message,
+						}}
 						return
 					}
 				}
@@ -256,13 +326,14 @@ func RetryableTransaction(ctx context.Context, db *sql.DB, dupKeyHandling DupKey
 				// and that's absolutely fine!
 				count, errC := res.RowsAffected()
 				if errC == nil { // affectedRows is supported
-					rowsAffected += count
+					attemptRowsAffected += count
 				}
 			} // end for each statement
 			// Commit it!
 			if err = trx.Commit(); err != nil {
 				return
 			}
+			rowsAffected = attemptRowsAffected
 		}()
 		if isFatal { // don't retry loop if fatal
 			return rowsAffected, err
@@ -296,8 +367,25 @@ func backoff(attempt int) {
 
 // ForceExec is like Exec but it has some added logic to force kill
 // any connections that are holding up metadata locks preventing this from
-// succeeding.
+// succeeding. Like Exec, stmt is a sqlescape format string: embed raw user
+// SQL (such as an ALTER clause) with the %r verb and a sqlescape.RawSQL
+// argument, never by concatenating it into stmt.
 func ForceExec(ctx context.Context, db *sql.DB, tables []*table.TableInfo, dbConfig *DBConfig, logger *slog.Logger, stmt string, args ...any) error {
+	// Escape before the kill timer below is armed: a bad format string must
+	// fail fast here, not while a timer that kills other connections is
+	// already pending.
+	stmt, err := sqlescape.EscapeSQL(stmt, args...)
+	if err != nil {
+		return err
+	}
+	return forceExec(ctx, db, dbConfig, logger, stmt, func(ctx context.Context, connID int) ([]int, error) {
+		return killLockingTransactions(ctx, db, tables, dbConfig, logger, []int{connID})
+	}, waitForKilledTransactions)
+}
+
+// forceExec receives the kill and cleanup operations so tests can control their
+// failures while exercising the statement and retry against real MySQL.
+func forceExec(ctx context.Context, db *sql.DB, dbConfig *DBConfig, logger *slog.Logger, stmt string, kill func(context.Context, int) ([]int, error), waitForCleanup func(context.Context, *sql.DB, []int) error) error {
 	trx, connId, err := BeginStandardTrx(ctx, db, nil)
 	if err != nil {
 		return err
@@ -319,17 +407,15 @@ func ForceExec(ctx context.Context, db *sql.DB, tables []*table.TableInfo, dbCon
 	duration := forceKillGracePeriod(dbConfig.LockWaitTimeout)
 	var wg sync.WaitGroup
 	var killTimerFired atomic.Bool
+	var killed []int
+	var killErr error
 	wg.Add(1)
 	timer := time.AfterFunc(duration, func() {
 		defer wg.Done()
 		killTimerFired.Store(true)
-		err := KillLockingTransactions(ctx, db, tables, dbConfig, logger, []int{connId})
-		if err != nil {
-			return // just return, we can't do much more here
-		}
+		killed, killErr = kill(ctx, connId)
 	})
-	escapedStmt := sqlescape.MustEscapeSQL(stmt, args...)
-	_, err = trx.ExecContext(ctx, escapedStmt)
+	_, err = trx.ExecContext(ctx, stmt)
 	if timer.Stop() {
 		// Timer was stopped before it fired, so the goroutine never started.
 		// We need to manually decrement the WaitGroup.
@@ -340,8 +426,23 @@ func ForceExec(ctx context.Context, db *sql.DB, tables []*table.TableInfo, dbCon
 	// are now being used for subsequent operations.
 	wg.Wait()
 	if shouldRetryForceExecAfterKill(err, killTimerFired.Load()) {
+		// These operations use other connections. Their errors must not enter
+		// the statement's error tree: callers use it to detect ambiguous DDL.
+		if killErr != nil {
+			logger.Warn("force-kill failed; retrying statement anyway", "error", killErr)
+		}
+		// MySQL KILL is asynchronous. Wait only for sessions already signalled.
+		if len(killed) > 0 {
+			logger.Debug("waiting for killed sessions to exit", "pids", killed)
+			cleanupCtx, cancel := context.WithTimeout(ctx, forceKillCleanupTimeout)
+			cleanupErr := waitForCleanup(cleanupCtx, db, killed)
+			cancel()
+			if cleanupErr != nil {
+				logger.Warn("killed-session cleanup failed; retrying statement anyway", "pids", killed, "error", cleanupErr)
+			}
+		}
 		logger.Warn("retrying statement after lock wait timeout because force-kill timer fired", "error", err)
-		_, err = trx.ExecContext(ctx, escapedStmt)
+		_, err = trx.ExecContext(ctx, stmt)
 	}
 	return err
 }
@@ -356,8 +457,11 @@ func shouldRetryForceExecAfterKill(err error, killTimerFired bool) bool {
 
 // Exec is like db.Exec but only returns an error.
 // This makes it a little bit easier to use in error handling.
-// It accepts args which are escaped client side using the TiDB escape library.
-// i.e. %n is an identifier, %? is automatic type conversion on a variable.
+// It accepts args which are escaped client side using the sqlescape library.
+// i.e. %n is an identifier, %? is automatic type conversion on a variable,
+// and %r splices a sqlescape.RawSQL argument in verbatim (for raw user SQL
+// such as an ALTER clause, which must never be concatenated into the format
+// string).
 func Exec(ctx context.Context, db *sql.DB, stmt string, args ...any) error {
 	stmt, err := sqlescape.EscapeSQL(stmt, args...)
 	if err != nil {

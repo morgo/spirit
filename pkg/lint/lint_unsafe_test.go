@@ -66,7 +66,7 @@ func TestUnsafeLinter_AlterTableDropColumn(t *testing.T) {
 	require.Equal(t, "unsafe", violations[0].Linter.Name())
 	require.Equal(t, SeverityError, violations[0].Severity)
 	require.Contains(t, violations[0].Message, "Unsafe operation")
-	require.Equal(t, "Unsafe operation detected: DROP COLUMN `email`", violations[0].Message)
+	require.Equal(t, "Unsafe operation detected: \"DROP COLUMN `email`\"", violations[0].Message)
 	t.Log(violations[0].Message)
 	require.Equal(t, "users", violations[0].Location.Table)
 	require.NotNil(t, violations[0].Location.Column)
@@ -114,6 +114,50 @@ func TestUnsafeLinter_AlterTableCoalescePartitions(t *testing.T) {
 	require.Len(t, violations, 1)
 	require.Equal(t, "unsafe", violations[0].Linter.Name())
 	require.Equal(t, SeverityError, violations[0].Severity)
+}
+
+func TestUnsafeLinter_AlterTableTruncatePartition(t *testing.T) {
+	sql := `ALTER TABLE users TRUNCATE PARTITION p0`
+	stmts, err := statement.New(sql)
+	require.NoError(t, err)
+
+	linter := &UnsafeLinter{}
+	violations := linter.Lint(nil, stmts)
+
+	// TRUNCATE PARTITION deletes all rows in the partition, so it is unsafe
+	require.Len(t, violations, 1)
+	require.Equal(t, "unsafe", violations[0].Linter.Name())
+	require.Equal(t, SeverityError, violations[0].Severity)
+	require.Equal(t, "Unsafe operation detected: \"TRUNCATE PARTITION\"", violations[0].Message)
+	require.Equal(t, "users", violations[0].Location.Table)
+}
+
+func TestUnsafeLinter_AlterTableTruncatePartitionAll(t *testing.T) {
+	sql := `ALTER TABLE users TRUNCATE PARTITION ALL`
+	stmts, err := statement.New(sql)
+	require.NoError(t, err)
+
+	linter := &UnsafeLinter{}
+	violations := linter.Lint(nil, stmts)
+
+	// TRUNCATE PARTITION ALL deletes all rows in every partition, so it is unsafe
+	require.Len(t, violations, 1)
+	require.Equal(t, "unsafe", violations[0].Linter.Name())
+	require.Equal(t, SeverityError, violations[0].Severity)
+	require.Equal(t, "Unsafe operation detected: \"TRUNCATE PARTITION\"", violations[0].Message)
+	require.Equal(t, "users", violations[0].Location.Table)
+}
+
+func TestUnsafeLinter_AlterTableAddPartition(t *testing.T) {
+	sql := `ALTER TABLE users ADD PARTITION (PARTITION p2026 VALUES LESS THAN (2027))`
+	stmts, err := statement.New(sql)
+	require.NoError(t, err)
+
+	linter := &UnsafeLinter{}
+	violations := linter.Lint(nil, stmts)
+
+	// ADD PARTITION is safe - no violations
+	require.Empty(t, violations)
 }
 
 func TestUnsafeLinter_AlterTableAddColumn(t *testing.T) {
@@ -212,6 +256,30 @@ func TestUnsafeLinter_AlterTableDropCheck(t *testing.T) {
 	require.Empty(t, violations)
 }
 
+func TestUnsafeLinter_AlterTableDropConstraint(t *testing.T) {
+	// DROP CONSTRAINT is its own spec type, not a synonym for DROP CHECK. It
+	// can drop a CHECK, FOREIGN KEY or UNIQUE constraint, none of which lose
+	// row data, so it belongs in the linter's safe-list.
+	//
+	// Note the switch in UnsafeLinter.Lint has no default, so an unlisted spec
+	// type also produces no violation: what this pins is that DROP CONSTRAINT
+	// is never classified as *unsafe*, not that it stays in the safe-list. The
+	// same is true of TestUnsafeLinter_AlterTableDropCheck above.
+	for _, sql := range []string{
+		`ALTER TABLE users DROP CONSTRAINT chk_age`,
+		`ALTER TABLE users DROP CONSTRAINT uq_name`,
+		`ALTER TABLE users DROP CONSTRAINT fk_org`,
+	} {
+		stmts, err := statement.New(sql)
+		require.NoError(t, err, sql)
+
+		linter := &UnsafeLinter{}
+		violations := linter.Lint(nil, stmts)
+
+		require.Empty(t, violations, sql)
+	}
+}
+
 func TestUnsafeLinter_AlterTableOption(t *testing.T) {
 	sql := `ALTER TABLE users ENGINE=InnoDB`
 	stmts, err := statement.New(sql)
@@ -272,7 +340,7 @@ func TestUnsafeLinter_AlterTableMultipleSpecs(t *testing.T) {
 	require.Equal(t, "users", violations[0].Location.Table)
 	require.NotNil(t, violations[0].Location.Column)
 	require.Equal(t, "phone", *violations[0].Location.Column)
-	require.Equal(t, "Unsafe operation detected: DROP COLUMN `phone`", violations[0].Message)
+	require.Equal(t, "Unsafe operation detected: \"DROP COLUMN `phone`\"", violations[0].Message)
 }
 
 func TestUnsafeLinter_AlterTableMultipleUnsafeSpecs(t *testing.T) {
@@ -300,8 +368,8 @@ func TestUnsafeLinter_AlterTableMultipleUnsafeSpecs(t *testing.T) {
 		columnMessages[*v.Location.Column] = v.Message
 	}
 	require.Equal(t, map[string]string{
-		"email": "Unsafe operation detected: DROP COLUMN `email`",
-		"phone": "Unsafe operation detected: DROP COLUMN `phone`",
+		"email": "Unsafe operation detected: \"DROP COLUMN `email`\"",
+		"phone": "Unsafe operation detected: \"DROP COLUMN `phone`\"",
 	}, columnMessages)
 }
 

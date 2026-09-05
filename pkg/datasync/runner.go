@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/block/spirit/pkg/applier"
@@ -57,7 +58,8 @@ type sourceInfo struct {
 // Runner executes a Sync: an initial copy followed by continuous
 // replication that runs until the context is cancelled.
 type Runner struct {
-	sync *Sync
+	sourceUUID string // server owning file:position checkpoints
+	sync       *Sync
 
 	source sourceInfo
 	target applier.Target
@@ -68,13 +70,6 @@ type Runner struct {
 
 	sourceTables []*table.TableInfo
 
-	// sourceUUID is the source server's @@server_uuid, fetched once during
-	// setup when the built-in change clients are used (Sync.Source == nil; an
-	// injected change.Source may not be plain MySQL). It is recorded in every
-	// checkpoint and, for the file:pos change source, verified on resume — see
-	// syncPosition.
-	sourceUUID string
-
 	applier     applier.Applier
 	replClient  change.Source
 	copyChunker table.Chunker
@@ -82,14 +77,24 @@ type Runner struct {
 
 	// resuming is set when a checkpoint was found on the target: the
 	// initial copy is skipped and the change feed is opened from the
-	// checkpointed position.
-	resuming bool
+	// checkpointed position. It is atomic because it is also reported to API
+	// callers as Progress().Resume, which they poll from their own goroutine
+	// while setup is still writing it.
+	resuming atomic.Bool
 
-	status    status.State
-	startTime time.Time
+	status status.Tracker
 
-	logger     *slog.Logger
-	cancelFunc context.CancelFunc
+	// lastCheckpoint is when the checkpoint was last persisted and the
+	// change-feed position it saved, reported together on the ckpt row of the
+	// status block (#329).
+	lastCheckpoint status.LastCheckpoint
+
+	logger *slog.Logger
+	// metricsSink receives the copier's per-chunk metrics and the tracker's
+	// phase transitions. It defaults to a NoopSink, so a caller that installs
+	// nothing pays only for the discarded values.
+	metricsSink metrics.Sink
+	cancelFunc  context.CancelFunc
 	// sourceDBConfig connects to the read-only source: ForceKill and
 	// RejectReadOnly are disabled (see Run). targetDBConfig connects to the
 	// writable target and keeps the standard safe defaults — most importantly
@@ -111,8 +116,8 @@ type Runner struct {
 	fatalErr  error
 	fatalOnce sync.Once
 
-	// progMu guards the progress-related fields (copier, copyChunker,
-	// replClient, startTime, cancelFunc) that Run assigns during setup and
+	// progMu guards the progress-related fields (applier, copier, copyChunker,
+	// replClient, cancelFunc) that Run assigns during setup and
 	// that the status.Task accessors (Progress/Status/DumpCheckpoint/Cancel)
 	// read concurrently from a separate monitoring goroutine.
 	progMu sync.RWMutex
@@ -155,8 +160,8 @@ func NewRunner(s *Sync) (*Runner, error) {
 	if s.WriteThreads <= 0 {
 		s.WriteThreads = 4
 	}
-	if s.TargetChunkTime <= 0 {
-		s.TargetChunkTime = 5 * time.Second
+	if s.TargetChunkSize == 0 {
+		s.TargetChunkSize = table.DefaultTargetChunkBytes
 	}
 	if s.FlushInterval <= 0 {
 		s.FlushInterval = change.DefaultFlushInterval
@@ -164,16 +169,61 @@ func NewRunner(s *Sync) (*Runner, error) {
 	r := &Runner{
 		sync:              s,
 		logger:            slog.Default(),
+		metricsSink:       &metrics.NoopSink{},
 		continuousReadyCh: make(chan struct{}),
 		firstCleanPassCh:  make(chan struct{}),
 	}
 	return r, nil
 }
 
-// SetLogger overrides the logger (used by programmatic callers to capture
-// progress output).
+// recordCopyCompleted reports the copy aggregate settled during this
+// Runner.Run invocation. The optimistic chunker does not persist its
+// actual-row counter in a checkpoint, so a resumed invocation reports only
+// work settled after it resumed.
+func (r *Runner) recordCopyCompleted() {
+	chunker := r.copier.GetChunker()
+	if chunker == nil {
+		return
+	}
+	_, chunks, _ := chunker.Progress()
+	r.status.RecordCopyCompleted(chunker.RowsCopied(), chunks)
+}
+
+func (r *Runner) runCopy(ctx context.Context) error {
+	defer r.recordCopyCompleted()
+	return r.status.Do(status.CopyRows, func() error {
+		r.logger.Info("Starting copy", "resuming", r.resuming.Load())
+		if err := r.copier.Run(ctx); err != nil {
+			return fmt.Errorf("copy failed: %w", err)
+		}
+		if !r.sync.CopyOnly {
+			if !r.resuming.Load() {
+				if err := r.replClient.SetWatermarkOptimization(ctx, false); err != nil {
+					return err
+				}
+			}
+			// Drain the copy-phase backlog so every change observed so far is
+			// applied before steady-state streaming.
+			if err := r.replClient.Flush(ctx); err != nil {
+				return fmt.Errorf("failed to flush after copy: %w", err)
+			}
+		}
+		return nil
+	})
+}
+
 func (r *Runner) SetLogger(logger *slog.Logger) {
 	r.logger = logger
+}
+
+// SetMetricsSink installs the destination for this run's metrics, including
+// the workflow phase transitions reported by status.Tracker. It must be called
+// before Run; a nil sink is ignored.
+func (r *Runner) SetMetricsSink(sink metrics.Sink) {
+	if sink == nil {
+		return
+	}
+	r.metricsSink = sink
 }
 
 // Run performs the initial copy and then streams changes continuously
@@ -184,8 +234,9 @@ func (r *Runner) Run(ctx context.Context) error {
 	defer cancel()
 	r.progMu.Lock()
 	r.cancelFunc = cancel
-	r.startTime = time.Now()
 	r.progMu.Unlock()
+	r.status.SetMetricsSink(r.metricsSink, r.logger)
+	r.status.Begin()
 	r.logger.Info("Starting sync", "source_dsn", dbconn.RedactDSN(r.sync.SourceDSN))
 
 	r.sourceDBConfig = dbconn.NewDBConfig()
@@ -258,6 +309,10 @@ func (r *Runner) Run(ctx context.Context) error {
 		r.ownsTarget = true
 	}
 
+	if err := dbconn.RequireDifferentDatabase(ctx, r.source.db, r.target.DB); err != nil {
+		return err
+	}
+
 	if err := r.setup(ctx); err != nil {
 		return err
 	}
@@ -276,43 +331,37 @@ func (r *Runner) Run(ctx context.Context) error {
 	// — and finishes immediately if the copy had already completed. The applier
 	// copies with INSERT IGNORE, so re-copying the chunks straddling the
 	// watermark is idempotent.
-	if !r.sync.CopyOnly && !r.resuming {
+	if !r.sync.CopyOnly && !r.resuming.Load() {
 		// Watermark optimization ON during a fresh continuous copy: change
 		// events for keys the copier has not reached yet (above the watermark)
 		// are discarded, because the copier will copy those rows directly.
 		//
-		// CORRECTNESS CAVEAT — read replicas:
+		// CORRECTNESS CAVEAT:
 		// keyAboveWatermark is only safe when the copier reads from a source
 		// that reflects every change the change feed has already delivered.
-		// That holds on a PRIMARY, but NOT on a lagging REPLICA: an update to
-		// an above-watermark key can be observed on the change stream — and
-		// discarded — while the copier's later read of that key on the replica
-		// still returns the pre-update (stale) value, silently losing it. The
-		// intended safety net is the post-copy checksum, which isn't usable on
-		// the read-only import source yet (it needs privileges that credential
-		// lacks). So a replica source (e.g. the strata import) gets only
-		// best-effort consistency. On resume we leave the optimization OFF
-		// (startResume) so every change applies.
+		// That does NOT strictly hold anywhere (see "Above-watermark discard
+		// vs. binlog visibility" in pkg/change/README.md): even on a
+		// PRIMARY, binlog subscribers receive a transaction's events at the
+		// binlog sync stage, before its engine commit makes the rows visible
+		// — a window that semi-sync (AFTER_SYNC) and Aurora commit latency
+		// stretch from sub-millisecond to hundreds of milliseconds or more.
+		// On a lagging REPLICA it is worse: an update to an above-watermark
+		// key can be observed on the change stream — and discarded — while
+		// the copier's later read of that key on the replica still returns
+		// the pre-update (stale) value, silently losing it. The safety net is
+		// the post-copy continuous checksum, which repairs divergence only
+		// lazily, and isn't usable at all on the read-only import source yet
+		// (it needs privileges that credential lacks). So this optimization
+		// trades a small, environment-dependent divergence risk for initial
+		// copy throughput; a replica source (e.g. the strata import) gets
+		// only best-effort consistency. On resume we leave the optimization
+		// OFF (startResume) so every change applies.
 		if err := r.replClient.SetWatermarkOptimization(ctx, true); err != nil {
 			return err
 		}
 	}
-	r.status.Set(status.CopyRows)
-	r.logger.Info("Starting copy", "resuming", r.resuming)
-	if err := r.copier.Run(ctx); err != nil {
-		return fmt.Errorf("copy failed: %w", err)
-	}
-	if !r.sync.CopyOnly {
-		if !r.resuming {
-			if err := r.replClient.SetWatermarkOptimization(ctx, false); err != nil {
-				return err
-			}
-		}
-		// Drain the copy-phase backlog so every change observed so far is
-		// applied before steady-state streaming.
-		if err := r.replClient.Flush(ctx); err != nil {
-			return fmt.Errorf("failed to flush after copy: %w", err)
-		}
+	if err := r.runCopy(ctx); err != nil {
+		return err
 	}
 
 	// The initial copy is done. Restore any secondary indexes deferred during
@@ -320,8 +369,9 @@ func (r *Runner) Run(ctx context.Context) error {
 	// the post-copy checksum walks it (copy-only). Always called — it is a
 	// no-op when nothing was deferred and resume-safe; see
 	// restoreSecondaryIndexes.
-	r.status.Set(status.RestoreSecondaryIndexes)
-	if err := r.restoreSecondaryIndexes(ctx); err != nil {
+	if err := r.status.Do(status.RestoreSecondaryIndexes, func() error {
+		return r.restoreSecondaryIndexes(ctx)
+	}); err != nil {
 		return fmt.Errorf("failed to restore secondary indexes: %w", err)
 	}
 
@@ -337,11 +387,15 @@ func (r *Runner) Run(ctx context.Context) error {
 			r.logger.Warn("post-copy checkpoint write failed", "error", err)
 		}
 		r.logger.Info("Copy complete; entering continuous checksum (CopyOnly mode)")
-		return r.runCopyOnlyChecksum(ctx)
+		return r.status.Do(status.ApplyChangeset, func() error {
+			return r.runCopyOnlyChecksum(ctx)
+		})
 	}
 
 	r.logger.Info("Copy complete; entering continuous sync")
-	return r.runContinuous(ctx)
+	return r.status.Do(status.ApplyChangeset, func() error {
+		return r.runContinuous(ctx)
+	})
 }
 
 // runCopyOnlyChecksum runs the post-copy continuous checksum without a
@@ -352,10 +406,9 @@ func (r *Runner) Run(ctx context.Context) error {
 // final checkpoint.
 //
 // This is structurally a stripped-down runContinuous: same checker
-// lifecycle and shutdown contract, no replClient calls.
+// lifecycle and shutdown contract, no replClient calls. The caller brackets
+// it in the ApplyChangeset state.
 func (r *Runner) runCopyOnlyChecksum(ctx context.Context) error {
-	r.status.Set(status.ApplyChangeset)
-
 	checksumCtx, cancelChecksum := context.WithCancel(ctx)
 	defer cancelChecksum()
 	checksumDone := make(chan struct{})
@@ -396,7 +449,7 @@ func (r *Runner) runCopyOnlyChecksum(ctx context.Context) error {
 	if err := r.dumpCheckpoint(cpCtx); err != nil {
 		r.logger.Warn("Final checkpoint write failed", "error", err)
 	}
-	r.logger.Info("Copy-only sync stopped", "total_time", time.Since(r.startTime).Round(time.Second).String())
+	r.logger.Info("Copy-only sync stopped", "total_time", r.status.TotalElapsed().Round(time.Second).String())
 
 	// A recorded fatal (e.g. a checkpoint-write failure that status.WatchTask
 	// cancelled us for) must surface rather than be masked by the clean
@@ -420,13 +473,12 @@ func (r *Runner) runCopyOnlyChecksum(ctx context.Context) error {
 // backlog and returns nil; on a fatal source event or a checksum failure
 // it returns that error.
 func (r *Runner) runContinuous(ctx context.Context) error {
-	// status moves off CopyRows so the status goroutine logs the continuous
-	// phase. The checkpoint table and the periodic checkpoint loop were already
-	// set up before the copy (checkpointTbl().Create in startFresh/startResume,
-	// the loop in startBackgroundRoutines), so a restart at any point — copy or
+	// The caller brackets this in ApplyChangeset (off CopyRows) so the status
+	// goroutine logs the continuous phase. The checkpoint table and the
+	// periodic checkpoint loop were already set up before the copy
+	// (checkpointTbl().Create in startFresh/startResume, the loop in
+	// startBackgroundRoutines), so a restart at any point — copy or
 	// continuous — resumes from the last checkpoint.
-	r.status.Set(status.ApplyChangeset)
-
 	r.logger.Info("Continuous sync running; will run until cancelled")
 
 	// Spawn the continuous checksum. It uses a separate chunker so
@@ -499,7 +551,7 @@ func (r *Runner) runContinuous(ctx context.Context) error {
 	if err := r.dumpCheckpoint(cpCtx); err != nil {
 		r.logger.Warn("Final checkpoint write failed", "error", err)
 	}
-	r.logger.Info("Sync stopped", "total_time", time.Since(r.startTime).Round(time.Second).String())
+	r.logger.Info("Sync stopped", "total_time", r.status.TotalElapsed().Round(time.Second).String())
 	// A real checksum failure outranks a clean nil — surface it so the
 	// caller (and exit code) reflect the underlying problem rather than
 	// just "ctx cancelled."
@@ -562,7 +614,6 @@ func (r *Runner) runContinuousChecksum(ctx context.Context) error {
 		r.source.db, r.target.DB, chunker, r.replClient,
 		checksum.ContinuousCheckerConfig{
 			Concurrency:     r.sync.Threads,
-			TargetChunkTime: r.sync.TargetChunkTime,
 			MinPassInterval: checksum.ContinuousMinPassInterval,
 			Recopier:        recopier,
 			Logger:          r.logger,
@@ -613,8 +664,7 @@ func (r *Runner) buildContinuousChunker() (table.Chunker, error) {
 	chunkers := make([]table.Chunker, 0, len(r.sourceTables))
 	for _, tbl := range r.sourceTables {
 		cc, err := table.NewChunker(tbl, table.ChunkerConfig{
-			TargetChunkTime: r.sync.TargetChunkTime,
-			Logger:          r.logger,
+			Logger: r.logger,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("new continuous-checksum chunker for %s: %w", tbl.TableName, err)
@@ -682,15 +732,49 @@ func (r *Runner) setup(ctx context.Context) error {
 	}
 
 	r.logger.Info("Creating applier")
-	r.applier, err = r.createApplier()
+	appl, err := r.createApplier()
+	if err != nil {
+		return err
+	}
+	// Published under progMu because Status() reads it from the monitoring
+	// goroutine to render the applier row.
+	r.progMu.Lock()
+	r.applier = appl
+	r.progMu.Unlock()
+
+	// File:position coordinates belong to the MySQL server that wrote them.
+	// An injected change source owns its own identity and position semantics.
+	if r.sync.Source == nil {
+		if err := r.source.db.QueryRowContext(ctx, "SELECT @@server_uuid").Scan(&r.sourceUUID); err != nil {
+			return fmt.Errorf("failed to read @@server_uuid from the source: %w", err)
+		}
+	}
+	if r.sync.Force {
+		if err := r.forceFreshTarget(ctx); err != nil {
+			return err
+		}
+	}
+
+	// Read any checkpoint before wiring the change source: the saved position's
+	// encoding decides which built-in client a resumed sync gets (see
+	// change.NewAutoClient), so the read has to come first.
+	watermark, rawPos, hasCheckpoint, err := r.readCheckpoint(ctx)
+	if err != nil {
+		return err
+	}
+
+	pos, err := r.resolveResumePosition(rawPos)
 	if err != nil {
 		return err
 	}
 
 	// Wire the change source (continuous mode only): injected (e.g. VStream),
-	// or a built-in MySQL binlog client constructed from the source DSN. Sync
-	// replicates a whole schema, so the DDL filter is by schema only. Copy-only
-	// sync constructs no change source.
+	// or a built-in MySQL client constructed from the source DSN. The built-in
+	// client's coordinate scheme (GTID vs binlog file+position) is selected
+	// automatically: a resumed sync stays in the scheme its checkpointed
+	// position was written in, and a fresh one uses GTIDs whenever the source
+	// has them enabled. Sync replicates a whole schema, so the DDL filter is
+	// by schema only. Copy-only sync constructs no change source.
 	if !r.sync.CopyOnly {
 		if r.sync.Source != nil {
 			r.setReplClient(r.sync.Source)
@@ -700,34 +784,11 @@ func (r *Runner) setup(ctx context.Context) error {
 			replConfig.CancelFunc = r.fatalError
 			replConfig.DDLFilterSchema = r.source.config.DBName
 			replConfig.DBConfig = r.sourceDBConfig
-			if r.sync.GTID {
-				r.logger.Info("EXPERIMENTAL: using GTID-based change source")
-				r.setReplClient(change.NewGTIDClient(r.source.db, r.source.config.Addr, r.source.config.User, r.source.config.Passwd, r.applier, replConfig))
-			} else {
-				r.setReplClient(change.NewBinlogClient(r.source.db, r.source.config.Addr, r.source.config.User, r.source.config.Passwd, r.applier, replConfig))
+			client, err := change.NewAutoClient(ctx, r.source.db, r.source.config.Addr, r.source.config.User, r.source.config.Passwd, r.applier, replConfig, pos)
+			if err != nil {
+				return err
 			}
-		}
-	}
-
-	// Record the source's identity. @@server_uuid uniquely identifies the
-	// server instance and changes across failover/promotion/rebuild, which is
-	// what lets a resume detect that a file:pos checkpoint belongs to a
-	// different server (see syncPosition). Fetched only for the built-in
-	// change clients — an injected change.Source may not be plain MySQL.
-	if r.sync.Source == nil {
-		if err := r.source.db.QueryRowContext(ctx, "SELECT @@server_uuid").Scan(&r.sourceUUID); err != nil {
-			return fmt.Errorf("failed to read @@server_uuid from the source: %w", err)
-		}
-	}
-
-	// Force: when the target cannot resume, wipe the sync-owned objects (the
-	// target copies of the source tables + the checkpoint table) so this run
-	// starts fresh instead of tripping the fresh-sync target-empty guard.
-	// Unlike a DROP DATABASE, unrelated tables sharing the target database
-	// survive. A resumable target is kept and resumes as normal.
-	if r.sync.Force {
-		if err := r.forceFreshTarget(ctx); err != nil {
-			return err
+			r.setReplClient(client)
 		}
 	}
 
@@ -735,19 +796,8 @@ func (r *Runner) setup(ctx context.Context) error {
 	// the saved watermark (continuing a partial copy) and open the change feed
 	// at the saved position — skipping the target-empty check. So a restarted
 	// sync resumes its partial copy instead of starting over.
-	watermark, rawPos, hasCheckpoint, err := r.readCheckpoint(ctx)
-	if err != nil {
-		return err
-	}
 	if hasCheckpoint {
-		// Unwrap the saved position and verify it belongs to the server we
-		// are about to stream from; a position from a replaced source is a
-		// hard error, not a silent mis-replay.
-		pos, err := r.resolveResumePosition(rawPos)
-		if err != nil {
-			return err
-		}
-		r.resuming = true
+		r.resuming.Store(true)
 		r.logger.Info("Found checkpoint on target; resuming", "position", pos)
 		return r.startResume(ctx, watermark, pos)
 	}
@@ -794,33 +844,17 @@ func (r *Runner) getTables(ctx context.Context) ([]*table.TableInfo, error) {
 	return tables, rows.Err()
 }
 
-// checkTargetEmpty verifies that, for a fresh sync, any source table that
-// already exists on the target is empty AND schema-identical to its source
-// table. A table that does not yet exist is fine (startFresh will create it).
-// Uses only SELECT on the target.
-//
-// The schema comparison matters because the copy and the continuous
-// replication write with REPLACE/INSERT IGNORE: on a pre-created table whose
-// primary-key collation differs from the source (e.g. source utf8mb4_bin vs a
-// target created with the default utf8mb4_0900_ai_ci), case-distinct source
-// rows silently collapse into a single target row, and the continuous checksum
-// then never converges. Erroring here — before any copy starts — mirrors
-// move's target_state check, using the same canonical comparison
-// (statement.SchemaDiff), which ignores instance-specific noise like
-// AUTO_INCREMENT counters but compares column types, charset, collation,
-// indexes and constraints.
+// checkTargetEmpty verifies that, for a fresh sync, none of the source
+// tables already exist with data on the target. A table that does not yet
+// exist is fine (startFresh will create it). Uses only SELECT on the
+// target.
 func (r *Runner) checkTargetEmpty(ctx context.Context) error {
 	for _, t := range r.sourceTables {
 		var dummy int
 		err := r.target.DB.QueryRowContext(ctx,
 			fmt.Sprintf("SELECT 1 FROM %s.%s LIMIT 1", sqlescape.EscapeIdentifier(r.target.Config.DBName), sqlescape.EscapeIdentifier(t.TableName))).Scan(&dummy)
 		if errors.Is(err, sql.ErrNoRows) {
-			// The table exists and is empty: acceptable for a fresh sync, but
-			// only if its schema matches the source.
-			if err := r.checkTargetTableSchema(ctx, t); err != nil {
-				return err
-			}
-			continue
+			continue // table exists but is empty
 		}
 		if err != nil {
 			// A missing target table is expected on a fresh sync.
@@ -832,47 +866,6 @@ func (r *Runner) checkTargetEmpty(ctx context.Context) error {
 		return fmt.Errorf("target table %q already exists and is not empty; sync requires an empty target (drop it, or start from a checkpoint)", t.TableName)
 	}
 	return nil
-}
-
-// checkTargetTableSchema errors when a pre-existing target table's schema
-// differs from its source table's, comparing the canonicalized SHOW CREATE
-// TABLE of both sides via statement.SchemaDiff (see checkTargetEmpty for why
-// a difference — especially a collation difference on the primary key — is
-// unsafe to copy into).
-func (r *Runner) checkTargetTableSchema(ctx context.Context, t *table.TableInfo) error {
-	sourceCreate, err := showCreateTable(ctx, r.source.db, t.SchemaName, t.TableName)
-	if err != nil {
-		return fmt.Errorf("failed to read source schema for table %q: %w", t.TableName, err)
-	}
-	targetCreate, err := showCreateTable(ctx, r.target.DB, r.target.Config.DBName, t.TableName)
-	if err != nil {
-		return fmt.Errorf("failed to read target schema for pre-existing table %q: %w", t.TableName, err)
-	}
-	diff, err := statement.SchemaDiff(t.TableName, sourceCreate, targetCreate)
-	if err != nil {
-		return fmt.Errorf("failed to compare schema for pre-existing target table %q: %w", t.TableName, err)
-	}
-	if diff != "" {
-		return fmt.Errorf("target table %q already exists but its schema does not match the source; reconcile the target to the source with: %s. Ensure the table matches exactly (including column types, charset and collation), or drop it and let sync create it", t.TableName, diff)
-	}
-	r.logger.Info("validated pre-existing empty target table against the source schema",
-		"table", t.TableName, "database", r.target.Config.DBName)
-	return nil
-}
-
-// showCreateTable returns the SHOW CREATE TABLE statement for schema.table on
-// db. Identifiers are quoted with sqlescape's %n verb, consistent with the
-// rest of the codebase (and with pkg/move/check's equivalent helper).
-func showCreateTable(ctx context.Context, db *sql.DB, schema, tableName string) (string, error) {
-	query, err := sqlescape.EscapeSQL("SHOW CREATE TABLE %n.%n", schema, tableName)
-	if err != nil {
-		return "", err
-	}
-	var name, createStmt string
-	if err := db.QueryRowContext(ctx, query).Scan(&name, &createStmt); err != nil {
-		return "", err
-	}
-	return createStmt, nil
 }
 
 // createApplier returns the caller-injected applier, or constructs a
@@ -996,10 +989,10 @@ func (r *Runner) hasResumableCheckpoint(ctx context.Context) (bool, error) {
 }
 
 // createTargetTables creates each source table on the target using the
-// source's SHOW CREATE TABLE. Tables that already exist are skipped: on a
-// fresh sync checkTargetEmpty has confirmed they are empty and
-// schema-identical to the source, and on a resume they were created by a
-// previous run.
+// source's SHOW CREATE TABLE. Tables that already exist are not recreated: on a
+// fresh sync checkTargetEmpty has confirmed they are empty, and on a resume
+// they were created by a previous run. They are still verified against the
+// source first — see verifyExistingTargetTable.
 //
 // When DeferSecondaryIndexes is set, the regular secondary indexes are
 // stripped from the CREATE so the bulk copy loads an index-free table; they
@@ -1046,29 +1039,39 @@ func (r *Runner) createTargetTables(ctx context.Context) error {
 		if err := row.Scan(&name, &createStmt); err != nil {
 			return fmt.Errorf("failed to read CREATE TABLE for source %s: %w", t.TableName, err)
 		}
+		var exists int
+		err := conn.QueryRowContext(ctx,
+			"SELECT 1 FROM information_schema.TABLES WHERE table_schema = ? AND table_name = ?",
+			r.target.Config.DBName, t.TableName).Scan(&exists)
+		if err == nil {
+			// The table is already there. Verify it still matches the source
+			// before we copy into it — an unconditional skip here is what makes
+			// a source DDL between attempts silently lossy (issue #1165).
+			var targetName, targetCreateStmt string
+			targetRow := conn.QueryRowContext(ctx, "SHOW CREATE TABLE "+t.QuotedTableName)
+			if err := targetRow.Scan(&targetName, &targetCreateStmt); err != nil {
+				return fmt.Errorf("failed to read CREATE TABLE for target %s: %w", t.TableName, err)
+			}
+			if err := r.verifyExistingTargetTable(t.TableName, createStmt, targetCreateStmt); err != nil {
+				return err
+			}
+			r.logger.Info("target table already exists and passed schema verification, skipping creation",
+				"table", t.TableName, "database", r.target.Config.DBName)
+			continue
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("failed to check if table %s exists on target: %w", t.TableName, err)
+		}
 		// When deferring secondary indexes, create the table without its regular
 		// secondary indexes; they are added back by restoreSecondaryIndexes once
 		// the initial copy has completed. We don't track which indexes were
 		// stripped — restore re-derives them from the source schema. UNIQUE,
 		// FULLTEXT and SPATIAL indexes are preserved on the CREATE.
 		if r.sync.DeferSecondaryIndexes {
-			var err error
 			createStmt, err = statement.RemoveSecondaryIndexes(createStmt)
 			if err != nil {
 				return fmt.Errorf("failed to remove secondary indexes from CREATE TABLE for %s: %w", t.TableName, err)
 			}
-		}
-		var exists int
-		err := conn.QueryRowContext(ctx,
-			"SELECT 1 FROM information_schema.TABLES WHERE table_schema = ? AND table_name = ?",
-			r.target.Config.DBName, t.TableName).Scan(&exists)
-		if err == nil {
-			r.logger.Info("target table already exists, skipping creation",
-				"table", t.TableName, "database", r.target.Config.DBName)
-			continue
-		}
-		if !errors.Is(err, sql.ErrNoRows) {
-			return fmt.Errorf("failed to check if table %s exists on target: %w", t.TableName, err)
 		}
 		if _, err := conn.ExecContext(ctx, createStmt); err != nil {
 			return fmt.Errorf("failed to create table %s on target: %w", t.TableName, err)
@@ -1077,6 +1080,71 @@ func (r *Runner) createTargetTables(ctx context.Context) error {
 			"deferred_indexes", r.sync.DeferSecondaryIndexes)
 	}
 	return nil
+}
+
+// verifyExistingTargetTable compares a target table that already exists against
+// its source, returning an actionable error when the two have diverged.
+//
+// The copy column list is the *intersection* of the source and target columns
+// (table.ColumnMapping), and the continuous checksum compares that same
+// intersection. So a target left behind by an earlier attempt of this sync,
+// against a source that has since been ALTERed, drops the differing columns
+// from both the copy and the verification: the sync converges "clean" while the
+// target quietly misses data. Because a run that aborts still leaves a resumable
+// checkpoint, that is reachable by any consumer that retries an errored sync
+// (issue #1165). Fail here instead, naming the ALTER that reconciles the two.
+//
+// We fail rather than repair: the rows already copied under the old schema
+// would carry column defaults rather than the source's values, so an ALTER on
+// the target alone would not make the copy correct.
+//
+// The comparison is deliberately exact, unlike move's source->target check
+// (move/check.TargetSchemaDiff), which forgives a target that drops the
+// source's column-level AUTO_INCREMENT or is stricter about NULL. Neither
+// relaxation transfers, because the two gates guard different states:
+//
+//   - move requires a pre-existing target table to be EMPTY (target_state
+//     rejects one holding any row), so only rows not yet copied are at stake
+//     and its unconditional pre-cutover checksum vets every one of them. This
+//     gate fires on a target that may already be half-copied by an earlier
+//     attempt — the resumable-checkpoint case above — where a divergence can
+//     mean the rows already on the target are wrong, and no schema relaxation
+//     can establish otherwise.
+//   - move's relaxations exist for a sharded Vitess target: ids from a
+//     sequence, and a shard key that cannot be NULL because a primary vindex
+//     has no keyspace id for one. Sync has a single unsharded target and no
+//     cutover, so neither reason arises here.
+//
+// The strictness is therefore a decision, not an oversight: sync copies into a
+// target shaped exactly like its source or it does not copy at all. Revisit it
+// here on its own merits rather than by reaching for move's options — the two
+// paths agreeing about a target should be on purpose, and so should their
+// disagreeing. TestSyncVerifyExistingTargetTableRequiresExactSchema pins it.
+//
+// Regular secondary indexes are excluded from the comparison on both sides.
+// With DeferSecondaryIndexes the target is deliberately created without them,
+// and an attempt that died mid-copy leaves it that way; restoreSecondaryIndexes
+// re-derives whatever is missing once the copy completes. UNIQUE, FULLTEXT and
+// SPATIAL indexes are kept on the initial CREATE, so those are still compared,
+// as are columns, the primary key, constraints and table options.
+func (r *Runner) verifyExistingTargetTable(tableName, sourceCreate, targetCreate string) error {
+	sourceCmp, err := statement.RemoveSecondaryIndexes(sourceCreate)
+	if err != nil {
+		return fmt.Errorf("failed to parse CREATE TABLE for source %s: %w", tableName, err)
+	}
+	targetCmp, err := statement.RemoveSecondaryIndexes(targetCreate)
+	if err != nil {
+		return fmt.Errorf("failed to parse CREATE TABLE for target %s: %w", tableName, err)
+	}
+	diff, err := statement.DiffCreateTables(tableName, sourceCmp, targetCmp, statement.NewDiffOptions())
+	if err != nil {
+		return fmt.Errorf("failed to compare source and target schema for %s: %w", tableName, err)
+	}
+	if diff == "" {
+		return nil
+	}
+	return fmt.Errorf("table %s already exists on the target (%s) but its schema has diverged from the source; copying into it is unsafe — any column the two do not share is silently dropped from both the copy and the checksum. Reconcile the target with: %s — or drop the target database and re-copy from scratch",
+		tableName, r.target.Config.DBName, diff)
 }
 
 // restoreSecondaryIndexes adds any secondary indexes that exist on a source
@@ -1137,9 +1205,13 @@ func (r *Runner) restoreSecondaryIndexes(ctx context.Context) error {
 func (r *Runner) buildChunkers() ([]table.Chunker, error) {
 	chunkers := make([]table.Chunker, 0, len(r.sourceTables))
 	for _, tbl := range r.sourceTables {
+		// Sync always uses the buffered copier, which reads rows into client
+		// memory; size the copy chunker by an in-memory byte budget rather than
+		// copy time, whose signal collapses under write-side backpressure. The
+		// continuous checksum runs server-side and keeps the time signal.
 		cc, err := table.NewChunker(tbl, table.ChunkerConfig{
-			TargetChunkTime: r.sync.TargetChunkTime,
-			Logger:          r.logger,
+			TargetChunkBytes: r.sync.TargetChunkSize,
+			Logger:           r.logger,
 		})
 		if err != nil {
 			return nil, err
@@ -1164,15 +1236,13 @@ func (r *Runner) buildCopyPipeline() error {
 		return err
 	}
 	r.setCopyChunker(table.NewMultiChunker(chunkers...))
-	cp, err := copier.NewCopier(r.source.db, r.copyChunker, &copier.CopierConfig{
-		Concurrency:     r.sync.Threads,
-		TargetChunkTime: r.sync.TargetChunkTime,
-		Logger:          r.logger,
-		Throttler:       &throttler.Noop{},
-		MetricsSink:     &metrics.NoopSink{},
-		DBConfig:        r.sourceDBConfig,
-		Applier:         r.applier,
-		Unbuffered:      false, // sync always uses the buffered copier
+	cp, err := copier.NewCopier(r.copyChunker, &copier.CopierConfig{
+		Concurrency: r.sync.Threads,
+		Logger:      r.logger,
+		Throttler:   &throttler.Noop{},
+		MetricsSink: r.metricsSink,
+		DBConfig:    r.sourceDBConfig,
+		Applier:     r.applier,
 	})
 	if err != nil {
 		return err
@@ -1318,7 +1388,7 @@ func encodeSyncPosition(pos, serverUUID, sourceAddr string) (string, error) {
 // (unknown fields rejected + version check) keeps an injected source's opaque
 // position from being misread as our payload even if it is JSON.
 func decodeSyncPosition(raw string) (pos syncPosition, ok bool) {
-	if !strings.HasPrefix(raw, "{") {
+	if !strings.HasPrefix(strings.TrimSpace(raw), "{") || !json.Valid([]byte(raw)) {
 		return syncPosition{Position: raw}, false
 	}
 	dec := json.NewDecoder(strings.NewReader(raw))
@@ -1344,15 +1414,15 @@ func (r *Runner) resolveResumePosition(rawPos string) (string, error) {
 	if payload.Position == "" {
 		return "", nil // no position was saved; the change feed starts fresh
 	}
-	if r.sync.Source != nil || r.sync.GTID {
+	if r.sync.Source != nil || change.IsGTIDPosition(payload.Position) {
 		return payload.Position, nil
 	}
 	if !hasIdentity || payload.ServerUUID == "" {
-		return "", fmt.Errorf("checkpoint position %q carries no source identity (it was written by an older spirit version), so it cannot be verified to belong to the current source server; re-run with --force to discard it and start a fresh sync, or use --gtid",
+		return "", fmt.Errorf("checkpoint position %q carries no source identity (it was written by an older spirit version), so it cannot be verified to belong to the current source server; re-run with --force to discard it and start a fresh sync",
 			payload.Position)
 	}
 	if payload.ServerUUID != r.sourceUUID {
-		return "", fmt.Errorf("checkpoint position %q was recorded on a different source server (checkpoint server_uuid=%s addr=%s; current source server_uuid=%s addr=%s): a binlog file:position is only valid on the server that wrote it, and resuming here would silently skip or replay the wrong changes (typical after a failover, replica promotion, or source rebuild). Re-run with --force to discard the checkpoint and start a fresh sync, or use --gtid, which resumes safely across failovers",
+		return "", fmt.Errorf("checkpoint position %q was recorded on a different source server (checkpoint server_uuid=%s addr=%s; current source server_uuid=%s addr=%s): a binlog file:position is only valid on the server that wrote it, and resuming here would silently skip or replay the wrong changes (typical after a failover, replica promotion, or source rebuild). Re-run with --force to discard the checkpoint and start a fresh sync",
 			payload.Position, payload.ServerUUID, payload.SourceAddr, r.sourceUUID, r.source.config.Addr)
 	}
 	return payload.Position, nil
@@ -1383,10 +1453,6 @@ func (r *Runner) dumpCheckpoint(ctx context.Context) error {
 	if repl != nil {
 		pos = repl.Position()
 	}
-	// The position is stored wrapped with the source's identity so a resume
-	// can refuse a checkpoint recorded against a different server (see
-	// syncPosition). The identity fields are empty for an injected
-	// change.Source; resolveResumePosition doesn't verify those.
 	var addr string
 	if r.source.config != nil {
 		addr = r.source.config.Addr
@@ -1395,10 +1461,14 @@ func (r *Runner) dumpCheckpoint(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	return r.checkpointTbl().Write(ctx, checkpoint.Record{
+	if err := r.checkpointTbl().Write(ctx, checkpoint.Record{
 		CopierWatermark: watermark,
 		Position:        posPayload,
-	})
+	}); err != nil {
+		return err
+	}
+	r.lastCheckpoint.Record(pos)
+	return nil
 }
 
 // readCheckpoint reports whether the target carries a sync checkpoint and, if
@@ -1461,17 +1531,19 @@ func (r *Runner) startBackgroundRoutines(ctx context.Context) {
 // fatalError is the change client's CancelFunc: it records the fatal
 // condition and cancels the run so runContinuous can surface it. Per the
 // CancelFunc contract (change.ClientConfig), it fires for DDL detected on a
-// synced table AND for fatal stream errors (minimal RBR detection, exhausted
-// streamer recreation attempts) — the callback carries no cause, so the
-// recorded error stays cause-neutral and points at the change client's logs,
-// which name the actual trigger.
+// synced table (change.FatalReasonSchemaChange) AND for fatal stream errors
+// such as minimal RBR detection or exhausted streamer recreation attempts
+// (change.FatalReasonStreamError). The reason names the trigger class in the
+// recorded error; the change client's logs carry the details. Unlike
+// migration/move, no resume state is invalidated for either reason: the
+// datasync checkpoint is Persistent and the caller decides fresh-vs-resume.
 //
 // fatalError is safe to call concurrently: it is invoked from the change
 // client's stream goroutine, so cancelFunc (written by Run under progMu)
 // must be read under progMu like Cancel() does, and fatalOnce makes the
 // record-and-cancel side effects idempotent.
-func (r *Runner) fatalError() bool {
-	r.recordFatal(errors.New("the change source signaled a fatal error (DDL on a synced table, or an unrecoverable stream error); sync cannot continue safely — see prior log lines for the cause"))
+func (r *Runner) fatalError(reason change.FatalReason) bool {
+	r.recordFatal(fmt.Errorf("the change source signaled a fatal error (%s); sync cannot continue safely — see prior log lines for the cause", reason))
 	return true
 }
 
@@ -1635,41 +1707,68 @@ func (r *Runner) Progress() status.Progress {
 		})
 	}
 
-	return status.Progress{CurrentState: state, Summary: summary, Tables: tables}
+	return status.Progress{
+		CurrentState: state,
+		Summary:      summary,
+		Resume:       r.resuming.Load(),
+		Tables:       tables,
+		// Throttle is deliberately left zero: a sync copies through a Noop
+		// throttler, so there is nothing to report yet.
+	}
 }
 
-// Status returns a one-line, human-readable status for logging. It does not
-// log itself; status.WatchTask (when used) logs the returned value.
+// Status returns the periodic human-readable report for logging: a header line
+// plus one indented row per subsystem (see status.Block). It does not log
+// itself; status.WatchTask (when used) logs the returned value.
 func (r *Runner) Status() string {
 	state := r.status.Get()
 
 	r.progMu.RLock()
 	cp := r.copier
 	repl := r.replClient
-	start := r.startTime
+	appl := r.applier
 	r.progMu.RUnlock()
 
-	elapsed := time.Since(start).Round(time.Second)
+	elapsed := r.status.TotalElapsed().Round(time.Second)
+	pending := 0
+	if repl != nil {
+		pending = repl.GetDeltaLen()
+	}
 	switch state { //nolint:exhaustive // sync only uses Initial/CopyRows/ApplyChangeset
 	case status.CopyRows:
-		progress, eta := "", ""
+		b := status.NewBlock("sync status: state=%s total-time=%s", state.String(), elapsed)
+		// The copy pipeline is built asynchronously, so a status tick can land
+		// before there is a copier to report on.
 		if cp != nil {
-			progress, eta = cp.GetProgress(), cp.GetETA()
+			progress := cp.CopyProgress()
+			// No throttled= here, unlike migrate and move: a sync copies
+			// through a Noop throttler, so the field would be a constant
+			// false.
+			b.Row("copier", "%6.2f%%  %d/%d  chunk-size=%d  eta=%s",
+				progress.Fraction()*100,
+				progress.RowsCopied,
+				progress.RowsTotal,
+				cp.ChunkSize(),
+				cp.GetETA(),
+			)
 		}
-		pending := 0
-		if repl != nil {
-			pending = repl.GetDeltaLen()
-		}
-		return fmt.Sprintf("sync status: state=%s copy-progress=%s copy-eta=%s pending-changes=%d total-time=%s",
-			state.String(), progress, eta, pending, elapsed)
+		b.Row("applier", "%s", applier.StatusRow(appl))
+		b.Row("binlog", "deltas=%d  %s", pending, change.StatusRow(repl))
+		b.Row("ckpt", "%s", r.lastCheckpoint.Row())
+		return b.String()
 	case status.ApplyChangeset:
 		pos := ""
-		pending := 0
 		if repl != nil {
-			pos, pending = repl.Position(), repl.GetDeltaLen()
+			pos = repl.Position()
 		}
-		return fmt.Sprintf("sync status: state=%s position=%s pending-changes=%d total-time=%s",
-			state.String(), pos, pending, elapsed)
+		b := status.NewBlock("sync status: state=%s total-time=%s", state.String(), elapsed)
+		b.Row("applier", "%s", applier.StatusRow(appl))
+		// position= is where the feed has read to; the ckpt row's position is
+		// the older point a restart would actually resume from. The gap
+		// between them is how much re-reading a crash would cost.
+		b.Row("binlog", "position=%s  deltas=%d  %s", pos, pending, change.StatusRow(repl))
+		b.Row("ckpt", "%s", r.lastCheckpoint.Row())
+		return b.String()
 	default:
 		return fmt.Sprintf("sync status: state=%s total-time=%s", state.String(), elapsed)
 	}

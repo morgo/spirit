@@ -19,7 +19,7 @@ func TestInvisibleIndexBeforeDropLinter_DropWithoutInvisible(t *testing.T) {
 	require.Len(t, violations, 1)
 	require.Equal(t, "invisible_index_before_drop", violations[0].Linter.Name())
 	require.Equal(t, SeverityWarning, violations[0].Severity)
-	require.Contains(t, violations[0].Message, "should be made invisible before dropping")
+	require.Equal(t, `Index "idx_email" should be made invisible before dropping to ensure it's not needed`, violations[0].Message)
 	require.Equal(t, "users", violations[0].Location.Table)
 	require.NotNil(t, violations[0].Location.Index)
 	require.Equal(t, "idx_email", *violations[0].Location.Index)
@@ -62,6 +62,31 @@ func TestInvisibleIndexBeforeDropLinter_DropAlreadyInvisibleIndex(t *testing.T) 
 	violations := linter.Lint([]*statement.CreateTable{ct}, stmts)
 
 	// Should not have violations since index is already invisible
+	require.Empty(t, violations)
+}
+
+// TestInvisibleIndexBeforeDropLinter_DropAlreadyInvisibleIndexCaseInsensitive
+// verifies that identifier matching is case-insensitive (as MySQL treats table
+// and index names). An index defined INVISIBLE as `idx_email` must be
+// recognized when dropped as `IDX_EMAIL`, with different table-name casing too,
+// so the linter does not falsely flag an already-invisible index.
+func TestInvisibleIndexBeforeDropLinter_DropAlreadyInvisibleIndexCaseInsensitive(t *testing.T) {
+	createSQL := `CREATE TABLE users (
+		id INT PRIMARY KEY,
+		email VARCHAR(255),
+		INDEX idx_email (email) INVISIBLE
+	)`
+	ct, err := statement.ParseCreateTable(createSQL)
+	require.NoError(t, err)
+
+	alterSQL := "ALTER TABLE Users DROP INDEX IDX_EMAIL"
+	stmts, err := statement.New(alterSQL)
+	require.NoError(t, err)
+	require.Len(t, stmts, 1)
+
+	linter := &InvisibleIndexBeforeDropLinter{}
+	violations := linter.Lint([]*statement.CreateTable{ct}, stmts)
+
 	require.Empty(t, violations)
 }
 

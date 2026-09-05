@@ -9,12 +9,17 @@ package migration
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/block/spirit/pkg/change"
+	"github.com/block/spirit/pkg/checkpoint"
 	"github.com/block/spirit/pkg/copier"
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/status"
@@ -53,7 +58,6 @@ func TestChangeIntToBigIntPKResumeFromChkPt(t *testing.T) {
 
 	m := NewTestRunner(t, "bigintpk", alterSQL,
 		WithThreads(1),
-		WithTargetChunkTime(100*time.Millisecond),
 		WithTestThrottler())
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -65,7 +69,7 @@ func TestChangeIntToBigIntPKResumeFromChkPt(t *testing.T) {
 
 	waitForCheckpoint(t, m)
 
-	// Cancel first, wait for Run to return (so deferred MDL release runs and
+	// Cancel first, wait for Run to return (so deferred advisory lock release runs and
 	// no in-flight goroutine can trip fatalError → dropCheckpoint), then Close
 	// to tear down the remaining resources.
 	cancel()
@@ -78,7 +82,10 @@ func TestChangeIntToBigIntPKResumeFromChkPt(t *testing.T) {
 	// Start a new migration with the same parameters. Let it complete.
 	m2 := NewTestRunner(t, "bigintpk", alterSQL, WithThreads(2))
 	require.NoError(t, m2.Run(t.Context()))
-	require.True(t, m2.usedResumeFromCheckpoint)
+	require.True(t, m2.usedResumeFromCheckpoint.Load())
+	// The same fact must reach API callers, who cannot see the private field
+	// and cannot infer recovery from CurrentState (issue #844).
+	require.True(t, m2.Progress().Resume)
 	require.NoError(t, m2.Close())
 }
 
@@ -87,13 +94,11 @@ func TestCheckpoint(t *testing.T) {
 	// watermark, checkpoint dump, and restore behavior.
 	// It uses specific INSERT patterns that produce exactly 11040 rows.
 	//
-	// It is intentionally unbuffered: it drives the copier's synchronous
-	// CopyChunk to complete chunks in a controlled order (2, 1, 3) and assert
-	// the exact watermark/progress at each step. The default buffered copier
-	// copies chunks in parallel and cannot be stepped deterministically, so
-	// this low-level watermark coverage stays on the unbuffered copier;
-	// buffered checkpoint/resume is covered by the TestResumeFromCheckpoint*
-	// E2E tests.
+	// It drives the copier's synchronous CopyChunk API (copier.ChunkCopier)
+	// to complete chunks in a controlled order (2, 1, 3) and assert the
+	// exact watermark/progress at each step; Copier.Run copies chunks in
+	// parallel and cannot be stepped deterministically. End-to-end
+	// checkpoint/resume is covered by the TestResumeFromCheckpoint* tests.
 	tbl := `CREATE TABLE cpt1 (
 		id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
 		id2 INT NOT NULL,
@@ -120,10 +125,7 @@ func TestCheckpoint(t *testing.T) {
 			Database:         cfg.DBName,
 			Threads:          1,
 			WriteThreads:     1,
-			TargetChunkTime:  100 * time.Millisecond,
-			Table:            "cpt1",
-			Alter:            "ENGINE=InnoDB",
-			Unbuffered:       true, // see the test's doc comment: intentionally unbuffered
+			Statement:        "ALTER TABLE cpt1 ENGINE=InnoDB",
 			useTestThrottler: true,
 		})
 		require.NoError(t, err)
@@ -135,7 +137,7 @@ func TestCheckpoint(t *testing.T) {
 		r.dbConfig = dbconn.NewDBConfig()
 
 		// Get Table Info
-		r.changes[0].table = table.NewTableInfo(r.db, r.migration.Database, r.migration.Table)
+		r.changes[0].table = table.NewTableInfo(r.db, r.migration.Database, r.changes[0].stmt.Table)
 		require.NoError(t, r.changes[0].table.SetInfo(t.Context()))
 		require.NoError(t, r.changes[0].dropOldTable(t.Context()))
 		return r
@@ -156,7 +158,20 @@ func TestCheckpoint(t *testing.T) {
 	r.status.Set(status.CopyRows)
 	require.Equal(t, "copyRows", r.status.Get().String())
 
-	require.Contains(t, r.Status(), `migration status: state=copyRows copy-progress=0/11040 0.00% binlog-deltas=0`)
+	// The status block: a header line, then one row per subsystem. chunk is 0
+	// until the first chunk is claimed, and the bar is empty at 0%.
+	require.Contains(t, r.Status(), "migration status: state=copyRows total-time=")
+	require.Contains(t, r.Status(), "\n  copier    0.00%  0/11040  chunk-size=0  eta=")
+	// The rows the change feed and the checkpoint dumper used to log for
+	// themselves, plus the applier pipeline snapshot.
+	// No write worker has started yet, so the applier row is the idle one. Every
+	// one of its rolling percentiles would read 0s here and describe nothing —
+	// rendering them anyway is how an already-stopped pipeline came to look live
+	// on the applyChangeset row.
+	require.Contains(t, r.Status(), "\n  applier queue=0/128  workers=0  idle")
+	require.NotContains(t, r.Status(), "write-p90=")
+	require.Contains(t, r.Status(), "\n  binlog  deltas=0  rotations=")
+	require.Contains(t, r.Status(), "\n  ckpt    never")
 
 	// first chunk.
 	chunk1, err := r.copyChunker.Next()
@@ -175,7 +190,7 @@ func TestCheckpoint(t *testing.T) {
 	// Dump checkpoint also returns an error for the same reason.
 	require.Error(t, r.DumpCheckpoint(t.Context()))
 
-	ccopier, ok := r.copier.(*copier.Unbuffered)
+	ccopier, ok := r.copier.(copier.ChunkCopier)
 	require.True(t, ok)
 
 	// Because it's multi-threaded, we can't guarantee the order of the chunks.
@@ -188,7 +203,7 @@ func TestCheckpoint(t *testing.T) {
 	// The status update is asynchronous (the applier phones home after each
 	// chunk completes), so poll until it reflects all three copied chunks.
 	require.Eventually(t, func() bool {
-		return strings.Contains(r.Status(), `migration status: state=copyRows copy-progress=3000/11040 27.17% binlog-deltas=0`)
+		return strings.Contains(r.Status(), "\n  copier   27.17%  3000/11040  chunk-size=1000  eta=")
 	}, 10*time.Second, 50*time.Millisecond, "status never reached expected copy progress; last status: %s", r.Status())
 
 	// The watermark should exist now, because migrateChunk()
@@ -198,6 +213,9 @@ func TestCheckpoint(t *testing.T) {
 	require.JSONEq(t, "{\"Key\":[\"id\"],\"ChunkSize\":1000,\"LowerBound\":{\"Value\": [\"1001\"],\"Inclusive\":true},\"UpperBound\":{\"Value\": [\"2001\"],\"Inclusive\":false}}", watermark)
 	// Dump a checkpoint
 	require.NoError(t, r.DumpCheckpoint(t.Context()))
+	// Which the status block now reports in place of the checkpoint's own log
+	// line: the binlog coordinate a resumed run would restart reading from.
+	require.Contains(t, r.Status(), "\n  ckpt    0s ago  "+r.replClient.Position())
 
 	// Clean up first runner
 	require.NoError(t, r.Close())
@@ -216,7 +234,7 @@ func TestCheckpoint(t *testing.T) {
 	// the watermark to this point so new watermarks "align" correctly.
 	// So lets now call NextChunk to verify.
 
-	ccopier, ok = r.copier.(*copier.Unbuffered)
+	ccopier, ok = r.copier.(copier.ChunkCopier)
 	require.True(t, ok)
 
 	chunk, err := r.copyChunker.Next()
@@ -261,8 +279,7 @@ func TestCheckpointRestore(t *testing.T) {
 		Database:     cfg.DBName,
 		Threads:      2,
 		WriteThreads: 2,
-		Table:        "cpt2",
-		Alter:        "ENGINE=InnoDB",
+		Statement:    "ALTER TABLE cpt2 ENGINE=InnoDB",
 	})
 	require.NoError(t, err)
 	require.Equal(t, "initial", r.status.Get().String())
@@ -272,7 +289,7 @@ func TestCheckpointRestore(t *testing.T) {
 	require.NoError(t, err)
 	r.dbConfig = dbconn.NewDBConfig()
 	// Get Table Info
-	r.changes[0].table = table.NewTableInfo(r.db, r.migration.Database, r.migration.Table)
+	r.changes[0].table = table.NewTableInfo(r.db, r.migration.Database, r.changes[0].stmt.Table)
 	require.NoError(t, r.changes[0].table.SetInfo(t.Context()))
 	require.NoError(t, r.changes[0].dropOldTable(t.Context()))
 
@@ -304,12 +321,11 @@ func TestCheckpointRestore(t *testing.T) {
 		Database:     cfg.DBName,
 		Threads:      2,
 		WriteThreads: 2,
-		Table:        "cpt2",
-		Alter:        "ENGINE=InnoDB",
+		Statement:    "ALTER TABLE cpt2 ENGINE=InnoDB",
 	})
 	require.NoError(t, err)
 	require.NoError(t, r2.Run(t.Context()))
-	require.True(t, r2.usedResumeFromCheckpoint)
+	require.True(t, r2.usedResumeFromCheckpoint.Load())
 	require.NoError(t, r2.Close())
 }
 
@@ -329,7 +345,6 @@ func TestCheckpointRestoreBinaryPK(t *testing.T) {
 	// has been saved.
 	m := NewTestRunner(t, "binarypk", "ENGINE=InnoDB",
 		WithThreads(1),
-		WithTargetChunkTime(100*time.Millisecond),
 		WithTestThrottler())
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -345,7 +360,7 @@ func TestCheckpointRestoreBinaryPK(t *testing.T) {
 	// Resume with a fresh runner and confirm it picked up from the checkpoint.
 	m2 := NewTestRunner(t, "binarypk", "ENGINE=InnoDB", WithThreads(2))
 	require.NoError(t, m2.Run(t.Context()))
-	require.True(t, m2.usedResumeFromCheckpoint) // managed to resume.
+	require.True(t, m2.usedResumeFromCheckpoint.Load()) // managed to resume.
 	require.NoError(t, m2.Close())
 }
 
@@ -368,28 +383,22 @@ func TestCheckpointResumeDuringChecksum(t *testing.T) {
 	r := NewTestRunner(t, "cptresume", "ENGINE=InnoDB",
 		WithDBName(dbName),
 		WithThreads(4),
-		WithTargetChunkTime(100*time.Millisecond),
 		WithRespectSentinel())
 
 	// Call r.Run() with our context in a go-routine.
 	// When we see that we are waiting on the sentinel table,
 	// we then manually start the first bits of checksum, and then close()
 	// We should be able to resume from the checkpoint into the checksum state.
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
-	c := make(chan error, 1)
-	go func() {
-		c <- r.Run(ctx)
-	}()
+	running := startTestRun(t, r.Run, r.Close)
 	// Wait for the migration to block on the sentinel table.
-	waitForStatus(t, r, status.WaitingOnSentinelTable)
+	waitForStatus(t, r, status.WaitingOnSentinelTable, running)
 
 	require.NoError(t, r.checksum(t.Context()))       // run the checksum, the original Run is blocked on sentinel.
 	require.NoError(t, r.DumpCheckpoint(t.Context())) // dump a checkpoint with the watermark.
 	// Cancel + wait for Run to fully return before Close. See
 	// TestChangeIntToBigIntPKResumeFromChkPt for the rationale.
-	cancel()              // unblocks the goroutine that was waiting on sentinel.
-	require.Error(t, <-c) // context cancelled
+	running.cancel()                  // unblocks the goroutine that was waiting on sentinel.
+	require.Error(t, running.wait(t)) // context cancelled
 	require.NoError(t, r.Close())
 
 	// drop the sentinel table.
@@ -402,11 +411,10 @@ func TestCheckpointResumeDuringChecksum(t *testing.T) {
 	// Start again as a new runner.
 	r2 := NewTestRunner(t, "cptresume", "ENGINE=InnoDB",
 		WithDBName(dbName),
-		WithThreads(4),
-		WithTargetChunkTime(100*time.Millisecond))
+		WithThreads(4))
 	require.NoError(t, r2.Run(t.Context()))
 	defer utils.CloseAndLog(r2)
-	require.True(t, r2.usedResumeFromCheckpoint)
+	require.True(t, r2.usedResumeFromCheckpoint.Load())
 }
 
 func TestCheckpointDifferentRestoreOptions(t *testing.T) {
@@ -423,7 +431,6 @@ func TestCheckpointDifferentRestoreOptions(t *testing.T) {
 	// run slowly and interrupt once a checkpoint has been saved.
 	m := NewTestRunner(t, "cpt1difft1", "ADD COLUMN id3 INT NOT NULL DEFAULT 0, ADD INDEX(id2)",
 		WithThreads(1),
-		WithTargetChunkTime(100*time.Millisecond),
 		WithTestThrottler())
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -443,21 +450,19 @@ func TestCheckpointDifferentRestoreOptions(t *testing.T) {
 	// fresh — see TestResumeFromCheckpointCleanupOnFailure). This check is
 	// copier-agnostic, so the runner uses the default buffered copier.
 	m2, err := NewRunner(&Migration{
-		Host:            cfg.Addr,
-		Username:        cfg.User,
-		Password:        &cfg.Passwd,
-		Database:        cfg.DBName,
-		Threads:         2,
-		WriteThreads:    2,
-		Table:           "cpt1difft1",
-		Alter:           "ADD COLUMN id4 INT NOT NULL DEFAULT 0, ADD INDEX(id2)",
-		TargetChunkTime: 100 * time.Millisecond,
+		Host:         cfg.Addr,
+		Username:     cfg.User,
+		Password:     &cfg.Passwd,
+		Database:     cfg.DBName,
+		Threads:      2,
+		WriteThreads: 2,
+		Statement:    "ALTER TABLE cpt1difft1 ADD COLUMN id4 INT NOT NULL DEFAULT 0, ADD INDEX(id2)",
 	})
 	require.NoError(t, err)
 	m2.db, err = dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 	require.NoError(t, err)
 	m2.dbConfig = dbconn.NewDBConfig()
-	m2.changes[0].table = table.NewTableInfo(m2.db, m2.migration.Database, m2.migration.Table)
+	m2.changes[0].table = table.NewTableInfo(m2.db, m2.migration.Database, m2.changes[0].stmt.Table)
 	require.NoError(t, m2.changes[0].table.SetInfo(t.Context()))
 	require.NoError(t, m2.changes[0].dropOldTable(t.Context()))
 	require.ErrorIs(t, m2.resumeFromCheckpoint(t.Context()), status.ErrMismatchedAlter)
@@ -479,7 +484,6 @@ func TestResumeFromCheckpointE2E(t *testing.T) {
 	// when we kill it once we have a checkpoint saved.
 	m := NewTestRunner(t, "chkpresumetest", alterSQL,
 		WithThreads(1),
-		WithTargetChunkTime(100*time.Millisecond),
 		WithTestThrottler())
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -503,7 +507,7 @@ func TestResumeFromCheckpointE2E(t *testing.T) {
 	// Start a new migration with the same parameters. Let it complete.
 	m2 := NewTestRunner(t, "chkpresumetest", alterSQL, WithThreads(4))
 	require.NoError(t, m2.Run(t.Context()))
-	require.True(t, m2.usedResumeFromCheckpoint)
+	require.True(t, m2.usedResumeFromCheckpoint.Load())
 	require.NoError(t, m2.Close())
 }
 
@@ -537,7 +541,6 @@ FROM compositevarcharpk a WHERE version='1'`)
 
 	m := NewTestRunner(t, "compositevarcharpk", "ENGINE=InnoDB",
 		WithThreads(1),
-		WithTargetChunkTime(100*time.Millisecond),
 		WithTestThrottler())
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -557,154 +560,8 @@ FROM compositevarcharpk a WHERE version='1'`)
 
 	m2 := NewTestRunner(t, "compositevarcharpk", "ENGINE=InnoDB", WithThreads(2))
 	require.NoError(t, m2.Run(t.Context()))
-	require.True(t, m2.usedResumeFromCheckpoint)
+	require.True(t, m2.usedResumeFromCheckpoint.Load())
 	require.NoError(t, m2.Close())
-}
-
-// TestResumeFromCheckpointPhantom tests that there is not a phantom row issue
-// when resuming from checkpoint. i.e. consider the following scenario:
-// 1) A new row is inserted at the end of the table, and the copier copies it.. but the low watermark never advances past this point
-// 2) The row is then deleted after it's been copied (but the binary log doesn't get to this point)
-// 3) A resume occurs
-// 4) The insert and delete tracking ignore the row because it's above the high watermark.
-// 5) The INSERT..SELECT only inserts new rows, it doesn't delete non-conflicting existing rows.
-// This leaves a broken state because the _new table has a row that should have been deleted.
-//
-// The fix for this is simple:
-// - When resuming from checkpoint, we need to initialize the high watermark from a SELECT MAX(key) FROM the _new table.
-// - If this is done correctly, then on resume the DELETE will no longer be ignored.
-// TestResumeFromCheckpointPhantom is intentionally unbuffered: it is a
-// regression test for the legacy unbuffered copier's recopy behavior. It
-// manually copies a chunk, inserts that row into _new without feedback, then
-// deletes it from the source so the recopy-on-resume finds nothing — a
-// "phantom" that only arises on the INSERT IGNORE ... SELECT recopy path. The
-// buffered copier reads row images and applies via REPLACE rather than
-// recopying, so this scenario has no buffered equivalent.
-func TestResumeFromCheckpointPhantom(t *testing.T) {
-	t.Parallel()
-	testutils.NewTestTable(t, "phantomtest", `CREATE TABLE phantomtest (
-		id int(11) NOT NULL AUTO_INCREMENT,
-		pad varbinary(1024) NOT NULL,
-		PRIMARY KEY (id)
-	)`)
-	// Exactly 10 rows needed — the test asserts MaxValue() == "10".
-	testutils.RunSQL(t, "INSERT INTO phantomtest (pad) SELECT RANDOM_BYTES(1024) FROM dual")
-	testutils.RunSQL(t, "INSERT INTO phantomtest (pad) SELECT RANDOM_BYTES(1024) FROM phantomtest a, phantomtest b, phantomtest c LIMIT 100000")
-	testutils.RunSQL(t, "INSERT INTO phantomtest (pad) SELECT RANDOM_BYTES(1024) FROM phantomtest a, phantomtest b, phantomtest c LIMIT 100000")
-
-	cfg, err := mysql.ParseDSN(testutils.DSN())
-	require.NoError(t, err)
-
-	m, err := NewRunner(&Migration{
-		Host:             cfg.Addr,
-		Username:         cfg.User,
-		Password:         &cfg.Passwd,
-		Database:         cfg.DBName,
-		Threads:          2,
-		WriteThreads:     2,
-		Table:            "phantomtest",
-		Alter:            "ENGINE=InnoDB",
-		TargetChunkTime:  100 * time.Millisecond,
-		Unbuffered:       true, // see the test's doc comment: intentionally unbuffered
-		useTestThrottler: true,
-	})
-	require.NoError(t, err)
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
-
-	// Do the initial setup.
-	m.db, err = dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
-	require.NoError(t, err)
-	m.dbConfig = dbconn.NewDBConfig()
-	m.changes[0].table = table.NewTableInfo(m.db, m.migration.Database, m.migration.Table)
-	require.NoError(t, m.changes[0].table.SetInfo(ctx))
-
-	require.NoError(t, m.newMigration(t.Context()))
-
-	// Now we are ready to start copying rows.
-	// We step through this manually using the unbuffered copier, since we want
-	// to checkpoint after a few chunks.
-
-	ccopier, ok := m.copier.(*copier.Unbuffered)
-	require.True(t, ok)
-
-	m.status.Set(status.CopyRows)
-	require.Equal(t, "copyRows", m.status.Get().String())
-
-	// first chunk.
-	chunk, err := m.copyChunker.Next()
-	require.NoError(t, err)
-	require.Equal(t, "`id` < 1", chunk.String())
-	require.NoError(t, ccopier.CopyChunk(ctx, chunk))
-
-	// second chunk
-	chunk, err = m.copyChunker.Next()
-	require.NoError(t, err)
-	require.Equal(t, "`id` >= 1 AND `id` < 1001", chunk.String())
-	require.NoError(t, ccopier.CopyChunk(ctx, chunk))
-
-	// now we insert a row in the range of the third chunk
-	testutils.RunSQL(t, "INSERT INTO phantomtest (id, pad) VALUES (1002, RANDOM_BYTES(1024))")
-
-	// we copy it but we don't feedback it (a hack)
-	testutils.RunSQL(t, "INSERT INTO _phantomtest_new (id, pad) SELECT * FROM phantomtest WHERE id = 1002")
-
-	// delete the row (but not from the _new table)
-	// when it gets to recopy it will not be there.
-	testutils.RunSQL(t, "DELETE FROM phantomtest WHERE id = 1002")
-
-	// then we save the checkpoint without the feedback.
-	require.NoError(t, m.DumpCheckpoint(ctx))
-	// assert there is a checkpoint
-	var rowCount int
-	err = m.db.QueryRowContext(ctx, `SELECT count(*) from _phantomtest_chkpnt`).Scan(&rowCount)
-	require.NoError(t, err)
-	require.Equal(t, 1, rowCount)
-
-	// kill it.
-	cancel()
-	require.NoError(t, m.Close())
-
-	// Resume the migration using and apply all of the replication
-	// changes before starting the copier.
-	ctx = t.Context()
-	m, err = NewRunner(&Migration{
-		Host:            cfg.Addr,
-		Username:        cfg.User,
-		Password:        &cfg.Passwd,
-		Database:        cfg.DBName,
-		Threads:         2,
-		WriteThreads:    2,
-		Table:           "phantomtest",
-		Alter:           "ENGINE=InnoDB",
-		TargetChunkTime: 100 * time.Millisecond,
-		Unbuffered:      true, // continues the unbuffered scenario above (see doc comment)
-	})
-	require.NoError(t, err)
-	m.db, err = dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
-	require.NoError(t, err)
-	m.dbConfig = dbconn.NewDBConfig()
-	m.changes[0].table = table.NewTableInfo(m.db, m.migration.Database, m.migration.Table)
-	require.NoError(t, m.changes[0].table.SetInfo(ctx))
-	// check we can resume from checkpoint
-	// this is normally done in m.setup() but we want to call it in isolation.
-	require.NoError(t, m.resumeFromCheckpoint(ctx))
-	// This is normally done in m.setup()
-	require.NoError(t, m.replClient.SetWatermarkOptimization(ctx, true))
-	// doublecheck that the highPtr is 1002 in the _new table and not in the original table.
-	require.Equal(t, "10", m.changes[0].table.MaxValue().String())
-	require.Equal(t, "1002", m.changes[0].newTable.MaxValue().String())
-
-	// flush the replication changes
-	// if the bug exists, this would cause the breakage.
-	require.NoError(t, m.replClient.Flush(ctx))
-	// start the copier.
-	require.NoError(t, m.copier.Run(ctx))
-	// the checksum runs in prepare for cutover.
-	// previously it would fail, but it should work as long as the resumeFromCheckpoint()
-	// correctly finds the high watermark.
-	require.NoError(t, m.checksum(ctx))
-	require.NoError(t, m.Close())
 }
 
 func TestResumeFromCheckpointE2EWithManualSentinel(t *testing.T) {
@@ -751,7 +608,6 @@ func TestResumeFromCheckpointE2EWithManualSentinel(t *testing.T) {
 	runner := NewTestRunner(t, tableName, alterSQL,
 		WithDBName(dbName),
 		WithThreads(1),
-		WithTargetChunkTime(100*time.Millisecond),
 		WithTestThrottler(),
 		WithRespectSentinel())
 
@@ -764,9 +620,9 @@ func TestResumeFromCheckpointE2EWithManualSentinel(t *testing.T) {
 
 	waitForCheckpoint(t, runner)
 
-	// Test that it's not possible to acquire metadata lock with name
+	// Test that it's not possible to acquire advisory lock with name
 	// as tablename while the migration is running.
-	lock, err := dbconn.NewMetadataLock(ctx, testutils.DSN(), lockTables, dbconn.NewDBConfig(), slog.Default())
+	lock, err := dbconn.NewAdvisoryLock(ctx, testutils.DSN(), lockTables, dbconn.NewDBConfig(), slog.Default())
 	require.Error(t, err)
 	require.Nil(t, lock)
 
@@ -809,7 +665,7 @@ func TestResumeFromCheckpointE2EWithManualSentinel(t *testing.T) {
 	m.Cancel()
 	err = <-c
 	require.Error(t, err)
-	require.True(t, m.usedResumeFromCheckpoint)
+	require.True(t, m.usedResumeFromCheckpoint.Load())
 	require.NoError(t, m.Close())
 }
 
@@ -831,7 +687,6 @@ func TestResumeFromCheckpointCleanupOnFailure(t *testing.T) {
 	// First run: create a checkpoint that we can manipulate
 	m := NewTestRunner(t, "cleanup_test", "ENGINE=InnoDB",
 		WithThreads(1),
-		WithTargetChunkTime(100*time.Millisecond),
 		WithTestThrottler())
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -866,7 +721,7 @@ func TestResumeFromCheckpointCleanupOnFailure(t *testing.T) {
 	// Resume falls back to newMigration and completes successfully.
 	m2 := NewTestRunner(t, "cleanup_test", "ENGINE=InnoDB", WithThreads(2))
 	require.NoError(t, m2.Run(t.Context()))
-	require.False(t, m2.usedResumeFromCheckpoint) // Should NOT have resumed because binlog was invalid
+	require.False(t, m2.usedResumeFromCheckpoint.Load()) // Should NOT have resumed because binlog was invalid
 	require.NoError(t, m2.Close())
 }
 
@@ -885,7 +740,6 @@ func TestResumeFromCheckpointTooOld(t *testing.T) {
 	// First run: create a checkpoint
 	m := NewTestRunner(t, "chkpttooold", "ENGINE=InnoDB",
 		WithThreads(1),
-		WithTargetChunkTime(100*time.Millisecond),
 		WithTestThrottler())
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -907,7 +761,7 @@ func TestResumeFromCheckpointTooOld(t *testing.T) {
 	// Resume falls back to newMigration and completes successfully.
 	m2 := NewTestRunner(t, "chkpttooold", "ENGINE=InnoDB", WithThreads(2))
 	require.NoError(t, m2.Run(t.Context()))
-	require.False(t, m2.usedResumeFromCheckpoint) // Should NOT have resumed because checkpoint was too old
+	require.False(t, m2.usedResumeFromCheckpoint.Load()) // Should NOT have resumed because checkpoint was too old
 	require.NoError(t, m2.Close())
 }
 
@@ -924,7 +778,6 @@ func TestResumeFromCheckpointNotTooOld(t *testing.T) {
 	// First run: create a checkpoint
 	m := NewTestRunner(t, "chkptnotold", "ENGINE=InnoDB",
 		WithThreads(1),
-		WithTargetChunkTime(100*time.Millisecond),
 		WithTestThrottler())
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -944,7 +797,7 @@ func TestResumeFromCheckpointNotTooOld(t *testing.T) {
 	// The migration should resume from checkpoint successfully.
 	m2 := NewTestRunner(t, "chkptnotold", "ENGINE=InnoDB", WithThreads(2))
 	require.NoError(t, m2.Run(t.Context()))
-	require.True(t, m2.usedResumeFromCheckpoint) // Should have resumed because checkpoint is fresh
+	require.True(t, m2.usedResumeFromCheckpoint.Load()) // Should have resumed because checkpoint is fresh
 	require.NoError(t, m2.Close())
 }
 
@@ -964,7 +817,6 @@ func TestResumeRejectsCheckpointFromDifferentTable(t *testing.T) {
 	// First run: produce a real checkpoint via normal flow.
 	m := NewTestRunner(t, "chkptmismatch", "ENGINE=InnoDB",
 		WithThreads(1),
-		WithTargetChunkTime(100*time.Millisecond),
 		WithTestThrottler())
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -985,7 +837,136 @@ func TestResumeRejectsCheckpointFromDifferentTable(t *testing.T) {
 	// Resume must refuse and fall back to a fresh migration.
 	m2 := NewTestRunner(t, "chkptmismatch", "ENGINE=InnoDB", WithThreads(2))
 	require.NoError(t, m2.Run(t.Context()))
-	require.False(t, m2.usedResumeFromCheckpoint,
+	require.False(t, m2.usedResumeFromCheckpoint.Load(),
 		"resume should be skipped when checkpoint records a different original table name")
 	require.NoError(t, m2.Close())
+}
+
+// TestResumeTransientErrorPreservesState pins the fix for the
+// destroy-progress-on-a-blip bug: when resumeFromCheckpoint fails with an
+// error that does NOT prove "there is no usable checkpoint" (here every query
+// fails with "sql: database is closed" — the closed pool stands in for any
+// one-off connection failure on the probe / checkpoint read / SetInfo /
+// StartFromPosition), setup() must FAIL the run instead of falling through to
+// newMigration(), whose first act is to DROP the _new and checkpoint tables —
+// silently destroying possibly days of copy progress. The _new and checkpoint
+// tables must survive, and a subsequent healthy run must resume from them.
+func TestResumeTransientErrorPreservesState(t *testing.T) {
+	t.Parallel()
+	tt := testutils.NewTestTable(t, "transientresume", `CREATE TABLE transientresume (
+		id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+		name VARCHAR(255) NOT NULL,
+		pad VARCHAR(1000) NOT NULL default 'x')`)
+	tt.SeedRows(t, "INSERT INTO transientresume (name, pad) SELECT 'a', REPEAT('x', 1000)", 1000)
+
+	// First run: produce a real checkpoint via normal flow, then stop.
+	m := NewTestRunner(t, "transientresume", "ENGINE=InnoDB",
+		WithThreads(1),
+		WithTestThrottler())
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = m.Run(ctx)
+	}()
+	waitForCheckpoint(t, m)
+	cancel()
+	<-done
+	require.NoError(t, m.Close())
+
+	// Second run, assembled by hand (same shape as TestCheckpoint's preSetup)
+	// so we can hand setup() a broken DB pool: the resume probe then fails
+	// with a transient-class error rather than ER_NO_SUCH_TABLE.
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	r, err := NewRunner(&Migration{
+		Host:         cfg.Addr,
+		Username:     cfg.User,
+		Password:     &cfg.Passwd,
+		Database:     cfg.DBName,
+		Threads:      1,
+		WriteThreads: 1,
+		Statement:    "ALTER TABLE transientresume ENGINE=InnoDB",
+	})
+	require.NoError(t, err)
+	r.dbConfig = dbconn.NewDBConfig()
+	goodDB, err := dbconn.New(testutils.DSN(), r.dbConfig)
+	require.NoError(t, err)
+	defer utils.CloseAndLog(goodDB)
+	r.changes[0].table = table.NewTableInfo(goodDB, r.migration.Database, r.changes[0].stmt.Table)
+	require.NoError(t, r.changes[0].table.SetInfo(t.Context()))
+
+	brokenDB, err := dbconn.New(testutils.DSN(), r.dbConfig)
+	require.NoError(t, err)
+	require.NoError(t, brokenDB.Close()) // all queries now fail with "sql: database is closed"
+	r.db = brokenDB
+
+	err = r.setup(t.Context())
+	require.Error(t, err, "setup must fail rather than start a fresh migration")
+	require.ErrorContains(t, err, "refusing to start a fresh migration",
+		"a transient resume failure must fail the run, not fall through to newMigration")
+
+	// All resumable state must have been preserved.
+	var n int
+	require.NoError(t, goodDB.QueryRowContext(t.Context(),
+		"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name IN (?, ?)",
+		utils.NewTableName("transientresume"), utils.CheckpointTableName("transientresume")).Scan(&n))
+	require.Equal(t, 2, n, "the _new and checkpoint tables must survive a transient resume failure")
+	require.NoError(t, goodDB.QueryRowContext(t.Context(),
+		"SELECT COUNT(*) FROM "+utils.CheckpointTableName("transientresume")).Scan(&n))
+	require.Positive(t, n, "the checkpoint row must survive a transient resume failure")
+
+	// Third run (healthy): must resume from the preserved checkpoint,
+	// proving the state we refused to destroy was still usable.
+	m3 := NewTestRunner(t, "transientresume", "ENGINE=InnoDB", WithThreads(2))
+	require.NoError(t, m3.Run(t.Context()))
+	require.True(t, m3.usedResumeFromCheckpoint.Load(),
+		"the healthy re-run must resume from the preserved checkpoint")
+	require.NoError(t, m3.Close())
+}
+
+// TestResumeErrorClassification unit-tests resumeErrorIsDefinitive, the gate
+// that decides whether a resumeFromCheckpoint error means "no usable
+// checkpoint — safe to start fresh" (true) or "possibly transient — fail the
+// run and preserve state" (false). The definitive list must stay in sync with
+// the error classes resumeFromCheckpoint can produce.
+func TestResumeErrorClassification(t *testing.T) {
+	t.Parallel()
+
+	// Definitive: falling back to a fresh migration is safe.
+	badJSON := json.Unmarshal([]byte("{"), &map[string]string{})
+	require.Error(t, badJSON)
+	_, badTime := time.Parse(time.DateTime, "not-a-timestamp")
+	require.Error(t, badTime)
+
+	for _, err := range []error{
+		checkpoint.ErrNotFound,
+		fmt.Errorf("checkpoint table 'x' has no checkpoint, nothing to resume from: %w", checkpoint.ErrNotFound),
+		status.ErrMismatchedAlter,
+		fmt.Errorf("%w: stored=%q expected=%q", status.ErrCheckpointCollision, "a", "b"),
+		fmt.Errorf("%w: checkpoint is 200h old", status.ErrCheckpointTooOld),
+		fmt.Errorf("%w: %w", status.ErrBinlogNotFound, change.ErrPositionNotFound),
+		&mysql.MySQLError{Number: 1146, Message: "Table 'test._t1_new' doesn't exist"},
+		fmt.Errorf("could not read new table '_t1_new' to resume from checkpoint: %w",
+			&mysql.MySQLError{Number: 1146, Message: "Table 'test._t1_new' doesn't exist"}),
+		&mysql.MySQLError{Number: 1054, Message: "Unknown column 'original_table_name' in 'field list'"},
+		fmt.Errorf("could not parse multi-chunker watermark: %w", badJSON),
+		fmt.Errorf("could not parse checkpoint created_at timestamp: %w", badTime),
+	} {
+		require.True(t, resumeErrorIsDefinitive(err), "expected definitive: %v", err)
+	}
+
+	// Possibly transient / unknown: must fail the run and preserve state.
+	for _, err := range []error{
+		errors.New("dial tcp 127.0.0.1:3306: connect: connection refused"),
+		sql.ErrConnDone,
+		fmt.Errorf("could not read from table '_t1_chkpnt', err:%w", driver.ErrBadConn),
+		context.DeadlineExceeded,
+		&mysql.MySQLError{Number: 1205, Message: "Lock wait timeout exceeded"},
+		&mysql.MySQLError{Number: 1142, Message: "SELECT command denied to user"},
+	} {
+		require.False(t, resumeErrorIsDefinitive(err), "expected NOT definitive: %v", err)
+	}
 }

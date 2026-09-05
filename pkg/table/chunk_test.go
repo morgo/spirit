@@ -25,6 +25,50 @@ func TestBoundaryJSONControlChar(t *testing.T) {
 	require.Equal(t, []string{"foo\x16bar"}, parsed.Value)
 }
 
+// TestBinaryChunkJSONRoundTrip guards against checkpoint corruption for
+// binary boundary values that are valid UTF-8. The restore path
+// (datumValFromString) unconditionally hex-decodes any binaryType value with
+// a "0x" prefix, so the serializer must always hex-encode binary datums: a
+// VARBINARY boundary holding the ASCII string "0xab" written as a plain
+// string would otherwise be restored as the single byte 0xAB — and a resumed
+// chunker would then silently skip (or re-copy) rows. Odd-length ("0xabc")
+// and non-hex ("0xzz") variants would fail to restore at all.
+func TestBinaryChunkJSONRoundTrip(t *testing.T) {
+	ti := NewTableInfo(nil, "test", "t1")
+	ti.columnsMySQLTps = map[string]string{"pk": "varbinary(40)"}
+
+	values := []string{
+		"0xab",             // valid-UTF-8, even-length hex: previously corrupted to "\xab"
+		"0xabc",            // odd-length hex: previously errored on restore
+		"0xzz",             // non-hex after "0x" prefix: previously errored on restore
+		"0xdeadbeef",       // e.g. an Ethereum-style address stored as an ASCII string
+		"plain",            // no "0x" prefix
+		"\x00\x01\xff\xfe", // real binary (not valid UTF-8) always worked
+	}
+	for _, val := range values {
+		lower, err := NewDatum(val, binaryType)
+		require.NoError(t, err)
+		upper, err := NewDatum(val+"9", binaryType)
+		require.NoError(t, err)
+		chunk := &Chunk{
+			Key:        []string{"pk"},
+			ChunkSize:  1000,
+			LowerBound: &Boundary{Value: []Datum{lower}, Inclusive: true},
+			UpperBound: &Boundary{Value: []Datum{upper}, Inclusive: false},
+		}
+		chunkJSON := chunk.JSON()
+		require.True(t, json.Valid([]byte(chunkJSON)), "chunk JSON must be valid: %q", chunkJSON)
+
+		restored, err := newChunkFromJSON(ti, chunkJSON)
+		require.NoError(t, err, "restoring chunk JSON for value %q", val)
+		require.Equal(t, val, restored.LowerBound.Value[0].Val, "lower bound must round-trip for value %q", val)
+		require.Equal(t, val+"9", restored.UpperBound.Value[0].Val, "upper bound must round-trip for value %q", val)
+		// The restored chunk must serialize identically, so a checkpoint
+		// written after a resume round-trips again.
+		require.JSONEq(t, chunkJSON, restored.JSON())
+	}
+}
+
 func TestChunk2String(t *testing.T) {
 	chunk := &Chunk{
 		Key: []string{"id"},
@@ -153,17 +197,22 @@ func TestComparesTo(t *testing.T) {
 	require.False(t, b1.comparesTo(b2))
 }
 
-func TestWatermarkAboveClause(t *testing.T) {
+func TestWatermarkRecopyClause(t *testing.T) {
 	// Single-column auto-increment key
 	ti := NewTableInfo(nil, "test", "t1")
 	ti.KeyColumns = []string{"id"}
 	ti.columnsMySQLTps = map[string]string{"id": "bigint"}
 
-	// Build a watermark JSON: chunk with upper bound id=100
+	// Build a watermark JSON: chunk covering [50, 100). The resumed copy
+	// restarts from the LOWER bound (inclusive), so the clause must match
+	// id >= 50 — the exact range the copier re-copies. Matching only rows
+	// above the upper bound (id > 100) would leave rows in [50, 100] on the
+	// target that the recopy cannot remove if they no longer exist on the
+	// source (resurrection of deleted rows).
 	watermark := `{"Key":["id"],"ChunkSize":1000,"LowerBound":{"Value":["50"],"Inclusive":true},"UpperBound":{"Value":["100"],"Inclusive":false}}`
-	clause, err := WatermarkAboveClause(ti, watermark)
+	clause, err := WatermarkRecopyClause(ti, watermark)
 	require.NoError(t, err)
-	require.Equal(t, "`id` > 100", clause)
+	require.Equal(t, "`id` >= 50", clause)
 
 	// Composite key
 	ti2 := NewTableInfo(nil, "test", "t2")
@@ -171,28 +220,29 @@ func TestWatermarkAboveClause(t *testing.T) {
 	ti2.columnsMySQLTps = map[string]string{"tenant_id": "int", "item_id": "int"}
 
 	watermark2 := `{"Key":["tenant_id","item_id"],"ChunkSize":1000,"LowerBound":{"Value":["1","50"],"Inclusive":true},"UpperBound":{"Value":["2","100"],"Inclusive":false}}`
-	clause2, err := WatermarkAboveClause(ti2, watermark2)
+	clause2, err := WatermarkRecopyClause(ti2, watermark2)
 	require.NoError(t, err)
 	require.Contains(t, clause2, "`tenant_id`")
 	require.Contains(t, clause2, "`item_id`")
-	// Should be a row constructor comparison: ((tenant_id > 2) OR (tenant_id = 2 AND item_id > 100))
-	require.Equal(t, "((`tenant_id` > 2)\n OR (`tenant_id` = 2 AND `item_id` > 100))", clause2)
+	// Should be a row constructor comparison on the lower bound:
+	// ((tenant_id > 1) OR (tenant_id = 1 AND item_id >= 50))
+	require.Equal(t, "((`tenant_id` > 1)\n OR (`tenant_id` = 1 AND `item_id` >= 50))", clause2)
 
 	// Invalid JSON
-	_, err = WatermarkAboveClause(ti, "not-json")
+	_, err = WatermarkRecopyClause(ti, "not-json")
 	require.Error(t, err)
 
 	// Foreign formats must fail loudly rather than decode into a zero-value
 	// chunk that renders as "DELETE ... WHERE ()" (issue: resume broken for
 	// multi-table and composite-PK moves).
 	// Multi-chunker map format:
-	_, err = WatermarkAboveClause(ti, `{"localhost:3306.test.t1":"{\"Key\":[\"id\"],\"ChunkSize\":1000,\"LowerBound\":{\"Value\":[\"50\"],\"Inclusive\":true},\"UpperBound\":{\"Value\":[\"100\"],\"Inclusive\":false}}"}`)
+	_, err = WatermarkRecopyClause(ti, `{"localhost:3306.test.t1":"{\"Key\":[\"id\"],\"ChunkSize\":1000,\"LowerBound\":{\"Value\":[\"50\"],\"Inclusive\":true},\"UpperBound\":{\"Value\":[\"100\"],\"Inclusive\":false}}"}`)
 	require.Error(t, err)
 	// Composite chunker envelope format:
-	_, err = WatermarkAboveClause(ti, `{"ChunkJSON":"{\"Key\":[\"id\"],\"ChunkSize\":1000,\"LowerBound\":{\"Value\":[\"50\"],\"Inclusive\":true},\"UpperBound\":{\"Value\":[\"100\"],\"Inclusive\":false}}","RowsCopied":50}`)
+	_, err = WatermarkRecopyClause(ti, `{"ChunkJSON":"{\"Key\":[\"id\"],\"ChunkSize\":1000,\"LowerBound\":{\"Value\":[\"50\"],\"Inclusive\":true},\"UpperBound\":{\"Value\":[\"100\"],\"Inclusive\":false}}","RowsCopied":50}`)
 	require.Error(t, err)
 	// Empty object:
-	_, err = WatermarkAboveClause(ti, `{}`)
+	_, err = WatermarkRecopyClause(ti, `{}`)
 	require.Error(t, err)
 }
 
