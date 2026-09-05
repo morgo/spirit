@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"math"
 	"testing"
-	"time"
 
 	"github.com/block/spirit/pkg/copier"
 	"github.com/block/spirit/pkg/dbconn"
@@ -121,23 +120,23 @@ func TestE2EBinlogSubscribingCompositeKey(t *testing.T) {
 	(1182,1),(1183,1),(1184,1),(1185,1),(1186,1),(1187,1),(1188,1),(1189,1),(1190,1),(1191,1),(1192,1),(1193,1),
 	(1194,1),(1195,1),(1196,1),(1197,1),(1198,1),(1199,1),(1200,1);`)
 
-	// This test steps through the unbuffered copier's synchronous CopyChunk
-	// API directly, so it opts out of the now-default buffered copier.
-	m := NewTestRunner(t, "e2et1", "ENGINE=InnoDB", WithBuffered(false))
+	// This test steps through the copier's synchronous CopyChunk API
+	// (copier.ChunkCopier) so chunks complete in a controlled order.
+	m := NewTestRunner(t, "e2et1", "ENGINE=InnoDB")
 	defer utils.CloseAndLog(m)
 	require.Equal(t, "initial", m.status.Get().String())
 	require.Equal(t, status.Progress{CurrentState: status.Initial, Summary: "", Tables: nil}, m.Progress())
 
 	// Usually we would call m.Run() but we want to step through
 	// the migration process manually.
-	m.startTime = time.Now()
+	m.status.Begin()
 	m.dbConfig = dbconn.NewDBConfig()
 	var err error
 	m.db, err = dbconn.New(testutils.DSN(), m.dbConfig)
 	require.NoError(t, err)
 	defer utils.CloseAndLog(m.db)
 	// Get Table Info
-	m.changes[0].table = table.NewTableInfo(m.db, m.migration.Database, m.migration.Table)
+	m.changes[0].table = table.NewTableInfo(m.db, m.migration.Database, m.changes[0].stmt.Table)
 	err = m.changes[0].table.SetInfo(t.Context())
 	require.NoError(t, err)
 	require.NoError(t, m.setup(t.Context()))
@@ -154,7 +153,7 @@ func TestE2EBinlogSubscribingCompositeKey(t *testing.T) {
 	require.Equal(t, "copyRows", m.status.Get().String())
 
 	// We expect 2 chunks to be copied.
-	ccopier, ok := m.copier.(*copier.Unbuffered)
+	ccopier, ok := m.copier.(copier.ChunkCopier)
 	require.True(t, ok)
 
 	// first chunk.
@@ -235,15 +234,13 @@ func TestE2EBinlogSubscribingCompositeKeyVarchar(t *testing.T) {
 	// Seed with UUID-based session_ids — each doubling generates new unique UUIDs.
 	tt.SeedRows(t, "INSERT INTO e2et3 (session_id, event_id) SELECT UUID(), FLOOR(RAND()*1000)", 64)
 
-	m := NewTestRunner(t, "e2et3", "ENGINE=InnoDB",
-		WithTargetChunkTime(50*time.Millisecond),
-		WithBuffered(false))
+	m := NewTestRunner(t, "e2et3", "ENGINE=InnoDB")
 	defer func() {
 		require.NoError(t, m.Close())
 	}()
 
 	// Setup but don't call Run() - step through manually
-	m.startTime = time.Now()
+	m.status.Begin()
 	m.dbConfig = dbconn.NewDBConfig()
 	var err error
 	m.db, err = dbconn.New(testutils.DSN(), m.dbConfig)
@@ -253,14 +250,14 @@ func TestE2EBinlogSubscribingCompositeKeyVarchar(t *testing.T) {
 	}()
 
 	// Get Table Info
-	m.changes[0].table = table.NewTableInfo(m.db, m.migration.Database, m.migration.Table)
+	m.changes[0].table = table.NewTableInfo(m.db, m.migration.Database, m.changes[0].stmt.Table)
 	err = m.changes[0].table.SetInfo(t.Context())
 	require.NoError(t, err)
 	require.NoError(t, m.setup(t.Context()))
 
 	// Start copying
 	m.status.Set(status.CopyRows)
-	ccopier, ok := m.copier.(*copier.Unbuffered)
+	ccopier, ok := m.copier.(copier.ChunkCopier)
 	require.True(t, ok)
 
 	// Copy first chunk
@@ -340,29 +337,27 @@ func TestE2EBinlogSubscribingCompositeKeyCollation(t *testing.T) {
 		SELECT CONCAT('key', LPAD(n, 4, '0')), n + 800 FROM seq`)
 
 	m := NewTestRunner(t, "e2et_collation", "ENGINE=InnoDB",
-		WithThreads(1),
-		WithTargetChunkTime(100*time.Millisecond),
-		WithBuffered(false))
+		WithThreads(1))
 	defer func() {
 		require.NoError(t, m.Close())
 	}()
 
 	// Setup for manual stepping to observe checksum behavior
-	m.startTime = time.Now()
+	m.status.Begin()
 	m.dbConfig = dbconn.NewDBConfig()
 	var err error
 	m.db, err = dbconn.New(testutils.DSN(), m.dbConfig)
 	require.NoError(t, err)
 
 	// Get table info and setup
-	m.changes[0].table = table.NewTableInfo(m.db, m.migration.Database, m.migration.Table)
+	m.changes[0].table = table.NewTableInfo(m.db, m.migration.Database, m.changes[0].stmt.Table)
 	err = m.changes[0].table.SetInfo(t.Context())
 	require.NoError(t, err)
 	require.NoError(t, m.setup(t.Context()))
 
 	// Start copying
 	m.status.Set(status.CopyRows)
-	ccopier, ok := m.copier.(*copier.Unbuffered)
+	ccopier, ok := m.copier.(copier.ChunkCopier)
 	require.True(t, ok)
 
 	// Copy first chunk only - this establishes the watermark
@@ -490,31 +485,29 @@ func TestE2EBinlogSubscribingCompositeKeyBinary(t *testing.T) {
 	}
 
 	m := NewTestRunner(t, "e2et_binary", "ENGINE=InnoDB",
-		WithThreads(1),
-		WithTargetChunkTime(100*time.Millisecond),
-		WithBuffered(false))
+		WithThreads(1))
 	defer func() {
 		require.NoError(t, m.Close())
 	}()
 
 	// Setup for manual stepping to observe watermark behavior
-	m.startTime = time.Now()
+	m.status.Begin()
 	m.dbConfig = dbconn.NewDBConfig()
 	var err error
 	m.db, err = dbconn.New(testutils.DSN(), m.dbConfig)
 	require.NoError(t, err)
 
 	// Get table info and setup
-	m.changes[0].table = table.NewTableInfo(m.db, m.migration.Database, m.migration.Table)
+	m.changes[0].table = table.NewTableInfo(m.db, m.migration.Database, m.changes[0].stmt.Table)
 	err = m.changes[0].table.SetInfo(t.Context())
 	require.NoError(t, err)
 	require.NoError(t, m.setup(t.Context()))
 
-	t.Log("→ Starting manual copy process with unbuffered copier")
+	t.Log("→ Starting manual copy process, stepping the copier chunk by chunk")
 
 	// Start copying
 	m.status.Set(status.CopyRows)
-	ccopier, ok := m.copier.(*copier.Unbuffered)
+	ccopier, ok := m.copier.(copier.ChunkCopier)
 	require.True(t, ok)
 
 	// Copy ONLY the first chunk to establish watermark
@@ -633,15 +626,13 @@ func TestE2EBinlogSubscribingCompositeKeyDateTime(t *testing.T) {
 		insertRows(i)
 	}
 
-	m := NewTestRunner(t, "e2et4", "ENGINE=InnoDB",
-		WithTargetChunkTime(50*time.Millisecond),
-		WithBuffered(false))
+	m := NewTestRunner(t, "e2et4", "ENGINE=InnoDB")
 	defer func() {
 		require.NoError(t, m.Close())
 	}()
 
 	// Setup but don't call Run() - step through manually
-	m.startTime = time.Now()
+	m.status.Begin()
 	m.dbConfig = dbconn.NewDBConfig()
 	var err error
 	m.db, err = dbconn.New(testutils.DSN(), m.dbConfig)
@@ -651,14 +642,14 @@ func TestE2EBinlogSubscribingCompositeKeyDateTime(t *testing.T) {
 	}()
 
 	// Get Table Info
-	m.changes[0].table = table.NewTableInfo(m.db, m.migration.Database, m.migration.Table)
+	m.changes[0].table = table.NewTableInfo(m.db, m.migration.Database, m.changes[0].stmt.Table)
 	err = m.changes[0].table.SetInfo(t.Context())
 	require.NoError(t, err)
 	require.NoError(t, m.setup(t.Context()))
 
 	// Start copying
 	m.status.Set(status.CopyRows)
-	ccopier, ok := m.copier.(*copier.Unbuffered)
+	ccopier, ok := m.copier.(copier.ChunkCopier)
 	require.True(t, ok)
 
 	// Copy first chunk
@@ -709,20 +700,20 @@ func TestE2EBinlogSubscribingNonCompositeKey(t *testing.T) {
 	testutils.RunSQL(t, `insert into e2et2 (id) values (2)`)
 	testutils.RunSQL(t, `insert into e2et2 (id) values (3)`)
 
-	m := NewTestRunner(t, "e2et2", "ENGINE=InnoDB", WithBuffered(false))
+	m := NewTestRunner(t, "e2et2", "ENGINE=InnoDB")
 	defer utils.CloseAndLog(m)
 	require.Equal(t, "initial", m.status.Get().String())
 
 	// Usually we would call m.Run() but we want to step through
 	// the migration process manually.
 	m.dbConfig = dbconn.NewDBConfig()
-	m.startTime = time.Now()
+	m.status.Begin()
 	var err error
 	m.db, err = dbconn.New(testutils.DSN(), m.dbConfig)
 	require.NoError(t, err)
 	defer utils.CloseAndLog(m.db)
 	// Get Table Info
-	m.changes[0].table = table.NewTableInfo(m.db, m.migration.Database, m.migration.Table)
+	m.changes[0].table = table.NewTableInfo(m.db, m.migration.Database, m.changes[0].stmt.Table)
 	err = m.changes[0].table.SetInfo(t.Context())
 	require.NoError(t, err)
 	require.NoError(t, m.setup(t.Context()))
@@ -735,7 +726,7 @@ func TestE2EBinlogSubscribingNonCompositeKey(t *testing.T) {
 
 	// We expect 3 chunks to be copied.
 	// The special first and last case and middle case.
-	ccopier, ok := m.copier.(*copier.Unbuffered)
+	ccopier, ok := m.copier.(copier.ChunkCopier)
 	require.True(t, ok)
 
 	// first chunk.
@@ -914,20 +905,20 @@ func TestE2EBinlogSubscribingRogueValues(t *testing.T) {
 	("1181 \". ",1),("11'82 \". ",1),("118\"3 \". ",1),("1184 \". ",1),("1185 \". ",1),("1186 \". ",1),("1187 \". ",1),("1188 \". ",1),("1189 \". ",1),("1190 \". ",1),("1191 \". ",1),
 	("1192 \". ",1),("1193 \". ",1),("1194 \". ",1),("1195 \". ",1),("119\"\"6 \". ",1),("1197 \". ",1),("1198 \". ",1),("1199 \". ",1),("1200 \". ",1);`)
 
-	m := NewTestRunner(t, "e2erogue", "ENGINE=InnoDB", WithBuffered(false))
+	m := NewTestRunner(t, "e2erogue", "ENGINE=InnoDB")
 	defer utils.CloseAndLog(m)
 	require.Equal(t, "initial", m.status.Get().String())
 
 	// Usually we would call m.Run() but we want to step through
 	// the migration process manually.
 	m.dbConfig = dbconn.NewDBConfig()
-	m.startTime = time.Now()
+	m.status.Begin()
 	var err error
 	m.db, err = dbconn.New(testutils.DSN(), m.dbConfig)
 	require.NoError(t, err)
 	defer utils.CloseAndLog(m.db)
 	// Get Table Info
-	m.changes[0].table = table.NewTableInfo(m.db, m.migration.Database, m.migration.Table)
+	m.changes[0].table = table.NewTableInfo(m.db, m.migration.Database, m.changes[0].stmt.Table)
 	err = m.changes[0].table.SetInfo(t.Context())
 	require.NoError(t, err)
 
@@ -946,14 +937,16 @@ func TestE2EBinlogSubscribingRogueValues(t *testing.T) {
 	require.Equal(t, "copyRows", m.status.Get().String())
 
 	// We expect 2 chunks to be copied.
-	ccopier, ok := m.copier.(*copier.Unbuffered)
+	ccopier, ok := m.copier.(copier.ChunkCopier)
 	require.True(t, ok)
 
 	// first chunk.
 	chunk, err := m.copyChunker.Next()
 	require.NoError(t, err)
 	require.NotNil(t, chunk)
-	require.Contains(t, chunk.String(), ` < "819 \". "`)
+	// Binary boundary datums render as 0x-hex literals so checkpoint
+	// watermarks round-trip; 0x38313920222e20 is the value `819 ". `.
+	require.Contains(t, chunk.String(), ` < 0x38313920222e20`)
 	require.NoError(t, ccopier.CopyChunk(t.Context(), chunk))
 
 	// Wait for replication to catch up and watermark to be established
@@ -972,7 +965,7 @@ func TestE2EBinlogSubscribingRogueValues(t *testing.T) {
 	// Second chunk
 	chunk, err = m.copyChunker.Next()
 	require.NoError(t, err)
-	require.Equal(t, "((`datetime` > \"819 \\\". \")\n OR (`datetime` = \"819 \\\". \" AND `col2` >= 1))", chunk.String())
+	require.Equal(t, "((`datetime` > 0x38313920222e20)\n OR (`datetime` = 0x38313920222e20 AND `col2` >= 1))", chunk.String())
 	require.NoError(t, ccopier.CopyChunk(t.Context(), chunk))
 
 	// Now insert some data.

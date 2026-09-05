@@ -34,12 +34,11 @@ func TestSyncContinuousChecksumFirstCleanPass(t *testing.T) {
 	testutils.RunSQL(t, `DROP DATABASE IF EXISTS sync_checksum_dest`)
 
 	s := &Sync{
-		SourceDSN:       sourceDSN,
-		TargetDSN:       targetDSN,
-		TargetChunkTime: 100 * time.Millisecond,
-		Threads:         2,
-		WriteThreads:    2,
-		FlushInterval:   100 * time.Millisecond,
+		SourceDSN:     sourceDSN,
+		TargetDSN:     targetDSN,
+		Threads:       2,
+		WriteThreads:  2,
+		FlushInterval: 100 * time.Millisecond,
 	}
 	runner, err := NewRunner(s)
 	require.NoError(t, err)
@@ -119,12 +118,11 @@ func TestSyncContinuousChecksumWithBackgroundWrites(t *testing.T) {
 	testutils.RunSQL(t, `DROP DATABASE IF EXISTS sync_checksum_busy_dest`)
 
 	s := &Sync{
-		SourceDSN:       sourceDSN,
-		TargetDSN:       targetDSN,
-		TargetChunkTime: 100 * time.Millisecond,
-		Threads:         2,
-		WriteThreads:    2,
-		FlushInterval:   100 * time.Millisecond,
+		SourceDSN:     sourceDSN,
+		TargetDSN:     targetDSN,
+		Threads:       2,
+		WriteThreads:  2,
+		FlushInterval: 100 * time.Millisecond,
 	}
 	runner, err := NewRunner(s)
 	require.NoError(t, err)

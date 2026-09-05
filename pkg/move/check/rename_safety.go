@@ -25,6 +25,15 @@ func CutoverOldName(tableName string) string {
 	return tableName + "_old"
 }
 
+// RevertRetiredName returns the name a reverse-window rollback renames a former
+// target table to (`<table>_revert`). It is deliberately distinct from
+// CutoverOldName's `_old` (which retires the *source* on a forward cutover):
+// only a revert ever produces `_revert`, so a later move can unambiguously drop
+// a leftover `_revert` table without risking a forward move's `_old` backup.
+func RevertRetiredName(tableName string) string {
+	return tableName + "_revert"
+}
+
 // renameSafetyCheck verifies, before any rows are copied, that the final
 // cutover's RENAME TABLE `<table>` TO `<table>_old` can succeed on every
 // source:

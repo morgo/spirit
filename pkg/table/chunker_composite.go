@@ -270,15 +270,17 @@ func (t *chunkerComposite) OpenAtWatermark(checkpnt string) error {
 	// In the move path there is no new table per se, so NewChunker defaults
 	// NewTi to the source table — NewTi is never nil and the nil-check below
 	// is purely defensive. On a move resume checkpointHighPtr is therefore
-	// seeded from the *source* table's current max, and that is load-bearing,
-	// not an accident: Runner.deleteAboveWatermark only deletes target rows
-	// strictly above the watermark chunk's upper bound, so rows in the
-	// watermark chunk itself can still exist on the target. Replayed binlog
-	// DELETEs for those rows must not be discarded by KeyAboveHighWatermark
-	// (the re-copy reads from the source, where the row is already gone, so
-	// nothing else would remove the phantom row). Seeding from the source max
-	// keeps the optimization disabled for every key that existed at resume
-	// time, which covers them.
+	// seeded from the *source* table's current max, which keeps the
+	// optimization disabled for every key that still EXISTS on the source at
+	// resume time. It does NOT cover keys deleted on the source in the
+	// unflushed window before the crash: those can sit above the post-crash
+	// source max, so their replayed DELETEs may still be discarded. The
+	// guarantee for them comes from move.Runner.deleteRecopyRange, which
+	// deletes every target row at/above the watermark chunk's lower bound —
+	// exactly the range this chunker re-copies after restoring chunkPtrs
+	// below — so a row that no longer exists on the source is removed from
+	// the target rather than resurrected, and a discarded DELETE for it is a
+	// no-op.
 	if t.NewTi != nil {
 		checkpointHighPtr, err := NewDatum(t.NewTi.MaxValue().Val, t.Ti.MaxValue().Tp)
 		if err != nil {
@@ -330,9 +332,9 @@ func (t *chunkerComposite) Reset() error {
 	return nil
 }
 
-// Feedback is a way for consumers of chunks to give feedback on how long
-// processing the chunk took. It is incorporated into the calculation of future
-// chunk sizes.
+// Feedback is a way for consumers of chunks to give feedback on either
+// how long, or how large the chunks were. It is then incorporated into
+// the calculation of future chunk sizes.
 func (t *chunkerComposite) Feedback(chunk *Chunk, d time.Duration, actualRows uint64) {
 	t.Lock()
 	defer t.Unlock()
@@ -350,29 +352,16 @@ func (t *chunkerComposite) Feedback(chunk *Chunk, d time.Duration, actualRows ui
 		return
 	}
 
-	// If any copyRows tasks take 5x the target size we reduce immediately
-	// and don't wait for more feedback.
-	if d > t.ChunkerTarget*DynamicPanicFactor {
-		newTarget := uint64(float64(t.chunkSize) / float64(DynamicPanicFactor*2))
-		t.logger.Info("high chunk processing time",
-			"time", d,
-			"threshold", t.ChunkerTarget*DynamicPanicFactor,
-			"target-rows", t.chunkSize,
-			"target-ms", t.ChunkerTarget,
-			"new-target-rows", newTarget,
-		)
-		t.updateChunkerTarget(newTarget)
+	// Size the next chunk against a byte budget when configured (buffered
+	// copier), otherwise against the wall-clock budget.
+	// The composite chunker has no prefetch-mode switch (it always pre-reads an
+	// exact row count via OFFSET, so it never sees empty gap chunks), so it
+	// passes no pre-update hook to either sizer.
+	if t.TargetChunkBytes > 0 {
+		t.feedbackBytes(t.logger, chunk.ActualBytes, nil)
 		return
 	}
-
-	// Add feedback to the list.
-	t.chunkTimingInfo = append(t.chunkTimingInfo, d)
-
-	// If we have enough feedback, re-evaluate the chunk size.
-	if len(t.chunkTimingInfo) > 10 {
-		newTarget, _ := t.calculateNewTargetChunkSize()
-		t.updateChunkerTarget(newTarget)
-	}
+	t.feedbackTime(t.logger, d, nil)
 }
 
 // GetLowWatermark returns the highest known value that has been safely copied,
@@ -442,6 +431,13 @@ func (t *chunkerComposite) IsRead() bool {
 // wants to do that. For the composite chunker we use
 // the actualRows copied (from feedback) over the estimated
 // rows (from table statistics)
+// RowsCopied returns the rows settled by the applier. For the composite
+// chunker this is the same counter Progress reports, because it already
+// accumulates the actualRows from Feedback.
+func (t *chunkerComposite) RowsCopied() uint64 {
+	return atomic.LoadUint64(&t.rowsCopied)
+}
+
 func (t *chunkerComposite) Progress() (uint64, uint64, uint64) {
 	return atomic.LoadUint64(&t.rowsCopied), t.chunksCopied.Load(), atomic.LoadUint64(&t.Ti.EstimatedRows)
 }
@@ -598,6 +594,31 @@ func (t *chunkerComposite) KeyBelowLowWatermark(key0 any) bool {
 		return false
 	}
 	return below
+}
+
+// KeyNotYetDispatched satisfies MappedChunker. See the interface docs.
+func (t *chunkerComposite) KeyNotYetDispatched(key0 any) bool {
+	t.Lock()
+	defer t.Unlock()
+	if t.finalChunkSent {
+		return false
+	}
+	if len(t.chunkPtrs) == 0 {
+		return true
+	}
+	keyDatum, err := NewDatum(key0, t.chunkPtrs[0].Tp)
+	if err != nil {
+		t.logger.Error("failed to create keyDatum in KeyNotYetDispatched", "key", key0, "error", err)
+		return false
+	}
+	// Only a strictly greater key[0] guarantees the whole tuple sorts above
+	// every dispatched chunk — same reasoning as KeyAboveHighWatermark.
+	above, err := keyDatum.GreaterThan(t.chunkPtrs[0])
+	if err != nil {
+		t.logger.Error("comparing chunkPtrs[0] in KeyNotYetDispatched", "error", err)
+		return false
+	}
+	return above
 }
 
 // SetKey allows you to chunk on a secondary index, and not the primary key.

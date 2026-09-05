@@ -9,6 +9,8 @@ import (
 
 	"github.com/block/spirit/pkg/applier"
 	"github.com/block/spirit/pkg/dbconn"
+	"github.com/block/spirit/pkg/sentinel"
+	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
@@ -82,7 +84,6 @@ func TestShardedMove(t *testing.T) {
 	// Configure the move with multiple targets
 	move := &Move{
 		SourceDSN:        sourceDSN,
-		TargetChunkTime:  5 * time.Second,
 		Threads:          2,
 		WriteThreads:     2,
 		ShardingProvider: shardingProvider,
@@ -191,12 +192,11 @@ func TestNtoMShardedMove(t *testing.T) {
 	}
 
 	move := &Move{
-		SourceDSNs:      []string{src0DSN, src1DSN},
-		TargetChunkTime: 100 * time.Millisecond,
-		Threads:         2,
-		WriteThreads:    2,
-		Targets:         targets,
-		SourceTables:    []string{"users"},
+		SourceDSNs:   []string{src0DSN, src1DSN},
+		Threads:      2,
+		WriteThreads: 2,
+		Targets:      targets,
+		SourceTables: []string{"users"},
 		ShardingProvider: &testShardingProvider{
 			shardingColumn: "id",
 			hashFunc:       testutils.EvenOddHasher,
@@ -316,12 +316,11 @@ func TestNtoMShardedMoveCheckpointDeterminism(t *testing.T) {
 	}
 
 	move := &Move{
-		SourceDSNs:      reversedDSNs,
-		TargetChunkTime: 100 * time.Millisecond,
-		Threads:         2,
-		WriteThreads:    2,
-		Targets:         reversedTargets,
-		SourceTables:    []string{"users"},
+		SourceDSNs:   reversedDSNs,
+		Threads:      2,
+		WriteThreads: 2,
+		Targets:      reversedTargets,
+		SourceTables: []string{"users"},
 		ShardingProvider: &testShardingProvider{
 			shardingColumn: "id",
 			hashFunc:       testutils.EvenOddHasher,
@@ -349,6 +348,93 @@ func TestNtoMShardedMoveCheckpointDeterminism(t *testing.T) {
 		"sources[0] should have the smallest sourceKey (addr/dbname), even when SourceDSNs is provided in reverse order")
 	require.Equal(t, expectedCheckpointKey, actualCheckpointKey,
 		"targets[0] (the checkpoint home) should have the smallest targetKey, even when Targets is provided in reverse order")
+}
+
+// TestShardedMoveVindexUpdateFails verifies the end-to-end wiring of the
+// sharding-column immutability contract (see applier.ShardedApplier.UpsertRows
+// and change.Subscription.ImmutableColumnOrdinal): changes are tracked by
+// PRIMARY KEY only, so an UPDATE that changes a row's vindex value mid-move
+// must fail the whole move — otherwise the new row image would land on its
+// new shard while the old shard silently kept a stale copy.
+func TestShardedMoveVindexUpdateFails(t *testing.T) {
+	srcName, _ := testutils.CreateUniqueTestDatabase(t)
+	tgt0Name, _ := testutils.CreateUniqueTestDatabase(t)
+	tgt1Name, _ := testutils.CreateUniqueTestDatabase(t)
+
+	testutils.RunSQLInDatabase(t, srcName, `CREATE TABLE users (
+		id BIGINT NOT NULL PRIMARY KEY,
+		user_id BIGINT NOT NULL,
+		name VARCHAR(255) NOT NULL
+	)`)
+	for i := 1; i <= 20; i++ {
+		testutils.RunSQLInDatabase(t, srcName, fmt.Sprintf(
+			"INSERT INTO users (id, user_id, name) VALUES (%d, %d, 'user_%d')", i, i, i))
+	}
+
+	dbConfig := dbconn.NewDBConfig()
+	tgt0DB, err := dbconn.New(testutils.DSNForDatabase(tgt0Name), dbConfig)
+	require.NoError(t, err)
+	defer utils.CloseAndLog(tgt0DB)
+	tgt0Config, err := mysql.ParseDSN(testutils.DSNForDatabase(tgt0Name))
+	require.NoError(t, err)
+	tgt1DB, err := dbconn.New(testutils.DSNForDatabase(tgt1Name), dbConfig)
+	require.NoError(t, err)
+	defer utils.CloseAndLog(tgt1DB)
+	tgt1Config, err := mysql.ParseDSN(testutils.DSNForDatabase(tgt1Name))
+	require.NoError(t, err)
+
+	move := &Move{
+		SourceDSN:    testutils.DSNForDatabase(srcName),
+		Threads:      2,
+		WriteThreads: 2,
+		// The sentinel blocks the move before cutover, giving the test a
+		// deterministic window in which the repl client is streaming.
+		DeferCutOver: true,
+		ShardingProvider: &testShardingProvider{
+			shardingColumn: "user_id",
+			hashFunc:       testutils.EvenOddHasher,
+		},
+		Targets: []applier.Target{
+			{KeyRange: "-80", DB: tgt0DB, Config: tgt0Config},
+			{KeyRange: "80-", DB: tgt1DB, Config: tgt1Config},
+		},
+	}
+	runner, err := NewRunner(move)
+	require.NoError(t, err)
+	runner.SetCutover(func(_ context.Context) error { return nil })
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- runner.Run(t.Context())
+	}()
+
+	// Wait until the move blocks on the sentinel: the copy and the initial
+	// checksum are done and the repl client is streaming.
+	waitForMoveStatus(t, runner, status.WaitingOnSentinelTable, errCh)
+
+	// Change the vindex value of a row. The change feed must treat this as
+	// fatal and cancel the move.
+	testutils.RunSQLInDatabase(t, srcName, "UPDATE users SET user_id = user_id + 1 WHERE id = 1")
+
+	select {
+	case err := <-errCh:
+		require.Error(t, err, "a vindex-changing UPDATE must fail the move")
+	case <-time.After(60 * time.Second):
+		// Unblock the sentinel wait so the Run goroutine can exit before we fail.
+		// The sentinel lives on targets[0]; drop it on both targets since which
+		// one sorts first is not fixed here.
+		testutils.RunSQLInDatabase(t, tgt0Name, "DROP TABLE IF EXISTS "+sentinel.TableName)
+		testutils.RunSQLInDatabase(t, tgt1Name, "DROP TABLE IF EXISTS "+sentinel.TableName)
+		<-errCh
+		t.Fatal("the move did not fail after a vindex-changing UPDATE")
+	}
+	// The failure must come from the replication client's fatal path (which
+	// transitions the runner to ErrCleanup), not from the sentinel wait
+	// limit — TestMain shrinks sentinel.WaitLimit for this package, and a
+	// wait-limit error would mask a missing enforcement.
+	require.Equal(t, status.ErrCleanup, runner.status.Get(),
+		"the move must fail via the replication client's fatal path")
+	require.NoError(t, runner.Close())
 }
 
 // testShardingProvider is a simple implementation of ShardingMetadataProvider for testing.

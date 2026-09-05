@@ -10,15 +10,19 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/block/spirit/pkg/applier"
+	"github.com/block/spirit/pkg/autoscale"
 	"github.com/block/spirit/pkg/change"
 	"github.com/block/spirit/pkg/dbconn"
+	"github.com/block/spirit/pkg/metrics"
 	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/table"
+	"github.com/block/spirit/pkg/throttler"
 	"github.com/block/spirit/pkg/utils"
 	"golang.org/x/sync/errgroup"
 )
@@ -33,7 +37,17 @@ type sourcePool struct {
 type DistributedChecker struct {
 	sync.Mutex
 
-	concurrency      int
+	concurrency int
+	// maxConcurrency is the ceiling the autoscaler may grow to. Every
+	// transaction pool is provisioned at this size — see initConnPool.
+	maxConcurrency int
+	autoscale      bool
+	throttler      throttler.Throttler
+	metricsSink    metrics.Sink
+	// limiter gates live concurrency for the current pass; nil until Run.
+	limiter          *autoscale.Limiter
+	targetChunkTime  time.Duration
+	chunks           *chunkObserver
 	feeds            []change.Source
 	sourceDBs        []*sql.DB // all source database connections
 	applier          applier.Applier
@@ -51,18 +65,133 @@ type DistributedChecker struct {
 	maxRetries       int
 	yieldTimeout     time.Duration
 	yieldsPerformed  atomic.Uint64 // number of yield/resume cycles performed
+	// chunkSize is the row count of the most recently checksummed chunk. See
+	// the SingleChecker equivalent.
+	chunkSize atomic.Uint64
 }
 
-var _ Checker = (*DistributedChecker)(nil)
+var (
+	_ Checker       = (*DistributedChecker)(nil)
+	_ ThrottleAware = (*DistributedChecker)(nil)
+	_ Paced         = (*DistributedChecker)(nil)
+)
+
+// Threads reports the live worker count. See the SingleChecker equivalent.
+func (c *DistributedChecker) Threads() int {
+	if l := c.currentLimiter(); l != nil {
+		return l.Limit()
+	}
+	return c.concurrency
+}
+
+// ChunkSize reports the row count of the most recently checksummed chunk. See
+// the SingleChecker equivalent.
+func (c *DistributedChecker) ChunkSize() uint64 {
+	return c.chunkSize.Load()
+}
+
+// IsThrottled reports whether the throttler is currently pausing dispatch.
+func (c *DistributedChecker) IsThrottled() bool {
+	return c.getThrottler().IsThrottled()
+}
+
+// SetThrottler installs the throttler the checksum paces itself against — the
+// load-only narrowing of t, per loadOnlyThrottler. See
+// SingleChecker.SetThrottler for why this is not done at construction.
+func (c *DistributedChecker) SetThrottler(t throttler.Throttler) {
+	if t == nil {
+		return
+	}
+	c.Lock()
+	defer c.Unlock()
+	c.throttler = loadOnlyThrottler(t)
+}
+
+// getThrottler reads the throttler under lock.
+func (c *DistributedChecker) getThrottler() throttler.Throttler {
+	c.Lock()
+	defer c.Unlock()
+	return c.throttler
+}
+
+// setLimiter publishes the limiter for the pass now starting. See the
+// SingleChecker equivalent.
+func (c *DistributedChecker) setLimiter(l *autoscale.Limiter) {
+	c.Lock()
+	defer c.Unlock()
+	c.limiter = l
+}
+
+// currentLimiter returns the limiter for the pass in flight, or nil before the
+// first pass starts.
+func (c *DistributedChecker) currentLimiter() *autoscale.Limiter {
+	c.Lock()
+	defer c.Unlock()
+	return c.limiter
+}
+
+// logChunkSummary reports the pass's chunk-size distribution. See the
+// SingleChecker equivalent.
+func (c *DistributedChecker) logChunkSummary() {
+	if c.chunks == nil {
+		return
+	}
+	if summary := c.chunks.summary(c.targetChunkTime); summary != "" {
+		c.logger.Info("checksum chunk size distribution", "stats", summary)
+	}
+}
+
+// flushResidual aggregates change.Source.FlushResidual across every feed — the
+// backlog signal the autoscaler vetoes on. With N sources the relevant residual
+// is the sum, since any one feed falling behind holds up cut-over.
+//
+// The flush counter is the *minimum* across feeds, so a residual is only
+// compared once every feed has flushed again. Summing the counters instead would
+// advance N times per round of flushes and invite comparing a sum in which only
+// some terms had been refreshed. The cost of the minimum is that one feed which
+// stops flushing freezes the aggregate signal; the scaler detects that as
+// staleness and freezes growth rather than trusting the stale verdict (see
+// checksumScaler.backlogStale).
+//
+// One known imprecision with N > 1 feeds: each feed records its residual when
+// its own flush finishes, so a feed that flushed early in a round keeps
+// accumulating while the later ones drain, and the sum is inflated by roughly
+// writeRate × the later flushes' duration. The worst case is a spurious
+// single-worker shed that two clean rounds recover, so it is not worth
+// per-subscription residual accounting yet — but that is the fix if it ever
+// shows up in practice.
+func (c *DistributedChecker) flushResidual() (int, int) {
+	if len(c.feeds) == 0 {
+		return 0, 0
+	}
+	total := 0
+	flushes := math.MaxInt
+	for _, feed := range c.feeds {
+		r, f := feed.FlushResidual()
+		total += r
+		flushes = min(flushes, f)
+	}
+	return total, flushes
+}
 
 func (c *DistributedChecker) ChecksumChunk(ctx context.Context, chunk *table.Chunk) error {
 	startTime := time.Now()
+	c.chunkSize.Store(chunk.ChunkSize)
 
 	c.logger.Debug("checksumming chunk", "chunk", chunk.String())
 
-	// Build the checksum query fragment. The same WHERE clause and column list
-	// applies to both sources and targets since all schemas are identical.
-	checksumColumns, _, err := chunk.ColumnMapping.ChecksumExprs()
+	// Build the checksum query fragments. The same WHERE clause applies to
+	// both sources and targets since all schemas are identical, but the
+	// column expressions are side-dependent: JSON columns round-trip through
+	// text on the source and render strictly on the target (see
+	// table.castExpr). Move/sync writes are text-mediated — the applier
+	// writes rendered text that the target re-parses — so the same
+	// text-image contract as the single-server checksum applies here. This
+	// does assume source and target servers parse JSON text identically; if
+	// a future server version changed parse behavior (e.g. fixed the double
+	// misrounding bugs), a cross-version move of affected values would fail
+	// the checksum safely rather than pass silently.
+	sourceChecksumCols, targetChecksumCols, err := chunk.ColumnMapping.ChecksumExprs()
 	if err != nil {
 		return err
 	}
@@ -79,16 +208,22 @@ func (c *DistributedChecker) ChecksumChunk(ctx context.Context, chunk *table.Chu
 		if err != nil {
 			return fmt.Errorf("failed to get transaction for source %d: %w", i, err)
 		}
-		defer c.sourcePools[i].trxPool.Put(srcTrx)
-
 		sourceQuery := fmt.Sprintf("SELECT BIT_XOR(CRC32(CONCAT(%s))) as checksum, count(*) as c FROM %s WHERE %s",
-			checksumColumns,
+			sourceChecksumCols,
 			chunk.Table.QuotedTableName,
 			whereClause,
 		)
 		var cs int64
 		var cnt uint64
-		if err := srcTrx.QueryRowContext(ctx, sourceQuery).Scan(&cs, &cnt); err != nil {
+		err = srcTrx.QueryRowContext(ctx, sourceQuery).Scan(&cs, &cnt)
+		// Return the transaction as soon as its query is done (not deferred):
+		// a checked-out transaction is invisible to the pool's keepalive, and
+		// holding it across the remaining sources, the targets, and above all
+		// the recopyLock-serialized repair below can idle its connection past
+		// wait_timeout. Returning a transaction whose query just failed is
+		// fine — the pool treats dead transactions the same wherever they are.
+		c.sourcePools[i].trxPool.Put(srcTrx)
+		if err != nil {
 			return fmt.Errorf("failed to query source %d: %w", i, err)
 		}
 		sourceChecksum ^= cs
@@ -105,16 +240,18 @@ func (c *DistributedChecker) ChecksumChunk(ctx context.Context, chunk *table.Chu
 		if err != nil {
 			return fmt.Errorf("failed to get transaction for target %d: %w", i, err)
 		}
-		defer targetTrxPool.Put(targetTrx)
-
 		targetQuery := fmt.Sprintf("SELECT BIT_XOR(CRC32(CONCAT(%s))) as checksum, count(*) as c FROM %s WHERE %s",
-			checksumColumns,
+			targetChecksumCols,
 			chunk.Table.QuotedTableName,
 			whereClause,
 		)
 		var cs int64
 		var cnt uint64
-		if err := targetTrx.QueryRowContext(ctx, targetQuery).Scan(&cs, &cnt); err != nil {
+		err = targetTrx.QueryRowContext(ctx, targetQuery).Scan(&cs, &cnt)
+		// Returned immediately for the same keepalive-visibility reason as
+		// the source transactions above.
+		targetTrxPool.Put(targetTrx)
+		if err != nil {
 			return fmt.Errorf("failed to query target %d: %w", i, err)
 		}
 		targetChecksum ^= cs
@@ -125,6 +262,13 @@ func (c *DistributedChecker) ChecksumChunk(ctx context.Context, chunk *table.Chu
 	c.logger.Debug("aggregated checksums",
 		"sourceChecksum", sourceChecksum, "sourceCount", sourceCount,
 		"targetChecksum", targetChecksum, "targetCount", targetCount)
+
+	// Record the scan cost before the mismatch branch, so the sizing
+	// distribution measures checksumming only and not the far more expensive
+	// (and rare) repair. See SingleChecker.ChecksumChunk.
+	if c.chunks != nil {
+		c.chunks.record(targetCount, time.Since(startTime))
+	}
 
 	// Compare BOTH the aggregated checksum and the summed row count. Comparing
 	// the count is free (it is summed from the same per-source/per-target
@@ -207,6 +351,14 @@ func (c *DistributedChecker) replaceChunk(ctx context.Context, chunk *table.Chun
 	// Step 2: Read all rows from ALL sources for the chunk range and merge them.
 	// Use NonGeneratedColumns because the applier expects non-generated columns only.
 	// This ensures the column ordinals match when the applier extracts the sharding column.
+	//
+	// JSON columns are deliberately read bare here — no text round-trip cast.
+	// This path is already text-mediated: the SELECT renders each document to
+	// text on the wire and the applier writes it back as a SQL literal that
+	// the target re-parses. The repaired row therefore lands as exactly the
+	// one-round-trip text image the checksum's source side predicts. Adding a
+	// round-trip cast on top would apply parse∘render twice, which does not
+	// converge for misparsed doubles.
 	columnList := table.QuoteColumns(chunk.Table.NonGeneratedColumns)
 	// Use the table name only; each source DB connection determines which database is queried.
 	query := fmt.Sprintf("SELECT %s FROM %s WHERE %s",
@@ -413,7 +565,14 @@ func (c *DistributedChecker) initConnPool(ctx context.Context) error {
 	// Create transaction pools for each source
 	c.sourcePools = make([]sourcePool, 0, len(c.sourceDBs))
 	for i, srcDB := range c.sourceDBs {
-		pool, err := dbconn.NewTrxPool(ctx, srcDB, c.concurrency, c.dbConfig)
+		// Sized to maxConcurrency, not concurrency: these snapshots are all
+		// taken under the table locks, so they see one common point in time.
+		// A transaction started later would read a newer snapshot and could
+		// compare chunks against changes its siblings cannot see. Idle extras
+		// cost a connection each and no extra history retention, since every
+		// read view here pins from the same instant. See the SingleChecker
+		// equivalent for the full rationale.
+		pool, err := dbconn.NewTrxPool(ctx, srcDB, c.maxConcurrency, c.dbConfig, c.logger)
 		if err != nil {
 			// Clean up pools already created
 			for _, sp := range c.sourcePools {
@@ -431,7 +590,7 @@ func (c *DistributedChecker) initConnPool(ctx context.Context) error {
 	// with REPEATABLE-READ and a consistent snapshot
 	c.targetTrxPools = make([]*dbconn.TrxPool, len(targets))
 	for i, target := range targets {
-		targetTrxPool, err := dbconn.NewTrxPool(ctx, target.DB, c.concurrency, c.dbConfig)
+		targetTrxPool, err := dbconn.NewTrxPool(ctx, target.DB, c.maxConcurrency, c.dbConfig, c.logger)
 		if err != nil {
 			// Clean up any pools we've already created
 			for _, sp := range c.sourcePools {
@@ -482,6 +641,10 @@ func (c *DistributedChecker) Run(ctx context.Context) error {
 		_ = c.applier.Stop()
 	}()
 
+	// A previous Run may have left the checker poisoned (isInvalid=true from
+	// an errored attempt); every Run starts healthy.
+	c.setInvalid(false)
+
 	// Try the checksum up to n times if differences are found and we can fix them
 	for attempt := 1; attempt <= c.maxRetries; attempt++ {
 		if attempt > 1 {
@@ -492,6 +655,10 @@ func (c *DistributedChecker) Run(ctx context.Context) error {
 			}
 			// Reset differences found counter
 			c.differencesFound.Store(0)
+			// Reset the invalid flag left set by a failed attempt: it makes
+			// isHealthy() false, which would skip every chunk and turn this
+			// retry into a vacuous pass.
+			c.setInvalid(false)
 		}
 
 		// If the parent context is already cancelled, retrying is pointless.
@@ -603,9 +770,33 @@ func (c *DistributedChecker) runChecksum(ctx context.Context) error {
 	defer yieldCancel()
 
 	g, errGrpCtx := errgroup.WithContext(yieldCtx)
-	g.SetLimit(c.concurrency)
+	// Live concurrency is governed by the limiter rather than
+	// errgroup.SetLimit, which may not be resized while goroutines are active.
+	// See the SingleChecker equivalent.
+	limiter := autoscale.NewLimiter(c.concurrency)
+	c.setLimiter(limiter)
+	// Safe without synchronisation: assigned before any worker starts and not
+	// replaced until every worker of this pass has been joined by g.Wait().
+	c.chunks = &chunkObserver{}
+	defer c.logChunkSummary()
+
+	thr := c.getThrottler()
+	if c.autoscale {
+		scalerCtx, stopScaler := context.WithCancel(errGrpCtx)
+		defer stopScaler()
+		scaler := newChecksumScaler(thr, limiter, c.flushResidual, c.concurrency, c.maxConcurrency, c.logger, c.metricsSink)
+		go scaler.run(scalerCtx)
+	}
+
 	for !c.chunker.IsRead() && c.isHealthy(errGrpCtx) {
+		// Hard stop before taking a permit; in-flight chunks are never
+		// interrupted. See the SingleChecker equivalent.
+		thr.BlockWait(errGrpCtx)
+		if err := limiter.Acquire(errGrpCtx); err != nil {
+			break
+		}
 		g.Go(func() error {
+			defer limiter.Release()
 			chunk, err := c.chunker.Next()
 			if err != nil {
 				if errors.Is(err, table.ErrTableIsRead) {
@@ -656,6 +847,15 @@ func (c *DistributedChecker) runChecksum(ctx context.Context) error {
 	if err1 != nil {
 		c.logger.Error("checksum failed")
 		return err1
+	}
+	// A pass that stopped dispatching before the chunker was exhausted has not
+	// verified the whole table and must never report success. See the
+	// SingleChecker equivalent for how the dispatch loop makes this reachable.
+	if !c.chunker.IsRead() {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return errors.New("checksum stopped before the table was fully verified")
 	}
 	return nil
 }

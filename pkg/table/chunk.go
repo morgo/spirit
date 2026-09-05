@@ -17,6 +17,32 @@ type Chunk struct {
 	Table                *TableInfo     // Source table information for this chunk
 	NewTable             *TableInfo     // Destination table information for this chunk
 	ColumnMapping        *ColumnMapping // Column relationship between source and target, including renames
+
+	// ActualBytes is a transient measurement, not part of the chunk's identity
+	// or its checkpoint/watermark JSON (see JSON()). The copier sets it to the
+	// in-memory size of the rows it read for this chunk, so the chunker's
+	// Feedback() can size the next chunk against a byte budget instead of wall
+	// time when dynamicChunkSizer.TargetChunkBytes is set. Zero for the
+	// checksum path, which reads server-side and never sees the bytes.
+	ActualBytes uint64
+
+	// SourceRows is the companion of ActualBytes: the number of rows the
+	// producer actually read from the source for this chunk. Like ActualBytes it
+	// is transient and absent from the checkpoint JSON.
+	//
+	// It exists because the row count reaching Feedback() is not the rows
+	// *present*. On the copy path that argument is the applier's affected-row
+	// count from `INSERT IGNORE`, which skips any row the binlog applier had
+	// already written to the new table — so a fully dense chunk can report far
+	// fewer rows than it holds, or zero. The optimistic chunker's key-space
+	// density signal needs rows present, not rows written, or it reads an
+	// insert-hot region as a gap (see chunkerOptimistic.recordKeyDensity).
+	//
+	// Zero from producers that never hold the rows themselves — the checksum
+	// aggregates its CRC server-side — which is also what an empty chunk
+	// reports, and the two are interchangeable for density purposes because an
+	// empty chunk's affected-row count is zero too.
+	SourceRows uint64
 }
 
 // Boundary is used by chunk for lower or upper boundary
@@ -110,8 +136,9 @@ func (b *Boundary) valuesString() string {
 
 // jsonQuoteDatum renders a boundary datum as a JSON string literal (always
 // quoted, properly escaped). Numeric values are quoted to avoid JSON float
-// behavior (#125); binary values are hex-encoded ("0x...") so they round-trip
-// via datumValFromString. Crucially it uses json.Marshal rather than
+// behavior (#125); binary values are hex-encoded ("0x...", or the empty
+// binary literal for a zero-length value) so they round-trip via
+// datumValFromString. Crucially it uses json.Marshal rather than
 // Datum.String() (which SQL-escapes for WHERE clauses): a string value that is
 // valid in a MySQL string literal but not in JSON — e.g. a VARCHAR PK holding a
 // control byte like 0x16, or an embedded quote — must be JSON-escaped here, or
@@ -127,7 +154,10 @@ func jsonQuoteDatum(v Datum) string {
 			bs = fmt.Sprintf("%v", v.Val)
 		}
 		if len(bs) == 0 {
-			s = "0x00" // MySQL binary string needs at least one character
+			// Matches Datum.String(): x'' is the zero-length binary value.
+			// It must not be 0x00 (a one-byte NUL — a different value);
+			// datumValFromString decodes x'' back to the empty string.
+			s = "x''"
 		} else {
 			s = fmt.Sprintf("%#x", bs)
 		}
@@ -237,30 +267,42 @@ func newChunkFromJSON(ti *TableInfo, jsonStr string) (*Chunk, error) {
 	}, nil
 }
 
-// WatermarkAboveClause parses a watermark JSON string (as produced by
+// WatermarkRecopyClause parses a watermark JSON string (as produced by
 // GetLowWatermark/checkpoint) and returns a SQL WHERE clause that matches
-// rows strictly above the watermark's upper bound. This is used by the move
-// path to delete rows above the watermark from target tables before resuming,
-// so that the keyAboveWatermark optimization is safe without needing to read
-// the target table's max value.
+// every row the resumed copy will re-copy: rows at or above the watermark
+// chunk's LOWER bound. On resume the chunkers restore their pointer from the
+// lower bound and emit their next chunk with an inclusive lower bound (see
+// OpenAtWatermark in chunker_composite.go and chunker_optimistic.go), so the
+// recopy range is always `key >= lower bound` regardless of the persisted
+// Inclusive flag — which is why the clause uses >= unconditionally.
 //
-// For example, if the watermark upper bound is id=100, this returns
-// something like "`id` > 100".
-func WatermarkAboveClause(ti *TableInfo, watermarkJSON string) (string, error) {
+// The move path deletes exactly this range from the target tables before
+// resuming (see move.Runner.deleteRecopyRange). Because the deleted range
+// coincides with the recopied range, a target row survives resume iff it is
+// below the resume position (already fully copied) or still exists on the
+// source to be re-copied. Deleting less — e.g. only rows strictly above the
+// watermark chunk's upper bound — resurrects rows that were copied and then
+// deleted on the source just before the crash: the recopy reads the current
+// source snapshot, so it cannot remove them, and the keyAboveWatermark
+// optimization may discard their replayed binlog DELETEs.
+//
+// For example, if the watermark lower bound is id=50, this returns
+// something like "`id` >= 50".
+func WatermarkRecopyClause(ti *TableInfo, watermarkJSON string) (string, error) {
 	chunk, err := newChunkFromJSON(ti, watermarkJSON)
 	if err != nil {
 		return "", fmt.Errorf("could not parse watermark: %w", err)
 	}
-	if chunk.UpperBound == nil {
-		return "", fmt.Errorf("watermark has no upper bound")
+	if chunk.LowerBound == nil {
+		return "", fmt.Errorf("watermark has no lower bound")
 	}
-	return expandRowConstructorComparison(chunk.Key, OpGreaterThan, chunk.UpperBound.Value), nil
+	return expandRowConstructorComparison(chunk.Key, OpGreaterEqual, chunk.LowerBound.Value), nil
 }
 
 // WatermarkPerTable parses a copier watermark in any of the formats produced
 // by the chunkers' GetLowWatermark implementations and normalizes it into a
 // map of TableInfo.QualifiedName() -> raw single-chunk JSON (the format
-// accepted by WatermarkAboveClause). The formats are owned by the chunkers:
+// accepted by WatermarkRecopyClause). The formats are owned by the chunkers:
 //
 //   - multiChunker (used for two or more chunkers): a JSON map keyed by
 //     QualifiedName, where each value is the child chunker's own watermark.

@@ -65,13 +65,13 @@ func TestDiffColumnAttributeOptions(t *testing.T) {
 			name:     "GeneratedStoredAdded",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT)",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT GENERATED ALWAYS AS (a + 1) STORED)",
-			expected: "ALTER TABLE `t1` MODIFY COLUMN `b` int(11) GENERATED ALWAYS AS (`a`+1) STORED NULL",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `b` int GENERATED ALWAYS AS (`a`+1) STORED NULL",
 		},
 		{
 			name:     "GeneratedRemoved",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT GENERATED ALWAYS AS (a + 1) STORED)",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT)",
-			expected: "ALTER TABLE `t1` MODIFY COLUMN `b` int(11) NULL",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `b` int NULL",
 		},
 		{
 			name:     "GeneratedNoChange",
@@ -92,13 +92,13 @@ func TestDiffColumnAttributeOptions(t *testing.T) {
 			name:     "GeneratedStoredVsVirtual",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT GENERATED ALWAYS AS (a + 1) STORED)",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT GENERATED ALWAYS AS (a + 1) VIRTUAL)",
-			expected: "ALTER TABLE `t1` MODIFY COLUMN `b` int(11) GENERATED ALWAYS AS (`a`+1) VIRTUAL NULL",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `b` int GENERATED ALWAYS AS (`a`+1) VIRTUAL NULL",
 		},
 		{
 			name:     "GeneratedExpressionChanged",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT GENERATED ALWAYS AS (a + 1) STORED)",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT GENERATED ALWAYS AS (a + 2) STORED)",
-			expected: "ALTER TABLE `t1` MODIFY COLUMN `b` int(11) GENERATED ALWAYS AS (`a`+2) STORED NULL",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `b` int GENERATED ALWAYS AS (`a`+2) STORED NULL",
 		},
 		// SRID (spatial columns)
 		{

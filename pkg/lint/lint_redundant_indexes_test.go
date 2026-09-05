@@ -76,6 +76,30 @@ func TestRedundantIndexLinter_PrefixRedundancy(t *testing.T) {
 			)`,
 			expectViolated: false,
 		},
+		{
+			name: "index (a DESC) redundant to index (a DESC, b)",
+			createTable: `CREATE TABLE t1 (
+				id INT PRIMARY KEY,
+				a INT,
+				b INT,
+				INDEX idx_a (a DESC),
+				INDEX idx_ab (a DESC, b)
+			)`,
+			expectViolated: true,
+			violatedIndex:  "idx_a",
+			coveringIndex:  "idx_ab",
+		},
+		{
+			name: "index (a) NOT redundant to index (a DESC, b)",
+			createTable: `CREATE TABLE t1 (
+				id INT PRIMARY KEY,
+				a INT,
+				b INT,
+				INDEX idx_a (a),
+				INDEX idx_ab (a DESC, b)
+			)`,
+			expectViolated: false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -131,7 +155,7 @@ func TestRedundantIndexLinter_RedundantToUniqueIndex(t *testing.T) {
 	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
 
 	require.Len(t, violations, 1, "Expected one violation")
-	require.Contains(t, violations[0].Message, "Index 'idx_XYZ_id' on columns (XYZ_id) is redundant")
+	require.Contains(t, violations[0].Message, `Index "idx_XYZ_id" on column "XYZ_id" is redundant`)
 }
 
 func TestRedundantIndexLinter_DuplicateIndexes(t *testing.T) {

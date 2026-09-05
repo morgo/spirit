@@ -1,8 +1,10 @@
 package change
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -397,6 +399,12 @@ func TestBufferedMapFlushWithoutLockRespectsWatermark(t *testing.T) {
 	require.Equal(t, 1, sub.Length(), "Key 5 (at watermark) should remain in the map")
 	require.Equal(t, int64(4), sub.keysAdded.Load(), "all four HasChanged calls should have incremented keysAdded")
 	require.Equal(t, int64(1), sub.keysSkippedBelow.Load(), "key 5 should be counted as skipped-below-low-watermark")
+	// The other half of the incomplete-drain distinction: this drain fell short
+	// on eligibility, not on budget, so an immediate re-flush would defer key 5
+	// again. backlogWorthDraining relies on this reading false to let BlockWait
+	// pace the retry instead.
+	require.False(t, sub.LastDrainHitBudget(),
+		"a watermark-deferred drain must not look like one a fresh budget would finish")
 
 	// Verify that 3 rows (below watermark) were copied to the new table
 	var count int
@@ -1552,21 +1560,7 @@ func TestProcessRowsEventDoesNotDeadlockOnPark(t *testing.T) {
 
 	sub := getBufferedMap(t, client, srcTable.SchemaName+"."+srcTable.TableName)
 
-	// Seed a row so sizeBytes > 0, then drop the soft limit. Any
-	// further HasChanged from the binlog reader will park.
-	testutils.RunSQL(t, fmt.Sprintf("INSERT INTO %s (id, name) VALUES (1, 'seed')", srcTable.QuotedTableName))
-	require.NoError(t, client.BlockWait(t.Context()))
-	sub.Lock()
-	sub.softLimitBytes = 1
-	sub.Unlock()
-
-	// Trigger a second INSERT. The binlog reader will pick this up
-	// asynchronously, route it through processRowsEvent, call
-	// sub.HasChanged — which must park on the soft limit.
-	testutils.RunSQL(t, fmt.Sprintf("INSERT INTO %s (id, name) VALUES (2, 'parked')", srcTable.QuotedTableName))
-	require.Eventually(t, func() bool {
-		return sub.timesParked.Load() >= 1
-	}, 5*time.Second, 10*time.Millisecond, "binlog-driven HasChanged should park on soft limit")
+	parkBinlogReader(t, client, sub, srcTable)
 
 	// While HasChanged is parked from inside processRowsEvent,
 	// client.Flush must still make progress. With the lock-release
@@ -1587,6 +1581,40 @@ func TestProcessRowsEventDoesNotDeadlockOnPark(t *testing.T) {
 	require.NoError(t, db.QueryRowContext(t.Context(),
 		fmt.Sprintf("SELECT COUNT(*) FROM %s", dstTable.QuotedTableName)).Scan(&count))
 	require.Equal(t, 2, count)
+}
+
+// Real binlog delivery may be delayed on contended CI runners. Keep this test
+// budget independent of production BlockWait tuning.
+const parkWaitTimeout = 30 * time.Second
+
+// requestBinlogPark starts with an empty subscription and inserts two distinct
+// keys in one statement. The first fills the one-change cap; the second must
+// park (an overwrite of the first key would bypass the cap). This also works
+// if MySQL splits the statement across multiple row events.
+func requestBinlogPark(t *testing.T, sub *bufferedMap, src *table.TableInfo) {
+	t.Helper()
+	sub.Lock()
+	sub.softLimitBytes = 0
+	sub.softLimitChanges = 1
+	sub.Unlock()
+	testutils.RunSQL(t, fmt.Sprintf("INSERT INTO %s (id, name) VALUES (1, 'seed'), (2, 'parked')", src.QuotedTableName))
+}
+
+// parkBinlogReader requires the caller to keep periodic flushing stopped until
+// it deliberately releases the park via Flush or Close. The entry guard catches
+// an already-running flusher; it does not prevent later starts.
+func parkBinlogReader(t *testing.T, client *binlogClient, sub *bufferedMap, src *table.TableInfo) {
+	t.Helper()
+	client.periodicFlushLock.Lock()
+	flushing := client.periodicFlushCancel != nil
+	client.periodicFlushLock.Unlock()
+	require.False(t, flushing, "a background flusher could release the test's park")
+	requestBinlogPark(t, sub, src)
+	require.Eventually(t, func() bool {
+		sub.Lock()
+		defer sub.Unlock()
+		return sub.parked && sub.lengthLocked() == 1
+	}, parkWaitTimeout, 10*time.Millisecond, "binlog reader must be held at the second row")
 }
 
 // TestBufferedMapCloseUnblocksParkedHasChanged pins the invariant that
@@ -1672,20 +1700,7 @@ func TestClientCloseUnblocksParkedHasChanged(t *testing.T) {
 		client.Close()
 	})
 
-	// Seed one row so sizeBytes > 0, then crank the soft limit down.
-	// Any further binlog-driven HasChanged will park.
-	testutils.RunSQL(t, fmt.Sprintf("INSERT INTO %s (id, name) VALUES (1, 'seed')", srcTable.QuotedTableName))
-	require.NoError(t, client.BlockWait(t.Context()))
-	sub.Lock()
-	sub.softLimitBytes = 1
-	sub.Unlock()
-
-	// Trigger a second INSERT; the binlog reader will pick it up and
-	// park inside processRowsEvent → HasChanged.
-	testutils.RunSQL(t, fmt.Sprintf("INSERT INTO %s (id, name) VALUES (2, 'parked')", srcTable.QuotedTableName))
-	require.Eventually(t, func() bool {
-		return sub.timesParked.Load() >= 1
-	}, 5*time.Second, 10*time.Millisecond, "binlog-driven HasChanged should park on soft limit")
+	parkBinlogReader(t, client, sub, srcTable)
 
 	// Close must return within a bounded time. Without the wake, it
 	// would block on streamWG.Wait() forever because readStream is
@@ -1795,4 +1810,333 @@ func TestBufferedMapSeparatorInPKValues(t *testing.T) {
 	require.NoError(t, rows.Err())
 	require.Equal(t, []string{"a|b-#-c=second", "a-#-b|c=first"}, got,
 		"both upserted rows must be applied and the seeded row deleted")
+}
+
+// countingApplier is a minimal applier.Applier that records every
+// UpsertRows / DeleteKeys call so tests can assert on batch splitting.
+// The optional inner applier is delegated to (integration tests wrap a
+// real SingleTargetApplier); when inner is nil the calls succeed without
+// writing anywhere.
+type countingApplier struct {
+	mu          sync.Mutex
+	inner       applier.Applier
+	upsertCalls [][]applier.LogicalRow
+	deleteCalls [][][]any
+}
+
+func (c *countingApplier) Start(ctx context.Context) error {
+	if c.inner != nil {
+		return c.inner.Start(ctx)
+	}
+	return nil
+}
+
+func (c *countingApplier) Stats() applier.Stats {
+	if c.inner != nil {
+		return c.inner.Stats()
+	}
+	return applier.Stats{}
+}
+
+func (c *countingApplier) Apply(ctx context.Context, chunk *table.Chunk, rows [][]any, callback applier.ApplyCallback) error {
+	if c.inner != nil {
+		return c.inner.Apply(ctx, chunk, rows, callback)
+	}
+	callback(int64(len(rows)), nil)
+	return nil
+}
+
+func (c *countingApplier) DeleteKeys(ctx context.Context, sourceTable, targetTable *table.TableInfo, keys [][]any, locks []*dbconn.TableLock) (int64, error) {
+	c.mu.Lock()
+	c.deleteCalls = append(c.deleteCalls, keys)
+	c.mu.Unlock()
+	if c.inner != nil {
+		return c.inner.DeleteKeys(ctx, sourceTable, targetTable, keys, locks)
+	}
+	return int64(len(keys)), nil
+}
+
+func (c *countingApplier) UpsertRows(ctx context.Context, mapping *table.ColumnMapping, rows []applier.LogicalRow, locks []*dbconn.TableLock) (int64, error) {
+	c.mu.Lock()
+	c.upsertCalls = append(c.upsertCalls, rows)
+	c.mu.Unlock()
+	if c.inner != nil {
+		return c.inner.UpsertRows(ctx, mapping, rows, locks)
+	}
+	return int64(len(rows)), nil
+}
+
+func (c *countingApplier) Wait(ctx context.Context) error {
+	if c.inner != nil {
+		return c.inner.Wait(ctx)
+	}
+	return nil
+}
+
+func (c *countingApplier) Stop() error {
+	if c.inner != nil {
+		return c.inner.Stop()
+	}
+	return nil
+}
+
+func (c *countingApplier) GetTargets() []applier.Target {
+	if c.inner != nil {
+		return c.inner.GetTargets()
+	}
+	return nil
+}
+
+func (c *countingApplier) upserts() [][]applier.LogicalRow {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([][]applier.LogicalRow, len(c.upsertCalls))
+	copy(out, c.upsertCalls)
+	return out
+}
+
+func (c *countingApplier) deletes() [][][]any {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([][][]any, len(c.deleteCalls))
+	copy(out, c.deleteCalls)
+	return out
+}
+
+// newByteCapBufferedMap builds a bufferedMap wired to a countingApplier and
+// a mock chunker, detached from any binlog client / DB, for tests that
+// assert on flush batch splitting.
+func newByteCapBufferedMap(fake *countingApplier, queueMode bool) *bufferedMap {
+	mockChunker := table.NewMockChunker("bytecap", 1000)
+	sub := &bufferedMap{
+		logger:               slog.Default(),
+		applier:              fake,
+		table:                &table.TableInfo{SchemaName: "test", TableName: "bytecap"},
+		changes:              make(map[string]bufferedChange),
+		chunker:              mockChunker,
+		pkIsMemoryComparable: !queueMode,
+		// watermarkOptimization left false: no watermark filtering, and
+		// with pkIsMemoryComparable=false this selects queue mode.
+	}
+	sub.cond = sync.NewCond(&sub.Mutex)
+	return sub
+}
+
+// TestBufferedMapFlushByteCapSplitsUpserts verifies that flushMapLocked cuts
+// batches by estimated rendered byte size, not just row count. Before the
+// byte cap, 1000 buffered wide rows rendered into a single multi-MiB
+// REPLACE that could exceed max_allowed_packet — a deterministic,
+// non-retryable apply failure (every retry re-renders the same statement).
+func TestBufferedMapFlushByteCapSplitsUpserts(t *testing.T) {
+	fake := &countingApplier{}
+	sub := newByteCapBufferedMap(fake, false)
+
+	// Five rows sized so each estimates to ~40% of the budget rendered
+	// (strings are counted at 2x for worst-case escaping / hex expansion).
+	// Two fit under the budget, a third does not, so the flush must emit
+	// ceil(5/2) = 3 statements instead of one statement of ~2x the budget.
+	// Derived from the constant so retuning it cannot silently turn this into
+	// a single-statement case that asserts nothing.
+	payload := strings.Repeat("x", applier.MaxStatementSizeBytes/5)
+	for i := range 5 {
+		sub.HasChanged([]any{int32(i)}, []any{int32(i), payload}, false)
+	}
+	require.Len(t, sub.changes, 5)
+
+	allFlushed, err := sub.Flush(t.Context(), false, nil)
+	require.NoError(t, err)
+	require.True(t, allFlushed)
+
+	calls := fake.upserts()
+	require.Len(t, calls, 3, "5 rows at ~40%% of the budget rendered each must split 2+2+1")
+	totalRows := 0
+	for _, call := range calls {
+		var callBytes int64
+		for _, row := range call {
+			callBytes += estimateRenderedBytes(row.RowImage)
+		}
+		require.LessOrEqual(t, callBytes, int64(applier.MaxStatementSizeBytes),
+			"each multi-row statement must stay under the byte budget")
+		totalRows += len(call)
+	}
+	require.Equal(t, 5, totalRows, "every buffered row must land exactly once")
+	require.Empty(t, sub.changes, "flush must drain the map")
+	require.Equal(t, int64(0), sub.sizeBytes, "sizeBytes must balance after a split flush")
+}
+
+// TestBufferedMapFlushRowCountCapStillApplies pins that the byte cap did not
+// change the DefaultBatchSize row-count semantics: narrow rows still batch
+// 1000 at a time.
+func TestBufferedMapFlushRowCountCapStillApplies(t *testing.T) {
+	fake := &countingApplier{}
+	sub := newByteCapBufferedMap(fake, false)
+
+	for i := range 2500 {
+		sub.HasChanged([]any{int32(i)}, []any{int32(i), "v"}, false)
+	}
+
+	allFlushed, err := sub.Flush(t.Context(), false, nil)
+	require.NoError(t, err)
+	require.True(t, allFlushed)
+
+	calls := fake.upserts()
+	require.Len(t, calls, 3)
+	var sizes []int
+	for _, call := range calls {
+		sizes = append(sizes, len(call))
+	}
+	require.Equal(t, []int{DefaultBatchSize, DefaultBatchSize, 500}, sizes,
+		"narrow rows must still batch by row count alone")
+	require.Empty(t, sub.changes)
+}
+
+// TestBufferedMapFlushByteCapOversizedRowAlone verifies that a single row
+// whose rendered size exceeds the byte budget still flushes — alone in its
+// own statement (a row can't be split; we rely on max_allowed_packet being
+// well above MaxStatementSizeBytes, same as the copy path's chunklet splitting).
+// Queue mode is used for deterministic FIFO batching.
+func TestBufferedMapFlushByteCapOversizedRowAlone(t *testing.T) {
+	fake := &countingApplier{}
+	sub := newByteCapBufferedMap(fake, true)
+
+	small := strings.Repeat("s", 1024)
+	// Estimates to ~2x the budget rendered, so it is over by itself.
+	big := strings.Repeat("b", applier.MaxStatementSizeBytes)
+	sub.HasChanged([]any{"k1"}, []any{"k1", small}, false)
+	sub.HasChanged([]any{"k2"}, []any{"k2", big}, false)
+	sub.HasChanged([]any{"k3"}, []any{"k3", small}, false)
+	require.Len(t, sub.queue, 3)
+	require.Empty(t, sub.changes, "queue-mode events must not enter the map")
+
+	allFlushed, err := sub.Flush(t.Context(), false, nil)
+	require.NoError(t, err)
+	require.True(t, allFlushed)
+
+	calls := fake.upserts()
+	require.Len(t, calls, 3, "small, oversized, small must flush as three FIFO statements")
+	for i, call := range calls {
+		require.Len(t, call, 1, "call %d must contain exactly one row", i)
+	}
+	require.Equal(t, []any{"k2", big}, calls[1][0].RowImage,
+		"the oversized row must flush alone, in FIFO position")
+	require.Empty(t, sub.queue, "flush must drain the queue")
+	require.Equal(t, int64(0), sub.sizeBytes)
+}
+
+// TestBufferedMapFlushByteCapSplitsDeletes applies the same byte cap to
+// DELETE batches: composite / binary PKs hex-encode in the IN(...) list and
+// can be wide too.
+func TestBufferedMapFlushByteCapSplitsDeletes(t *testing.T) {
+	fake := &countingApplier{}
+	sub := newByteCapBufferedMap(fake, false)
+
+	// 100 deletes whose string PKs render to ~2x the total budget in
+	// aggregate, so the flush must split regardless of what the budget is.
+	keyLen := applier.MaxStatementSizeBytes / 100
+	for i := range 100 {
+		key := fmt.Sprintf("%03d-", i) + strings.Repeat("k", keyLen)
+		sub.HasChanged([]any{key}, nil, true)
+	}
+	require.Len(t, sub.changes, 100)
+
+	allFlushed, err := sub.Flush(t.Context(), false, nil)
+	require.NoError(t, err)
+	require.True(t, allFlushed)
+
+	calls := fake.deletes()
+	require.GreaterOrEqual(t, len(calls), 2, "byte cap must split wide-key DELETE batches")
+	totalKeys := 0
+	for _, call := range calls {
+		var callBytes int64
+		for _, key := range call {
+			callBytes += estimateRenderedBytes(key)
+		}
+		require.LessOrEqual(t, callBytes, int64(applier.MaxStatementSizeBytes),
+			"each DELETE statement's key list must stay under the byte budget")
+		totalKeys += len(call)
+	}
+	require.Equal(t, 100, totalKeys, "every buffered delete must land exactly once")
+	require.Empty(t, sub.changes)
+	require.Equal(t, int64(0), sub.sizeBytes)
+}
+
+// TestBufferedMapWideRowsFlushSplitsStatements is the end-to-end regression
+// test for unbounded binlog-apply statement size: LONGTEXT rows of a few
+// hundred KiB are captured from the real binlog and flushed through a real
+// SingleTargetApplier. Pre-fix, all six rows rendered into ONE ~2.4 MiB
+// REPLACE (and 1000 such buffered rows into a multi-GiB one) — over any
+// max_allowed_packet-sized limit this is a deterministic, non-retryable
+// failure. Post-fix the flush splits on the 1 MiB rendered-byte budget and
+// every row lands intact. We assert splitting via the applier seam rather
+// than lowering max_allowed_packet, which is global on the shared server.
+func TestBufferedMapWideRowsFlushSplitsStatements(t *testing.T) {
+	t1 := `CREATE TABLE subscription_test (
+		id INT NOT NULL,
+		payload LONGTEXT NOT NULL,
+		PRIMARY KEY (id)
+	)`
+	t2 := `CREATE TABLE _subscription_test_new (
+		id INT NOT NULL,
+		payload LONGTEXT NOT NULL,
+		PRIMARY KEY (id)
+	)`
+	srcTable, dstTable := setupTestTables(t, t1, t2)
+
+	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	cfg, err := mysql2.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	target := applier.Target{DB: db, KeyRange: "0", Config: cfg}
+	realApplier, err := applier.NewSingleTargetApplier(target, applier.NewApplierDefaultConfig())
+	require.NoError(t, err)
+	counting := &countingApplier{inner: realApplier}
+
+	client := NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, counting, NewClientDefaultConfig()).(*binlogClient)
+	chunker, err := table.NewChunker(srcTable, table.ChunkerConfig{NewTable: dstTable})
+	require.NoError(t, err)
+	require.NoError(t, client.AddSubscription(srcTable, dstTable, chunker))
+	require.NoError(t, client.Start(t.Context()))
+	defer client.Close()
+
+	// Six ~400 KiB rows while subscribed. Each estimates to ~800 KiB
+	// rendered, so no two fit under the 1 MiB budget together.
+	for i := 1; i <= 6; i++ {
+		testutils.RunSQL(t, fmt.Sprintf(
+			"INSERT INTO %s (id, payload) VALUES (%d, CONCAT('%d-', REPEAT(CHAR(96 + %d), 400 * 1024)))",
+			srcTable.QuotedTableName, i, i, i))
+	}
+	require.NoError(t, client.BlockWait(t.Context()))
+	require.Equal(t, 6, client.GetDeltaLen())
+
+	require.NoError(t, client.Flush(t.Context()))
+	require.Equal(t, 0, client.GetDeltaLen())
+
+	calls := counting.upserts()
+	require.GreaterOrEqual(t, len(calls), 2,
+		"wide rows must flush as multiple REPLACE statements, not one unbounded statement")
+	totalRows := 0
+	for _, call := range calls {
+		var callBytes int64
+		for _, row := range call {
+			callBytes += estimateRenderedBytes(row.RowImage)
+		}
+		if len(call) > 1 {
+			require.LessOrEqual(t, callBytes, int64(applier.MaxStatementSizeBytes),
+				"each multi-row statement must stay under the byte budget")
+		}
+		totalRows += len(call)
+	}
+	require.Equal(t, 6, totalRows, "every captured row must be applied exactly once")
+
+	// All rows must land intact on the destination.
+	var srcSum, dstSum string
+	err = db.QueryRowContext(t.Context(), fmt.Sprintf(
+		"SELECT CONCAT(COUNT(*), '-', BIT_XOR(CRC32(CONCAT(id, payload)))) FROM %s", srcTable.QuotedTableName)).Scan(&srcSum)
+	require.NoError(t, err)
+	err = db.QueryRowContext(t.Context(), fmt.Sprintf(
+		"SELECT CONCAT(COUNT(*), '-', BIT_XOR(CRC32(CONCAT(id, payload)))) FROM %s", dstTable.QuotedTableName)).Scan(&dstSum)
+	require.NoError(t, err)
+	require.Equal(t, srcSum, dstSum, "source and destination must match after a split flush")
 }

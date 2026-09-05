@@ -2,6 +2,7 @@ package change
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 
 	"github.com/block/spirit/pkg/applier"
@@ -40,6 +41,7 @@ func killGTIDSyncer(t *testing.T, client *gtidClient) {
 //     which includes the new transaction).
 //  4. Flush and assert both rows landed on the target table.
 func TestGTIDRecreateStreamerRecovers(t *testing.T) {
+	skipUnlessGTIDEnabled(t)
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
@@ -99,6 +101,7 @@ func TestGTIDRecreateStreamerRecovers(t *testing.T) {
 // maxRecreateAttempts (lowered to 3 in TestMain), signal a fatal error
 // through the caller's CancelFunc, and exit cleanly.
 func TestGTIDMaxRecreateAttemptsError(t *testing.T) {
+	skipUnlessGTIDEnabled(t)
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
@@ -120,8 +123,16 @@ func TestGTIDMaxRecreateAttemptsError(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
+	// Also capture the reason: exhausted recreate attempts are a stream
+	// error, NOT a schema change, so callers must not invalidate checkpoints.
+	var gotReason atomic.Int64
+	gotReason.Store(-1)
 	clientConfig := NewClientDefaultConfig()
-	clientConfig.CancelFunc = func() bool { cancel(); return true }
+	clientConfig.CancelFunc = func(reason FatalReason) bool {
+		gotReason.Store(int64(reason))
+		cancel()
+		return true
+	}
 	client := NewGTIDClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), clientConfig).(*gtidClient)
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
 	require.NoError(t, err)
@@ -146,6 +157,8 @@ func TestGTIDMaxRecreateAttemptsError(t *testing.T) {
 	client.streamWG.Wait()
 
 	require.Error(t, ctx.Err(), "caller context should be cancelled via CancelFunc on fatal stream error")
+	require.Equal(t, int64(FatalReasonStreamError), gotReason.Load(),
+		"exhausted recreate attempts must be reported as a stream error")
 
 	client.Close()
 }

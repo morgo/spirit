@@ -59,8 +59,7 @@ func setupRunnerForChecksumTest(t *testing.T, tableName string) *Runner {
 		Database:     cfg.DBName,
 		Threads:      1,
 		WriteThreads: 1,
-		Table:        tableName,
-		Alter:        "ENGINE=InnoDB",
+		Statement:    fmt.Sprintf("ALTER TABLE %s ENGINE=InnoDB", tableName),
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { utils.CloseAndLog(r) })
@@ -71,7 +70,7 @@ func setupRunnerForChecksumTest(t *testing.T, tableName string) *Runner {
 	r.db, err = dbconn.New(testutils.DSN(), dbCfg)
 	require.NoError(t, err)
 	r.dbConfig = dbCfg
-	r.changes[0].table = table.NewTableInfo(r.db, r.migration.Database, r.migration.Table)
+	r.changes[0].table = table.NewTableInfo(r.db, r.migration.Database, r.changes[0].stmt.Table)
 	require.NoError(t, r.changes[0].table.SetInfo(t.Context()))
 	require.NoError(t, r.changes[0].dropOldTable(t.Context()))
 	require.NoError(t, r.changes[0].createNewTable(t.Context()))
@@ -275,16 +274,9 @@ func TestContinuousChecksumDivergenceClearsCheckpointWatermark(t *testing.T) {
 		WithThreads(1),
 		WithDeferCutOver(),
 		WithRespectSentinel())
-	defer utils.CloseAndLog(m)
+	running := startTestRun(t, m.Run, m.Close)
 
-	var runErr error
-	runDone := make(chan struct{})
-	go func() {
-		defer close(runDone)
-		runErr = m.Run(t.Context())
-	}()
-
-	waitForStatus(t, m, status.WaitingOnSentinelTable)
+	waitForStatus(t, m, status.WaitingOnSentinelTable, running)
 
 	// The test-suite checkpoint dumper runs every 100ms (see TestMain).
 	// Wait until a checkpoint row carrying the end-of-initial-checksum
@@ -305,11 +297,7 @@ func TestContinuousChecksumDivergenceClearsCheckpointWatermark(t *testing.T) {
 	// allowing cutover.
 	testutils.RunSQL(t, fmt.Sprintf("UPDATE `%s` SET val = 'corrupted' WHERE id = 1", utils.NewTableName(tableName)))
 
-	select {
-	case <-runDone:
-	case <-time.After(2 * time.Minute):
-		t.Fatal("timed out waiting for the continuous checksum to abort the migration")
-	}
+	runErr := running.wait(t)
 	require.Error(t, runErr)
 	require.ErrorContains(t, runErr, "continuous checksum")
 
@@ -339,14 +327,14 @@ func TestContinuousChecksumDivergenceClearsCheckpointWatermark(t *testing.T) {
 // which in practice requires more than one chunk on the runway.
 func advanceRunnerToChecksumWatermarks(t *testing.T, r *Runner) {
 	t.Helper()
-	seedRows(t, r.db, r.migration.Table, 4096)
+	seedRows(t, r.db, r.changes[0].stmt.Table, 4096)
 	require.NoError(t, r.changes[0].table.SetInfo(t.Context()))
 	require.NoError(t, r.initChunkers())
 	require.NoError(t, r.copyChunker.Open())
 	require.NoError(t, r.checksumChunker.Open())
 	disableDynamicChunking(t, r.copyChunker)
 	disableDynamicChunking(t, r.checksumChunker)
-	require.NoError(t, r.setupCopierCheckerAndReplClient(t.Context()))
+	require.NoError(t, r.setupCopierCheckerAndReplClient(t.Context(), ""))
 	require.NoError(t, r.replClient.Start(t.Context()))
 	t.Cleanup(func() { r.replClient.Close() })
 

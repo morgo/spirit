@@ -34,14 +34,10 @@ type SourceResource struct {
 
 // Resources contains the resources needed for move checks
 type Resources struct {
-	Sources        []SourceResource
-	Targets        []applier.Target
-	SourceTables   []*table.TableInfo
-	CreateSentinel bool
-	// GTID, when true, opts the move into the experimental GTID-based change
-	// source. The configuration check uses this to additionally validate
-	// gtid_mode and enforce_gtid_consistency on every source.
-	GTID bool
+	Sources      []SourceResource
+	Targets      []applier.Target
+	SourceTables []*table.TableInfo
+	DeferCutOver bool
 	// MoveEverything is true when no explicit table list was supplied (i.e.
 	// move.SourceTables is empty), so every table in each source database is
 	// being moved. The source_schema_consistency check uses this to decide

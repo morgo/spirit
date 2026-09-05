@@ -20,7 +20,7 @@ Spirit is designed for **speed** — it is multi-threaded in both row-copying an
 cd cmd/spirit && go build
 
 # Run a schema change
-./spirit migrate --host=<host> --username=<user> --password=<pass> --database=<db> --table=<table> --alter="<alter statement>"
+./spirit migrate --host=<host> --username=<user> --password=<pass> --database=<db> --statement="<ddl statement>"
 
 # Other subcommands
 ./spirit move --help
@@ -110,8 +110,7 @@ assert.NoError(t, m.Close())
 // With options
 m := NewTestRunner(t, "mytable", "ADD INDEX idx_a (a)",
     WithThreads(1),
-    WithTargetChunkTime(100*time.Millisecond),
-    WithBuffered(false), // opt out of the default buffered copier
+    WithTestThrottler(),
 )
 ```
 
@@ -126,13 +125,11 @@ assert.NoError(t, m.Close())
 For tests that need to call `Migration.Run()` directly (e.g., testing error paths, replica DSN, or the `Migration` struct API), use `NewTestMigration`:
 
 ```go
-m := NewTestMigration(t, WithThreads(1))
-m.Table = "mytable"
-m.Alter = "ENGINE=InnoDB"
+m := NewTestMigration(t, WithThreads(1), WithStatement("ALTER TABLE mytable ENGINE=InnoDB"))
 require.NoError(t, m.Run())
 ```
 
-Available options: `WithThreads(n)`, `WithTargetChunkTime(d)`, `WithBuffered(b)`, `WithTable(name)`, `WithAlter(stmt)`, `WithStatement(sql)`, `WithTestThrottler()`, `WithDeferCutOver()`, `WithSkipDropAfterCutover()`, `WithDBName(name)`, `WithRespectSentinel()`, `WithLint()`, `WithLintOnly()`, `WithHost(host)`, `WithReplicaDSN(dsn)`, `WithReplicaMaxLag(d)`, `WithConfFile(t, content)`.
+Available options: `WithThreads(n)`, `WithWriteThreads(n)`, `WithAutoscaling()`, `WithStatement(sql)`, `WithTestThrottler()`, `WithDeferCutOver()`, `WithDBName(name)`, `WithRespectSentinel()`, `WithHost(host)`, `WithReplicaDSN(dsn)`, `WithReplicaMaxLag(d)`, `WithSkipDropAfterCutover()`.
 
 **General test patterns:**
 - Integration tests connect to real MySQL — there are no mocked database tests for core logic
@@ -160,13 +157,13 @@ pkg/
   migration/  → Orchestrator for single-table schema changes (main entry point)
   move/       → Orchestrator for multi-table cross-server migrations
   change/     → change.Source abstraction + binlog implementation (acts as MySQL replica)
-  copier/     → Parallel row copying (unbuffered and buffered algorithms)
+  copier/     → Parallel row copying (DBLog-style buffered algorithm)
   applier/    → Write layer for target tables (single-target and sharded)
   table/      → Chunking strategies (optimistic, composite, multi)
   checksum/   → Post-copy data verification (CRC32 + BIT_XOR)
   dbconn/     → MySQL connection management, TLS, retries, locking, kill logic
-  statement/  → SQL parsing via TiDB parser (ALTER, CREATE, DROP, RENAME)
-  lint/       → Static analysis framework for schemas and DDL (17 built-in linters)
+  statement/  → SQL parsing via pkg/parser (ALTER, CREATE, DROP, RENAME)
+  lint/       → Static analysis framework for schemas and DDL (built-in linters)
   fmt/        → Schema file formatter (canonicalize CREATE TABLE .sql files)
   throttler/  → Rate limiting interface (noop, mock, replica-lag based)
   status/     → State machine and progress reporting
@@ -191,7 +188,7 @@ scripts/      → Build and run helper scripts
 
 ### Key design decisions
 
-- **Dynamic chunking**: chunk size is specified as a *target time* (default 500ms), not a row count. The chunk size auto-adjusts based on the 90th percentile of the last 10 chunks.
+- **Dynamic chunking**: chunk size auto-adjusts against a target based on the 90th percentile of the last 10 chunks, rather than a fixed row count. The copier targets an in-memory *byte budget* (`--target-chunk-size`, default `table.DefaultTargetChunkBytes` = 16 MiB); the checksum targets a *chunk time* (`table.ChunkerDefaultTarget` = 5s, a constant — there is no `--target-chunk-time` flag).
 - **Change row map**: binlog changes are deduplicated in a map before flushing, so a row updated 10 times is only copied once.
 - **High watermark optimization**: binlog changes above the copier's current position are discarded (only for auto-increment PKs).
 - **Checkpoint/resume**: progress is saved periodically; interrupted migrations resume automatically with ~1 minute of lost progress.
@@ -203,7 +200,7 @@ Each package has its own `README.md` with detailed documentation. Key packages t
 ### `pkg/migration`
 The main orchestrator. `runner.go` contains the core migration loop. `Migration` struct is the Kong CLI binding. The `Run()` method drives the full lifecycle. See `cutover.go` for the atomic rename logic.
 
-**Concurrency:** migrations serialize per-table via `dbconn.MetadataLock` (a `GET_LOCK` per table) — two migrations on the same table block each other, but different tables run concurrently. Atomic multi-table migrations (`--statement` with several `ALTER`s) additionally take a **schema-scoped** lock (`dbconn.WithMultiTableSchemaLock`), so only one runs per schema at a time: they all coordinate through one fixed-name `_spirit_checkpoint`/`_spirit_sentinel` and must not overlap. A second one fails fast in `Run`. Single-table migrations are unaffected. (User-facing: README "Atomic Multi-table changes".)
+**Concurrency:** migrations serialize per-table via `dbconn.AdvisoryLock` (a `GET_LOCK` per table) — two migrations on the same table block each other, but different tables run concurrently. Atomic multi-table migrations (`--statement` with several `ALTER`s) additionally take a **schema-scoped** lock (`dbconn.WithMultiTableSchemaLock`), so only one runs per schema at a time: they all coordinate through one fixed-name `_spirit_checkpoint`/`_spirit_sentinel` and must not overlap. A second one fails fast in `Run`. Single-table migrations are unaffected. (User-facing: README "Atomic Multi-table changes".)
 
 ### `pkg/change`
 Defines the `change.Source` interface — the abstraction spirit uses to consume row changes — and the binlog-backed implementation behind `NewBinlogClient`. The binlog backend acts as a MySQL replica using [go-mysql](https://github.com/go-mysql-org/go-mysql); future backends (e.g. Vitess VStream) can plug in by implementing `Source`. Resume positions are opaque strings (`Position` / `StartFromPosition`) so callers never parse implementation-specific formats. One subscription type — the **bufferedMap** — stores the full row image from the change feed and writes via the applier. It has two internal flush modes:
@@ -213,9 +210,7 @@ Defines the `change.Source` interface — the abstraction spirit uses to consume
 The applier issues `REPLACE INTO target VALUES (...)` from inline row images (not `SELECT FROM source`), which sidesteps the binlog/visibility race that motivated `binlog_row_image=FULL` (see #746) and makes flushes order-independent for swap-pair workloads (see #847). REPLACE may delete rows on unique-key conflicts as well as PK conflicts — those rows are re-inserted by their own events in subsequent batches, so the destination is *eventually consistent* between batches and converges once every event for each affected PK has been applied.
 
 ### `pkg/copier`
-Two algorithms:
-- **Buffered** (default) — producer/consumer pattern; required for cross-server migrations (`pkg/move`) and the default for single-server schema changes. Reads rows into Spirit and writes them through the applier, taking no locks on the source.
-- **Unbuffered** (`--unbuffered`) — `INSERT IGNORE INTO ... SELECT` directly in MySQL; the legacy copier. Selected via `CopierConfig.Unbuffered`, which the migration runner wires straight from `--unbuffered`, so the buffered copier runs unless `--unbuffered` is passed. The copier ignores the applier when `Unbuffered` is true even if one is supplied.
+One algorithm: a DBLog-style **buffered** producer/consumer pattern, used for both single-server schema changes and cross-server migrations (`pkg/move`). Reads rows into Spirit and writes them through the applier (`CopierConfig.Applier`, required non-nil), taking no locks on the source. The legacy *unbuffered* copier (`INSERT IGNORE INTO ... SELECT` directly in MySQL, behind `--unbuffered`) has been removed.
 
 ### `pkg/table`
 Three chunker implementations:
@@ -224,10 +219,12 @@ Three chunker implementations:
 - **MultiChunker** — wraps multiple child chunkers for multi-table operations
 
 ### `pkg/statement`
-Uses the [TiDB parser](https://github.com/pingcap/tidb/tree/master/pkg/parser) for SQL parsing. If a DDL cannot be parsed by TiDB, Spirit cannot execute it. `parse_create_table.go` provides structured `CREATE TABLE` parsing.
+Uses [pkg/parser](pkg/parser/README.md) (Spirit's MySQL-only fork of the TiDB parser) for SQL parsing. If a DDL cannot be parsed, Spirit cannot execute it. `create_table.go` provides structured `CREATE TABLE` parsing (the `CreateTable` struct and its parse/diff methods).
+
+**Normalization pipeline:** MySQL rewrites many constructs when it stores a table (inline `PRIMARY KEY`/`UNIQUE` → table-level, column `CHECK` hoisted to table-level, `int(11)` → `int`, the legacy `BINARY` attribute → a `_bin` collation). To stop a hand-written schema from diffing spuriously against a live `SHOW CREATE TABLE`, `ParseCreateTable` runs a registry of **normalization rules** over the parsed `CreateTable` before returning it. Each rule is a `Normalizer` (`normalize.go`) that self-registers via `init()` in its own `normalize_*.go` file and rewrites the struct's fields in place (never `Raw`). Rules run after the struct is fully parsed, so they are order-independent. Consequence: `CreateTable.Diff` **assumes normalized input**. The parser already folds most type *aliases* (`BOOL`→`tinyint(1)`, `SERIAL`→`bigint unsigned … UNIQUE`, `INTEGER`→`int`), so rules only handle what the parser leaves alone. See `pkg/statement/README.md` for the full concept and rule list.
 
 ### `pkg/lint`
-17 built-in linters that auto-register via `init()`. Each linter is in its own file (`lint_<name>.go`). To add a new linter, create a new file following the existing pattern and implement the `Linter` interface from `linter.go`.
+Built-in linters auto-register via `init()`. Each linter is in its own file (`lint_<name>.go`). To add a new linter, create a new file following the existing pattern and implement the `Linter` interface from `linter.go`.
 
 ### `pkg/dbconn`
 Handles connection management including:
@@ -283,7 +280,7 @@ Key principles:
 
 ## Unsupported Features (Do Not Implement)
 
-- **RENAME column** — some rename operations are intentionally not supported. Renaming primary key columns and dangerous overlap patterns (e.g., `RENAME COLUMN c1 TO n1, ADD COLUMN c1 ...`) are blocked. Simple non-PK column renames are supported in both the buffered and unbuffered copier paths.
+- **RENAME column** — some rename operations are intentionally not supported. Renaming primary key columns and dangerous overlap patterns (e.g., `RENAME COLUMN c1 TO n1, ADD COLUMN c1 ...`) are blocked. Simple non-PK column renames are supported.
 - **ALTER/DROP PRIMARY KEY** — primary key must remain unchanged
 - **Lossy conversions** (e.g., shortening VARCHAR below max data length)
 - **FOREIGN KEYS or TRIGGERS** on migrated tables
@@ -297,8 +294,17 @@ Key principles:
 3. Create `pkg/lint/lint_<name>_test.go` with comprehensive test cases
 4. Follow the pattern of existing linters (e.g., `lint_has_fk.go`)
 
-### Working with the TiDB parser
-All SQL parsing goes through `pkg/statement/`. Do not parse SQL manually. The `Statement` type wraps parsed DDL and provides safety analysis methods.
+### Adding a normalization rule
+Normalization canonicalizes a parsed `CreateTable` so a user-written schema matches what MySQL stores (and reports via `SHOW CREATE TABLE`), preventing spurious diffs. It mirrors the linter registration pattern.
+
+**All MySQL canonical-form handling belongs in this layer.** When the desired schema and the live `SHOW CREATE TABLE` disagree only in representation — parenthesization, display widths, inline vs table-level declarations, auto-generated names — fix it by adding a `Normalizer` rule, never by special-casing `Diff`, the parse helpers, or restore functions. Keeping every MySQL-ism in the registry is what keeps the rest of the code free of per-exception complexity: `Diff` and the parser assume canonical input and stay simple.
+1. Create `pkg/statement/normalize_<name>.go` with a type implementing the `Normalizer` interface (`Name() string` + `Normalize(*CreateTable) *CreateTable`)
+2. Register it in an `init()` function using `registerNormalizer()` (defined in `normalize.go`)
+3. Mutate the **structured** fields of `CreateTable` (`Columns`, `Indexes`, …) and return the same instance — never touch `Raw`
+4. Keep the rule order-independent (it runs after the struct is fully parsed) and follow an existing rule (e.g., `normalize_integer_display_width.go`)
+
+### Working with the parser
+All SQL parsing goes through `pkg/statement/` (built on `pkg/parser`, Spirit's fork of the TiDB parser). Do not parse SQL manually. The `Statement` type wraps parsed DDL and provides safety analysis methods.
 
 ### Database connections
 Always use `pkg/dbconn` for MySQL connections. Never create raw `sql.Open()` calls in production code (test utilities are the exception). The `DBConn` type handles retries, TLS, and connection pooling.
@@ -318,5 +324,8 @@ GitHub Actions workflows (`.github/workflows/`):
 - **mysql8.0.42-docker.yml** — integration tests against MySQL 8.0.42
 - **mysql84-docker.yml** — integration tests against MySQL 8.4
 - **mysql97-docker.yml** — integration tests against MySQL 9.7
+- **mysql8.0.45-singleversion-docker.yml** — runs the version-agnostic "single-version" suite (build tag `singleversion`) once, against MySQL 8.0.45. It selects tests with a `-run` regex defined in the `singleversion-test` service in `compose/compose.yml`, so a new `singleversion` test must either match that pattern by name or be added to it — `go test` exits 0 when `-run` matches nothing, so a mismatch silently skips the test.
+- **mysql-semisync-docker.yml** — integration tests against MySQL 8.0.45 with semi-sync replication and a delayed replica
+- **govulncheck.yml** — scans dependencies for known vulnerabilities
 - **buildandrun-docker.yml** — build and run smoke test
 - **release.yml** — release automation

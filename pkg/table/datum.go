@@ -65,6 +65,18 @@ func mySQLTypeToDatumTp(mysqlTp string) datumTp {
 		return unknownType
 	case "VARBINARY", "BLOB", "BINARY", "LONGBLOB", "MEDIUMBLOB", "TINYBLOB":
 		return binaryType
+	case "VECTOR":
+		// VECTOR (MySQL 9.7+) is a packed array of 4-byte little-endian
+		// floats. Both the driver and the binlog surface it as []byte, and
+		// MySQL only accepts it back as a binary-charset literal: a
+		// character-set string of the right length is rejected outright
+		// ("Value of type 'string, size: 12' cannot be converted to
+		// 'vector' type"). Classifying it as binaryType forces the 0x-hex
+		// literal in Datum.String() even for byte images that happen to be
+		// valid UTF-8 — e.g. the all-zeros vector [0,0,0], which the
+		// IsBinaryString() UTF-8 heuristic alone would emit as a quoted
+		// string and the server would reject.
+		return binaryType
 	case "VARCHAR", "CHAR", "TEXT", "LONGTEXT", "MEDIUMTEXT", "TINYTEXT", "JSON":
 		return unknownType
 	case "DATETIME", "TIMESTAMP", "DATE", "TIME":
@@ -129,6 +141,13 @@ func NewDatum(val any, tp datumTp) (Datum, error) {
 	return Datum{
 		Val: val,
 		Tp:  tp,
+		// Binary values must always serialize as 0x-hex literals, even when
+		// they happen to be valid UTF-8 (e.g. a VARBINARY key holding the
+		// ASCII string "0xab"). The checkpoint-restore path
+		// (datumValFromString) unconditionally hex-decodes binaryType values
+		// with a "0x" prefix, so serializing such a value as a plain string
+		// would corrupt the watermark boundary on resume.
+		forceHexEncode: tp == binaryType,
 	}, nil
 }
 
@@ -143,8 +162,14 @@ func datumValFromString(val string, tp datumTp) (any, error) {
 	case unsignedType:
 		return strconv.ParseUint(val, 10, 64)
 	case binaryType:
-		// Binary types are always hex-encoded in checkpoint JSON via Datum.String().
-		// Decode the hex back to raw binary bytes.
+		// Binary types are hex-encoded ("0x...") in checkpoint JSON via
+		// jsonQuoteDatum, except the empty value, which is serialized as
+		// x'' (there is no zero-digit 0x literal). Decode both back to a
+		// Go string holding the raw bytes: Datum.Val stores binary values
+		// as string, never []byte.
+		if val == "x''" {
+			return "", nil
+		}
 		if strings.HasPrefix(val, "0x") {
 			tmp, err := hex.DecodeString(val[2:])
 			if err != nil {
@@ -228,39 +253,14 @@ func NewDatumFromValueWithType(value any, ct ColumnType) (Datum, error) {
 		value = u
 	}
 
-	// Convert []byte to string for non-numeric types
+	// Convert []byte to string. NewDatum parses numeric types from strings,
+	// and marks binaryType datums with forceHexEncode so binary data is
+	// always hex-encoded in SQL output — even data that is valid UTF-8
+	// (which IsBinaryString() would not catch).
 	if b, ok := value.([]byte); ok {
-		switch tp { //nolint:exhaustive
-		case signedType, unsignedType:
-			// For numeric types, convert []byte to string then parse
-			value = string(b)
-		case binaryType:
-			// For binary types, convert to string and set forceHexEncode.
-			// We always want to hex-encode binary data in SQL output.
-			// The forceHexEncode flag ensures this happens even for data
-			// that is valid UTF-8 (which IsBinaryString() would not catch).
-			d, err := NewDatum(string(b), tp)
-			if err != nil {
-				return Datum{}, err
-			}
-			d.forceHexEncode = true
-			return d, nil
-		default:
-			// For unknown types (text, datetime, json, etc), convert to string
-			value = string(b)
-		}
+		value = string(b)
 	}
-
-	d, err := NewDatum(value, tp)
-	if err != nil {
-		return Datum{}, err
-	}
-	// Ensure binary types are always hex-encoded, even when the input value
-	// is not []byte (e.g. a string). This is consistent with the []byte path above.
-	if tp == binaryType {
-		d.forceHexEncode = true
-	}
-	return d, nil
+	return NewDatum(value, tp)
 }
 
 func NewNilDatum(tp datumTp) Datum {
@@ -340,6 +340,7 @@ func (d Datum) Range(d2 Datum) (uint64, error) {
 //   - NULL                            for IsNil()
 //   - the numeric literal (e.g. 42)   for IsNumeric()
 //   - 0x... hex literal               for IsBinaryString()
+//     (a zero-length value uses the empty binary literal instead — see below)
 //   - "..." with backslash escapes    for everything else
 //
 // The string-literal path runs sqlescape.EscapeString on the contents
@@ -369,9 +370,15 @@ func (d Datum) String() string {
 		s = fmt.Sprintf("%v", d.Val)
 	}
 	if d.IsBinaryString() {
-		// MySQL binary string needs at least one character
+		// The empty value still needs a valid SQL literal: %#x renders ""
+		// as "" and a bare "0x" parses as an identifier, so emit the
+		// standard zero-length hex literal instead. It must NOT be 0x00 —
+		// that is a one-byte NUL, a different value, and emitting it here
+		// made every binlog-applied REPLACE corrupt empty blobs (minting
+		// endless checksum mismatches on tables that store empty strings,
+		// e.g. zero-length serialized protos).
 		if len(s) == 0 {
-			return "0x00"
+			return "x''"
 		}
 		return fmt.Sprintf("%#x", s)
 	}

@@ -1,6 +1,6 @@
 # Statement
 
-The statement package provides SQL statement parsing and analysis capabilities for Spirit. It wraps the [TiDB parser](https://github.com/pingcap/tidb/tree/master/pkg/parser) to extract structured information from DDL statements and determine their safety characteristics for online schema changes.
+The statement package provides SQL statement parsing and analysis capabilities for Spirit. It wraps [pkg/parser](../parser/README.md) (Spirit's MySQL-only fork of the TiDB parser) to extract structured information from DDL statements and determine their safety characteristics for online schema changes.
 
 ## Design Philosophy
 
@@ -10,8 +10,9 @@ Spirit needs to understand DDL statements to:
 3. **Analyze** whether operations are safe for INPLACE algorithm
 4. **Transform** statements (e.g., rewrite `CREATE INDEX` to `ALTER TABLE`)
 5. **Parse** CREATE TABLE statements into structured data for comparison
+6. **Normalize** parsed CREATE TABLE definitions to MySQL's canonical form so equivalent schemas compare equal (see [Normalization](#normalization))
 
-Rather than implementing a custom parser, Spirit leverages the TiDB parser, which provides:
+Rather than implementing a parser from scratch, Spirit maintains a fork of the TiDB parser (see [pkg/parser](../parser/README.md)), which provides:
 - Battle-tested SQL parsing compatible with MySQL syntax
 - AST (Abstract Syntax Tree) representation of statements
 - Ability to restore modified ASTs back to SQL
@@ -300,14 +301,15 @@ Each `Constraint` represents CHECK or FOREIGN KEY constraints:
 
 ```go
 type Constraint struct {
-    Raw        *ast.Constraint      // Raw AST node from parser
-    Name       string
-    Type       string                // "CHECK", "FOREIGN KEY"
-    Columns    []string
-    Expression *string               // For CHECK constraints
-    References *ForeignKeyReference  // For FOREIGN KEY constraints
-    Definition *string               // Full constraint definition
-    Options    map[string]any        // Additional constraint options
+    Raw         *ast.Constraint      // Raw AST node from parser
+    Name        string
+    Type        string                // "CHECK", "FOREIGN KEY"
+    Columns     []string
+    Expression  *string               // For CHECK constraints
+    References  *ForeignKeyReference  // For FOREIGN KEY constraints
+    Definition  *string               // Full constraint definition
+    NotEnforced bool                  // For CHECK constraints: true when NOT ENFORCED
+    Options     map[string]any        // Additional constraint options
 }
 ```
 
@@ -326,6 +328,51 @@ type PartitionOptions struct {
     SubPartition *SubPartitionOptions
 }
 ```
+
+Partitioning is compared as a whole: MySQL cannot alter a partition method in place, so any difference other than a HASH/KEY partition-count change is emitted as `REMOVE PARTITIONING` followed by a complete `PARTITION BY` — including its `SUBPARTITION BY` clause, partition comments, and any explicitly named subpartitions. The per-partition `ENGINE` clause is the one thing deliberately **not** compared: MySQL requires every partition to use the table's engine, so it carries no information, yet `SHOW CREATE TABLE` always prints it while authored SQL does not.
+
+## Normalization
+
+MySQL rewrites many constructs when it stores a table definition, so the form a human writes rarely matches what `SHOW CREATE TABLE` reports. Left unhandled, this produces **spurious diffs** — a schema file that says `active BOOLEAN` would appear to differ from the live `active tinyint(1)`, and a diff would emit a pointless `MODIFY COLUMN`. To prevent this, `ParseCreateTable` runs a pipeline of **normalization rules** over the parsed `CreateTable` before returning it, canonicalizing both sides so `Diff` compares like with like.
+
+Two layers of canonicalization apply:
+
+1. **The parser** already folds most type *aliases* before Spirit sees them: `BOOL`/`BOOLEAN` → `tinyint(1)`, `SERIAL` → `bigint unsigned NOT NULL AUTO_INCREMENT UNIQUE`, `INTEGER` → `int`, `NVARCHAR` → `varchar`, `DEC` → `decimal`. Nothing in Spirit is needed for these.
+2. **Spirit's normalization rules** handle the canonicalizations the parser does *not* — each mirrors something MySQL does when storing the table:
+
+   | Rule (`normalize_*.go`) | Canonicalization |
+   |---|---|
+   | `primaryKeyNormalizer` | inline `id INT PRIMARY KEY` → table-level `PRIMARY KEY` index |
+   | `indexNormalizer` | inline `c INT UNIQUE` → table-level `UNIQUE KEY`; assigns MySQL's default names to unnamed indexes |
+   | `columnCheckNormalizer` | hoists a column-level `CHECK` into a table-level constraint |
+   | `expressionParenNormalizer` | rewrites `CHECK` and generated-column expressions into a canonical parenthesization, keeping only the parentheses the expression's own precedence does not already imply: MySQL stores them fully parenthesized and the parser preserves input parens verbatim, so `CHECK ((a=1) OR ((b=2) AND (c=3)))` and `CHECK (a=1 OR b=2 AND c=3)` both canonicalize to the latter |
+   | `functionAliasNormalizer` | rewrites a function name to the one MySQL stores, in expression `DEFAULT`s, generated columns, `CHECK`s, functional indexes and partition expressions: `STRING_TO_VECTOR` → `to_vector`, `LCASE` → `lower`, `SUBSTRING`/`MID` → `substr`, `DAY` → `dayofmonth`, and the timestamp family inside an expression default → `now()` |
+   | `binaryAttributeNormalizer` | resolves the legacy `BINARY` column attribute to the column charset's `_bin` collation |
+   | `integerDisplayWidthNormalizer` | strips deprecated integer display widths (`int(11)` → `int`), keeping `tinyint(1)` and `ZEROFILL` |
+   | `vectorDimensionNormalizer` | fills in the default dimension of a `VECTOR` column declared without one (`vector` → `vector(2048)`, MySQL 9.7+) |
+   | `charsetlessTypeNormalizer` | drops charset/collation from the types that cannot carry one (`VECTOR`, spatial) — both the parser's synthetic `binary` charset and one an author wrote by hand, which MySQL accepts and silently discards |
+   | `partitionCommentNormalizer` | pushes a partition-level `COMMENT` down onto explicitly named subpartitions that have none, and clears it from the partition — what MySQL stores for `PARTITION p0 ... COMMENT 'c' (SUBPARTITION s0, SUBPARTITION s1)`. A partition comment on implicit subpartitions (`SUBPARTITIONS n`) stays on the partition |
+
+### Pipeline
+
+Rules implement the `Normalizer` interface (`normalize.go`):
+
+```go
+type Normalizer interface {
+    Name() string
+    Normalize(ct *CreateTable) *CreateTable
+}
+```
+
+- Each rule lives in its own `normalize_<name>.go` file and self-registers via `init()` calling `registerNormalizer(...)` — the same registration pattern `pkg/lint` uses for linters, so a new rule is added by dropping in a file with no change to `Diff` or the parser.
+- `runNormalizers` applies every registered rule at the tail of `parseToStruct`, **after** all fields are populated. Rules therefore see the whole struct and are **order-independent**.
+- Rules rewrite the **structured** fields of `CreateTable` (`Columns`, `Indexes`, …), never `Raw`. Code that reads `Column.Raw` / `CreateTable.Raw` (e.g. AST `Restore`, some linters) bypasses normalization.
+
+Because canonicalization happens at parse time, **`Diff` assumes normalized input**: two `CreateTable`s obtained from `ParseCreateTable` are always canonical, so the diff logic compares them structurally without re-deriving equivalences (inline vs. table-level keys, unnamed indexes, etc.). A `CreateTable` built by hand — without going through `ParseCreateTable` — is *not* normalized.
+
+### Relationship to `spirit fmt`
+
+Normalization is an **offline, best-effort** approximation of what MySQL does: it needs no database and covers the common cases. [`spirit fmt`](../../docs/fmt.md) is the **ground-truth** canonicalizer — it round-trips a `CREATE TABLE` through a live MySQL server and reads back `SHOW CREATE TABLE`, so it captures *every* transformation, including ones normalization does not implement (e.g. `DEFAULT FALSE` → `DEFAULT '0'`, and the expression rewrites that restructure rather than rename — `MOD(a,b)` → `(a % b)`, `INSTR(a,b)` → `locate(b,a)`, `WEEKOFYEAR(d)` → `week(d,3)`). Use `spirit fmt` to canonicalize schema files on disk; normalization keeps in-memory parsing and diffing accurate without a server.
 
 ## Helper Functions
 
@@ -512,7 +559,7 @@ if alterStmt != "" {
 1. **Functional Indexes**: `CREATE INDEX` with functional expressions cannot be converted to `ALTER TABLE`
 2. **Single Schema**: Multi-table operations must use the same schema
 3. **SPATIAL Indexes**: Not fully supported in some helper functions
-4. **Statements must be parseable by the TiDB parser**: When encountered, we typically contribute fixes upstream. The most commonly occurring scenarios tend to be complex DEFAULT or CHECK expressions.
+4. **Statements must be parseable by pkg/parser**: unparseable DDL cannot be migrated. The most commonly occurring scenarios tend to be complex DEFAULT or CHECK expressions; since the parser is part of this repo, fixes land here directly.
 
 ## Best Practices
 
@@ -521,7 +568,7 @@ if alterStmt != "" {
 
 ## See Also
 
-- [TiDB Parser Documentation](https://github.com/pingcap/tidb/tree/master/pkg/parser)
+- [pkg/parser](../parser/README.md) - Spirit's SQL parser (MySQL-only fork of the TiDB parser)
 - [MySQL 8.0 Online DDL Operations](https://dev.mysql.com/doc/refman/8.0/en/innodb-online-ddl-operations.html)
 - [pkg/table](../table/README.md) - Uses statement parsing for table metadata
 - [pkg/migration](../migration/README.md) - Uses safety analysis to determine migration strategy
