@@ -745,16 +745,13 @@ func TestConcurrentMoveDoesNotWipeTarget(t *testing.T) {
 	require.Zero(t, artifacts, "a concurrent run must not create a checkpoint table before acquiring the lock")
 }
 
-// TestMoveWithVarcharPK verifies a move on a table with a non-memory-comparable
-// primary key (VARCHAR with a CI collation) — the case from issue #607. The
-// move runs under concurrent writes to exercise the binlog replay path.
-//
-// For non-memory-comparable PKs the bufferedMap subscription uses LWW map
-// dedup during the copy phase and FIFO queue post-copy. The queue replays
-// binlog events in their original order, which is required for collation-
-// sensitive PKs because the map's hash equality ("A" ≠ "a") does not match
-// MySQL's row identity ("A" = "a" under a CI collation). The post-cutover
-// checksum keeps the optimization honest by repairing any divergence.
+// TestMoveWithVarcharPK verifies FIFO replay after copying a table with a
+// non-memory-comparable VARCHAR primary key (issue #607). Concurrent writes
+// run while the sentinel holds cutover, after the switch from LWW map dedup
+// to FIFO. This test does not exercise concurrent writes during map-mode copy;
+// the move checksum is the correctness gate for divergence in that phase.
+// FIFO preserves event order when Go key equality differs from MySQL's CI
+// collation ("A" and "a" identify the same row in MySQL).
 func TestMoveWithVarcharPK(t *testing.T) {
 	srcDB := "source_varcharpk"
 	dstDB := "dest_varcharpk"
@@ -777,9 +774,8 @@ func TestMoveWithVarcharPK(t *testing.T) {
 		updated_at DATETIME NOT NULL
 	) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci`)
 
-	// Seed enough rows that the copier runs for long enough to interleave
-	// with the concurrent writers. Use UUIDs for PK values to keep them
-	// well-distributed.
+	// Seed existing rows for the initial copy. The concurrent write workload
+	// runs later, once the sentinel holds the move in FIFO replay mode.
 	for range 50 {
 		testutils.RunSQL(t, `INSERT INTO `+srcDB+`.items (id, val, updated_at)
 			VALUES (UUID(), HEX(RANDOM_BYTES(20)), NOW())`)
@@ -789,58 +785,80 @@ func TestMoveWithVarcharPK(t *testing.T) {
 	require.NoError(t, err)
 	defer utils.CloseAndLog(sourceDB)
 
+	// Hold cutover at the sentinel so the finite workload definitely runs
+	// after copy, when VARCHAR primary keys use FIFO replay. The old writers
+	// ran until move.Run returned, so a slow reader could chase them forever.
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-
-	var wg sync.WaitGroup
-	var writeCount, errorCount atomic.Int64
-
-	// 4 writers doing INSERT / UPDATE / DELETE on VARCHAR PKs while the
-	// move runs. The FIFO queue must replay these in binlog order to land
-	// on the correct end state on the target.
-	//
-	// A short delay between iterations rate-limits the writers to ~400 ops/sec
-	// total. Without this, an uncapped tight loop generates binlog faster than
-	// the reader can drain it on slow CI runners — the source position
-	// outruns the buffered position indefinitely and Flush()'s BlockWait loop
-	// never converges below binlogTrivialThreshold, eventually tripping the
-	// 10-minute test timeout (issue #834).
-	for range 4 {
-		wg.Go(func() {
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				default:
-				}
-				if err := varcharPKWriteOne(ctx, sourceDB, srcDB); err != nil {
-					errorCount.Add(1)
-				} else {
-					writeCount.Add(1)
-				}
-				time.Sleep(10 * time.Millisecond)
-			}
-		})
-	}
-	time.Sleep(100 * time.Millisecond)
-
-	move := &Move{
+	runner, err := NewRunner(&Move{
 		SourceDSN:    sourceDSN,
 		TargetDSN:    targetDSN,
 		Threads:      2,
 		WriteThreads: 2,
-		DeferCutOver: false,
-	}
-	err = move.Run()
-	cancel()
-	wg.Wait()
+		DeferCutOver: true,
+	})
+	require.NoError(t, err)
+	done := make(chan struct{})
+	errCh := make(chan error, 1)
+	var runErr error
+	var wg sync.WaitGroup
+	t.Cleanup(func() {
+		cancel()
+		wg.Wait()
+		select {
+		case <-done:
+			if err := runner.Close(); err != nil {
+				t.Errorf("closing move runner: %v", err)
+			}
+		case <-time.After(30 * time.Second):
+			t.Error("move runner did not stop during cleanup")
+		}
+	})
+	go func() { runErr = runner.Run(ctx); errCh <- runErr; close(done) }()
 
-	t.Logf("%d successful writes, %d errors during move",
-		writeCount.Load(), errorCount.Load())
-	require.NoError(t, err, "move on VARCHAR PK table must succeed (issue #607)")
+	waitForMoveStatus(t, runner, status.WaitingOnSentinelTable, errCh)
+
+	var writeCount, errorCount atomic.Int64
+	// Four finite writers keep concurrent FIFO apply coverage while guaranteeing
+	// a quiet source for the final drain (#834). Unbounded writers can produce
+	// binlog faster than a slow CI reader drains it, preventing catch-up forever.
+	// The finite count guarantees convergence; pacing also limits peak pressure.
+	writeCtx, cancelWrites := context.WithTimeout(ctx, 3*time.Minute)
+	defer cancelWrites()
+	const writers, iterations = 4, 25
+	for range writers {
+		wg.Go(func() {
+			pace := time.NewTicker(10 * time.Millisecond)
+			defer pace.Stop()
+			for range iterations {
+				select {
+				case <-writeCtx.Done():
+					return
+				case <-pace.C:
+				}
+				if err := varcharPKWriteOne(writeCtx, sourceDB, srcDB); err != nil {
+					errorCount.Add(1)
+				} else {
+					writeCount.Add(1)
+				}
+			}
+		})
+	}
+	wg.Wait()
+	require.Equal(t, int64(0), errorCount.Load())
+	require.Equal(t, int64(writers*iterations), writeCount.Load(), "the test must execute its concurrent write workload")
+	drainCtx, cancelDrain := context.WithTimeout(ctx, 3*time.Minute)
+	defer cancelDrain()
+	testutils.RunSQL(t, "DROP TABLE "+dstDB+"."+sentinel.TableName)
+	select {
+	case <-done:
+		require.NoError(t, runErr, "move on VARCHAR PK table must succeed (issue #607)")
+	case <-drainCtx.Done():
+		t.Fatalf("move did not finish within the final drain budget (state %s): %v", runner.status.Get(), drainCtx.Err())
+	}
 
 	// Source/target row counts must match. The internal checksum step inside
-	// move.Run() already proves content equivalence; this is a belt-and-braces
+	// runner.Run() already proves content equivalence; this is a belt-and-braces
 	// check on top of that.
 	var sourceCount, targetCount int
 	require.NoError(t, sourceDB.QueryRowContext(t.Context(),
