@@ -42,6 +42,10 @@
 //       lag) reconciles here and passes, so only a mismatch that survives a
 //       full drain returns ErrPermanentDivergence.
 //
+// With SplitHotChunks, two successive source changes subdivide a range into
+// two surrounding ranges and a point read, each with fresh evidence. Split
+// parents are never counted as passed. Depth and per-pass budgets bound work.
+//
 // Hot chunks slow but do not block pass completion: they cycle to the back
 // of the FIFO while other entries resolve. After MaxHotAttempts observations,
 // a still-changing chunk is deferred to the next pass. The pass is not clean
@@ -130,6 +134,11 @@ const (
 	DefaultContinuousMaxHotAttempts = 10
 )
 
+const (
+	hotSplitDepthLimit = 32
+	hotSplitPassLimit  = 1024
+)
+
 // Shared continuous-checksum pacing. Vars (not consts) so tests can shorten
 // them; production never overrides them. Keeping them here makes the pacing
 // identical across every caller (migrate, sync).
@@ -151,6 +160,9 @@ var (
 type ContinuousCheckerConfig struct {
 	// Concurrency is the number of worker goroutines. Default 4.
 	Concurrency int
+	// SplitHotChunks subdivides repeatedly changing ranges before deferring
+	// them. Each child is independently read; parent signatures are not reused.
+	SplitHotChunks bool
 	// Throttler pauses new checks under target load; in-flight repairs finish.
 	Throttler throttler.Throttler
 	// Autoscale bounds live checks using target load and change-feed backlog.
@@ -225,7 +237,7 @@ type ContinuousCheckerStats struct {
 	CurrentPass uint64
 
 	// ChunksThisPass is how many chunks the walker has emitted in the
-	// current pass.
+	// current pass, including split parents and their subsequently emitted children.
 	ChunksThisPass uint64
 
 	// ChunksPassedThisPass is how many chunks have gone clean in the
@@ -243,8 +255,8 @@ type ContinuousCheckerStats struct {
 	// (fresh-walk) read in the current pass and were enqueued for retry.
 	// At the end of a completed pass this equals PassedSecondAttemptThisPass +
 	// PassedUnder5AttemptsThisPass + PassedUnder10AttemptsThisPass +
-	// RecopiesThisPass + HotChunksDeferredThisPass. A completed pass may
-	// contain repairs or deferrals and therefore need not be clean. Resets
+	// RecopiesThisPass + HotChunksDeferredThisPass + HotChunksSplitThisPass.
+	// A completed pass may contain repairs or deferrals and need not be clean. Resets
 	// each pass.
 	MismatchesThisPass uint64
 
@@ -271,6 +283,9 @@ type ContinuousCheckerStats struct {
 	// deferred after MaxHotAttempts. They are not counted as passed; any value
 	// greater than zero makes this pass ineligible for FirstCleanPass.
 	HotChunksDeferredThisPass uint64
+	// HotChunksSplitThisPass counts parents replaced by child ranges. A split
+	// is not a verification result; all children must resolve independently.
+	HotChunksSplitThisPass uint64
 
 	// RetryQueueDepth is the current size of the delayed-retry queue.
 	RetryQueueDepth int
@@ -313,7 +328,8 @@ type ContinuousCheckerStats struct {
 // permanent failure surfaces. Concurrent calls to Stats and FirstCleanPass
 // are safe at any time.
 type ContinuousChecker struct {
-	cfg ContinuousCheckerConfig
+	cfg        ContinuousCheckerConfig
+	splitChunk func(context.Context, *table.Chunk, uint64) ([]*table.Chunk, error)
 
 	sourceDB *sql.DB
 	targetDB *sql.DB
@@ -322,12 +338,14 @@ type ContinuousChecker struct {
 
 	// atomically-updated counters. The "ThisPass" counters reset at the
 	// start of each pass; lifetime counters accumulate forever.
-	passesCompleted      atomic.Uint64
-	currentPass          atomic.Uint64
-	chunksThisPass       atomic.Uint64
-	chunksPassedThisPass atomic.Uint64
-	mismatchesThisPass   atomic.Uint64 // any chunk that needed >=1 retry
-	mismatchesDetected   atomic.Uint64 // lifetime mismatches
+	passesCompleted        atomic.Uint64
+	currentPass            atomic.Uint64
+	chunksThisPass         atomic.Uint64
+	hotChunksSplitThisPass atomic.Uint64
+	splitAttempts          atomic.Uint64
+	chunksPassedThisPass   atomic.Uint64
+	mismatchesThisPass     atomic.Uint64 // any chunk that needed >=1 retry
+	mismatchesDetected     atomic.Uint64 // lifetime mismatches
 
 	// Per-pass histogram of how many attempts each chunk needed before
 	// it went clean. Buckets are non-overlapping. "attempts" counts every
@@ -380,7 +398,10 @@ type chunkSig struct {
 // originalSrc is updated each time we observe the source change while the
 // chunk is still pending — see the "hot chunk" path in the package doc.
 type retryEntry struct {
-	chunk *table.Chunk
+	chunk      *table.Chunk
+	fresh      bool
+	splitDepth int
+	point      bool
 
 	originalSrc chunkSig
 	originalTgt chunkSig
@@ -394,8 +415,7 @@ type retryEntry struct {
 	// when >=2.
 	consecutiveSrcChanged int
 
-	// attempts is the number of times this entry has been re-read. Used
-	// only for logging / stats; not gated on.
+	// attempts counts completed observations and bounds hot retries.
 	attempts int
 }
 
@@ -403,7 +423,9 @@ type retryEntry struct {
 // the fresh-walk path (where a mismatch enqueues a new retryEntry) from
 // the retry path (where the policy of pkg-doc step 2 applies).
 type workItem struct {
-	chunk *table.Chunk
+	chunk      *table.Chunk
+	splitDepth int
+	point      bool
 
 	isRetry bool
 
@@ -417,7 +439,8 @@ type workItem struct {
 // workResult is what workers send back to the dispatcher. The driver then
 // applies pass/retry policy and updates counters.
 type workResult struct {
-	item *workItem
+	item     *workItem
+	children []*table.Chunk
 
 	// passed is true iff the chunk resolved for pass-completion purposes
 	// (initial match, retry match against the original or new source
@@ -497,6 +520,9 @@ func NewContinuousChecker(
 		firstCleanPassCh: make(chan struct{}),
 	}
 	c.readChunk = readChunkCRC2(sourceDB, targetDB)
+	c.splitChunk = func(ctx context.Context, chunk *table.Chunk, rows uint64) ([]*table.Chunk, error) {
+		return splitHotChunk(ctx, sourceDB, chunk, rows)
+	}
 	return c, nil
 }
 
@@ -585,6 +611,8 @@ func (c *ContinuousChecker) Run(ctx context.Context) error {
 		}
 		c.currentPass.Store(passNum)
 		c.chunksThisPass.Store(0)
+		c.hotChunksSplitThisPass.Store(0)
+		c.splitAttempts.Store(0)
 		c.chunksPassedThisPass.Store(0)
 		c.mismatchesThisPass.Store(0)
 		c.passedFirstAttemptThisPass.Store(0)
@@ -644,6 +672,7 @@ func (c *ContinuousChecker) Run(ctx context.Context) error {
 			"under_10_attempts", c.passedUnder10AttemptsThisPass.Load(),
 			"recopies", c.recopiesThisPass.Load(),
 			"hot_chunks_deferred", deferredHot,
+			"hot_chunks_split", c.hotChunksSplitThisPass.Load(),
 			"duration", time.Since(passStart).Round(time.Millisecond).String(),
 		)
 	}
@@ -718,7 +747,9 @@ func (c *ContinuousChecker) runOnePass(ctx context.Context, workCh chan<- *workI
 					dueHead = e
 					emit = &workItem{
 						chunk:                 e.chunk,
-						isRetry:               true,
+						isRetry:               !e.fresh,
+						splitDepth:            e.splitDepth,
+						point:                 e.point,
 						originalSrc:           e.originalSrc,
 						originalTgt:           e.originalTgt,
 						consecutiveSrcChanged: e.consecutiveSrcChanged,
@@ -791,6 +822,9 @@ func (c *ContinuousChecker) runOnePass(ctx context.Context, workCh chan<- *workI
 			} else {
 				// Commit the retry emit: remove from queue head and adjust
 				// hot-chunk counter if applicable.
+				if dueHead.fresh {
+					c.chunksThisPass.Add(1)
+				}
 				queue.Remove(queue.Front())
 				c.retryQueueDepth.Store(int64(queue.Len()))
 				if dueHead.consecutiveSrcChanged >= 2 {
@@ -903,6 +937,31 @@ func (c *ContinuousChecker) worker(
 	}
 }
 
+// trySplitHot only runs after two successive source changes. Splits are bounded
+// independently of retries, so resetting child evidence cannot make a pass
+// unbounded. A failed split keeps the normal retry/deferral policy; splitting
+// is optional and never grants verification. Parent cancellation still aborts.
+func (c *ContinuousChecker) trySplitHot(ctx context.Context, res *workResult) bool {
+	item := res.item
+	if !c.cfg.SplitHotChunks || item.point || res.newSrc.count <= 1 || item.splitDepth >= hotSplitDepthLimit || item.consecutiveSrcChanged < 1 {
+		return false
+	}
+	if c.splitAttempts.Add(1) > hotSplitPassLimit {
+		return false
+	}
+	res.children, res.err = c.splitChunk(ctx, item.chunk, res.newSrc.count)
+	if res.err != nil {
+		if ctx.Err() != nil {
+			res.err = ctx.Err()
+			return true
+		}
+		c.cfg.Logger.Warn("continuous checksum: split failed; retaining bounded retries", "error", res.err)
+		res.children, res.err = nil, nil
+		return false
+	}
+	return len(res.children) != 0
+}
+
 // executeWork runs the source+target read for a single workItem and applies
 // the pass criterion, returning a result that the dispatcher can act on
 // without re-reading state.
@@ -925,7 +984,7 @@ func (c *ContinuousChecker) executeWork(ctx context.Context, item *workItem) *wo
 	// would skew the feedback signal toward the slower retry path. Time is
 	// measured by the worker (not the dispatcher) so we time the actual
 	// read, not the queue wait.
-	if !item.isRetry {
+	if !item.isRetry && item.splitDepth == 0 {
 		c.chunker.Feedback(item.chunk, time.Since(start), tgtCount)
 	}
 
@@ -956,6 +1015,9 @@ func (c *ContinuousChecker) executeWork(ctx context.Context, item *workItem) *wo
 		// the dispatcher until the bounded attempt limit. At that point defer
 		// it to the next pass without claiming it verified; a small number of
 		// permanently hot chunks must not hold one pass open forever.
+		if c.trySplitHot(ctx, res) {
+			return res
+		}
 		if item.attempts+1 >= c.cfg.MaxHotAttempts {
 			res.deferHot = true
 		}
@@ -1020,6 +1082,9 @@ func (c *ContinuousChecker) executeWork(ctx context.Context, item *workItem) *wo
 		if newSrc != item.originalSrc {
 			// Apply the same hot-chunk bound as the pre-drain comparison:
 			// changes observed only during Flush must not bypass the limit.
+			if c.trySplitHot(ctx, res) {
+				return res
+			}
 			res.deferHot = item.attempts+1 >= c.cfg.MaxHotAttempts
 			return res
 		}
@@ -1038,6 +1103,19 @@ func (c *ContinuousChecker) handleResult(res *workResult, enqueueRetry func(*ret
 	if res.err != nil {
 		return res.err
 	}
+	if len(res.children) != 0 {
+		c.hotChunksSplitThisPass.Add(1)
+		// Replace the unresolved parent with independently verified leaves.
+		// The parent is recorded as split, never as passed.
+		c.cfg.Logger.Info("continuous checksum: splitting hot range", "chunk", res.item.chunk.String(), "depth", res.item.splitDepth+1, "children", len(res.children))
+		for i, child := range res.children {
+			if err := enqueueRetry(&retryEntry{chunk: child, fresh: true, splitDepth: res.item.splitDepth + 1, point: i == 1, notBefore: time.Now()}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
 	if res.passed {
 		c.chunksPassedThisPass.Add(1)
 		c.bucketPassed(res.item, res.recopied)
@@ -1086,6 +1164,8 @@ func (c *ContinuousChecker) handleResult(res *workResult, enqueueRetry func(*ret
 		)
 		return enqueueRetry(&retryEntry{
 			chunk:       res.item.chunk,
+			splitDepth:  res.item.splitDepth,
+			point:       res.item.point,
 			originalSrc: res.newSrc,
 			originalTgt: res.newTgt,
 			notBefore:   time.Now().Add(c.cfg.RetryDelay),
@@ -1109,6 +1189,8 @@ func (c *ContinuousChecker) handleResult(res *workResult, enqueueRetry func(*ret
 	)
 	return enqueueRetry(&retryEntry{
 		chunk:                 res.item.chunk,
+		splitDepth:            res.item.splitDepth,
+		point:                 res.item.point,
 		originalSrc:           res.newSrc,
 		originalTgt:           res.newTgt,
 		notBefore:             time.Now().Add(c.cfg.RetryDelay),
@@ -1234,6 +1316,7 @@ func (c *ContinuousChecker) Stats() ContinuousCheckerStats {
 		PassedUnder10AttemptsThisPass: c.passedUnder10AttemptsThisPass.Load(),
 		RecopiesThisPass:              c.recopiesThisPass.Load(),
 		HotChunksDeferredThisPass:     c.hotChunksDeferredThisPass.Load(),
+		HotChunksSplitThisPass:        c.hotChunksSplitThisPass.Load(),
 		RetryQueueDepth:               int(c.retryQueueDepth.Load()),
 		HotChunkCount:                 int(c.hotChunkCount.Load()),
 		InFlight:                      int(c.inFlight.Load()),
