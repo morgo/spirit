@@ -45,7 +45,7 @@ var (
 // locklessDivergenceReporter is the minimal view of the sentinel-wait
 // lockless checker that the checkpoint machinery needs: "has this checker
 // observed any divergence?". Both the production *checksum.LocklessChecker
-// and the test mockChecker satisfy it. Keeping the field this narrow lets the
+// and the test checksum.MockChecker satisfy it. Keeping the field this narrow lets the
 // lockless checksum use checksum.LocklessChecker (which is intentionally
 // not a checksum.Checker) without changing DumpCheckpoint /
 // invalidateChecksumWatermark, which only consult DifferencesFound().
@@ -1143,9 +1143,7 @@ func (r *Runner) flushUnderLoad() bool {
 }
 
 // setThrottlerOnPhases hands the resolved throttler to every phase that paces
-// itself against it. The copier always accepts one; the checksum does so via
-// the optional checksum.ThrottleAware capability (test doubles and the
-// sentinel-wait checker do not implement it, and do not need to).
+// itself against it. Both the copier and every finite checker accept one.
 //
 // Both phases get the same composite, but they do not react to the same parts of
 // it: the copier writes and so honours every signal in it, while the checksum
@@ -1156,15 +1154,7 @@ func (r *Runner) flushUnderLoad() bool {
 func (r *Runner) setThrottlerOnPhases() {
 	t := r.currentThrottler()
 	r.copier.SetThrottler(t)
-	if aware, ok := r.checker.(checksum.ThrottleAware); ok {
-		aware.SetThrottler(t)
-	} else {
-		// Not fatal: the checksum falls back to its Noop and runs unthrottled,
-		// which is how it behaved before it learned to throttle at all. Worth a
-		// line so it is visible if a future checker type silently loses the
-		// capability.
-		r.logger.Debug("checker does not support throttling; checksum will run unpaced")
-	}
+	r.checker.SetThrottler(t)
 }
 
 // setupThrottler sets up the throttlers used to pace the copier and the

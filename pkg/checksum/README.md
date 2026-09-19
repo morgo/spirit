@@ -64,6 +64,10 @@ an empty watermark because unresolved retries are not represented by traversal.
 This preserves safe migration resume but does **not** yet provide partial checksum
 resume for lockless verification.
 
+`Checker.SetThrottler` is required for every finite implementation. Tests can use
+the shared `checksum.MockChecker`, whose throttler setter is a no-op and whose
+mismatch count can be changed safely while a runner is active.
+
 The optional `StatusReporter` capability exposes a structured `ChecksumStatus`.
 `StatusSummary` and `StatusRow` format it, falling back to basic progress and pacing
 for checkers without that capability. Runners need no concrete checker assertions.
@@ -116,7 +120,7 @@ The read is not synchronized with the change feed: a row deleted on the source a
 
 `SingleChecker` and `DistributedChecker` pace themselves against the same throttler the copier uses. Two things are separate here:
 
-- **The hard stop** is not opt-in, but it reacts only to *load*. Before dispatching each chunk the checker calls `Throttler.BlockWait`, so a checksum pauses when server load says to. Chunks already in flight are never interrupted: the checksum stops *dispatching* rather than abandoning work, because an aborted chunk is wasted I/O that must be redone from the same watermark. Wire the throttler with `SetThrottler` (the `ThrottleAware` capability) — runners build the checker before their throttlers are open.
+- **The hard stop** is not opt-in, but it reacts only to *load*. Before dispatching each chunk the checker calls `Throttler.BlockWait`, so a checksum pauses when server load says to. Chunks already in flight are never interrupted: the checksum stops *dispatching* rather than abandoning work, because an aborted chunk is wasted I/O that must be redone from the same watermark. Wire the throttler with `Checker.SetThrottler` — runners build the checker before their throttlers are open.
 
   Whatever throttler a checker is given is narrowed by `loadOnlyThrottler` to the children implementing `throttler.GradualThrottler` — in practice the Aurora signals. Binary signals, meaning replica lag, are dropped, and a checker given only those runs unpaced. This is not a shortcut but a correctness point: a checksum reads inside a `REPEATABLE READ` snapshot and writes nothing to the binlog, so it cannot be the cause of replica lag and pausing it cannot reduce that lag — while the pause extends the pass, holding the snapshot open and pinning undo the purge thread cannot advance past. The lag throttler also fails closed on stale polling, so an unreachable replica would stall dispatch until the yield timeout with the snapshot still held. Load is different in kind: a checksum does add read load to the primary, so backing off on load both works and is warranted.
 

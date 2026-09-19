@@ -71,9 +71,8 @@ type DistributedChecker struct {
 }
 
 var (
-	_ Checker       = (*DistributedChecker)(nil)
-	_ ThrottleAware = (*DistributedChecker)(nil)
-	_ Paced         = (*DistributedChecker)(nil)
+	_ Checker = (*DistributedChecker)(nil)
+	_ Paced   = (*DistributedChecker)(nil)
 )
 
 // Threads reports the live worker count. See the SingleChecker equivalent.

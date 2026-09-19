@@ -28,7 +28,6 @@ type locklessChecker struct {
 }
 
 var _ Checker = (*locklessChecker)(nil)
-var _ ThrottleAware = (*locklessChecker)(nil)
 var _ StatusReporter = (*locklessChecker)(nil)
 
 // SetThrottler is called during runner setup, before Run.

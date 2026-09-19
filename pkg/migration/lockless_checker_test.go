@@ -37,7 +37,7 @@ func TestExperimentalLocklessMigration(t *testing.T) {
 func TestLocklessCheckpointNeverPersistsChecksumWatermark(t *testing.T) {
 	r := setupRunnerForChecksumTest(t, "lockless_checkpoint")
 	advanceRunnerToChecksumWatermarks(t, r)
-	r.checker = &mockChecker{chunker: r.checksumChunker}
+	r.checker = &checksum.MockChecker{Chunker: r.checksumChunker}
 	r.status.Set(status.Checksum)
 	require.NoError(t, r.DumpCheckpoint(t.Context()))
 	_, watermark := latestCheckpointWatermarks(t, r)

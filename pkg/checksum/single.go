@@ -114,9 +114,8 @@ func (c *SingleChecker) currentLimiter() *autoscale.Limiter {
 }
 
 var (
-	_ Checker       = (*SingleChecker)(nil)
-	_ ThrottleAware = (*SingleChecker)(nil)
-	_ Paced         = (*SingleChecker)(nil)
+	_ Checker = (*SingleChecker)(nil)
+	_ Paced   = (*SingleChecker)(nil)
 )
 
 // Threads reports the live worker count: the limiter's current limit while a

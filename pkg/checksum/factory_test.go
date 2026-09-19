@@ -85,7 +85,7 @@ func TestFactoryLocklessConfigAndLifecycle(t *testing.T) {
 	require.True(t, finite.cfg.SplitHotChunks)
 	require.True(t, finite.cfg.SnapshotHotChunks)
 	require.Equal(t, 99, options.Concurrency, "factory must not mutate supplied lockless policy")
-	checker.(ThrottleAware).SetThrottler(&throttler.Noop{})
+	checker.SetThrottler(&throttler.Noop{})
 	require.Contains(t, StatusRow(checker), "scanning")
 	for range 2 {
 		require.NoError(t, checker.Run(t.Context()))

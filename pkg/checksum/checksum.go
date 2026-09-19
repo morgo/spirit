@@ -122,6 +122,8 @@ func compareChunk(srcCRC, tgtCRC int64, srcCount, tgtCount uint64) chunkMismatch
 }
 
 type Checker interface {
+	// SetThrottler installs pacing before Run. Every finite checker supports it.
+	SetThrottler(throttler.Throttler)
 	// ResumeWatermark returns safe verification progress, or an empty string when
 	// a resumed run must recheck everything. Read it instead of the walker watermark.
 	ResumeWatermark() (string, error)
@@ -153,13 +155,6 @@ type AutoscaleConfig struct {
 	// budget connections for it (see SingleChecker.initConnPool for why the
 	// pools cannot grow on demand). Values below Concurrency are raised to it.
 	MaxThreads int
-}
-
-// ThrottleAware optionally installs pacing after construction, before Run.
-// All factory implementations support it. Runners construct checkers before
-// opening throttlers; test doubles need not provide this capability.
-type ThrottleAware interface {
-	SetThrottler(t throttler.Throttler)
 }
 
 // loadOnlyThrottler narrows a throttler to the signals a checksum should react

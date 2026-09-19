@@ -148,9 +148,7 @@ func TestChecksumConsultsThrottler(t *testing.T) {
 	checker := checksumFixture(t, "checksum_throttle_counts", 4096, NewCheckerDefaultConfig())
 
 	thr := &countingThrottler{}
-	aware, ok := checker.(ThrottleAware)
-	require.True(t, ok, "SingleChecker must expose the ThrottleAware capability")
-	aware.SetThrottler(thr)
+	checker.SetThrottler(thr)
 
 	require.NoError(t, checker.Run(t.Context()))
 	// Before this existed the checksum ignored throttling entirely, so a
@@ -167,7 +165,7 @@ func TestChecksumIgnoresBinaryThrottler(t *testing.T) {
 	checker := checksumFixture(t, "checksum_ignores_binary_throttler", 4096, NewCheckerDefaultConfig())
 
 	lag := &binaryThrottler{}
-	checker.(ThrottleAware).SetThrottler(lag)
+	checker.SetThrottler(lag)
 	require.NoError(t, checker.Run(t.Context()))
 	assert.Zero(t, lag.calls.Load(), "must not wait on a signal it cannot influence")
 	assert.False(t, checker.(Paced).IsThrottled(), "a dropped signal must not show as throttled")
@@ -180,7 +178,7 @@ func TestChecksumThrottlerKeepsLoadDropsLagFromAComposite(t *testing.T) {
 
 	lag := &binaryThrottler{}
 	load := &alwaysLoaded{}
-	checker.(ThrottleAware).SetThrottler(throttler.NewMultiThrottler(lag, load))
+	checker.SetThrottler(throttler.NewMultiThrottler(lag, load))
 
 	require.NoError(t, checker.Run(t.Context()))
 	assert.Positive(t, load.calls.Load(), "the load signal must still pace the checksum")
@@ -190,7 +188,7 @@ func TestChecksumThrottlerKeepsLoadDropsLagFromAComposite(t *testing.T) {
 func TestChecksumThrottlerBlocksDispatch(t *testing.T) {
 	checker := checksumFixture(t, "checksum_throttle_blocks", 4096, NewCheckerDefaultConfig())
 	thr := newGateThrottler()
-	checker.(ThrottleAware).SetThrottler(thr)
+	checker.SetThrottler(thr)
 
 	done := make(chan error, 1)
 	go func() { done <- checker.Run(t.Context()) }()
@@ -216,7 +214,7 @@ func TestChecksumThrottlerBlocksDispatch(t *testing.T) {
 func TestChecksumThrottledPassIsCancellable(t *testing.T) {
 	checker := checksumFixture(t, "checksum_throttle_cancel", 1024, NewCheckerDefaultConfig())
 	thr := newGateThrottler() // never released
-	checker.(ThrottleAware).SetThrottler(thr)
+	checker.SetThrottler(thr)
 
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)
@@ -244,7 +242,7 @@ func TestChecksumCancelledWhileThrottledNeverReportsPass(t *testing.T) {
 	// Without the chunker.IsRead() guard in runChecksum this returns nil.
 	checker := checksumFixture(t, "checksum_cancel_no_false_pass", 8192, NewCheckerDefaultConfig())
 	thr := newGateThrottler() // never released, so not one chunk is dispatched
-	checker.(ThrottleAware).SetThrottler(thr)
+	checker.SetThrottler(thr)
 
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)
@@ -359,7 +357,7 @@ func TestStatusSuffixReportsPacing(t *testing.T) {
 	// A throttled checker must say so, which is the whole point of the field.
 	// The stub carries a continuous signal because a checksum only reacts to
 	// load throttlers; throttler.Mock is binary and would be narrowed away.
-	checker.(ThrottleAware).SetThrottler(&alwaysLoaded{})
+	checker.SetThrottler(&alwaysLoaded{})
 	assert.Contains(t, StatusSuffix(checker), "throttled=true")
 }
 
@@ -369,7 +367,7 @@ func TestStatusSuffixEmptyForUnpacedChecker(t *testing.T) {
 	assert.Empty(t, StatusSuffix(unpacedChecker{}))
 }
 
-// unpacedChecker is a Checker that implements neither Paced nor ThrottleAware.
+// unpacedChecker is a Checker that does not report pacing through Paced.
 type unpacedChecker struct{}
 
 func (unpacedChecker) Run(context.Context) error            { return nil }
@@ -379,3 +377,5 @@ func (unpacedChecker) ExecTime() time.Duration              { return 0 }
 func (unpacedChecker) DifferencesFound() uint64             { return 0 }
 
 func (unpacedChecker) ResumeWatermark() (string, error) { return "", nil }
+
+func (unpacedChecker) SetThrottler(throttler.Throttler) {}
