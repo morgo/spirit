@@ -101,6 +101,7 @@ import (
 
 	"github.com/block/spirit/pkg/autoscale"
 	"github.com/block/spirit/pkg/change"
+	"github.com/block/spirit/pkg/metrics"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/throttler"
 	"golang.org/x/sync/errgroup"
@@ -167,7 +168,9 @@ var (
 // LocklessCheckerConfig configures a LocklessChecker. See Default for
 // the runtime defaults applied by the constructor when fields are zero.
 type LocklessCheckerConfig struct {
-	// Concurrency is the number of worker goroutines. Default 4.
+	// Concurrency is the number of worker goroutines. Default 4. Through
+	// NewChecker, set CheckerConfig.Concurrency; a conflicting nonzero value
+	// here is rejected. NewLocklessChecker uses this field directly.
 	Concurrency int
 	// SplitHotChunks subdivides repeatedly changing ranges before deferring
 	// them. Large ranges produce up to eleven children; oversized descendants
@@ -181,6 +184,8 @@ type LocklessCheckerConfig struct {
 	Throttler throttler.Throttler
 	// Autoscale bounds live checks using target load and change-feed backlog.
 	Autoscale AutoscaleConfig
+	// MetricsSink receives autoscaling gauges. NewChecker uses CheckerConfig.MetricsSink.
+	MetricsSink metrics.Sink
 
 	// RetryDelay is the minimum wait between attempts for any given chunk —
 	// measured from the *last* attempt of that chunk, not from the original
@@ -631,7 +636,7 @@ func (c *LocklessChecker) run(ctx context.Context, untilClean bool) error {
 			backlog = c.feed.FlushResidual
 		}
 		workerWG.Go(func() {
-			newChecksumScaler(c.cfg.Throttler, limiter, backlog, c.cfg.Concurrency, workers, c.cfg.Logger, nil).run(workerCtx)
+			newChecksumScaler(c.cfg.Throttler, limiter, backlog, c.cfg.Concurrency, workers, c.cfg.Logger, c.cfg.MetricsSink).run(workerCtx)
 		})
 	}
 

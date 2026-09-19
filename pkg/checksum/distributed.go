@@ -61,6 +61,7 @@ type DistributedChecker struct {
 	logger           *slog.Logger
 	fixDifferences   bool
 	differencesFound atomic.Uint64
+	resume           snapshotResume
 	recopyLock       sync.Mutex
 	maxRetries       int
 	yieldTimeout     time.Duration
@@ -71,9 +72,8 @@ type DistributedChecker struct {
 }
 
 var (
-	_ Checker       = (*DistributedChecker)(nil)
-	_ ThrottleAware = (*DistributedChecker)(nil)
-	_ Paced         = (*DistributedChecker)(nil)
+	_ Checker = (*DistributedChecker)(nil)
+	_ Paced   = (*DistributedChecker)(nil)
 )
 
 // Threads reports the live worker count. See the SingleChecker equivalent.
@@ -649,12 +649,9 @@ func (c *DistributedChecker) Run(ctx context.Context) error {
 	for attempt := 1; attempt <= c.maxRetries; attempt++ {
 		if attempt > 1 {
 			c.logger.Error("checksum failed, retrying", "attempt", attempt, "maxRetries", c.maxRetries)
-			// Reset the chunker to start from the beginning
-			if err := c.chunker.Reset(); err != nil {
+			if err := c.resume.restart(&c.differencesFound, c.chunker.Reset); err != nil {
 				return fmt.Errorf("failed to reset chunker for retry: %w", err)
 			}
-			// Reset differences found counter
-			c.differencesFound.Store(0)
 			// Reset the invalid flag left set by a failed attempt: it makes
 			// isHealthy() false, which would skip every chunk and turn this
 			// retry into a vacuous pass.
@@ -858,4 +855,9 @@ func (c *DistributedChecker) runChecksum(ctx context.Context) error {
 		return errors.New("checksum stopped before the table was fully verified")
 	}
 	return nil
+}
+
+// ResumeWatermark returns evidence from one attempt, synchronized with retries.
+func (c *DistributedChecker) ResumeWatermark() (string, error) {
+	return c.resume.capture(c.chunker, &c.differencesFound)
 }

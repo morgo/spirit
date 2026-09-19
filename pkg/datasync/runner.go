@@ -558,6 +558,7 @@ func (r *Runner) runLocklessChecksum(ctx context.Context) error {
 			Concurrency:     r.sync.Threads,
 			SplitHotChunks:  true,
 			Throttler:       r.currentLoadSignal(),
+			MetricsSink:     r.metricsSink,
 			Autoscale:       checksum.AutoscaleConfig{Enabled: r.autoscale.Enabled, MaxThreads: r.autoscale.MaxReadThreads},
 			MinPassInterval: checksum.LocklessMinPassInterval,
 			Recopier:        recopier,

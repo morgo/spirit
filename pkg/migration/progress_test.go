@@ -3,7 +3,6 @@ package migration
 import (
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/block/spirit/pkg/checksum"
 	"github.com/block/spirit/pkg/status"
@@ -158,22 +157,22 @@ func TestProgressPolledConcurrentlyWithRun(t *testing.T) {
 	require.Equal(t, status.ThrottleStatus{}, p.Throttle)
 }
 
-func TestLocklessProgressSummary(t *testing.T) {
-	stats := checksum.LocklessCheckerStats{CurrentPass: 1, ProgressBasisPoints: 1780, ChunksPassedThisPass: 40, InFlight: 8}
-	require.Contains(t, locklessProgressSummary(stats), "scanning scan≈17.8% passed=40")
-	stats.ProgressBasisPoints = 10000
-	stats.ScanComplete = true
-	stats.InFlight = 0
-	stats.RetryQueueDepth = 1
-	stats.ChunksPassedThisPass = 263
-	summary := locklessProgressSummary(stats)
-	require.Contains(t, summary, "waiting for verification")
-	require.Contains(t, summary, "scan≈100.0% passed=263 retrying=1")
-	require.NotContains(t, summary, "verified")
-	stats.RetryQueueDepth = 0
-	stats.HotChunksDeferredThisPass = 1
-	require.Contains(t, locklessProgressSummary(stats), "waiting for verification")
-	stats.HotChunksDeferredThisPass = 0
-	stats.FirstCleanPassAt = time.Now()
-	require.Contains(t, locklessProgressSummary(stats), "lockless: verified")
+type recordingChecker struct {
+	checksum.MockChecker
+	got throttler.Throttler
+}
+
+func (c *recordingChecker) SetThrottler(t throttler.Throttler) { c.got = t }
+
+func TestSetThrottlerOnPhasesReachesChecker(t *testing.T) {
+	r := setupRunnerForChecksumTest(t, "throttler_wiring")
+	advanceRunnerToChecksumWatermarks(t, r)
+	checker := &recordingChecker{}
+	r.checker = checker
+	resolved := &throttler.Noop{}
+	r.throttlerMu.Lock()
+	r.throttler = resolved
+	r.throttlerMu.Unlock()
+	r.setThrottlerOnPhases()
+	require.Same(t, resolved, checker.got, "resolved throttler must reach the checksum phase")
 }

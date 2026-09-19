@@ -1606,18 +1606,12 @@ func (r *Runner) Status() string {
 		return b.String()
 	case status.Checksum:
 		// This could take a while if it's a large table.
-		progress := r.checker.GetProgress()
 		b := status.NewBlock("migration status: state=%s total-time=%s checksum-time=%s",
 			state.String(),
 			r.status.TotalElapsed().Round(time.Second),
 			r.status.Elapsed().Round(time.Second),
 		)
-		b.Row("checksum", "%6.2f%%  %d/%d%s",
-			progress.Fraction()*100,
-			progress.RowsChecked,
-			progress.RowsTotal,
-			checksum.StatusSuffix(r.checker),
-		)
+		b.Row("checksum", "%s", checksum.StatusRow(r.checker))
 		b.Row("binlog", "deltas=%d  %s", r.getDeltaLenAll(), r.feedStatusRow())
 		b.Row("ckpt", "%s", r.lastCheckpoint.Row())
 		return b.String()
@@ -2004,7 +1998,7 @@ func (r *Runner) Progress() status.Progress {
 	state := r.status.Get()
 	var summary string
 	var eta status.ETA
-	var checksum status.ChecksumProgress
+	var checksumProgress status.ChecksumProgress
 	switch state { //nolint: exhaustive
 	case status.CopyRows:
 		summary = fmt.Sprintf("%v %s ETA %v",
@@ -2018,8 +2012,8 @@ func (r *Runner) Progress() status.Progress {
 	case status.ApplyChangeset, status.PostChecksum:
 		summary = fmt.Sprintf("Applying Changeset Deltas=%v", r.getDeltaLenAll())
 	case status.Checksum:
-		checksum = r.checker.GetProgress()
-		summary = "Checksum Progress=" + checksum.String()
+		checksumProgress = r.checker.GetProgress()
+		summary = checksum.StatusSummary(r.checker)
 	}
 
 	// Get per-table progress from the published copy chunker. Setup and
@@ -2033,7 +2027,7 @@ func (r *Runner) Progress() status.Progress {
 		Summary:      summary,
 		Resume:       r.usedResumeFromCheckpoint.Load(),
 		ETA:          eta,
-		Checksum:     checksum,
+		Checksum:     checksumProgress,
 		Tables:       tables,
 		Throttle:     r.throttleStatus(state),
 	}
@@ -2253,33 +2247,16 @@ func (r *Runner) DumpCheckpoint(ctx context.Context) error {
 	if err != nil {
 		return status.ErrWatermarkNotReady // it might not be ready, we can try again.
 	}
-	// Safety invariant: only persist the checksum_watermark if the current
-	// checksum pass has had zero differences. The chunker advances its
-	// low-watermark past every chunk it sees Feedback() for, including
-	// chunks that needed a recopy — but a recopy isn't a verification.
-	// Reading DifferencesFound() *after* the watermark catches any chunk
-	// in the watermark that was repaired (the per-chunk path increments
-	// differencesFound strictly before chunker.Feedback). When set,
-	// suppress the watermark so a restart re-validates from the start of
-	// the checksum phase. See pkg/migration/runner.go DumpCheckpoint for
-	// the full rationale.
-	//
-	// The same invariant applies to the sentinel-wait continuous checker
-	// (a separate object from r.checker — see continuousChecker): once it
-	// has repaired any chunk, the watermark here is the stale
-	// end-of-initial-checksum one, and resuming from it would verify only
-	// the trailing chunks — silently neutralizing the deliberate abort the
-	// continuous checksum triggers on divergence. So the watermark is
-	// persisted only while BOTH checkers are clean (or the continuous one
-	// doesn't exist yet).
+	// The checker excludes repaired or otherwise unverified ranges from its
+	// resume evidence. Sentinel-check differences also invalidate the initial
+	// gate's watermark, so a restart rechecks the whole range.
 	var checksumWatermark string
 	if r.status.Get() >= status.Checksum && r.checker != nil {
-		wm, wmErr := r.checksumChunker.GetLowWatermark()
+		wm, wmErr := r.checker.ResumeWatermark()
 		if wmErr != nil {
 			return status.ErrWatermarkNotReady
 		}
-		if r.checker.DifferencesFound() == 0 &&
-			(r.continuousChecker == nil || r.continuousChecker.DifferencesFound() == 0) {
+		if r.continuousChecker == nil || r.continuousChecker.DifferencesFound() == 0 {
 			checksumWatermark = wm
 		}
 	}
