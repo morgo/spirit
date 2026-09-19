@@ -1428,6 +1428,10 @@ func (r *Runner) Progress() status.Progress {
 		eta = r.copier.GetETAState()
 	case status.WaitingOnSentinelTable:
 		summary = "Waiting on Sentinel Table"
+		if r.checker != nil && r.checker.ContinuousActive() {
+			checksumProgress = r.checker.GetProgress()
+			summary += "; " + checksum.StatusSummary(r.checker)
+		}
 	case status.ApplyChangeset, status.PostChecksum:
 		summary = fmt.Sprintf("Applying Changeset Deltas=%v", r.replClient.GetDeltaLen())
 	case status.Checksum:

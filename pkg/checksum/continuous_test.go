@@ -31,7 +31,7 @@ func (f *continuousFeed) StartPeriodicFlush(context.Context, time.Duration) { f.
 func (f *continuousFeed) StopPeriodicFlush()                                { f.stops.Add(1) }
 
 func TestContinuousSnapshotLifecycle(t *testing.T) {
-	for _, outcome := range []string{"clean", "cancel", "repair-cancel", "failure", "joined-cancel"} {
+	for _, outcome := range []string{"clean", "cancel", "repair-cancel", "failure", "joined-cancel", "foreign-cancel"} {
 		t.Run(outcome, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				ctx, cancel := context.WithCancel(t.Context())
@@ -53,7 +53,9 @@ func TestContinuousSnapshotLifecycle(t *testing.T) {
 					if outcome == "failure" {
 						return failure
 					}
-					cancel()
+					if outcome != "foreign-cancel" {
+						cancel()
+					}
 					if outcome == "repair-cancel" {
 						resume.observed.Add(1)
 					}
@@ -76,7 +78,7 @@ func TestContinuousSnapshotLifecycle(t *testing.T) {
 				switch outcome {
 				case "failure", "joined-cancel":
 					require.ErrorIs(t, err, failure)
-				case "repair-cancel":
+				case "repair-cancel", "foreign-cancel":
 					require.ErrorIs(t, err, context.Canceled)
 				default:
 					require.NoError(t, err)
@@ -164,5 +166,82 @@ func TestLocklessContinuousReusesCheckerAfterInitialPass(t *testing.T) {
 		require.NoError(t, <-done)
 		require.False(t, checker.ContinuousActive(), "finished checker is idle")
 		require.Equal(t, feed.starts, feed.stops)
+	})
+}
+
+type continuousApplier struct{ spyApplier }
+
+func (*continuousApplier) Start(context.Context) error { return nil }
+func (*continuousApplier) Stop() error                 { return nil }
+
+func TestSnapshotContinuousActiveLifecycle(t *testing.T) {
+	for _, distributed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("distributed=%t", distributed), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				entered := make(chan struct{})
+				feed := &fakeFeed{flushFn: func(ctx context.Context) error {
+					close(entered)
+					<-ctx.Done()
+					return ctx.Err()
+				}}
+				cfg := NewCheckerDefaultConfig()
+				cfg.RepairApplier = &spyApplier{}
+				if distributed {
+					cfg.Applier = &continuousApplier{}
+				}
+				checker, err := NewChecker([]*sql.DB{{}}, newTestChunker(0), []change.Source{feed}, cfg)
+				require.NoError(t, err)
+				ctx, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				require.False(t, checker.ContinuousActive())
+				done := make(chan error, 1)
+				go func() { done <- checker.RunContinuous(ctx) }()
+				synctest.Wait()
+				require.False(t, checker.ContinuousActive(), "initial pacing is idle")
+				<-entered
+				require.True(t, checker.ContinuousActive(), "snapshot setup is active")
+				cancel()
+				require.NoError(t, <-done)
+				require.False(t, checker.ContinuousActive(), "joined checker is idle")
+			})
+		})
+	}
+}
+
+func TestLocklessContinuousDefaultInterval(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		feed := &lifecycleFeed{}
+		cfg := NewCheckerDefaultConfig()
+		cfg.Lockless = &LocklessCheckerConfig{DivergenceIsFatal: true}
+		checker, err := NewChecker([]*sql.DB{{}}, newTestChunker(0), []change.Source{feed}, cfg)
+		require.NoError(t, err)
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		done := make(chan error, 1)
+		go func() { done <- checker.RunContinuous(ctx) }()
+		time.Sleep(LocklessMinPassInterval / 2)
+		synctest.Wait()
+		require.Zero(t, checker.(*locklessChecker).Stats().PassesCompleted)
+		require.False(t, checker.ContinuousActive())
+		time.Sleep(LocklessMinPassInterval)
+		synctest.Wait()
+		require.Equal(t, uint64(1), checker.(*locklessChecker).Stats().PassesCompleted)
+		cancel()
+		require.NoError(t, <-done)
+	})
+}
+
+type canceledScan struct{ *testChunker }
+
+func (*canceledScan) Next() (*table.Chunk, error) { return nil, context.Canceled }
+
+func TestLocklessContinuousForeignCancellation(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		cfg := NewCheckerDefaultConfig()
+		cfg.Lockless = &LocklessCheckerConfig{DivergenceIsFatal: true, MinPassInterval: time.Second}
+		checker, err := NewChecker([]*sql.DB{{}}, &canceledScan{newTestChunker(1)}, []change.Source{&fakeFeed{}}, cfg)
+		require.NoError(t, err)
+		require.ErrorIs(t, checker.RunContinuous(t.Context()), context.Canceled)
+		require.NoError(t, t.Context().Err(), "parent is still alive")
 	})
 }

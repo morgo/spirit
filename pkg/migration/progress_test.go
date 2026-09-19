@@ -4,8 +4,10 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/block/spirit/pkg/change"
 	"github.com/block/spirit/pkg/checksum"
 	"github.com/block/spirit/pkg/status"
+	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/throttler"
 	"github.com/stretchr/testify/require"
@@ -184,4 +186,38 @@ func TestContinuousChecksumThrottleStatus(t *testing.T) {
 	require.False(t, r.throttleStatus(status.WaitingOnSentinelTable).Throttled, "replica/binary signals do not pace checksum")
 	checker.active = false
 	require.Equal(t, status.ThrottleStatus{}, r.throttleStatus(status.WaitingOnSentinelTable))
+}
+
+type statusOnlyFeed struct{ change.Source }
+
+func (*statusOnlyFeed) GetDeltaLen() int { return 0 }
+func (*activeContinuousChecker) GetProgress() status.ChecksumProgress {
+	return status.ChecksumProgress{RowsChecked: 25, RowsTotal: 100}
+}
+
+type explainedLoadThrottler struct{ gradualTestThrottler }
+
+func (*explainedLoadThrottler) ThrottleReason() string { return "server load" }
+
+func TestContinuousChecksumStatusSurfaces(t *testing.T) {
+	checker := &activeContinuousChecker{}
+	r := &Runner{checker: checker, replClient: &statusOnlyFeed{}, changes: []*tableChange{{table: &table.TableInfo{SchemaName: "test"}}}}
+	r.setThrottler(&explainedLoadThrottler{gradualTestThrottler{throttled: true}})
+	r.status.Set(status.WaitingOnSentinelTable)
+	for _, active := range []bool{false, true, false} {
+		checker.active = active
+		progress, block := r.Progress(), r.Status()
+		require.Equal(t, active, progress.Throttle.Throttled)
+		if active {
+			require.Equal(t, checker.GetProgress(), progress.Checksum)
+			require.Contains(t, progress.Summary, "25/100")
+			require.Contains(t, block, "checksum")
+			require.Contains(t, block, "throttle")
+		} else {
+			require.Zero(t, progress.Checksum)
+			require.Equal(t, "Waiting on Sentinel Table", progress.Summary)
+			require.NotContains(t, block, "checksum")
+			require.NotContains(t, block, "throttle")
+		}
+	}
 }

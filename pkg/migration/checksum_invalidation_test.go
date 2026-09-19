@@ -331,3 +331,29 @@ func TestContinuousSnapshotRepairsBeforeCutover(t *testing.T) {
 	testutils.RunSQLInDatabase(t, dbName, "DROP TABLE _spirit_sentinel")
 	require.NoError(t, running.wait(t))
 }
+
+// Disable periodic dumping so neither it nor graceful-exit cleanup can hide a
+// missing eager invalidation. Seed the old evidence while copying is paused.
+func TestContinuousChecksumInvalidatesBeforeExit(t *testing.T) {
+	oldInterval := status.CheckpointDumpInterval
+	status.CheckpointDumpInterval = time.Hour
+	t.Cleanup(func() { status.CheckpointDumpInterval = oldInterval })
+	dbName, db := testutils.CreateUniqueTestDatabase(t)
+	testutils.RunSQLInDatabase(t, dbName, "CREATE TABLE eager_invalidation (id INT PRIMARY KEY)")
+	testutils.RunSQLInDatabase(t, dbName, "INSERT INTO eager_invalidation VALUES (1)")
+	m := NewTestRunner(t, "eager_invalidation", "ENGINE=InnoDB", WithDBName(dbName), WithThreads(1), WithTestThrottler(), WithDeferCutOver(), WithRespectSentinel())
+	running := startTestRun(t, m.Run, m.Close)
+	waitForStatus(t, m, status.CopyRows, running)
+	_, err := db.ExecContext(t.Context(), "INSERT INTO _eager_invalidation_chkpnt (id, checksum_watermark, statement) VALUES (1, 'old-initial-watermark', ?)", m.migration.Statement)
+	require.NoError(t, err)
+	waitForStatus(t, m, status.WaitingOnSentinelTable, running)
+	require.Eventually(t, func() bool {
+		var wm string
+		err := db.QueryRowContext(t.Context(), "SELECT checksum_watermark FROM _eager_invalidation_chkpnt WHERE id=1").Scan(&wm)
+		return err == nil && wm == ""
+	}, 5*time.Second, 10*time.Millisecond, "evidence must be cleared before any exit cleanup or periodic dump")
+	require.Equal(t, status.WaitingOnSentinelTable, m.status.Get())
+	running.cancel()
+	require.Error(t, running.wait(t))
+	require.NoError(t, m.Close())
+}
