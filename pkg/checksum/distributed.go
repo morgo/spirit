@@ -864,3 +864,14 @@ func (c *DistributedChecker) runChecksum(ctx context.Context) error {
 func (c *DistributedChecker) ResumeWatermark() (string, error) {
 	return c.resume.capture(c.chunker, &c.differencesFound)
 }
+
+var _ Checker = (*DistributedChecker)(nil)
+
+func (c *DistributedChecker) ContinuousActive() bool { return c.resume.active.Load() }
+
+func (c *DistributedChecker) RunContinuous(ctx context.Context) error {
+	c.resume.continuous.Store(true)
+	return runContinuousSnapshot(ctx, c, c.feeds, &c.resume, func() error {
+		return c.resume.restart(&c.differencesFound, c.chunker.Reset)
+	})
+}

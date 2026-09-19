@@ -41,9 +41,9 @@ The checksum package contains three implementations:
 
 All three use **CRC32 with XOR aggregation** for chunk comparison. The lockless checker can additionally drain a bounded per-row PK/CRC32 snapshot for unresolved hot ranges.
 
-## Finite checker contract
+## Checker contract
 
-`NewChecker` returns a finite `Checker`: `Run` succeeds only after verification
+`NewChecker` returns a `Checker`: its finite `Run` succeeds only after verification
 completes. Set `CheckerConfig.Lockless` to select optimistic verification on a
 single server, leave it nil for the existing snapshot checkers. Supplying the
 distributed `Applier` and `Lockless` together is rejected.
@@ -55,8 +55,7 @@ conflicting nonzero `Lockless.Concurrency` is rejected. Direct continuous caller
 set `LocklessCheckerConfig.Concurrency` instead. Snapshot settings (`FixDifferences`,
 `RepairApplier`, `MaxRetries`, and `YieldTimeout`) do not control lockless behavior.
 Migration explicitly selects fatal divergence; selecting the algorithm alone does
-not select a repair policy. Migration reuses the factory result through the optional `ContinuousChecker`
-capability. `RunContinuous` owns pacing, chunker resets, feed flushing, and safe
+not select a repair policy. Migration reuses the factory result through `Checker.RunContinuous`, which owns pacing, chunker resets, feed flushing, and safe
 cancellation. `ContinuousActive` reports whether a pass is running rather than
 waiting for the next interval, so callers can report throttling accurately. Snapshot passes use the same configured repair/retry policy as the
 initial gate. Lockless passes retain their optimistic retry/defer behavior.

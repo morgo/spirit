@@ -470,15 +470,11 @@ func (r *Runner) Run(ctx context.Context) (retErr error) {
 			return sentinel.Wait(ctx, sentinel.WaitConfig{
 				Exists: func(ctx context.Context) (bool, error) { return sentinel.Exists(ctx, r.db) },
 				RunChecksum: func(ctx context.Context) error {
-					checker, ok := r.checker.(checksum.ContinuousChecker)
-					if !ok {
-						return errors.New("checksum does not support continuous verification")
-					}
 					// Clear evidence before background work, including on a hard crash.
 					if err := r.invalidateChecksumWatermark(context.WithoutCancel(ctx)); err != nil {
 						return err
 					}
-					return checker.RunContinuous(ctx)
+					return r.checker.RunContinuous(ctx)
 				},
 				InvalidateWatermark: r.invalidateChecksumWatermark,
 				Logger:              r.logger,
@@ -1467,8 +1463,7 @@ func (r *Runner) throttleStatus(state status.State) status.ThrottleStatus {
 	case status.Checksum:
 		t = throttler.GradualOnly(r.currentThrottler())
 	case status.WaitingOnSentinelTable:
-		checker, ok := r.checker.(checksum.ContinuousChecker)
-		if !ok || !checker.ContinuousActive() {
+		if r.checker == nil || !r.checker.ContinuousActive() {
 			return status.ThrottleStatus{}
 		}
 		t = throttler.GradualOnly(r.currentThrottler())
@@ -1923,7 +1918,7 @@ func (r *Runner) Status() string {
 			r.status.Elapsed().Round(time.Second),
 			sentinel.WaitLimit,
 		)
-		if checker, ok := r.checker.(checksum.ContinuousChecker); ok && checker.ContinuousActive() {
+		if r.checker != nil && r.checker.ContinuousActive() {
 			b.Row("checksum", "%s", checksum.StatusRow(r.checker))
 			if throttle := r.throttleStatus(state); throttle.Throttled {
 				b.Row("throttle", "%s", throttle.Reason)

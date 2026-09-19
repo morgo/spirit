@@ -996,3 +996,14 @@ func (c *SingleChecker) runChecksum(ctx context.Context) error {
 func (c *SingleChecker) ResumeWatermark() (string, error) {
 	return c.resume.capture(c.chunker, &c.differencesFound)
 }
+
+var _ Checker = (*SingleChecker)(nil)
+
+func (c *SingleChecker) ContinuousActive() bool { return c.resume.active.Load() }
+
+func (c *SingleChecker) RunContinuous(ctx context.Context) error {
+	c.resume.continuous.Store(true)
+	return runContinuousSnapshot(ctx, c, []change.Source{c.feed}, &c.resume, func() error {
+		return c.resume.restart(&c.differencesFound, c.chunker.Reset)
+	})
+}
