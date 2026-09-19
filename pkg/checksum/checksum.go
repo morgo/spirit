@@ -149,6 +149,9 @@ type Checker interface {
 type ContinuousChecker interface {
 	Checker
 	RunContinuous(context.Context) error
+	// ContinuousActive distinguishes a running pass from interval pacing.
+	// It is safe to query concurrently with RunContinuous.
+	ContinuousActive() bool
 }
 
 // AutoscaleConfig controls the checksum phase's worker-count control loop. It

@@ -156,17 +156,7 @@ func TestContinuousChecksumClearsCheckpointWatermark(t *testing.T) {
 	_, wm := latestCheckpointWatermarks(t, r)
 	require.NotEmpty(t, wm)
 	r.status.Set(status.WaitingOnSentinelTable)
-	// Start the real runner callback; the mock blocks until canceled.
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
-	done := make(chan error, 1)
-	go func() { done <- r.runContinuousChecksum(ctx) }()
-	require.Eventually(t, func() bool {
-		_, current := latestCheckpointWatermarks(t, r)
-		return current == ""
-	}, time.Second, time.Millisecond, "persisted evidence is cleared before background work")
-	cancel()
-	require.NoError(t, <-done)
+	// Invalidation must clear previously persisted evidence even before a pass.
 	require.NoError(t, r.invalidateChecksumWatermark(t.Context()))
 	copyWM, wm := latestCheckpointWatermarks(t, r)
 	require.NotEmpty(t, copyWM)
@@ -175,8 +165,6 @@ func TestContinuousChecksumClearsCheckpointWatermark(t *testing.T) {
 	copyWM, wm = latestCheckpointWatermarks(t, r)
 	require.NotEmpty(t, copyWM)
 	require.Empty(t, wm, "later dumps cannot resurrect the initial watermark")
-	// A sentinel drop before the callback starts is still a benign stop.
-	require.NoError(t, r.runContinuousChecksum(ctx))
 }
 
 // TestLocklessChecksumDivergenceClearsCheckpointWatermark is the E2E

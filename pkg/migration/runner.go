@@ -468,8 +468,18 @@ func (r *Runner) Run(ctx context.Context) (retErr error) {
 	if r.migration.RespectSentinel {
 		if err := r.status.Do(status.WaitingOnSentinelTable, func() error {
 			return sentinel.Wait(ctx, sentinel.WaitConfig{
-				Exists:              func(ctx context.Context) (bool, error) { return sentinel.Exists(ctx, r.db) },
-				RunChecksum:         r.runContinuousChecksum,
+				Exists: func(ctx context.Context) (bool, error) { return sentinel.Exists(ctx, r.db) },
+				RunChecksum: func(ctx context.Context) error {
+					checker, ok := r.checker.(checksum.ContinuousChecker)
+					if !ok {
+						return errors.New("checksum does not support continuous verification")
+					}
+					// Clear evidence before background work, including on a hard crash.
+					if err := r.invalidateChecksumWatermark(context.WithoutCancel(ctx)); err != nil {
+						return err
+					}
+					return checker.RunContinuous(ctx)
+				},
 				InvalidateWatermark: r.invalidateChecksumWatermark,
 				Logger:              r.logger,
 			})
@@ -1447,32 +1457,20 @@ func (r *Runner) Progress() status.Progress {
 	}
 }
 
-// throttleStatus reports how the phase named by state is currently being paced,
-// reading only the signals that phase actually honours so that Throttled means
-// the same thing in every phase: this phase is paused right now.
-//
-// Only two phases pace themselves against a throttler — they are the only
-// callers of SetThrottler:
-//
-//   - CopyRows: the copier writes, so it honours every signal in the composite.
-//   - Checksum: narrowed to the load signals, exactly as checksum's
-//     loadOnlyThrottler does (a read-only snapshot pass cannot cause replica
-//     lag, so pausing it on lag would only hold the snapshot open for longer).
-//
-// Every other phase reports the zero value, because nothing there consults a
-// throttler: the sentinel wait runs the lockless checker, which takes no
-// throttler at all, and the changeset applies and cutover are not paced. Those
-// phases previously reported the composite, which made Throttled mean "the
-// server is loaded" there and "this phase is paused" in the two above — and
-// since the replica throttler fails closed on a stale signal and Close() stops
-// its poll loop without changing IsThrottled, a *finished* migration would
-// start reporting itself as paused on replica lag once the signal aged out.
+// throttleStatus reports only signals honored by the work currently running.
+// Checksum passes honor load signals; interval waits and cutover are unpaced.
 func (r *Runner) throttleStatus(state status.State) status.ThrottleStatus {
 	var t throttler.Throttler
-	switch state { //nolint:exhaustive // only the two paced phases report throttling
+	switch state { //nolint:exhaustive // only paced phases report throttling
 	case status.CopyRows:
 		t = r.currentThrottler()
 	case status.Checksum:
+		t = throttler.GradualOnly(r.currentThrottler())
+	case status.WaitingOnSentinelTable:
+		checker, ok := r.checker.(checksum.ContinuousChecker)
+		if !ok || !checker.ContinuousActive() {
+			return status.ThrottleStatus{}
+		}
 		t = throttler.GradualOnly(r.currentThrottler())
 	default:
 		return status.ThrottleStatus{}
@@ -1925,6 +1923,12 @@ func (r *Runner) Status() string {
 			r.status.Elapsed().Round(time.Second),
 			sentinel.WaitLimit,
 		)
+		if checker, ok := r.checker.(checksum.ContinuousChecker); ok && checker.ContinuousActive() {
+			b.Row("checksum", "%s", checksum.StatusRow(r.checker))
+			if throttle := r.throttleStatus(state); throttle.Throttled {
+				b.Row("throttle", "%s", throttle.Reason)
+			}
+		}
 		b.Row("binlog", "deltas=%d  %s", r.replClient.GetDeltaLen(), change.StatusRow(r.replClient))
 		b.Row("ckpt", "%s", r.lastCheckpoint.Row())
 		return b.String()
@@ -1984,20 +1988,6 @@ func (r *Runner) invalidateChecksumWatermark(ctx context.Context) error {
 		"",
 		r.migration.Statement,
 	)
-}
-
-// runContinuousChecksum reuses the initial checker and its configured policy.
-func (r *Runner) runContinuousChecksum(ctx context.Context) error {
-	checker, ok := r.checker.(checksum.ContinuousChecker)
-	if !ok {
-		return errors.New("checksum does not support continuous verification")
-	}
-	// Clear persisted evidence before background work can observe or repair a
-	// mismatch. This also protects a hard crash before the next periodic dump.
-	if err := r.invalidateChecksumWatermark(context.WithoutCancel(ctx)); err != nil {
-		return err
-	}
-	return checker.RunContinuous(ctx)
 }
 
 func (r *Runner) Cancel() {

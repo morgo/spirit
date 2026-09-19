@@ -57,7 +57,8 @@ set `LocklessCheckerConfig.Concurrency` instead. Snapshot settings (`FixDifferen
 Migration explicitly selects fatal divergence; selecting the algorithm alone does
 not select a repair policy. Migration reuses the factory result through the optional `ContinuousChecker`
 capability. `RunContinuous` owns pacing, chunker resets, feed flushing, and safe
-cancellation. Snapshot passes use the same configured repair/retry policy as the
+cancellation. `ContinuousActive` reports whether a pass is running rather than
+waiting for the next interval, so callers can report throttling accurately. Snapshot passes use the same configured repair/retry policy as the
 initial gate. Lockless passes retain their optimistic retry/defer behavior.
 
 Once `RunContinuous` starts, `ResumeWatermark` stays empty, including after a

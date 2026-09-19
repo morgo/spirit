@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/block/spirit/pkg/change"
@@ -16,15 +17,16 @@ import (
 // Divergence policy comes from cfg; repaired or deferred ranges cannot authorize
 // completion until a subsequent complete pass verifies clean.
 type locklessChecker struct {
-	db       *sql.DB
-	chunker  table.Chunker
-	feed     change.Source
-	cfg      LocklessCheckerConfig
-	mu       sync.RWMutex
-	checker  *LocklessChecker
-	started  time.Time
-	elapsed  time.Duration
-	finished bool
+	db               *sql.DB
+	chunker          table.Chunker
+	feed             change.Source
+	cfg              LocklessCheckerConfig
+	mu               sync.RWMutex
+	checker          *LocklessChecker
+	started          time.Time
+	elapsed          time.Duration
+	finished         bool
+	continuousActive atomic.Bool
 }
 
 var _ Checker = (*locklessChecker)(nil)
@@ -35,6 +37,13 @@ func (c *locklessChecker) SetThrottler(t throttler.Throttler) { c.cfg.Throttler 
 
 func (c *locklessChecker) Run(ctx context.Context) error {
 	return c.run(ctx, false)
+}
+
+func (c *locklessChecker) ContinuousActive() bool {
+	if !c.continuousActive.Load() {
+		return false
+	}
+	return c.Stats().NextPassAt.IsZero()
 }
 
 func (c *locklessChecker) RunContinuous(ctx context.Context) error {
@@ -78,6 +87,8 @@ func (c *locklessChecker) run(ctx context.Context, continuous bool) error {
 		if !waitForChecksum(ctx, cfg.MinPassInterval) {
 			return nil
 		}
+		c.continuousActive.Store(true)
+		defer c.continuousActive.Store(false)
 		err := checker.Run(ctx)
 		// The lockless algorithm joins repairs before returning cancellation.
 		// Wrapped cancellation is benign; never hide joined errors.

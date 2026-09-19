@@ -14,6 +14,9 @@ var _ ContinuousChecker = (*DistributedChecker)(nil)
 var _ ContinuousChecker = (*locklessChecker)(nil)
 var _ ContinuousChecker = (*MockChecker)(nil)
 
+func (c *SingleChecker) ContinuousActive() bool      { return c.resume.active.Load() }
+func (c *DistributedChecker) ContinuousActive() bool { return c.resume.active.Load() }
+
 func (c *SingleChecker) RunContinuous(ctx context.Context) error {
 	c.resume.continuous.Store(true)
 	return runContinuousSnapshot(ctx, c, []change.Source{c.feed}, &c.resume, func() error {
@@ -48,7 +51,9 @@ func runContinuousSnapshot(ctx context.Context, checker Checker, feeds []change.
 		}
 		before := resume.observed.Load()
 		started := time.Now()
+		resume.active.Store(true)
 		err := checker.Run(ctx)
+		resume.active.Store(false)
 		if err != nil {
 			// A retry can reset DifferencesFound even after a repair was interrupted.
 			// Use the monotonic observation count for this entire Run instead.

@@ -150,7 +150,7 @@ copy rows → initial checksum → wait on sentinel (continuous verification) �
 
 By default both phases use the snapshot checker, including its brief setup locks, repair-and-reverify policy, configured thread count, throttling, and autoscaling. With [`--enable-experimental-lockless-checksum`](#enable-experimental-lockless-checksum), both phases use optimistic reads with hot-range splitting and bounded retries. Confirmed stable divergence is fatal in lockless mode. Background lockless passes may defer changing ranges; the initial gate must verify a complete clean pass.
 
-The first background pass starts one hour after continuous verification begins; subsequent passes start at least one hour apart. Replication continues flushing between passes. Continuous verification runs automatically whenever a sentinel causes Spirit to wait.
+The first background pass starts one hour after continuous verification begins; subsequent passes start at least one hour apart. Replication continues flushing between passes. Continuous verification runs automatically whenever a sentinel causes Spirit to wait. While a pass is active, the status block includes checksum progress and reports load throttling. Interval waits are not reported as throttled.
 
 Once continuous verification starts, checksum resume progress is discarded. After an interruption, Spirit keeps its copy checkpoint but repeats the full initial checksum, even if background verification found no differences. Background walker positions are never treated as proof of completed verification.
 

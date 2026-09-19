@@ -22,6 +22,8 @@ type MockChecker struct {
 
 var _ Checker = (*MockChecker)(nil)
 
+func (*MockChecker) ContinuousActive() bool { return false }
+
 func (m *MockChecker) RunContinuous(ctx context.Context) error {
 	m.continuous.Store(true)
 	if m.RunError != nil {
