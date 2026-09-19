@@ -41,6 +41,34 @@ The checksum package contains three implementations:
 
 All three use **CRC32 with XOR aggregation** for chunk comparison. The lockless checker can additionally drain a bounded per-row PK/CRC32 snapshot for unresolved hot ranges.
 
+## Finite checker contract
+
+`NewChecker` returns a finite `Checker`: `Run` succeeds only after verification
+completes. Set `CheckerConfig.Lockless` to select optimistic verification on a
+single server, leave it nil for the existing snapshot checkers. Supplying the
+distributed `Applier` and `Lockless` together is rejected.
+
+For lockless verification, common concurrency, autoscaling, throttler, and logger
+settings come from `CheckerConfig`; retry, splitting, and divergence policy come
+from its `Lockless` configuration. Snapshot settings (`FixDifferences`,
+`RepairApplier`, `MaxRetries`, and `YieldTimeout`) do not control lockless behavior.
+Migration explicitly selects fatal divergence; selecting the algorithm alone does
+not select a repair policy. Continuous callers still use `NewLocklessChecker.Run`.
+
+Callers open the chunker before construction unless supplying a nonempty
+`CheckerConfig.Watermark`. In that case the factory opens it: snapshot checkers
+restore verification progress, while lockless ignores the saved evidence and
+opens from the beginning. Persist `Checker.ResumeWatermark()`, never the chunker's traversal
+watermark. Snapshot checkers suppress evidence after differences; lockless returns
+an empty watermark because unresolved retries are not represented by traversal.
+This preserves safe migration resume but does **not** yet provide partial checksum
+resume for lockless verification.
+
+The optional `StatusReporter` capability exposes a structured `ChecksumStatus`.
+`StatusSummary` and `StatusRow` format it, falling back to basic progress and pacing
+for checkers without that capability. Runners need no concrete checker assertions.
+Optimistic status distinguishes scan completion from verification completion.
+
 ## Checksum Algorithm
 
 The checksum is computed using (simplified version):

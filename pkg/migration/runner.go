@@ -713,7 +713,7 @@ func (r *Runner) checkpointTbl() *checkpoint.Table {
 // change source. resumePosition is the checkpointed source position when
 // resuming ("" for a fresh migration); it decides the change source's
 // coordinate scheme — see change.NewAutoClient.
-func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context, resumePosition string) error {
+func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context, resumePosition, checksumWatermark string) error {
 	var err error
 
 	autoscaleEnabled := r.migration.EnableExperimentalAutoscaling
@@ -979,19 +979,14 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context, resumePosi
 		}
 	}
 
+	var lockless *checksum.LocklessCheckerConfig
 	if r.migration.EnableExperimentalLocklessChecksum {
-		r.checker = &locklessChecker{
-			db: r.db, chunker: r.checksumChunker, feed: r.replClient,
-			cfg: checksum.LocklessCheckerConfig{
-				Concurrency:    r.migration.Threads,
-				Autoscale:      checksum.AutoscaleConfig{Enabled: autoscaleEnabled, MaxThreads: maxRead},
-				SplitHotChunks: true, SnapshotHotChunks: true, DivergenceIsFatal: true, Logger: r.logger,
-			},
-		}
+		lockless = &checksum.LocklessCheckerConfig{SplitHotChunks: true, SnapshotHotChunks: true, DivergenceIsFatal: true}
 		r.logger.Warn("experimental lockless checksum enabled; verification uses optimistic reads, cutover locking is unchanged")
-		return nil
 	}
 	r.checker, err = checksum.NewChecker([]*sql.DB{r.db}, r.checksumChunker, []change.Source{r.replClient}, &checksum.CheckerConfig{
+		Lockless:        lockless,
+		Watermark:       checksumWatermark,
 		Concurrency:     r.migration.Threads,
 		TargetChunkTime: table.ChunkerDefaultTarget,
 		DBConfig:        r.dbConfig,
@@ -1062,7 +1057,7 @@ func (r *Runner) newMigration(ctx context.Context) error {
 	// This is setup the same way in both code-paths,
 	// but we need to do it before we finish resumeFromCheckpoint
 	// because we need to check that the binlog file exists.
-	if err := r.setupCopierCheckerAndReplClient(ctx, ""); err != nil {
+	if err := r.setupCopierCheckerAndReplClient(ctx, "", ""); err != nil {
 		return err
 	}
 	// Start the change feed now
@@ -1466,7 +1461,7 @@ func (r *Runner) Progress() status.Progress {
 	state := r.status.Get()
 	var summary string
 	var eta status.ETA
-	var checksum status.ChecksumProgress
+	var checksumProgress status.ChecksumProgress
 	switch state { //nolint: exhaustive
 	case status.CopyRows:
 		summary = fmt.Sprintf("%v %s ETA %v",
@@ -1480,11 +1475,8 @@ func (r *Runner) Progress() status.Progress {
 	case status.ApplyChangeset, status.PostChecksum:
 		summary = fmt.Sprintf("Applying Changeset Deltas=%v", r.replClient.GetDeltaLen())
 	case status.Checksum:
-		checksum = r.checker.GetProgress()
-		summary = "Checksum Progress=" + checksum.String()
-		if checker, ok := r.checker.(*locklessChecker); ok {
-			summary = locklessProgressSummary(checker.Stats())
-		}
+		checksumProgress = r.checker.GetProgress()
+		summary = checksum.StatusSummary(r.checker)
 	}
 
 	// Get per-table progress if available (multi-table migrations).
@@ -1500,7 +1492,7 @@ func (r *Runner) Progress() status.Progress {
 		Resume:       r.usedResumeFromCheckpoint.Load(),
 		Throttle:     r.throttleStatus(state),
 		ETA:          eta,
-		Checksum:     checksum,
+		Checksum:     checksumProgress,
 		Tables:       tables,
 	}
 }
@@ -1692,13 +1684,9 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 		return err
 	}
 
-	// An experimental run must also ignore watermarks saved by a previous
-	// run that used the traditional snapshot checker.
-	if checksumWatermark != "" && !r.migration.EnableExperimentalLocklessChecksum {
-		if err := r.checksumChunker.OpenAtWatermark(checksumWatermark); err != nil {
-			return err
-		}
-	} else {
+	// With saved evidence, the factory opens the chunker according to the
+	// selected verification policy. Otherwise start at the beginning.
+	if checksumWatermark == "" {
 		if err = r.checksumChunker.Open(); err != nil {
 			return err
 		}
@@ -1711,7 +1699,7 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 	// GTID checkpoint on a server that no longer has GTIDs enabled errors
 	// here (not definitive, so the run fails with state preserved rather
 	// than silently restarting).
-	if err := r.setupCopierCheckerAndReplClient(ctx, resumePosition); err != nil {
+	if err := r.setupCopierCheckerAndReplClient(ctx, resumePosition, checksumWatermark); err != nil {
 		return err
 	}
 
@@ -1895,7 +1883,6 @@ func (r *Runner) DumpCheckpoint(ctx context.Context) error {
 	// may be assigning r.copyChunker concurrently during setup.
 	r.chunkerMu.RLock()
 	copyChunker := r.copyChunker
-	checksumChunker := r.checksumChunker
 	r.chunkerMu.RUnlock()
 	if r.replClient == nil || copyChunker == nil {
 		return status.ErrWatermarkNotReady
@@ -1906,56 +1893,20 @@ func (r *Runner) DumpCheckpoint(ctx context.Context) error {
 	if err != nil {
 		return status.ErrWatermarkNotReady // it might not be ready, we can try again.
 	}
-	// We only dump the checksumWatermark if we are in >= checksum state.
-	// We require a mutex because the checker can be replaced during
-	// operation, leaving a race condition.
-	//
-	// Safety invariant: the persisted checksum_watermark must only ever
-	// describe chunks that have been *verified* clean (source == target on
-	// a fresh read). A chunk that needed a recopy has not been verified —
-	// only the recopy succeeded. The chunker, however, advances its
-	// low-watermark past every chunk it sees Feedback() for, including
-	// recopied ones. So in any pass where any chunk needed repair, the
-	// chunker's low-watermark is *not* a valid resume point until a
-	// subsequent pass re-checks those chunks clean.
-	//
-	// We enforce that here by reading DifferencesFound() *after* the
-	// watermark and dropping the watermark to "" whenever the current
-	// pass has had any repairs. Ordering matters: in single.go's
-	// runChecksum, differencesFound is incremented before replaceChunk,
-	// which is before chunker.Feedback advances the watermark. So any
-	// failing chunk that has contributed to the watermark we just read
-	// is guaranteed to be visible in DifferencesFound() by the time we
-	// read it next.
-	//
-	// With this rule in place, a crash mid-pass (or retry exhaustion)
-	// leaves a checkpoint whose checksum_watermark is "", forcing the
-	// resumed run to re-verify the table from the start of the checksum
-	// phase. That is the only safe recovery from a not-yet-completed
-	// repair.
-	//
-	// The same invariant applies to the sentinel-wait lockless checker
-	// (a separate object from r.checker — see locklessChecker): once it
-	// has repaired any chunk, the watermark we would persist here is the
-	// end-of-initial-checksum watermark, and resuming from it would let
-	// the operator's re-run "pass" by verifying only the trailing chunks —
-	// silently neutralizing the deliberate abort that the continuous
-	// checksum triggers on divergence. So the watermark is persisted only
-	// while BOTH checkers are clean (or the continuous one doesn't exist
-	// yet).
+	// The checker owns verification evidence: traversal alone may include
+	// unresolved retries or repairs. Any mismatch during sentinel verification
+	// also invalidates the initial gate's evidence, forcing a full recheck.
 	var checksumWatermark string
-	// Optimistic retries are not represented by the walker watermark. Always
-	// restart experimental verification from the beginning, even after a clean pass.
-	if r.status.Get() >= status.Checksum && !r.migration.EnableExperimentalLocklessChecksum {
-		wm, wmErr := checksumChunker.GetLowWatermark()
+	if r.status.Get() >= status.Checksum && r.checker != nil {
+		wm, wmErr := r.checker.ResumeWatermark()
 		if wmErr != nil {
 			return status.ErrWatermarkNotReady
 		}
-		if r.checker != nil && r.checker.DifferencesFound() == 0 &&
-			(r.locklessChecker == nil || r.locklessChecker.DifferencesFound() == 0) {
+		if r.locklessChecker == nil || r.locklessChecker.DifferencesFound() == 0 {
 			checksumWatermark = wm
 		}
 	}
+
 	// Debug, not Info: the status block's ckpt row reports it instead, so
 	// this no longer needs a line of its own on every dump (#329). The
 	// watermark detail is still one -v away when a resume needs debugging.
@@ -2061,7 +2012,6 @@ func (r *Runner) Status() string {
 		b.Row("ckpt", "%s", r.lastCheckpoint.Row())
 		return b.String()
 	case status.Checksum:
-		progress := r.checker.GetProgress()
 		b := status.NewBlock("migration status: state=%s total-time=%s checksum-time=%s",
 			state.String(),
 			r.status.TotalElapsed().Round(time.Second),
@@ -2070,16 +2020,7 @@ func (r *Runner) Status() string {
 		// threads/throttled mirror the copier row's throttled=: without them a
 		// checksum that is deliberately paused or scaled down looks identical
 		// to one that is simply slow.
-		if checker, ok := r.checker.(*locklessChecker); ok {
-			b.Row("checksum", "%s", locklessProgressSummary(checker.Stats()))
-		} else {
-			b.Row("checksum", "%6.2f%%  %d/%d%s",
-				progress.Fraction()*100,
-				progress.RowsChecked,
-				progress.RowsTotal,
-				checksum.StatusSuffix(r.checker),
-			)
-		}
+		b.Row("checksum", "%s", checksum.StatusRow(r.checker))
 		b.Row("binlog", "deltas=%d  %s", r.replClient.GetDeltaLen(), change.StatusRow(r.replClient))
 		b.Row("ckpt", "%s", r.lastCheckpoint.Row())
 		return b.String()

@@ -1,8 +1,10 @@
 package migration
 
 import (
+	"database/sql"
 	"testing"
 
+	"github.com/block/spirit/pkg/change"
 	"github.com/block/spirit/pkg/checksum"
 	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/testutils"
@@ -19,12 +21,12 @@ func TestExperimentalLocklessMigration(t *testing.T) {
 			})
 			defer func() { require.NoError(t, r.Close()) }()
 			require.NoError(t, r.Run(t.Context()))
-			checker, ok := r.checker.(*locklessChecker)
+			checker, ok := r.checker.(checksum.StatusReporter)
 			require.True(t, ok, "flag must select the optimistic checker")
-			require.False(t, checker.Stats().FirstCleanPassAt.IsZero())
-			require.Equal(t, uint64(1), checker.Stats().PassesCompleted)
-			require.False(t, checker.StartTime().IsZero())
-			require.Positive(t, checker.ExecTime())
+			require.False(t, checker.ChecksumStatus().Optimistic.FirstCleanPassAt.IsZero())
+			require.Equal(t, uint64(1), checker.ChecksumStatus().Optimistic.PassesCompleted)
+			require.False(t, r.checker.StartTime().IsZero())
+			require.Positive(t, r.checker.ExecTime())
 			var count int
 			require.NoError(t, tt.DB.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM lockless_migration").Scan(&count))
 			require.GreaterOrEqual(t, count, 1000)
@@ -35,12 +37,16 @@ func TestExperimentalLocklessMigration(t *testing.T) {
 func TestLocklessCheckpointNeverPersistsChecksumWatermark(t *testing.T) {
 	r := setupRunnerForChecksumTest(t, "lockless_checkpoint")
 	advanceRunnerToChecksumWatermarks(t, r)
-	r.checker = &mockChecker{}
+	r.checker = &mockChecker{chunker: r.checksumChunker}
 	r.status.Set(status.Checksum)
 	require.NoError(t, r.DumpCheckpoint(t.Context()))
 	_, watermark := latestCheckpointWatermarks(t, r)
 	require.NotEmpty(t, watermark, "control: traditional checksum persists a clean watermark")
-	r.migration.EnableExperimentalLocklessChecksum = true
+	cfg := checksum.NewCheckerDefaultConfig()
+	cfg.Lockless = &checksum.LocklessCheckerConfig{DivergenceIsFatal: true}
+	var err error
+	r.checker, err = checksum.NewChecker([]*sql.DB{r.db}, r.checksumChunker, []change.Source{r.replClient}, cfg)
+	require.NoError(t, err)
 	require.NoError(t, r.DumpCheckpoint(t.Context()))
 	copyWatermark, watermark := latestCheckpointWatermarks(t, r)
 	require.NotEmpty(t, copyWatermark)
@@ -66,8 +72,8 @@ func TestLocklessResumeIgnoresSnapshotChecksumWatermark(t *testing.T) {
 	err := resumed.Run(t.Context())
 	require.True(t, resumed.usedResumeFromCheckpoint.Load())
 	require.ErrorIs(t, err, checksum.ErrPermanentDivergence)
-	checker, ok := resumed.checker.(*locklessChecker)
+	checker, ok := resumed.checker.(checksum.StatusReporter)
 	require.True(t, ok)
-	require.True(t, checker.Stats().FirstCleanPassAt.IsZero())
-	require.Zero(t, checker.GetProgress().RowsChecked)
+	require.True(t, checker.ChecksumStatus().Optimistic.FirstCleanPassAt.IsZero())
+	require.Zero(t, resumed.checker.GetProgress().RowsChecked)
 }

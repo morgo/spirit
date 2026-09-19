@@ -859,3 +859,13 @@ func (c *DistributedChecker) runChecksum(ctx context.Context) error {
 	}
 	return nil
 }
+
+// ResumeWatermark excludes passes that repaired data. Read the watermark first
+// so a repair contributing to it is visible in the subsequent mismatch count.
+func (c *DistributedChecker) ResumeWatermark() (string, error) {
+	wm, err := c.chunker.GetLowWatermark()
+	if c.DifferencesFound() != 0 {
+		return "", nil
+	}
+	return wm, err
+}

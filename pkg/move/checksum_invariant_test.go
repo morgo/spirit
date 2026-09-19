@@ -22,6 +22,7 @@ import (
 // are scripted by the test. Mirror of the migration-package helper — see
 // pkg/migration/checksum_invalidation_test.go for the parent rationale.
 type mockChecker struct {
+	chunker          table.Chunker
 	runErr           error
 	differencesFound atomic.Uint64
 }
@@ -186,7 +187,7 @@ func TestChecksumErrorPreservesCheckpoint(t *testing.T) {
 func TestDumpCheckpointSuppressesWatermarkWithDifferences(t *testing.T) {
 	r, ctx := setupRunnerForChecksumTest(t, "invariant")
 
-	mock := &mockChecker{}
+	mock := &mockChecker{chunker: r.checksumChunker}
 	r.checker = mock
 	r.status.Set(status.Checksum)
 
@@ -220,7 +221,7 @@ func TestDumpCheckpointSuppressesWatermarkWithContinuousDifferences(t *testing.T
 
 	// The initial checksum completed clean; the move is now blocked in the
 	// sentinel wait (which is >= Checksum, so watermarks are dumped).
-	r.checker = &mockChecker{}
+	r.checker = &mockChecker{chunker: r.checksumChunker}
 	r.status.Set(status.WaitingOnSentinelTable)
 
 	// --- Case 1: no continuous checker yet (just entered the wait). ---
@@ -231,7 +232,7 @@ func TestDumpCheckpointSuppressesWatermarkWithContinuousDifferences(t *testing.T
 		"checksum_watermark must be persisted while no continuous checker exists")
 
 	// --- Case 2: continuous checker exists and is clean. ---
-	cont := &mockChecker{}
+	cont := &mockChecker{chunker: r.checksumChunker}
 	r.continuousChecker = cont
 	require.NoError(t, r.DumpCheckpoint(ctx))
 	_, checksumWM = latestCheckpointWatermarks(t, r)
@@ -256,7 +257,7 @@ func TestDumpCheckpointSuppressesWatermarkWithContinuousDifferences(t *testing.T
 func TestInvalidateChecksumWatermarkAfterContinuousDivergence(t *testing.T) {
 	r, ctx := setupRunnerForChecksumTest(t, "cont_invalidate")
 
-	r.checker = &mockChecker{}
+	r.checker = &mockChecker{chunker: r.checksumChunker}
 	r.status.Set(status.WaitingOnSentinelTable)
 
 	// Persist a checkpoint while everything is believed clean — this is the
@@ -271,7 +272,7 @@ func TestInvalidateChecksumWatermarkAfterContinuousDivergence(t *testing.T) {
 	_, checksumWM = latestCheckpointWatermarks(t, r)
 	require.NotEmpty(t, checksumWM,
 		"invalidate must not touch the watermark when no continuous checker exists")
-	cont := &mockChecker{}
+	cont := &mockChecker{chunker: r.checksumChunker}
 	r.continuousChecker = cont
 	require.NoError(t, r.invalidateChecksumWatermark(ctx))
 	_, checksumWM = latestCheckpointWatermarks(t, r)
@@ -313,4 +314,15 @@ func latestCheckpointWatermarks(t *testing.T, r *Runner) (string, string) {
 			r.checkpointTable.SchemaName, r.checkpointTable.TableName)).Scan(&copierWM, &checksumWM)
 	require.NoError(t, err)
 	return copierWM.String, checksumWM.String
+}
+
+func (m *mockChecker) ResumeWatermark() (string, error) {
+	if m.chunker == nil {
+		return "", nil
+	}
+	wm, err := m.chunker.GetLowWatermark()
+	if m.DifferencesFound() != 0 {
+		return "", nil
+	}
+	return wm, err
 }

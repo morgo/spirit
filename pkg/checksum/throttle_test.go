@@ -377,3 +377,5 @@ func (unpacedChecker) GetProgress() status.ChecksumProgress { return status.Chec
 func (unpacedChecker) StartTime() time.Time                 { return time.Time{} }
 func (unpacedChecker) ExecTime() time.Duration              { return 0 }
 func (unpacedChecker) DifferencesFound() uint64             { return 0 }
+
+func (unpacedChecker) ResumeWatermark() (string, error) { return "", nil }
