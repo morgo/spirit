@@ -19,6 +19,7 @@ spirit migrate --host mydb:3306 --username root --password secret \
 - [database](#database)
 - [defer-cutover](#defer-cutover)
 - [enable-experimental-autoscaling](#enable-experimental-autoscaling)
+- [enable-experimental-lockless-checksum](#enable-experimental-lockless-checksum)
 - [host](#host)
 - [lock-wait-timeout](#lock-wait-timeout)
 - [max-commit-latency](#max-commit-latency)
@@ -153,6 +154,66 @@ By default both phases use the snapshot checker, including its brief setup locks
 The first background pass starts one hour after continuous verification begins; subsequent passes start at least one hour apart. Replication continues flushing between passes. Continuous verification runs automatically whenever a sentinel causes Spirit to wait. While a pass is active, the status block includes checksum progress and reports load throttling. Interval waits are not reported as throttled.
 
 Once continuous verification starts, checksum resume progress is discarded. After an interruption, Spirit keeps its copy checkpoint but repeats the full initial checksum, even if background verification found no differences. Background walker positions are never treated as proof of completed verification.
+
+### enable-experimental-lockless-checksum
+
+- Type: Boolean
+- Default value: `false`
+
+**Experimental.**
+
+Use `--enable-experimental-lockless-checksum` to use lockless verification for both the initial
+checksum and continuous sentinel checks, with optimistic source/shadow-table reads and bounded retries. This
+experimental mode takes no checksum setup lock (`FTWRL` or table lock) and opens
+no long-lived `REPEATABLE READ` snapshots. It uses the same column mappings as
+the normal checksum, including renamed columns, and supports checksum load
+throttling and experimental autoscaling.
+
+```bash
+spirit migrate --enable-experimental-lockless-checksum \
+       --host mydb:3306 --database mydb \
+       --statement "ALTER TABLE users ADD COLUMN email VARCHAR(255)"
+```
+
+Cutover still requires a complete clean pass. Hot ranges are split. Small unresolved ranges then use a finite per-row
+snapshot drain: read target keys first, freeze source PK/CRC32 images once, and
+retry target reads until each frozen image has matched and every observed
+target-only key is absent. Later inserts do not expand the frozen work set, so
+an append-heavy tail can converge. There are no stream-backed or soft passes.
+**Current limitation:** workloads that continuously update the same rows are not
+currently supported reliably by the lockless algorithm. Splitting down to a
+single row does not resolve this: its frozen source image may be superseded
+before a target read observes it. A source row deleted before its image can be
+verified can remain unresolved for the same reason. The snapshot fallback helps
+append-heavy tails, but does not guarantee convergence for these hot-row workloads.
+
+Replication-applier integration is planned to address this limitation by using
+change-stream row images and their application to reconcile unresolved rows.
+That support is not implemented; the current checker requires matching target
+reads and does not accept unverified rows to complete the checksum.
+
+Each side is limited to 128 rows, with a combined 64 KiB key-data budget;
+oversized ranges stay on normal splitting/retries. Snapshot reads have a
+30-second timeout per capture or target-check call, not for the entire drain.
+Snapshot retries use the ordinary retry delay and bounded
+hot-attempt count, then defer without authorizing cutover. Unresolved ranges
+are revisited in another pass. Completing a scan or
+deferring a hot range does not authorize cutover. Stable divergence aborts the
+migration instead of repairing the shadow table. Persistently hot workloads can
+therefore prevent completion; cancel the run or resume with the default checker.
+
+This is optimistic verification, not a comparison at one common source/target
+snapshot. Use it to evaluate the experimental algorithm before adopting it
+broadly. The final replication drain and cutover locking are unchanged.
+
+Copy checkpoints are preserved, but experimental checksum progress is neither
+saved nor resumed: verification starts from the beginning after a restart,
+including when resuming a checkpoint created by the default checker.
+`--checksum-yield-timeout` applies only to the default snapshot checksum. There
+is no equivalent overall deadline for the experimental gate: unresolved hot
+ranges can keep it running until cancelled. The status line's `deferred` count
+covers only the current pass, not the lifetime of the run; use the timestamped
+hot-range and pass-completion logs to investigate repeated deferrals.
 
 ### host
 
@@ -737,55 +798,3 @@ Two more fields appear **only when they have something to say**, so their presen
 | `handoff-p50` | Handoff reaches 1ms | Write workers are backing up behind the single goroutine that publishes completions, rather than behind the target. Adding write threads will not help here either. |
 
 Everything Spirit measures about the write path — including the fields not rendered here, such as pending work, mean rows per chunklet, and the remaining p90s — is still emitted to the metrics sink, which is the better source for dashboards.
-
-
-### enable-experimental-lockless-checksum
-
-Default: `false`.
-
-Use `--enable-experimental-lockless-checksum` to use lockless verification for both the initial
-checksum and continuous sentinel checks, with optimistic source/shadow-table reads and bounded retries. This
-experimental mode takes no checksum setup lock (`FTWRL` or table lock) and opens
-no long-lived `REPEATABLE READ` snapshots. It uses the same column mappings as
-the normal checksum, including renamed columns, and supports checksum load
-throttling and experimental autoscaling.
-
-Cutover still requires a complete clean pass. Hot ranges are split. Small unresolved ranges then use a finite per-row
-snapshot drain: read target keys first, freeze source PK/CRC32 images once, and
-retry target reads until each frozen image has matched and every observed
-target-only key is absent. Later inserts do not expand the frozen work set, so
-an append-heavy tail can converge. There are no stream-backed or soft passes.
-**Current limitation:** workloads that continuously update the same rows are not
-currently supported reliably by the lockless algorithm. Splitting down to a
-single row does not resolve this: its frozen source image may be superseded
-before a target read observes it. A source row deleted before its image can be
-verified can remain unresolved for the same reason. The snapshot fallback helps
-append-heavy tails, but does not guarantee convergence for these hot-row workloads.
-
-Replication-applier integration is planned to address this limitation by using
-change-stream row images and their application to reconcile unresolved rows.
-That support is not implemented; the current checker requires matching target
-reads and does not accept unverified rows to complete the checksum.
-
-Each side is limited to 128 rows, with a combined 64 KiB key-data budget;
-oversized ranges stay on normal splitting/retries. Snapshot reads have a
-30-second timeout per capture or target-check call, not for the entire drain.
-Snapshot retries use the ordinary retry delay and bounded
-hot-attempt count, then defer without authorizing cutover. Unresolved ranges
-are revisited in another pass. Completing a scan or
-deferring a hot range does not authorize cutover. Stable divergence aborts the
-migration instead of repairing the shadow table. Persistently hot workloads can
-therefore prevent completion; cancel the run or resume with the default checker.
-
-This is optimistic verification, not a comparison at one common source/target
-snapshot. Use it to evaluate the experimental algorithm before adopting it
-broadly. The final replication drain and cutover locking are unchanged.
-
-Copy checkpoints are preserved, but experimental checksum progress is neither
-saved nor resumed: verification starts from the beginning after a restart,
-including when resuming a checkpoint created by the default checker.
-`--checksum-yield-timeout` applies only to the default snapshot checksum. There
-is no equivalent overall deadline for the experimental gate: unresolved hot
-ranges can keep it running until cancelled. The status line's `deferred` count
-covers only the current pass, not the lifetime of the run; use the timestamped
-hot-range and pass-completion logs to investigate repeated deferrals.
