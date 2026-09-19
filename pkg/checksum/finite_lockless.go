@@ -34,6 +34,14 @@ var _ StatusReporter = (*locklessChecker)(nil)
 func (c *locklessChecker) SetThrottler(t throttler.Throttler) { c.cfg.Throttler = loadOnlyThrottler(t) }
 
 func (c *locklessChecker) Run(ctx context.Context) error {
+	return c.run(ctx, false)
+}
+
+func (c *locklessChecker) RunContinuous(ctx context.Context) error {
+	return c.run(ctx, true)
+}
+
+func (c *locklessChecker) run(ctx context.Context, continuous bool) error {
 	// Sequential runs each require a complete pass. Never reuse the walker
 	// position left by a previous clean, interrupted, or failed run.
 	c.mu.RLock()
@@ -44,7 +52,11 @@ func (c *locklessChecker) Run(ctx context.Context) error {
 			return err
 		}
 	}
-	checker, err := NewLocklessChecker(c.db, c.db, c.chunker, c.feed, c.cfg)
+	cfg := c.cfg
+	if continuous && cfg.MinPassInterval == 0 {
+		cfg.MinPassInterval = LocklessMinPassInterval
+	}
+	checker, err := NewLocklessChecker(c.db, c.db, c.chunker, c.feed, cfg)
 	if err != nil {
 		return err
 	}
@@ -62,6 +74,18 @@ func (c *locklessChecker) Run(ctx context.Context) error {
 	}()
 	c.feed.StartPeriodicFlush(ctx, change.DefaultFlushInterval)
 	defer c.feed.StopPeriodicFlush()
+	if continuous {
+		if !waitForChecksum(ctx, cfg.MinPassInterval) {
+			return nil
+		}
+		err := checker.Run(ctx)
+		// The lockless algorithm joins repairs before returning cancellation.
+		// Wrapped cancellation is benign; never hide joined errors.
+		if ctx.Err() != nil && checksumCanceled(err) {
+			return nil
+		}
+		return err
+	}
 	return checker.RunUntilClean(ctx)
 }
 

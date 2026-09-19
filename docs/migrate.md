@@ -137,24 +137,22 @@ You can resume a migration from checkpoint and Spirit will start waiting again f
 
 If you start a migration and realize that you forgot to set defer-cutover, worry not! You can manually create a sentinel table `_spirit_sentinel`, and Spirit will detect the table before the cutover is completed and block as though defer-cutover had been enabled from the beginning.
 
-#### Two-checksum model
+#### Initial and continuous verification
 
-When `defer-cutover` is in use Spirit runs two checksums:
+Spirit uses the same configured checker in two phases:
 
-1. The **initial checksum** runs after copy-rows completes and before Spirit starts waiting on the sentinel. This is the correctness gate; the cutover will not proceed unless the initial checksum succeeds.
-2. The **lockless checksum** runs in a loop *while* Spirit is waiting on the sentinel to be dropped. It rechecks consistency during a long sentinel wait. Dropping the sentinel cancels this background check and allows cutover to proceed without requiring another complete clean pass. A confirmed stable divergence aborts the migration; this checker does not repair mismatches.
-
-Migration order (with `defer-cutover`):
+1. The **initial checksum** runs after copy-rows completes. Cutover requires a successful, clean verification.
+2. **Continuous verification** runs while Spirit waits for the sentinel to be dropped. Dropping the sentinel interrupts background verification; it does not require another complete pass. Verification errors and cancellation during a snapshot pass that observed mismatches abort cutover.
 
 ```
-copy rows → initial checksum → wait on sentinel (lockless checksum loop) → cutover
+copy rows → initial checksum → wait on sentinel (continuous verification) → cutover
 ```
 
-The sentinel checker runs single-threaded using ordinary reads, with no checksum setup lock or long-lived snapshot. Its first iteration starts one hour after the initial checksum completes, and subsequent iterations start at least one hour apart (a pass lasting longer than an hour needs no extra wait). Dropping the sentinel interrupts the wait. The checker is enabled automatically whenever the sentinel is in effect; there is no separate flag.
+By default both phases use the snapshot checker, including its brief setup locks, repair-and-reverify policy, configured thread count, throttling, and autoscaling. With [`--enable-experimental-lockless-checksum`](#enable-experimental-lockless-checksum), both phases use optimistic reads with hot-range splitting and bounded retries. Confirmed stable divergence is fatal in lockless mode. Background lockless passes may defer changing ranges; the initial gate must verify a complete clean pass.
 
-Within each pass, mismatched chunks enter a delayed-retry queue. A retry can pass when the target matches a witnessed source signature. Continuously changing chunks are retried up to a bounded attempt count, then deferred for a later pass without being marked verified. If the source is stable but the target still differs, the checker drains replication and rechecks before declaring a fatal divergence. Confirmed divergence aborts rather than recopying the affected range.
+The first background pass starts one hour after continuous verification begins; subsequent passes start at least one hour apart. Replication continues flushing between passes. Continuous verification runs automatically whenever a sentinel causes Spirit to wait.
 
-The [experimental initial lockless checksum](#enable-experimental-lockless-checksum) additionally enables hot-range splitting and bounded per-row snapshot retries. Unlike the sentinel background check, it must complete a clean pass with no deferred ranges before the migration can proceed.
+Once continuous verification starts, checksum resume progress is discarded. After an interruption, Spirit keeps its copy checkpoint but repeats the full initial checksum, even if background verification found no differences. Background walker positions are never treated as proof of completed verification.
 
 ### host
 
@@ -745,8 +743,8 @@ Everything Spirit measures about the write path — including the fields not ren
 
 Default: `false`.
 
-Use `--enable-experimental-lockless-checksum` to replace the main migration
-checksum with optimistic source/shadow-table reads and bounded retries. This
+Use `--enable-experimental-lockless-checksum` to use lockless verification for both the initial
+checksum and continuous sentinel checks, with optimistic source/shadow-table reads and bounded retries. This
 experimental mode takes no checksum setup lock (`FTWRL` or table lock) and opens
 no long-lived `REPEATABLE READ` snapshots. It uses the same column mappings as
 the normal checksum, including renamed columns, and supports checksum load

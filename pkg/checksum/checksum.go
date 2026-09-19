@@ -141,6 +141,16 @@ type Checker interface {
 	DifferencesFound() uint64
 }
 
+// ContinuousChecker reuses a successfully completed finite checker for background
+// verification. Calls must be sequential. A nil return means cancellation was
+// safe, not that the interrupted pass verified every row. Other errors abort cutover.
+// Once started, ResumeWatermark stays empty: restarting requires a full initial
+// verification, independently of background pass progress or mismatch counters.
+type ContinuousChecker interface {
+	Checker
+	RunContinuous(context.Context) error
+}
+
 // AutoscaleConfig controls the checksum phase's worker-count control loop. It
 // mirrors copier.AutoscaleConfig, minus a StartThreads field — the checksum
 // starts at CheckerConfig.Concurrency.

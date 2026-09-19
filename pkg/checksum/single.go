@@ -205,6 +205,7 @@ func (c *SingleChecker) ChecksumChunk(ctx context.Context, trxPool *dbconn.TrxPo
 	if mismatch := compareChunk(sourceChecksum, targetChecksum, sourceCount, targetCount); mismatch.mismatched() {
 		// The source and target do not match, so we first need
 		// to inspect closely and report on the differences.
+		c.resume.observed.Add(1)
 		c.differencesFound.Add(1)
 		c.logger.Warn("chunk verification failed", "chunk", chunk.String(), "reason", mismatch.reason(sourceCount, targetCount), "sourceChecksum", sourceChecksum, "targetChecksum", targetChecksum, "sourceCount", sourceCount, "targetCount", targetCount)
 		if err := c.inspectDifferences(ctx, trx, chunk); err != nil {
@@ -707,7 +708,9 @@ func (c *SingleChecker) Run(ctx context.Context) error {
 	c.Unlock()
 
 	defer func() {
+		c.Lock()
 		c.execTime = time.Since(startTime)
+		c.Unlock()
 	}()
 
 	// A previous Run may have left the checker poisoned (isInvalid=true from

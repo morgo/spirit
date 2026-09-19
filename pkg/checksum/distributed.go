@@ -281,6 +281,7 @@ func (c *DistributedChecker) ChecksumChunk(ctx context.Context, chunk *table.Chu
 	if mismatch := compareChunk(sourceChecksum, targetChecksum, sourceCount, targetCount); mismatch.mismatched() {
 		// The source and target do not match, so we first need
 		// to inspect closely and report on the differences.
+		c.resume.observed.Add(1)
 		c.differencesFound.Add(1)
 		c.logger.Warn("chunk verification failed", "chunk", chunk.String(),
 			"reason", mismatch.reason(sourceCount, targetCount),
@@ -637,7 +638,9 @@ func (c *DistributedChecker) Run(ctx context.Context) error {
 	}
 
 	defer func() {
+		c.Lock()
 		c.execTime = time.Since(startTime)
+		c.Unlock()
 		_ = c.applier.Stop()
 	}()
 
