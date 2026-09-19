@@ -4,6 +4,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/block/spirit/pkg/checksum"
 	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/throttler"
@@ -154,4 +155,24 @@ func TestProgressPolledConcurrentlyWithRun(t *testing.T) {
 	p := m.Progress()
 	require.False(t, p.Resume)
 	require.Equal(t, status.ThrottleStatus{}, p.Throttle)
+}
+
+type recordingChecker struct {
+	checksum.MockChecker
+	got throttler.Throttler
+}
+
+func (c *recordingChecker) SetThrottler(t throttler.Throttler) { c.got = t }
+
+func TestSetThrottlerOnPhasesReachesChecker(t *testing.T) {
+	r := setupRunnerForChecksumTest(t, "throttler_wiring")
+	advanceRunnerToChecksumWatermarks(t, r)
+	checker := &recordingChecker{}
+	r.checker = checker
+	resolved := &throttler.Noop{}
+	r.throttlerMu.Lock()
+	r.throttler = resolved
+	r.throttlerMu.Unlock()
+	r.setThrottlerOnPhases()
+	require.Same(t, resolved, checker.got, "resolved throttler must reach the checksum phase")
 }

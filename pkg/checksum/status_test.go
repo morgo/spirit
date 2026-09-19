@@ -21,8 +21,25 @@ func TestLocklessProgressSummary(t *testing.T) {
 	require.NotContains(t, summary, "verified")
 	stats.RetryQueueDepth = 0
 	stats.HotChunksDeferredThisPass = 1
-	require.Contains(t, (ChecksumStatus{Optimistic: &stats}).String(), "waiting for verification")
+	require.Contains(t, (ChecksumStatus{Optimistic: &stats}).String(), "deferred=1")
 	stats.HotChunksDeferredThisPass = 0
 	stats.FirstCleanPassAt = time.Now()
 	require.Contains(t, (ChecksumStatus{Optimistic: &stats}).String(), "lockless: verified")
+}
+
+func TestLocklessStatusPhase(t *testing.T) {
+	for _, scanComplete := range []bool{false, true} {
+		for _, clean := range []bool{false, true} {
+			stats := LocklessCheckerStats{ScanComplete: scanComplete}
+			phase := "scanning"
+			if scanComplete {
+				phase = "waiting for verification"
+			}
+			if clean {
+				stats.FirstCleanPassAt = time.Now()
+				phase = "verified"
+			}
+			require.Contains(t, (ChecksumStatus{Optimistic: &stats}).String(), "lockless: "+phase+" scan")
+		}
+	}
 }

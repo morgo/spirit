@@ -74,7 +74,7 @@ func TestFactoryLocklessConfigAndLifecycle(t *testing.T) {
 	cfg := NewCheckerDefaultConfig()
 	cfg.Concurrency = 2
 	cfg.Autoscale = AutoscaleConfig{MaxThreads: 3}
-	options := &LocklessCheckerConfig{Concurrency: 99, SplitHotChunks: true, SnapshotHotChunks: true, DivergenceIsFatal: true}
+	options := &LocklessCheckerConfig{SplitHotChunks: true, SnapshotHotChunks: true, DivergenceIsFatal: true}
 	cfg.Lockless = options
 	checker, err := NewChecker([]*sql.DB{{}}, chunker, []change.Source{feed}, cfg)
 	require.NoError(t, err)
@@ -84,7 +84,7 @@ func TestFactoryLocklessConfigAndLifecycle(t *testing.T) {
 	require.True(t, finite.cfg.DivergenceIsFatal)
 	require.True(t, finite.cfg.SplitHotChunks)
 	require.True(t, finite.cfg.SnapshotHotChunks)
-	require.Equal(t, 99, options.Concurrency, "factory must not mutate supplied lockless policy")
+	require.Zero(t, options.Concurrency, "factory must not mutate supplied lockless policy")
 	checker.SetThrottler(&throttler.Noop{})
 	require.Contains(t, StatusRow(checker), "scanning")
 	for range 2 {
@@ -169,5 +169,15 @@ func TestFactoryResumeWithoutChildWatermarks(t *testing.T) {
 				require.NoError(t, err, "every child must be open from the beginning")
 			}
 		})
+	}
+}
+
+func TestFactoryRejectsConflictingLocklessConcurrency(t *testing.T) {
+	for _, concurrency := range []int{0, 2} {
+		cfg := NewCheckerDefaultConfig()
+		cfg.Concurrency = concurrency
+		cfg.Lockless = &LocklessCheckerConfig{Concurrency: 99}
+		_, err := NewChecker([]*sql.DB{{}}, newTestChunker(0), []change.Source{&fakeFeed{}}, cfg)
+		require.ErrorContains(t, err, "Concurrency conflicts")
 	}
 }

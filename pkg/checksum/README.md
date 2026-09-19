@@ -48,9 +48,11 @@ completes. Set `CheckerConfig.Lockless` to select optimistic verification on a
 single server, leave it nil for the existing snapshot checkers. Supplying the
 distributed `Applier` and `Lockless` together is rejected.
 
-For lockless verification, common concurrency, autoscaling, throttler, and logger
+For lockless verification, common concurrency, autoscaling, throttler, metrics sink, and logger
 settings come from `CheckerConfig`; retry, splitting, and divergence policy come
-from its `Lockless` configuration. Snapshot settings (`FixDifferences`,
+from its `Lockless` configuration. Set finite concurrency on `CheckerConfig`; a
+conflicting nonzero `Lockless.Concurrency` is rejected. Direct continuous callers
+set `LocklessCheckerConfig.Concurrency` instead. Snapshot settings (`FixDifferences`,
 `RepairApplier`, `MaxRetries`, and `YieldTimeout`) do not control lockless behavior.
 Migration explicitly selects fatal divergence; selecting the algorithm alone does
 not select a repair policy. Continuous callers still use `NewLocklessChecker.Run`.

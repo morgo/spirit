@@ -31,7 +31,7 @@ var _ Checker = (*locklessChecker)(nil)
 var _ StatusReporter = (*locklessChecker)(nil)
 
 // SetThrottler is called during runner setup, before Run.
-func (c *locklessChecker) SetThrottler(t throttler.Throttler) { c.cfg.Throttler = t }
+func (c *locklessChecker) SetThrottler(t throttler.Throttler) { c.cfg.Throttler = loadOnlyThrottler(t) }
 
 func (c *locklessChecker) Run(ctx context.Context) error {
 	// Sequential runs each require a complete pass. Never reuse the walker

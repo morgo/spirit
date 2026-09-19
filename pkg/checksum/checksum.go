@@ -291,6 +291,9 @@ func NewChecker(sourceDBs []*sql.DB, chunker table.Chunker, feeds []change.Sourc
 		if sourceDBs[0] == nil || feeds[0] == nil {
 			return nil, errors.New("lockless verification requires non-nil source and feed")
 		}
+		if config.Lockless.Concurrency != 0 && config.Lockless.Concurrency != config.Concurrency {
+			return nil, errors.New("Lockless.Concurrency conflicts with CheckerConfig.Concurrency; configure finite checker concurrency on CheckerConfig")
+		}
 		// Snapshot watermarks cannot represent pending optimistic retries.
 		// A resumed optimistic checker opens the whole range instead.
 		if config.Watermark != "" {
@@ -300,7 +303,8 @@ func NewChecker(sourceDBs []*sql.DB, chunker table.Chunker, feeds []change.Sourc
 		}
 		cfg := *config.Lockless
 		cfg.Concurrency, cfg.Autoscale = config.Concurrency, config.Autoscale
-		cfg.Throttler, cfg.Logger = config.Throttler, config.Logger
+		cfg.Throttler, cfg.Logger = loadOnlyThrottler(config.Throttler), config.Logger
+		cfg.MetricsSink = config.MetricsSink
 		return &locklessChecker{db: sourceDBs[0], chunker: chunker, feed: feeds[0], cfg: cfg}, nil
 	}
 	if config.DBConfig == nil {

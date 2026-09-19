@@ -3,6 +3,7 @@ package checksum
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/block/spirit/pkg/applier"
 	"github.com/block/spirit/pkg/change"
 	"github.com/block/spirit/pkg/dbconn"
+	"github.com/block/spirit/pkg/metrics"
 	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
@@ -379,3 +381,71 @@ func (unpacedChecker) DifferencesFound() uint64             { return 0 }
 func (unpacedChecker) ResumeWatermark() (string, error) { return "", nil }
 
 func (unpacedChecker) SetThrottler(throttler.Throttler) {}
+
+func TestFiniteLocklessThrottleWiring(t *testing.T) {
+	for _, setter := range []bool{false, true} {
+		for _, composite := range []bool{false, true} {
+			name := fmt.Sprintf("setter=%v/composite=%v", setter, composite)
+			t.Run(name, func(t *testing.T) {
+				cfg := NewCheckerDefaultConfig()
+				cfg.Lockless = &LocklessCheckerConfig{DivergenceIsFatal: true}
+				lag, load := &binaryThrottler{}, &alwaysLoaded{}
+				var signal throttler.Throttler = lag
+				if composite {
+					signal = throttler.NewMultiThrottler(lag, load)
+				}
+				if !setter {
+					cfg.Throttler = signal
+				}
+				checker := checksumFixture(t, "lockless_throttle_wiring", 4096, cfg)
+				if setter {
+					checker.SetThrottler(signal)
+				}
+				require.NoError(t, checker.Run(t.Context()))
+				assert.Zero(t, lag.calls.Load(), "binary lag signals must not pace verification")
+				if composite {
+					assert.Positive(t, load.calls.Load(), "configured load signal must reach verification")
+				}
+			})
+		}
+	}
+}
+
+type checksumGaugeSink struct{ received chan *metrics.Metrics }
+
+func (s *checksumGaugeSink) Send(_ context.Context, m *metrics.Metrics) error {
+	select {
+	case s.received <- m:
+	default:
+	}
+	return nil
+}
+
+func TestFiniteLocklessEmitsConfiguredMetrics(t *testing.T) {
+	cfg := NewCheckerDefaultConfig()
+	cfg.Lockless = &LocklessCheckerConfig{DivergenceIsFatal: true}
+	cfg.Autoscale.Enabled = true
+	sink := &checksumGaugeSink{received: make(chan *metrics.Metrics, 1)}
+	cfg.MetricsSink = sink
+	gate := newGateThrottler()
+	cfg.Throttler = gate
+	checker := checksumFixture(t, "lockless_metrics_wiring", 4096, cfg)
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- checker.Run(ctx) }()
+	defer func() { cancel(); require.ErrorIs(t, <-done, context.Canceled) }()
+	gate.waitEntered(t)
+	select {
+	case m := <-sink.received:
+		var found bool
+		for _, v := range m.Values {
+			if v.Name == metrics.ChecksumThreadsMetricName {
+				found = true
+				require.Positive(t, v.Value)
+			}
+		}
+		require.True(t, found, "live checksum worker gauge must reach the configured sink")
+	case <-time.After(3 * csTick):
+		t.Fatal("no checksum metrics reached configured sink")
+	}
+}
