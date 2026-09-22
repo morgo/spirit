@@ -131,7 +131,13 @@ func (h *runHandle) close() {
 		case err := <-h.done:
 			h.returned, h.runErr = true, err
 		case <-time.After(60 * time.Second):
-			h.t.Error("sync did not stop within 60s of cancellation")
+			// Close is documented safe only once Run has returned, so a run
+			// that will not stop is left open: closing its pools and change
+			// source underneath it would trade this diagnosis for a race or a
+			// panic somewhere further out. goleak reports the stuck goroutine
+			// at package exit, which is the more useful signal anyway.
+			h.t.Error("sync did not stop within 60s of cancellation; leaving the runner open")
+			return
 		}
 	}
 	if err := h.runner.Close(); err != nil {
