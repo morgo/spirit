@@ -61,6 +61,84 @@ func runUntilCopied(t *testing.T, runner *Runner) error {
 	}
 }
 
+// runHandle drives a Runner from a test that has to wait on one of the
+// runner's signal channels (ChecksumReady, FirstCleanPass) rather than on Run
+// itself.
+//
+// Waiting on a signal channel and a timer alone makes every setup-time failure
+// look identical: Run returns an error, nothing ever closes the signal, and the
+// test reports a bare "did not fire within Ns" with no error text. That is what
+// issue #1260 cost us — a CI failure whose actual cause is unrecoverable from
+// the logs. Every wait here also selects on the run result, and a failed test
+// still tears the runner down instead of leaking its binlog syncer and
+// connection pools into the rest of the package.
+type runHandle struct {
+	t        *testing.T
+	runner   *Runner
+	cancel   context.CancelFunc
+	done     chan error
+	returned bool  // Run has returned and its result is in runErr
+	runErr   error // valid once returned
+	stopped  bool
+}
+
+// startRunner starts runner.Run on its own goroutine. The run is always
+// cancelled and closed by the end of the test; call stop to do it earlier and
+// assert that Run returned cleanly.
+func startRunner(t *testing.T, runner *Runner) *runHandle {
+	t.Helper()
+	ctx, cancel := context.WithCancel(t.Context())
+	h := &runHandle{t: t, runner: runner, cancel: cancel, done: make(chan error, 1)}
+	go func() { h.done <- runner.Run(ctx) }()
+	t.Cleanup(h.close)
+	return h
+}
+
+// await blocks until signal fires. If Run returns first the test fails with
+// that error; if neither happens within timeout it fails with the checksum
+// stats. what names the signal, for the failure message.
+func (h *runHandle) await(signal <-chan struct{}, timeout time.Duration, what string) {
+	h.t.Helper()
+	select {
+	case <-signal:
+	case err := <-h.done:
+		h.returned, h.runErr = true, err
+		h.t.Fatalf("Run returned before %s fired: err=%v; checksum stats=%+v", what, err, h.runner.ChecksumStats())
+	case <-time.After(timeout):
+		h.t.Fatalf("%s did not fire within %s; checksum stats=%+v", what, timeout, h.runner.ChecksumStats())
+	}
+}
+
+// stop cancels the run, waits for it to drain, closes the runner, and asserts
+// Run returned no error.
+func (h *runHandle) stop() {
+	h.t.Helper()
+	h.close()
+	require.NoError(h.t, h.runErr)
+}
+
+// close is the teardown half of stop, without the assertion on the run result:
+// it also runs as a t.Cleanup, where a test that has already failed must not be
+// told a second time. Idempotent.
+func (h *runHandle) close() {
+	if h.stopped {
+		return
+	}
+	h.stopped = true
+	h.cancel()
+	if !h.returned {
+		select {
+		case err := <-h.done:
+			h.returned, h.runErr = true, err
+		case <-time.After(60 * time.Second):
+			h.t.Error("sync did not stop within 60s of cancellation")
+		}
+	}
+	if err := h.runner.Close(); err != nil {
+		h.t.Errorf("runner.Close: %v", err)
+	}
+}
+
 func TestNewRunnerValidation(t *testing.T) {
 	// Defaults are applied for zero-valued knobs.
 	r, err := NewRunner(&Sync{})
