@@ -78,6 +78,7 @@ type runHandle struct {
 	cancel   context.CancelFunc
 	done     chan error
 	returned bool  // Run has returned and its result is in runErr
+	reported bool  // a wait already failed the test with runErr
 	runErr   error // valid once returned
 	stopped  bool
 }
@@ -102,18 +103,49 @@ func (h *runHandle) await(signal <-chan struct{}, timeout time.Duration, what st
 	select {
 	case <-signal:
 	case err := <-h.done:
-		h.returned, h.runErr = true, err
+		h.returned, h.runErr, h.reported = true, err, true
 		h.t.Fatalf("Run returned before %s fired: err=%v; checksum stats=%+v", what, err, h.runner.ChecksumStats())
 	case <-time.After(timeout):
 		h.t.Fatalf("%s did not fire within %s; checksum stats=%+v", what, timeout, h.runner.ChecksumStats())
 	}
 }
 
+// eventually is require.Eventually under the same guard as await: a Run that
+// returns while the condition is still false fails with that error rather than
+// spending the whole window polling for something nothing will satisfy. what
+// names the expectation, for the failure message.
+func (h *runHandle) eventually(cond func() bool, timeout time.Duration, what string) {
+	h.t.Helper()
+	deadline := time.After(timeout)
+	tick := time.NewTicker(100 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		if cond() {
+			return
+		}
+		select {
+		case err := <-h.done:
+			h.returned, h.runErr, h.reported = true, err, true
+			h.t.Fatalf("Run returned before %s: err=%v", what, err)
+		case <-deadline:
+			h.t.Fatalf("%s: not true within %s", what, timeout)
+		case <-tick.C:
+		}
+	}
+}
+
 // stop cancels the run, waits for it to drain, closes the runner, and asserts
-// Run returned no error.
+// Run returned no error. A wait that already failed the test with that error
+// does not get to report it a second time: stop runs from a defer in tests
+// whose teardown has to land before their own post-run assertions, and
+// testify's second report arrives with a runtime panic frame on top of it,
+// because the goroutine is unwinding from the first.
 func (h *runHandle) stop() {
 	h.t.Helper()
 	h.close()
+	if h.reported {
+		return
+	}
 	require.NoError(h.t, h.runErr)
 }
 
@@ -134,8 +166,9 @@ func (h *runHandle) close() {
 			// Close is documented safe only once Run has returned, so a run
 			// that will not stop is left open: closing its pools and change
 			// source underneath it would trade this diagnosis for a race or a
-			// panic somewhere further out. goleak reports the stuck goroutine
-			// at package exit, which is the more useful signal anyway.
+			// panic somewhere further out. The t.Error is the whole signal —
+			// goleak does not add one here, since VerifyTestMain only looks
+			// for leaks when the suite exited zero.
 			h.t.Error("sync did not stop within 60s of cancellation; leaving the runner open")
 			return
 		}
@@ -219,40 +252,34 @@ func TestSyncE2E(t *testing.T) {
 	runner, err := NewRunner(s)
 	require.NoError(t, err)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- runner.Run(ctx) }()
+	h := startRunner(t, runner)
 
 	// Initial copy lands all three rows.
-	require.Eventually(t, func() bool { return countRows() == 3 },
-		30*time.Second, 100*time.Millisecond, "initial copy should replicate 3 rows")
+	h.eventually(func() bool { return countRows() == 3 },
+		30*time.Second, "initial copy should replicate 3 rows")
 
 	// Continuous: an INSERT replicates.
 	testutils.RunSQL(t, `INSERT INTO sync_src.t1 VALUES (4,'four')`)
-	require.Eventually(t, func() bool { return countRows() == 4 },
-		30*time.Second, 100*time.Millisecond, "continuous sync should replicate the INSERT")
+	h.eventually(func() bool { return countRows() == 4 },
+		30*time.Second, "continuous sync should replicate the INSERT")
 
 	// Continuous: an UPDATE and a DELETE replicate.
 	testutils.RunSQL(t, `UPDATE sync_src.t1 SET val='ONE' WHERE id=1`)
 	testutils.RunSQL(t, `DELETE FROM sync_src.t1 WHERE id=2`)
-	require.Eventually(t, func() bool { return countRows() == 3 && valOf(1) == "ONE" },
-		30*time.Second, 100*time.Millisecond, "continuous sync should replicate the UPDATE + DELETE")
+	h.eventually(func() bool { return countRows() == 3 && valOf(1) == "ONE" },
+		30*time.Second, "continuous sync should replicate the UPDATE + DELETE")
 
-	// Cancellation drains and returns cleanly. The drain is bounded by the
-	// runner's short shutdown budgets, so this wait only needs enough margin to
-	// absorb CI scheduling jitter on a busy server.
-	cancel()
-	select {
-	case runErr := <-done:
-		require.NoError(t, runErr)
-	case <-time.After(60 * time.Second):
-		t.Fatal("sync did not stop within 60s of cancellation")
-	}
+	// The pool budget is a configured limit, so it reads the same live as it
+	// would after the drain.
 	require.Equal(t, 2, runner.source.db.Stats().MaxOpenConnections)
 	require.Equal(t, 2, runner.target.DB.Stats().MaxOpenConnections)
 	require.Equal(t, 2, runner.sourceDBConfig.MaxOpenConnections)
 	require.Equal(t, 2, runner.targetDBConfig.MaxOpenConnections)
-	require.NoError(t, runner.Close())
+
+	// Cancellation drains and returns cleanly. The drain is bounded by the
+	// runner's short shutdown budgets, so this wait only needs enough margin to
+	// absorb CI scheduling jitter on a busy server.
+	h.stop()
 }
 
 // TestSyncInitialCopy verifies the initial copy: the snapshot is copied to the
@@ -1220,35 +1247,25 @@ func TestSyncDeferSecondaryIndexesE2E(t *testing.T) {
 	runner, err := NewRunner(s)
 	require.NoError(t, err)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- runner.Run(ctx) }()
+	h := startRunner(t, runner)
 
 	// Initial copy lands all three rows.
-	require.Eventually(t, func() bool { return countRows() == 3 },
-		30*time.Second, 100*time.Millisecond, "initial copy should replicate 3 rows")
+	h.eventually(func() bool { return countRows() == 3 },
+		30*time.Second, "initial copy should replicate 3 rows")
 
 	// The deferred secondary indexes are restored before the continuous phase.
-	require.Eventually(t, func() bool {
-		got := secondaryIndexNames(t, tgt, dest.DBName, "t1")
-		return len(got) == 3
-	}, 30*time.Second, 100*time.Millisecond, "deferred indexes should be restored")
+	h.eventually(func() bool {
+		return len(secondaryIndexNames(t, tgt, dest.DBName, "t1")) == 3
+	}, 30*time.Second, "deferred indexes should be restored")
 	require.ElementsMatch(t, []string{"uq_u", "idx_a", "idx_b"},
 		secondaryIndexNames(t, tgt, dest.DBName, "t1"))
 
 	// Continuous replication still works against the now-indexed target.
 	testutils.RunSQL(t, `INSERT INTO sync_deferidx_src.t1 VALUES (4,'four',40,400)`)
-	require.Eventually(t, func() bool { return countRows() == 4 },
-		30*time.Second, 100*time.Millisecond, "continuous sync should replicate the INSERT")
+	h.eventually(func() bool { return countRows() == 4 },
+		30*time.Second, "continuous sync should replicate the INSERT")
 
-	cancel()
-	select {
-	case runErr := <-done:
-		require.NoError(t, runErr)
-	case <-time.After(60 * time.Second):
-		t.Fatal("sync did not stop within 60s of cancellation")
-	}
-	require.NoError(t, runner.Close())
+	h.stop()
 }
 
 // TestSyncValidate covers the Kong Validate() hook: explicitly-negative
