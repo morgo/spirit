@@ -114,6 +114,14 @@ func (h *runHandle) await(signal <-chan struct{}, timeout time.Duration, what st
 // returns while the condition is still false fails with that error rather than
 // spending the whole window polling for something nothing will satisfy. what
 // names the expectation, for the failure message.
+//
+// cond runs on the test goroutine, unlike require.Eventually's, so it may use
+// t and require freely — but it owes the deadline a return: a cond that blocks
+// blocks this helper, and go test's whole-package timeout is a far worse
+// report than the named failure below. Anything it queries therefore needs a
+// bounded context, because these conditions read pools the runner holds
+// (TestSyncE2E shares a two-connection target pool with the applier) and an
+// exhausted pool is one of the failures they exist to catch.
 func (h *runHandle) eventually(cond func() bool, timeout time.Duration, what string) {
 	h.t.Helper()
 	deadline := time.After(timeout)
@@ -225,16 +233,29 @@ func TestSyncE2E(t *testing.T) {
 	require.NoError(t, err)
 	defer utils.CloseAndLog(tgt)
 
+	// Both read the pool this test hands the runner as its target, capped to
+	// MaxConnections below and shared with 16 applier write threads. A bounded
+	// context is what keeps an exhausted pool a failed assertion instead of a
+	// wait with no end: these run inside h.eventually, on the test goroutine.
+	query := func(f func(ctx context.Context) error) error {
+		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+		defer cancel()
+		return f(ctx)
+	}
 	countRows := func() int {
 		var n int
-		if err := tgt.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM t1`).Scan(&n); err != nil {
+		if err := query(func(ctx context.Context) error {
+			return tgt.QueryRowContext(ctx, `SELECT COUNT(*) FROM t1`).Scan(&n)
+		}); err != nil {
 			return -1 // table may not exist yet
 		}
 		return n
 	}
 	valOf := func(id int) string {
 		var v string
-		if err := tgt.QueryRowContext(context.Background(), `SELECT val FROM t1 WHERE id = ?`, id).Scan(&v); err != nil {
+		if err := query(func(ctx context.Context) error {
+			return tgt.QueryRowContext(ctx, `SELECT val FROM t1 WHERE id = ?`, id).Scan(&v)
+		}); err != nil {
 			return ""
 		}
 		return v
@@ -1110,7 +1131,11 @@ func TestSyncCreateTableLegacyDefault(t *testing.T) {
 // require.ElementsMatch, which is order-independent.
 func secondaryIndexNames(t *testing.T, db *sql.DB, schema, table string) []string {
 	t.Helper()
-	rows, err := db.QueryContext(context.Background(),
+	// Bounded: this runs inside h.eventually, on the test goroutine, and reads
+	// information_schema for a table the runner may be adding indexes to.
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	rows, err := db.QueryContext(ctx,
 		`SELECT DISTINCT INDEX_NAME FROM information_schema.STATISTICS
 		 WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND INDEX_NAME <> 'PRIMARY'`, schema, table)
 	require.NoError(t, err)
@@ -1228,9 +1253,13 @@ func TestSyncDeferSecondaryIndexesE2E(t *testing.T) {
 	tgt, err := sql.Open("block-mysql", targetDSN)
 	require.NoError(t, err)
 	defer utils.CloseAndLog(tgt)
+	// Bounded, as in TestSyncE2E: this runs inside h.eventually on the test
+	// goroutine, and the table it counts is one the runner is adding indexes to.
 	countRows := func() int {
+		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+		defer cancel()
 		var n int
-		if err := tgt.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM t1`).Scan(&n); err != nil {
+		if err := tgt.QueryRowContext(ctx, `SELECT COUNT(*) FROM t1`).Scan(&n); err != nil {
 			return -1
 		}
 		return n
