@@ -80,7 +80,10 @@ type Runner struct {
 	applier     applier.Applier
 	replClient  change.Source
 	copyChunker table.Chunker
-	copier      copier.Copier
+	// copyRowsAtResume is the settled row count the chunker restored from the
+	// checkpoint, excluded from this invocation's copy aggregate.
+	copyRowsAtResume uint64
+	copier           copier.Copier
 
 	// resuming is set when a checkpoint was found on the target: the
 	// initial copy is skipped and the change feed is opened from the
@@ -191,16 +194,16 @@ func NewRunner(s *Sync) (*Runner, error) {
 }
 
 // recordCopyCompleted reports the copy aggregate settled during this
-// Runner.Run invocation. The optimistic chunker does not persist its
-// actual-row counter in a checkpoint, so a resumed invocation reports only
-// work settled after it resumed.
+// Runner.Run invocation. The chunker restores its settled row count from the
+// checkpoint, while its chunk count starts afresh, so the restored rows are
+// subtracted here to keep the two figures on the same invocation.
 func (r *Runner) recordCopyCompleted() {
 	chunker := r.copier.GetChunker()
 	if chunker == nil {
 		return
 	}
 	_, chunks, _ := chunker.Progress()
-	r.status.RecordCopyCompleted(chunker.RowsCopied(), chunks)
+	r.status.RecordCopyCompleted(chunker.RowsCopied()-r.copyRowsAtResume, chunks)
 }
 
 func (r *Runner) runCopy(ctx context.Context) error {
@@ -1271,6 +1274,11 @@ func (r *Runner) startResume(ctx context.Context, watermark, pos string) error {
 	if err := r.startResumeChangeSource(ctx, watermark, pos); err != nil {
 		return err
 	}
+	// The baseline is taken only here, past every step that can still send
+	// setup down the fresh-copy path: the fresh chunker starts at zero, and a
+	// baseline left over from an abandoned resume would underflow the
+	// unsigned subtraction in recordCopyCompleted.
+	r.copyRowsAtResume = r.copyChunker.RowsCopied()
 	return r.checkpointTbl().Create(ctx)
 }
 

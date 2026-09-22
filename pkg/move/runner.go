@@ -120,9 +120,12 @@ type Runner struct {
 	monitorDBs  []*sql.DB
 	autoscale   copier.AutoscaleConfig
 
-	applier           applier.Applier
-	chunkerMu         sync.RWMutex // Publishes copyChunker to concurrent Progress callers.
-	copyChunker       table.Chunker
+	applier     applier.Applier
+	chunkerMu   sync.RWMutex // Publishes copyChunker to concurrent Progress callers.
+	copyChunker table.Chunker
+	// copyRowsAtResume is the settled row count the chunker restored from the
+	// checkpoint, excluded from this invocation's copy aggregate.
+	copyRowsAtResume  uint64
 	checksumChunker   table.Chunker
 	copier            copier.Copier
 	checker           checksum.Checker
@@ -249,16 +252,19 @@ func NewRunner(m *Move) (*Runner, error) {
 }
 
 // recordCopyCompleted reports the copy aggregate settled during this
-// Runner.Run invocation. The optimistic chunker does not persist its
-// actual-row counter in a checkpoint, so a resumed invocation reports only
-// work settled after it resumed.
+// Runner.Run invocation. The chunker restores its settled row count from the
+// checkpoint, while its chunk count starts afresh, so the restored rows are
+// subtracted here to keep the two figures on the same invocation.
+//
+// A move resume deletes the rows at or above the resume position and copies
+// them again, so those rows are settled twice and counted in both invocations.
 func (r *Runner) recordCopyCompleted() {
 	chunker := r.copier.GetChunker()
 	if chunker == nil {
 		return
 	}
 	_, chunks, _ := chunker.Progress()
-	r.status.RecordCopyCompleted(chunker.RowsCopied(), chunks)
+	r.status.RecordCopyCompleted(chunker.RowsCopied()-r.copyRowsAtResume, chunks)
 }
 
 func (r *Runner) runCopy(ctx context.Context) error {
@@ -621,6 +627,11 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 	}
 
 	r.checkpointTable = table.NewTableInfo(tgt0.DB, tgt0.Config.DBName, checkpointTableName)
+	// The baseline is taken only here, past every step that can still send
+	// setup down the fresh-copy path: the fresh chunker starts at zero, and a
+	// baseline left over from an abandoned resume would underflow the
+	// unsigned subtraction in recordCopyCompleted.
+	r.copyRowsAtResume = r.copyChunker.RowsCopied()
 	r.usedResumeFromCheckpoint.Store(true)
 	return nil
 }
@@ -714,11 +725,12 @@ func (r *Runner) setupUnderLocks(ctx context.Context) error {
 				return fmt.Errorf("resume validation passed but checkpoint resume failed: %w", resumeErr)
 			}
 			r.logger.Warn("force set and checkpoint is definitively unresumable; starting fresh", "reason", resumeErr)
-			// resumeFromCheckpoint assigns this only after every definitive
-			// validation. Clear it explicitly before the fresh path so a future
-			// force-eligible failure added after that boundary cannot leak stale
-			// checkpoint state into newCopy.
+			// resumeFromCheckpoint assigns these only after every definitive
+			// validation. Clear them explicitly before the fresh path so a
+			// future force-eligible failure added after that boundary cannot
+			// leak stale checkpoint state into newCopy.
 			r.checksumWatermark = ""
+			r.copyRowsAtResume = 0
 		case resumeFreshOwned:
 			r.logger.Warn("target holds an empty checkpoint table: a prior move attempt stopped before writing its first checkpoint; wiping target tables and starting fresh")
 		case resumeNone:

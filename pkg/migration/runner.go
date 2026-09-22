@@ -71,6 +71,9 @@ type Runner struct {
 
 	copier      copier.Copier
 	copyChunker table.Chunker // the chunker for copying
+	// copyRowsAtResume is the settled row count the chunker restored from the
+	// checkpoint, excluded from this invocation's copy aggregate.
+	copyRowsAtResume uint64
 
 	// applier is the shared write layer used by both the copier (buffered
 	// copy) and the replication client (binlog deltas). Kept on the runner
@@ -247,16 +250,16 @@ func (r *Runner) attemptMySQLDDL(ctx context.Context) error {
 }
 
 // recordCopyCompleted reports the copy aggregate settled during this
-// Runner.Run invocation. The optimistic chunker does not persist its
-// actual-row counter in a checkpoint, so a resumed invocation reports only
-// work settled after it resumed.
+// Runner.Run invocation. The chunker restores its settled row count from the
+// checkpoint, while its chunk count starts afresh, so the restored rows are
+// subtracted here to keep the two figures on the same invocation.
 func (r *Runner) recordCopyCompleted() {
 	chunker := r.copier.GetChunker()
 	if chunker == nil {
 		return
 	}
 	_, chunks, _ := chunker.Progress()
-	r.status.RecordCopyCompleted(chunker.RowsCopied(), chunks)
+	r.status.RecordCopyCompleted(chunker.RowsCopied()-r.copyRowsAtResume, chunks)
 }
 
 func (r *Runner) runCopy(ctx context.Context) error {
@@ -985,6 +988,9 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context, resumePosi
 // newMigration is called when resumeFromCheckpoint has failed.
 // It performs all the initial steps to prepare for a fresh migration.
 func (r *Runner) newMigration(ctx context.Context) error {
+	// A resume that got far enough to take a baseline and then failed
+	// definitively lands here; the fresh chunker counts from zero.
+	r.copyRowsAtResume = 0
 	// This is the non-resume path, so we need to create each of the new tables
 	// And apply the alters. This doesn't apply to resume.
 	for _, change := range r.changes {
@@ -1681,6 +1687,11 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 		"checksum-watermark", checksumWatermark,
 		"position", resumePosition,
 	)
+	// The baseline is taken only here, past every step that can still send
+	// setup down the fresh-copy path: the fresh chunker starts at zero, and a
+	// baseline left over from an abandoned resume would underflow the
+	// unsigned subtraction in recordCopyCompleted.
+	r.copyRowsAtResume = r.copyChunker.RowsCopied()
 	r.usedResumeFromCheckpoint.Store(true)
 	return nil
 }
