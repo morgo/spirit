@@ -676,22 +676,64 @@ func TestDiff(t *testing.T) {
 		},
 		// Composite Primary Key
 		{
+			// Primary key columns are implicitly NOT NULL, so the target's
+			// `a` and `b` normalize to NOT NULL and the diff states that
+			// explicitly.
 			name:     "CompositePrimaryKey",
 			source:   "CREATE TABLE t1 (a INT, b INT)",
 			target:   "CREATE TABLE t1 (a INT, b INT, PRIMARY KEY (a, b))",
-			expected: "ALTER TABLE `t1` ADD PRIMARY KEY (`a`, `b`)",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `a` int NOT NULL, MODIFY COLUMN `b` int NOT NULL, ADD PRIMARY KEY (`a`, `b`)",
 		},
 		{
+			// The inline PRIMARY KEY made `id` NOT NULL, and DROP PRIMARY KEY
+			// does not revert that, so the nullable target needs the MODIFY.
 			name:     "DropPrimaryKey",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY)",
 			target:   "CREATE TABLE t1 (id INT)",
-			expected: "ALTER TABLE `t1` DROP PRIMARY KEY",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `id` int NULL, DROP PRIMARY KEY",
 		},
 		{
 			name:     "DropPrimaryKeyCanonicalForm",
 			source:   "CREATE TABLE `t1` (`id` int NOT NULL,  PRIMARY KEY (`id`)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci",
 			target:   "CREATE TABLE t1 (id INT NOT NULL)",
 			expected: "ALTER TABLE `t1` DROP PRIMARY KEY",
+		},
+		// A column leaving the primary key keeps its NOT NULL (DROP PRIMARY
+		// KEY never relaxes it), so a target that declares it nullable gets a
+		// MODIFY like any other column.
+		{
+			name:     "ColumnLeavesPrimaryKeyAndRelaxesWhenPrimaryKeyMoves",
+			source:   "CREATE TABLE t1 (a VARCHAR(10) NOT NULL, b VARCHAR(10), PRIMARY KEY (a))",
+			target:   "CREATE TABLE t1 (a VARCHAR(10), b VARCHAR(10) NOT NULL, PRIMARY KEY (b))",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `a` varchar(10) NULL, MODIFY COLUMN `b` varchar(10) NOT NULL, DROP PRIMARY KEY, ADD PRIMARY KEY (`b`)",
+		},
+		{
+			name:     "ColumnLeavesPrimaryKeyAndRelaxesWhenPrimaryKeyDropped",
+			source:   "CREATE TABLE t1 (a VARCHAR(10) NOT NULL, b VARCHAR(10), PRIMARY KEY (a))",
+			target:   "CREATE TABLE t1 (a VARCHAR(10), b VARCHAR(10))",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `a` varchar(10) NULL, DROP PRIMARY KEY",
+		},
+		{
+			// The new key column omits NOT NULL, which the key implies, so
+			// the diff makes it NOT NULL alongside relaxing the old one.
+			name:     "ColumnLeavesPrimaryKeyAndRelaxesWhenNewKeyColumnOmitsNotNull",
+			source:   "CREATE TABLE t1 (a VARCHAR(10) NOT NULL, b VARCHAR(10), PRIMARY KEY (a))",
+			target:   "CREATE TABLE t1 (a VARCHAR(10), b VARCHAR(10), PRIMARY KEY (b))",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `a` varchar(10) NULL, MODIFY COLUMN `b` varchar(10) NOT NULL, DROP PRIMARY KEY, ADD PRIMARY KEY (`b`)",
+		},
+		{
+			name:     "AutoIncrementColumnLeavesPrimaryKeyAndRelaxes",
+			source:   "CREATE TABLE t1 (id INT NOT NULL AUTO_INCREMENT, b VARCHAR(10) NOT NULL, PRIMARY KEY (id))",
+			target:   "CREATE TABLE t1 (id INT, b VARCHAR(10) NOT NULL, PRIMARY KEY (b))",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `id` int NULL, DROP PRIMARY KEY, ADD PRIMARY KEY (`b`)",
+		},
+		{
+			// Every attribute change on the former PK column is emitted, not
+			// just the nullability.
+			name:     "ColumnLeavesPrimaryKeyAndChangesTypeCommentAndNullability",
+			source:   "CREATE TABLE t1 (a VARCHAR(10) NOT NULL, b VARCHAR(10), PRIMARY KEY (a))",
+			target:   "CREATE TABLE t1 (a BIGINT COMMENT 'reshaped', b VARCHAR(10) NOT NULL, PRIMARY KEY (b))",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `a` bigint NULL COMMENT 'reshaped', MODIFY COLUMN `b` varchar(10) NOT NULL, DROP PRIMARY KEY, ADD PRIMARY KEY (`b`)",
 		},
 
 		// Multi-column Indexes

@@ -178,6 +178,49 @@ func TestDeclarativeToImperativeWithOptions(t *testing.T) {
 	require.Empty(t, changes, "AUTO_INCREMENT differences should be ignored with default options")
 }
 
+// TestDeclarativeToImperative_PrimaryKeyDeclaresNull: a desired primary key
+// column that explicitly declares NULL or DEFAULT NULL is a table MySQL refuses
+// to create, so it is rejected at plan time for new and existing tables alike.
+// A key column that merely omits NOT NULL is implicitly NOT NULL and is
+// accepted, as is the expression default (NULL).
+func TestDeclarativeToImperative_PrimaryKeyDeclaresNull(t *testing.T) {
+	const current = "CREATE TABLE t1 (a int NOT NULL, b int DEFAULT NULL, PRIMARY KEY (a))"
+	tests := []struct {
+		name    string
+		desired string
+		wantErr bool
+	}{
+		{"ImplicitNotNull", "CREATE TABLE t1 (a INT, b INT, PRIMARY KEY (a))", false},
+		{"ExplicitNull", "CREATE TABLE t1 (a INT NULL, b INT, PRIMARY KEY (a))", true},
+		{"DefaultNull", "CREATE TABLE t1 (a INT DEFAULT NULL, b INT, PRIMARY KEY (a))", true},
+		{"ExplicitNullInline", "CREATE TABLE t1 (a INT NULL PRIMARY KEY, b INT)", true},
+		{"ExplicitNullInComposite", "CREATE TABLE t1 (a INT, b INT NULL, PRIMARY KEY (a, b))", true},
+		{"ExplicitNullThenNotNull", "CREATE TABLE t1 (a INT NULL NOT NULL, b INT, PRIMARY KEY (a))", true},
+		{"NotNullDefaultNull", "CREATE TABLE t1 (a INT NOT NULL DEFAULT NULL, b INT, PRIMARY KEY (a))", true},
+		{"ExpressionDefaultNull", "CREATE TABLE t1 (a INT DEFAULT (NULL), b INT, PRIMARY KEY (a))", false},
+		// Moving the key off a column frees it to declare NULL.
+		{"FormerKeyColumnDeclaresNull", "CREATE TABLE t1 (a INT NULL, b INT NOT NULL, PRIMARY KEY (b))", false},
+	}
+	for _, tt := range tests {
+		for _, existing := range []bool{true, false} {
+			name := tt.name + "/NewTable"
+			var cur []table.TableSchema
+			if existing {
+				name = tt.name + "/ExistingTable"
+				cur = []table.TableSchema{{Name: "t1", Schema: current}}
+			}
+			t.Run(name, func(t *testing.T) {
+				_, err := DeclarativeToImperative(cur, []table.TableSchema{{Name: "t1", Schema: tt.desired}}, nil)
+				if !tt.wantErr {
+					require.NoError(t, err)
+					return
+				}
+				require.ErrorContains(t, err, "is part of the PRIMARY KEY but declares NULL")
+			})
+		}
+	}
+}
+
 func TestDeclarativeToImperative_OrderingCreateAlterBeforeDrop(t *testing.T) {
 	// Verify the correctness property: statements are ordered as
 	// CREATE → ALTER → DROP. This ensures safe sequential execution (e.g.

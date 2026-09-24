@@ -54,6 +54,18 @@ func DeclarativeToImperative(current, desired []table.TableSchema, opts *DiffOpt
 			if err != nil {
 				return nil, fmt.Errorf("failed to parse CREATE TABLE for new table %q: %w", name, err)
 			}
+			for _, stmt := range stmts {
+				if !stmt.IsCreateTable() {
+					continue
+				}
+				ct, err := stmt.ParseCreateTable()
+				if err != nil {
+					return nil, fmt.Errorf("failed to parse CREATE TABLE for new table %q: %w", name, err)
+				}
+				if err := checkPrimaryKeyNullability(ct); err != nil {
+					return nil, fmt.Errorf("invalid desired schema for table %q: %w", name, err)
+				}
+			}
 			creates = append(creates, stmts...)
 			continue
 		}
@@ -105,7 +117,6 @@ func diffTable(name, currentSchema, desiredSchema string, opts *DiffOptions) (st
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse desired schema for table %q: %w", name, err)
 	}
-
 	defer func() {
 		if r := recover(); r != nil {
 			stmts = nil
