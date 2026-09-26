@@ -76,8 +76,9 @@ func captureHotSnapshot(ctx context.Context, sourceDB, targetDB *sql.DB, chunk *
 }
 
 // pendingPredicate renders the outstanding obligations as a disjunction of
-// point predicates, which is what both the poll and the settle path read with.
-// Empty when nothing is outstanding.
+// point predicates, which is what the poll reads the target with. Empty when
+// nothing is outstanding. The settle path builds its own single-row predicate
+// instead (pointPredicate), because it resolves one row at a time.
 func (s *hotSnapshot) pendingPredicate() string {
 	predicates := make([]string, 0, len(s.pending))
 	for _, row := range s.pending {
@@ -125,10 +126,13 @@ func (s *hotSnapshot) check(ctx context.Context) (bool, error) {
 }
 
 // readHotSnapshotRows preserves tuple identity without delimiter collisions.
-// It takes a rowQuerier (see inspect.go) rather than a *sql.DB so the settle
-// path can run the same read inside the transaction holding the source rows.
 // Temporal keys are cast to their server representation to preserve fractional
 // seconds/zero dates with parseTime=true; predicates still use native key types.
+//
+// It takes a rowQuerier (see inspect.go) rather than a *sql.DB so a caller can
+// run the read inside a transaction. No caller does today — the settle path
+// reads the target with its own point predicate and no transaction, because
+// what it compares against is the stream's image rather than a frozen source.
 func readHotSnapshotRows(ctx context.Context, db rowQuerier, chunk *table.Chunk, info *table.TableInfo, columns, predicate string, limit int) (map[string]hotSnapshotRow, int, bool, error) {
 	if len(chunk.Key) == 0 {
 		return nil, 0, false, fmt.Errorf("snapshot range has no key")

@@ -108,6 +108,17 @@ type workResult struct {
 	// with no self-heal path. Run will exit with ErrPermanentDivergence.
 	permanent bool
 
+	// permanentEvidence describes what proved the divergence, for the error
+	// and the log line. Empty means the ordinary aggregate path, whose
+	// evidence is the newSrc/newTgt signatures above.
+	//
+	// The settled path fills it because it never reads an aggregate: it
+	// compares single rows against the change stream, so newSrc and newTgt
+	// are still zero there and formatting them would report "source crc=0
+	// count=0, target crc=0 count=0" for a range that was never read that
+	// way.
+	permanentEvidence string
+
 	// deferHot is true when a continuously changing chunk reached the bounded
 	// attempt limit. It resolves the work item for this pass without claiming
 	// the chunk passed; the next pass walks it again from scratch.

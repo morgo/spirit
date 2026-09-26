@@ -1096,6 +1096,8 @@ func (c *LocklessChecker) resolveSettledDivergence(ctx context.Context, res *wor
 	if c.recopier == nil {
 		c.logRowDifferences(ctx, chunk, "hot chunk has diverged")
 		res.permanent = true
+		res.permanentEvidence = fmt.Sprintf("settled against the change stream after %d attempts, %d rows still outstanding; see the logged row differences",
+			res.snapshot.attempts, len(res.snapshot.pending))
 		return
 	}
 	c.logRowDifferences(ctx, chunk, "recopying diverged hot chunk")
@@ -1332,6 +1334,13 @@ func (c *LocklessChecker) handleResult(res *workResult, enqueueRetry func(*retry
 	// known, forever, and the run would never return the divergence.
 	if res.permanent {
 		c.permanentFailures.Add(1)
+		if res.permanentEvidence != "" {
+			c.cfg.Logger.Error("lockless checksum: permanent divergence",
+				"chunk", res.item.chunk.String(),
+				"evidence", res.permanentEvidence,
+			)
+			return fmt.Errorf("%w: chunk %s (%s)", ErrPermanentDivergence, res.item.chunk.String(), res.permanentEvidence)
+		}
 		c.cfg.Logger.Error("lockless checksum: permanent divergence",
 			"chunk", res.item.chunk.String(),
 			"sourceCRC", res.newSrc.crc,
