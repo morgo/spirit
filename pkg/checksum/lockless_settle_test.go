@@ -322,6 +322,104 @@ func TestExpectedImageCRCMatchesRealRow(t *testing.T) {
 	}
 }
 
+// TestExpectedImageCRCMatchesRealRowForBinlogTypes is the same equivalence over
+// the two types where it is not free, with the image built from the Go types
+// go-mysql decodes a row event into rather than from a SELECT.
+//
+// That distinction is the whole test. Reading the image back with SELECT hands
+// back a FLOAT as a float64 already rounded to the column's precision and a BIT
+// as []byte, so both happen to render correctly — and the real decoding, float32
+// and int64, does not. UNION type merging widens, so the float32 (widened again
+// to float64 by database/sql) merges to DOUBLE and renders every digit of its
+// binary expansion, and the int64 merges to an integer and renders in decimal
+// where the column renders raw bytes. Neither fails the query: they return a CRC
+// that is simply not the row's, so every hot row in such a table would settle to
+// a false divergence.
+func TestExpectedImageCRCMatchesRealRowForBinlogTypes(t *testing.T) {
+	for _, tc := range []struct {
+		ddl    string
+		insert string
+		image  []any
+	}{
+		// BIT(8)=5 renders as the single byte 0x05, BIT(64)=5 as eight bytes.
+		{
+			"id INT PRIMARY KEY, f FLOAT, b8 BIT(8), b64 BIT(64)",
+			"INSERT INTO src VALUES (1, 0.1, b'00000101', 5)",
+			[]any{int32(1), float32(0.1), int64(5), int64(5)},
+		},
+		// A BIT with no declared width is BIT(1), and a negative float has to
+		// survive the round trip back through the column's precision.
+		{
+			"id INT PRIMARY KEY, f FLOAT, b1 BIT, b17 BIT(17)",
+			"INSERT INTO src VALUES (1, -3.4028234e+38, b'1', 131071)",
+			[]any{int32(1), float32(-3.4028234e+38), int64(1), int64(131071)},
+		},
+		// NULL has no Go type to widen, and must stay NULL through the cast.
+		{
+			"id INT PRIMARY KEY, f FLOAT NULL, b8 BIT(8) NULL",
+			"INSERT INTO src VALUES (1, NULL, NULL)",
+			[]any{int32(1), nil, nil},
+		},
+	} {
+		t.Run(tc.ddl, func(t *testing.T) {
+			db, chunk := snapshotTestTables(t, tc.ddl, []string{"id"})
+			snapshotExec(t, db, tc.insert)
+
+			sourceExprs, _, err := chunk.ColumnMapping.ChecksumExprs()
+			require.NoError(t, err)
+			var want uint64
+			require.NoError(t, db.QueryRowContext(t.Context(),
+				"SELECT CRC32(CONCAT("+sourceExprs+")) FROM src WHERE id=1").Scan(&want))
+
+			got, err := (&rowSettler{sourceDB: db}).expectedImageCRC(t.Context(), chunk, tc.image)
+			require.NoError(t, err)
+			require.Equal(t, want, got)
+		})
+	}
+}
+
+// TestImageValueExpr covers the parts of the rendering that do not need a
+// server: which types are special-cased, and the big-endian byte layout a BIT
+// column's cast produces.
+func TestImageValueExpr(t *testing.T) {
+	for name, tc := range map[string]struct {
+		tp       string
+		in       any
+		wantExpr string
+		wantVal  any
+	}{
+		"int is bound as-is":     {"int", int32(7), "?", int32(7)},
+		"varchar is bound as-is": {"varchar(20)", "x", "?", "x"},
+		"null short-circuits":    {"bit(8)", nil, "?", nil},
+		"float is narrowed":      {"float", float32(0.1), "CAST(? AS FLOAT)", float32(0.1)},
+		"float with width":       {"float(10,2)", float32(1), "CAST(? AS FLOAT)", float32(1)},
+		"float unsigned":         {"float unsigned", float32(1), "CAST(? AS FLOAT)", float32(1)},
+		"double is not":          {"double", float64(0.1), "?", float64(0.1)},
+		"bit(1)":                 {"bit(1)", int64(1), "?", []byte{0x01}},
+		"bit with no width":      {"bit", int64(1), "?", []byte{0x01}},
+		"bit(8)":                 {"bit(8)", int64(5), "?", []byte{0x05}},
+		"bit(9) rounds up":       {"bit(9)", int64(257), "?", []byte{0x01, 0x01}},
+		"bit(64) is big-endian":  {"bit(64)", int64(5), "?", []byte{0, 0, 0, 0, 0, 0, 0, 5}},
+		"bit(64) all ones":       {"bit(64)", int64(-1), "?", []byte{255, 255, 255, 255, 255, 255, 255, 255}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			expr, val, err := imageValueExpr(tc.tp, tc.in)
+			require.NoError(t, err)
+			require.Equal(t, tc.wantExpr, expr)
+			require.Equal(t, tc.wantVal, val)
+		})
+	}
+
+	// A BIT column the stream did not decode to an integer is a mismatch
+	// between what we believe the schema is and what arrived. Guessing would
+	// mint a false divergence, so it is an error.
+	_, _, err := imageValueExpr("bit(8)", "5")
+	require.ErrorContains(t, err, "want an integer")
+
+	_, _, err = imageValueExpr("bit(0)", int64(1))
+	require.ErrorContains(t, err, "malformed bit type")
+}
+
 // TestExpectedImageCRCRejectsShortImage: an image with fewer columns than the
 // mapping expects would otherwise index out of range.
 func TestExpectedImageCRCRejectsShortImage(t *testing.T) {

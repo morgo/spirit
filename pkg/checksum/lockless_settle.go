@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 
@@ -252,6 +253,9 @@ func (s *rowSettler) compareRowToImage(ctx context.Context, snapshot *hotSnapsho
 // column to the target's type before hashing — the same normalisation an
 // ordinary chunk read gets — and those casts have to be applied to a column of
 // the right type, not to whatever a bare parameter would be typed as.
+//
+// The merge is not a substitute for binding the right value, though: see
+// imageValueExpr for the two types where it produces the wrong rendering.
 func (s *rowSettler) expectedImageCRC(ctx context.Context, chunk *table.Chunk, image []any) (uint64, error) {
 	sourceExprs, _, err := chunk.ColumnMapping.ChecksumExprs()
 	if err != nil {
@@ -260,20 +264,109 @@ func (s *rowSettler) expectedImageCRC(ctx context.Context, chunk *table.Chunk, i
 	columns, _ := chunk.ColumnMapping.ColumnsSlice()
 	ordinals := chunk.ColumnMapping.SourceOrdinalIndices()
 	values := make([]any, len(ordinals))
+	placeholders := make([]string, len(ordinals))
 	for i, ordinal := range ordinals {
 		if ordinal >= len(image) {
 			return 0, fmt.Errorf("binlog row image has %d columns, need ordinal %d", len(image), ordinal)
 		}
-		values[i] = image[ordinal]
+		tp, _ := chunk.Table.GetColumnMySQLType(columns[i])
+		placeholders[i], values[i], err = imageValueExpr(tp, image[ordinal])
+		if err != nil {
+			return 0, fmt.Errorf("render column %s of the binlog row image: %w", columns[i], err)
+		}
 	}
 	query := fmt.Sprintf("SELECT CRC32(CONCAT(%s)) FROM (SELECT %s FROM %s WHERE 1=0 UNION ALL SELECT %s) AS img",
 		sourceExprs, table.QuoteColumns(columns), chunk.Table.QuotedTableName,
-		strings.TrimSuffix(strings.Repeat("?,", len(values)), ","))
+		strings.Join(placeholders, ","))
 	var crc uint64
 	if err := s.sourceDB.QueryRowContext(ctx, query, values...).Scan(&crc); err != nil {
 		return 0, fmt.Errorf("evaluate checksum over binlog row image: %w", err)
 	}
 	return crc, nil
+}
+
+// imageValueExpr renders one column of a binlog row image into the value branch
+// of expectedImageCRC's derived table, as an expression and the value to bind.
+//
+// A bare "?" is right for most types and wrong for two, because UNION type
+// merging *widens*: a value whose Go type is wider than the column takes the
+// wider type into the merge, and the checksum's cast then renders it the way
+// that wider type would be rendered rather than the way the column is.
+//
+//   - FLOAT is decoded as a float32, and database/sql widens every float to a
+//     float64 before binding. Merged with the column that is a DOUBLE, and
+//     CAST(... AS char) renders 0.1 as "0.10000000149011612" where the real row
+//     gives "0.1". Casting the parameter back to FLOAT restores the column's
+//     precision, so the merge is FLOAT with FLOAT.
+//   - BIT is decoded as an int64, which merges to an integer and renders in
+//     decimal ("5"), where casting the real column yields its raw big-endian
+//     bytes — ceil(N/8) of them, so 0x05 for BIT(8) and 0x0000000000000005 for
+//     BIT(64). Binding those bytes reproduces it exactly.
+//
+// Both are silent: the query succeeds and returns a CRC that simply is not the
+// row's, so every hot row in a table with a FLOAT or BIT column settles to a
+// false divergence. Every other type the checksum handles renders the same
+// either way — TestExpectedImageCRCMatchesRealRow pins that over the ones where
+// storage and text differ.
+func imageValueExpr(tp string, v any) (string, any, error) {
+	if v == nil {
+		return "?", nil, nil // NULL renders as NULL under every cast
+	}
+	switch baseColumnType(tp) {
+	case "float", "float unsigned":
+		return "CAST(? AS FLOAT)", v, nil
+	case "bit":
+		bits, err := bitWidth(tp)
+		if err != nil {
+			return "", nil, err
+		}
+		var u uint64
+		switch n := v.(type) {
+		case int64:
+			u = uint64(n)
+		case uint64:
+			u = n
+		default:
+			return "", nil, fmt.Errorf("binlog decoded a %s column as %T, want an integer", tp, v)
+		}
+		raw := make([]byte, (bits+7)/8)
+		for i := len(raw) - 1; i >= 0; i-- {
+			raw[i] = byte(u)
+			u >>= 8
+		}
+		return "?", raw, nil
+	}
+	return "?", v, nil
+}
+
+// baseColumnType strips a declared type's width, so "bit(8)" and
+// "float(10,2) unsigned" reduce to what imageValueExpr switches on.
+func baseColumnType(tp string) string {
+	tp = strings.ToLower(strings.TrimSpace(tp))
+	open := strings.IndexByte(tp, '(')
+	closing := strings.IndexByte(tp, ')')
+	if open < 0 || closing < open {
+		return tp
+	}
+	return strings.TrimSpace(tp[:open] + " " + strings.TrimSpace(tp[closing+1:]))
+}
+
+// bitWidth reads N out of "bit(N)". A BIT column with no width is BIT(1).
+func bitWidth(tp string) (int, error) {
+	tp = strings.ToLower(strings.TrimSpace(tp))
+	open := strings.IndexByte(tp, '(')
+	closing := strings.IndexByte(tp, ')')
+	if open < 0 {
+		return 1, nil
+	}
+	if closing < open {
+		return 0, fmt.Errorf("malformed bit type %q", tp)
+	}
+	bits, err := strconv.Atoi(strings.TrimSpace(tp[open+1 : closing]))
+	if err != nil || bits < 1 || bits > 64 {
+		return 0, fmt.Errorf("malformed bit type %q", tp)
+	}
+	return bits, nil
 }
 
 // keyMatcher decides whether a binlog event's key is the row being waited for.
