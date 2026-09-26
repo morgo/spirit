@@ -427,10 +427,48 @@ Override via `ClientConfig.SubscriptionSoftLimitBytes`; pass a negative value to
 
 **Limitation — binlog retention:** while parked, the binlog reader makes no progress. If the source rotates past the reader's current position (`binlog_expire_logs_seconds`) before the buffer drains, the reader will fail to resume and the migration will abort. Tune the soft limit and source retention together for sustained high-write workloads.
 
+### Parking at a row change (`VerifyRowAtNextChange`)
+
+`VerifyRowAtNextChange` is part of the `Source` contract: every source must be able to hold its reader at a chosen event. It exists for one caller — the lockless checksum, verifying a row that is written continuously.
+
+Such a row cannot be verified by reading both sides. Any SQL comparison is between a source image at one position and a target state at a later one, and closing that window means stopping the writes. But with `binlog_row_image=FULL`, an event's after-image **is** the source's value for that row at that position, so the verification becomes:
+
+```
+VerifyRowAtNextChange(ctx, watch, verify):
+  arm the watch, then release the reader
+  on a change matching watch, dispatchRow does, in this order:
+      record it against the watch
+      buffer it into the subscription
+      park the reader and release the verification (unless it has given up)
+  drain the buffer (not Flush — see below), so the target holds exactly that image
+  call verify(key, image, deleted) with the reader still parked
+  re-check for a rewrite, then disarm and unpark, whatever happened
+```
+
+Five details carry the correctness:
+
+- **The gate is checked after the event is read from the stream but before it is acted on**, so parking never consumes and discards an event. Dispatch resumes with it.
+- **The drain is not `Flush`.** `Flush` ends in `BlockWait`, which waits for the reader to reach the source's *current* position — and the reader is parked, by us, precisely so nothing past the watched event is admitted. That wait could never succeed. `flushParked` applies what is buffered, stops, and returns `ErrFlushIncomplete` if the buffer will not empty; the caller must then retry rather than treat a target difference as a divergence.
+- **A multi-row event keeps dispatching after the gate arms**, so a second change to the same key can still land. The waiter counts those, and the verification checks the count twice — once after the drain (which would otherwise carry the newer image) and once after `verify` returns, because the verifier reads a target that a periodic flush is still free to write to. Either check returns `ErrRowRewritten` rather than a verdict reached against a target that moved.
+- **Each of `dispatchRow`'s three steps is wrong anywhere else.** The verification reads the rewrite count *after* its flush, so a rewrite must be recorded before it can be buffered — otherwise a flush could carry the newer image to the target while the count still read zero, and the comparison would report a divergence against an image the target had already moved past. Equally, the verification must not be released until after the change is buffered, or the flush would run without it. `TestDispatchRowOrdering` pins both.
+- **Only a live verification's waiter may park the reader.** A dispatch and the verification that armed it are on different goroutines, and the verification can be gone by the time the dispatch reaches the park. Parking then stops the feed for the rest of the run, because that verification was the only thing that would have unparked it. `rowWaiter.parkAndRelease` and `rowWaiter.abandon` serialize on the waiter's mutex, so either the park is skipped or `abandon` undoes it.
+
+One verification runs at a time (`verifyMu`), which is what makes a single watch slot enough.
+
+This park is unrelated to the [memory backpressure](#memory-backpressure) park, which blocks inside `HasChanged`. The two interact in exactly one place: a watch is offered the change *before* `HasChanged`, so it does fire while a subscription is over its soft limit — but the verification is not woken until the change is buffered, so it times out and defers, and the dispatch arrives at the park long after the verification is gone. That is the case `abandon` exists for.
+
 ### Other Minor Features
 
 - **Automatic recovery**: Handles transient errors and reconnects to the binlog stream without data loss
 - **DDL detection**: Monitors for schema changes and notifies the migration coordinator. This is used to abandon any schema changes if the table was externally modified.
+
+## Testing against a Source
+
+`change.MockSource` (mock.go) is the shared test double, for this package and for every package that is handed a feed. `Source` is a wide interface, so a hand-rolled double is ~20 lines of no-op methods around the one or two that carry behaviour, and adding a method to `Source` means writing it once per copy — which is how the checksum, move and sync packages each ended up with their own.
+
+With `Inner` set it delegates to a real source and records the calls; with `Inner` nil every method is a success-shaped no-op reading from its configuration fields. A test that needs a scripted change delivered embeds it and overrides `VerifyRowAtNextChange`.
+
+Prefer it over embedding a nil `change.Source`, even for a feed a test believes is never touched. Promotion through an embedded interface satisfies `Source` with methods that panic, so growing the interface turns a passing test into a nil dereference at a call site nobody was thinking about — which is what moving `FeedStats` onto `Source` did to `pkg/migration`'s status stub. Embed a nil `Source` only where an unintended call *should* be a panic that names itself: a parameter the code under test must not reach at all.
 
 ## See Also
 

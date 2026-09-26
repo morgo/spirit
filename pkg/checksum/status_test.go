@@ -22,7 +22,11 @@ func TestLocklessProgressSummary(t *testing.T) {
 	stats.RetryQueueDepth = 0
 	stats.HotChunksDeferredThisPass = 1
 	require.Contains(t, (ChecksumStatus{Optimistic: &stats}).String(), "deferred=1")
-	stats.HotChunksDeferredThisPass = 0
+	// The pair has to be readable together: deferred falling on its own does
+	// not say whether those ranges were verified or merely stopped being hot.
+	stats.HotChunksDeferredThisPass, stats.HotChunksSettledThisPass = 0, 3
+	require.Contains(t, (ChecksumStatus{Optimistic: &stats}).String(), "deferred=0 settled=3")
+	stats.HotChunksSettledThisPass = 0
 	stats.FirstCleanPassAt = time.Now()
 	require.Contains(t, (ChecksumStatus{Optimistic: &stats}).String(), "lockless: verified")
 }

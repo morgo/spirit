@@ -1,19 +1,16 @@
 package move
 
 import (
-	"context"
 	"database/sql"
 	"errors"
 	"log/slog"
 	"sync"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/block/spirit/pkg/applier"
 	"github.com/block/spirit/pkg/change"
 	"github.com/block/spirit/pkg/checkpoint"
-	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
@@ -166,40 +163,6 @@ func TestFatalErrorReasonCheckpointHandling(t *testing.T) {
 	})
 }
 
-// fakeChangeSource is a minimal change.Source used to observe that
-// Close() reaches every repl client even when an earlier cleanup step
-// failed.
-type fakeChangeSource struct {
-	closed atomic.Bool
-	// notFlushed makes AllChangesFlushed report a feed still holding buffered
-	// changes. Defaults to false so the zero value is a healthy feed.
-	notFlushed atomic.Bool
-}
-
-func (f *fakeChangeSource) AddSubscription(_, _ *table.TableInfo, _ table.MappedChunker) error {
-	return nil
-}
-func (f *fakeChangeSource) Start(_ context.Context) error                       { return nil }
-func (f *fakeChangeSource) StartFromPosition(_ context.Context, _ string) error { return nil }
-func (f *fakeChangeSource) Position() string                                    { return "" }
-func (f *fakeChangeSource) CurrentPosition(_ context.Context) (string, error)   { return "", nil }
-func (f *fakeChangeSource) Flush(_ context.Context) error                       { return nil }
-func (f *fakeChangeSource) FlushUnderTableLock(_ context.Context, _ []*dbconn.TableLock) error {
-	return nil
-}
-func (f *fakeChangeSource) BlockWait(_ context.Context) error { return nil }
-func (f *fakeChangeSource) GetDeltaLen() int                  { return 0 }
-
-func (f *fakeChangeSource) FlushResidual() (int, int) { return 0, 0 }
-func (f *fakeChangeSource) SetWatermarkOptimization(_ context.Context, _ bool) error {
-	return nil
-}
-func (f *fakeChangeSource) StartPeriodicFlush(_ context.Context, _ time.Duration) {}
-func (f *fakeChangeSource) StopPeriodicFlush()                                    {}
-func (f *fakeChangeSource) AllChangesFlushed() bool                               { return !f.notFlushed.Load() }
-func (f *fakeChangeSource) Stop()                                                 {}
-func (f *fakeChangeSource) Close()                                                { f.closed.Store(true) }
-
 // TestCloseRunsAllClosersOnError pins the Close() aggregation contract:
 // every cleanup step runs even when an early one fails. Previously the
 // first failing step short-circuited the rest, leaking the remaining repl
@@ -213,8 +176,8 @@ func TestCloseRunsAllClosersOnError(t *testing.T) {
 	require.NoError(t, mockChunker.Open())
 	mockChunker.SetCloseError(chunkerErr)
 
-	repl1 := &fakeChangeSource{}
-	repl2 := &fakeChangeSource{}
+	repl1 := &change.MockSource{}
+	repl2 := &change.MockSource{}
 
 	db1, err := sql.Open("block-mysql", testutils.DSN())
 	require.NoError(t, err)
@@ -237,8 +200,8 @@ func TestCloseRunsAllClosersOnError(t *testing.T) {
 	err = r.Close()
 	require.ErrorIs(t, err, chunkerErr, "the failing step's error must surface")
 
-	require.True(t, repl1.closed.Load(), "repl client 1 must be closed despite the chunker error")
-	require.True(t, repl2.closed.Load(), "repl client 2 must be closed despite the chunker error")
+	require.Positive(t, repl1.Closes(), "repl client 1 must be closed despite the chunker error")
+	require.Positive(t, repl2.Closes(), "repl client 2 must be closed despite the chunker error")
 	require.ErrorContains(t, db1.PingContext(t.Context()), "database is closed",
 		"target DB 1 must be closed despite the chunker error")
 	require.ErrorContains(t, db2.PingContext(t.Context()), "database is closed",

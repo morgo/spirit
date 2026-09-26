@@ -15,11 +15,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// progressFeed satisfies the factory's "a lockless checker needs a feed" check.
-// The status assertions never run the checker, so no method on it is ever
-// called and the embedded nil interface is never dereferenced.
-type progressFeed struct{ change.Source }
-
 func TestSyncProgressAndLogFormat(t *testing.T) {
 	r, err := NewRunner(&Sync{})
 	require.NoError(t, err)
@@ -62,7 +57,7 @@ func TestSyncProgressAndLogFormat(t *testing.T) {
 	require.Empty(t, r.Progress().ETA)
 	require.Equal(t, status.CopyProgress{RowsCopied: 70, RowsTotal: 300}, r.Progress().Copy) // The copy reading outlives the copy phase.
 	require.Empty(t, r.Progress().Checksum)                                                  // The continuous verifier has no finite initial-checksum phase.
-	checker, err := checksum.NewChecker([]*sql.DB{{}}, table.NewMockChunker("verify", 100), []change.Source{&progressFeed{}}, &checksum.CheckerConfig{
+	checker, err := checksum.NewChecker([]*sql.DB{{}}, table.NewMockChunker("verify", 100), []change.Source{&change.MockSource{}}, &checksum.CheckerConfig{
 		Algorithm: checksum.Lockless,
 		TargetDB:  &sql.DB{},
 		DBConfig:  dbconn.NewDBConfig(),

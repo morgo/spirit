@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/block/spirit/pkg/change"
-	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/throttler"
@@ -628,41 +627,6 @@ func TestRecopyOnStableDivergence(t *testing.T) {
 	require.True(t, errors.Is(err, context.Canceled) || err == nil)
 }
 
-// fakeFeed is a minimal change.Source double for lockless-checksum tests.
-// Only Flush carries behaviour — it runs flushFn so a test can simulate the
-// target catching up as buffered changes are applied (apply lag draining).
-// Every other method is an inert no-op.
-type fakeFeed struct {
-	flushFn func(ctx context.Context) error
-	flushes atomic.Int64
-}
-
-var _ change.Source = (*fakeFeed)(nil)
-
-func (f *fakeFeed) Flush(ctx context.Context) error {
-	f.flushes.Add(1)
-	if f.flushFn != nil {
-		return f.flushFn(ctx)
-	}
-	return nil
-}
-func (f *fakeFeed) AddSubscription(_, _ *table.TableInfo, _ table.MappedChunker) error { return nil }
-func (f *fakeFeed) Start(context.Context) error                                        { return nil }
-func (f *fakeFeed) StartFromPosition(context.Context, string) error                    { return nil }
-func (f *fakeFeed) Position() string                                                   { return "" }
-func (f *fakeFeed) CurrentPosition(context.Context) (string, error)                    { return "", nil }
-func (f *fakeFeed) FlushUnderTableLock(context.Context, []*dbconn.TableLock) error     { return nil }
-func (f *fakeFeed) BlockWait(context.Context) error                                    { return nil }
-func (f *fakeFeed) GetDeltaLen() int                                                   { return 0 }
-
-func (f *fakeFeed) FlushResidual() (int, int)                            { return 0, 0 }
-func (f *fakeFeed) SetWatermarkOptimization(context.Context, bool) error { return nil }
-func (f *fakeFeed) StartPeriodicFlush(context.Context, time.Duration)    {}
-func (f *fakeFeed) StopPeriodicFlush()                                   {}
-func (f *fakeFeed) AllChangesFlushed() bool                              { return true }
-func (f *fakeFeed) Stop()                                                {}
-func (f *fakeFeed) Close()                                               {}
-
 // TestFatalDivergenceReconcilesApplyLag is the regression test for the
 // false-positive cutover abort: a chunk that is merely behind on applying
 // buffered changes (apply lag) must NOT be reported as a fatal divergence.
@@ -673,8 +637,8 @@ func (f *fakeFeed) Close()                                               {}
 func TestFatalDivergenceReconcilesApplyLag(t *testing.T) {
 	chunker := newTestChunker(1)
 	var drained atomic.Bool
-	feed := &fakeFeed{
-		flushFn: func(context.Context) error { drained.Store(true); return nil },
+	feed := &change.MockSource{
+		FlushFn: func(context.Context) error { drained.Store(true); return nil },
 	}
 	cfg := fastConfig()
 	// No recopier: the migration cutover gate's policy is that a confirmed
@@ -700,7 +664,7 @@ func TestFatalDivergenceReconcilesApplyLag(t *testing.T) {
 	}
 	require.Equal(t, uint64(0), c.Stats().PermanentFailures, "apply lag must not count as permanent divergence")
 	require.True(t, drained.Load(), "the checker must drain the feed before judging divergence")
-	require.GreaterOrEqual(t, feed.flushes.Load(), int64(1), "feed.Flush must be called to confirm divergence")
+	require.GreaterOrEqual(t, feed.Flushes(), 1, "feed.Flush must be called to confirm divergence")
 
 	err := stop()
 	require.True(t, errors.Is(err, context.Canceled) || err == nil)
@@ -709,7 +673,7 @@ func TestFatalDivergenceReconcilesApplyLag(t *testing.T) {
 func TestHotChunkDuringFeedDrainIsBounded(t *testing.T) {
 	var sourceCRC atomic.Int64
 	sourceCRC.Store(100)
-	feed := &fakeFeed{flushFn: func(context.Context) error {
+	feed := &change.MockSource{FlushFn: func(context.Context) error {
 		sourceCRC.Add(1)
 		return nil
 	}}
@@ -728,7 +692,7 @@ func TestHotChunkDuringFeedDrainIsBounded(t *testing.T) {
 	require.Eventually(t, func() bool { return c.Stats().PassesCompleted == 1 },
 		2*time.Second, time.Millisecond)
 	stats := c.Stats()
-	require.Equal(t, int64(2), feed.flushes.Load())
+	require.Equal(t, 2, feed.Flushes())
 	require.Equal(t, uint64(1), stats.HotChunksDeferredThisPass)
 	require.Zero(t, stats.ChunksPassedThisPass)
 	require.Zero(t, stats.PermanentFailures)
@@ -746,8 +710,8 @@ func TestHotChunkDuringFeedDrainIsBounded(t *testing.T) {
 // corruption.
 func TestFatalDivergenceStillAbortsAfterDrain(t *testing.T) {
 	chunker := newTestChunker(1)
-	feed := &fakeFeed{} // Flush is a no-op: draining changes nothing
-	cfg := fastConfig() // no recopier: a confirmed divergence is fatal
+	feed := &change.MockSource{} // Flush is a no-op: draining changes nothing
+	cfg := fastConfig()          // no recopier: a confirmed divergence is fatal
 
 	c := newTestChecker(t, chunker, cfg,
 		func(ctx context.Context, chunk *table.Chunk, attempt int) (int64, int64, uint64, error) {
@@ -759,7 +723,7 @@ func TestFatalDivergenceStillAbortsAfterDrain(t *testing.T) {
 	err := c.Run(t.Context())
 	require.ErrorIs(t, err, ErrPermanentDivergence,
 		"a divergence that survives a feed drain must still be fatal")
-	require.GreaterOrEqual(t, feed.flushes.Load(), int64(1), "the checker must attempt a drain before the fatal verdict")
+	require.GreaterOrEqual(t, feed.Flushes(), 1, "the checker must attempt a drain before the fatal verdict")
 	require.Positive(t, c.Stats().PermanentFailures)
 }
 
@@ -1685,7 +1649,7 @@ func TestFiniteLocklessRetriesTransientFailures(t *testing.T) {
 		cfg := NewCheckerDefaultConfig()
 		cfg.Algorithm = Lockless
 		cfg.RetryDelay = time.Millisecond
-		checker, err := NewChecker([]*sql.DB{{}}, chunker, []change.Source{&fakeFeed{}}, cfg)
+		checker, err := NewChecker([]*sql.DB{{}}, chunker, []change.Source{&change.MockSource{}}, cfg)
 		require.NoError(t, err)
 		return checker
 	}
@@ -1732,7 +1696,7 @@ func TestFiniteLocklessReportsFullProgressAfterCleanPass(t *testing.T) {
 	cfg := NewCheckerDefaultConfig()
 	cfg.Algorithm = Lockless
 	cfg.RetryDelay = time.Millisecond
-	checker, err := NewChecker([]*sql.DB{{}}, chunker, []change.Source{&fakeFeed{}}, cfg)
+	checker, err := NewChecker([]*sql.DB{{}}, chunker, []change.Source{&change.MockSource{}}, cfg)
 	require.NoError(t, err)
 
 	require.Equal(t, status.ChecksumProgress{RowsChecked: 3, RowsTotal: 10}, checker.GetProgress())

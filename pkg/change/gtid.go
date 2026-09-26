@@ -50,6 +50,13 @@ type gtidClient struct {
 
 	subs *subscriptionRegistry
 
+	// park / rowWatch back VerifyRowAtNextChange. The gate holds the reader between
+	// events; rowWatch is the single armed verification (verifyMu enforces
+	// "single"). See park.go for why one at a time is enough.
+	park     parkGate
+	rowWatch atomic.Pointer[rowWaiter]
+	verifyMu sync.Mutex
+
 	callerCancelFunc func(FatalReason) bool
 	ddlFilterSchema  string
 	ddlFilterTables  map[string]struct{}
@@ -653,6 +660,12 @@ func (c *gtidClient) readStream(ctx context.Context) {
 		if ev == nil {
 			continue
 		}
+		// Hold here if a verification has parked the reader. The event is
+		// already read but not acted on, so nothing is consumed and lost;
+		// dispatch resumes with it once the gate opens. See park.go.
+		if err := c.park.wait(ctx); err != nil {
+			return
+		}
 		// Stamp before the switch, not inside it: several cases below
 		// `continue` out, and one call site per client is what keeps the two
 		// clients from drifting on this. The published position is at most one
@@ -976,10 +989,10 @@ func (c *gtidClient) processRowsEvent(ev *replication.BinlogEvent, e *replicatio
 				return err
 			}
 			if pkChanged(beforeKey, afterKey) {
-				sub.HasChanged(beforeKey, nil, true)
-				sub.HasChanged(afterKey, afterRow, false)
+				c.dispatchRow(sub, tbl, beforeKey, nil, true)
+				c.dispatchRow(sub, tbl, afterKey, afterRow, false)
 			} else {
-				sub.HasChanged(beforeKey, afterRow, false)
+				c.dispatchRow(sub, tbl, beforeKey, afterRow, false)
 			}
 		}
 		return nil
@@ -992,9 +1005,9 @@ func (c *gtidClient) processRowsEvent(ev *replication.BinlogEvent, e *replicatio
 		}
 		switch eventType { //nolint:exhaustive
 		case eventTypeInsert:
-			sub.HasChanged(key, row, false)
+			c.dispatchRow(sub, tbl, key, row, false)
 		case eventTypeDelete:
-			sub.HasChanged(key, nil, true)
+			c.dispatchRow(sub, tbl, key, nil, true)
 		default:
 			// Unreachable; kept as a hard error for the same reason as the
 			// matching branch in binlogClient.processRowsEvent.
@@ -1167,7 +1180,7 @@ func (c *gtidClient) countRotation(currentLogName, nextLogName string) string {
 	return nextLogName
 }
 
-// FeedStats satisfies StatsReporter. ForcedRotations is always zero: this
+// FeedStats satisfies Source. ForcedRotations is always zero: this
 // client never issues `FLUSH BINARY LOGS` — BlockWait polls
 // @@GLOBAL.gtid_executed instead of chasing a file offset.
 func (c *gtidClient) FeedStats() FeedStats {
@@ -1344,4 +1357,40 @@ func (c *gtidClient) SetWatermarkOptimization(ctx context.Context, newVal bool) 
 		}
 	}
 	return nil
+}
+
+// dispatchRow delivers one row change to its subscription, cooperating with any
+// armed verification (see park.go). All three steps are ordered, and each one
+// is wrong anywhere else:
+//
+//   - watchRow runs first, so a rewrite of the watched row is counted before it
+//     can be buffered, and therefore before any flush could carry it;
+//   - the change is buffered next, so the flush the verification runs puts it on
+//     the target;
+//   - the reader parks before the verification is released, so nothing past this
+//     event is admitted while the target is read.
+//
+// The rest of this event still dispatches behind the park, which is what the
+// rewrite count covers; no later event does.
+func (c *gtidClient) dispatchRow(sub Subscription, tbl *table.TableInfo, key, image []any, deleted bool) {
+	watched := watchRow(&c.rowWatch, tbl, key, image, deleted)
+	sub.HasChanged(key, image, deleted)
+	if watched != nil {
+		watched.parkAndRelease(&c.park)
+	}
+}
+
+// VerifyRowAtNextChange satisfies Source. verifyMu is what makes the single
+// rowWatch slot enough: one verification runs at a time.
+func (c *gtidClient) VerifyRowAtNextChange(ctx context.Context, watch RowWatch, verify RowVerifier) error {
+	c.verifyMu.Lock()
+	defer c.verifyMu.Unlock()
+	return verifyRowAtNextChange(ctx, &c.park,
+		func(w *rowWaiter) { c.rowWatch.Store(w) },
+		func() { c.rowWatch.Store(nil) },
+		func(ctx context.Context) error {
+			return flushParked(ctx, func(ctx context.Context) error {
+				return c.flush(ctx, false, nil)
+			}, c.AllChangesFlushed)
+		}, watch, verify)
 }

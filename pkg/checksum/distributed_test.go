@@ -1,7 +1,6 @@
 package checksum
 
 import (
-	"context"
 	"database/sql"
 	"log/slog"
 	"testing"
@@ -17,32 +16,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-type noopChangeSource struct{}
-
-func (s *noopChangeSource) AddSubscription(_, _ *table.TableInfo, _ table.MappedChunker) error {
-	return nil
-}
-func (s *noopChangeSource) Start(context.Context) error                     { return nil }
-func (s *noopChangeSource) StartFromPosition(context.Context, string) error { return nil }
-func (s *noopChangeSource) Position() string                                { return "" }
-func (s *noopChangeSource) CurrentPosition(context.Context) (string, error) { return "", nil }
-func (s *noopChangeSource) Flush(context.Context) error                     { return nil }
-func (s *noopChangeSource) FlushUnderTableLock(context.Context, []*dbconn.TableLock) error {
-	return nil
-}
-func (s *noopChangeSource) BlockWait(context.Context) error { return nil }
-func (s *noopChangeSource) GetDeltaLen() int                { return 0 }
-
-func (s *noopChangeSource) FlushResidual() (int, int) { return 0, 0 }
-func (s *noopChangeSource) SetWatermarkOptimization(context.Context, bool) error {
-	return nil
-}
-func (s *noopChangeSource) StartPeriodicFlush(context.Context, time.Duration) {}
-func (s *noopChangeSource) StopPeriodicFlush()                                {}
-func (s *noopChangeSource) AllChangesFlushed() bool                           { return true }
-func (s *noopChangeSource) Stop()                                             {}
-func (s *noopChangeSource) Close()                                            {}
-
 func TestDistributedCheckerHonorsYieldTimeoutConfig(t *testing.T) {
 	db, err := sql.Open("block-mysql", testutils.DSN())
 	require.NoError(t, err)
@@ -56,7 +29,7 @@ func TestDistributedCheckerHonorsYieldTimeoutConfig(t *testing.T) {
 	checker, err := NewChecker(
 		[]*sql.DB{db},
 		table.NewMockChunker("yield_config", 1),
-		[]change.Source{&noopChangeSource{}},
+		[]change.Source{&change.MockSource{}},
 		config,
 	)
 	require.NoError(t, err)

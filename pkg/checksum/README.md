@@ -219,21 +219,71 @@ criteria.
 
 `LocklessChecker` verifies a target that is still converging toward the source over a live replication feed, so a first-attempt mismatch is *expected* (the target simply hasn't caught up yet) rather than alarming. It runs in **passes**: each pass walks every chunk once and then drains a delayed-retry queue until empty. A mismatched chunk is re-read after a short delay and passes once the target's CRC matches a source CRC the checker has witnessed. A chunk whose source keeps changing (a "hot chunk") cycles to the back of the queue without blocking the pass.
 
-### Current limitation: continuously updated hot rows
+### Continuously updated hot rows
 
-Workloads that continuously update the same rows are not currently supported
-reliably by the lockless algorithm. Even with hot-chunk splitting and the
-snapshot fallback, a frozen source row image may be superseded before a target
-read observes it. Splitting to a single row cannot guarantee convergence. Deletes
-before verification can also leave frozen images unresolved. These ranges remain
-unverified and can prevent `RunUntilClean` from completing; they are not accepted
-as clean merely because replication is active.
+A row that is written continuously defeats every read-and-compare strategy the
+checker has: the frozen source image is stale before the first target read, so
+every attempt observes a different source and the range is deferred with no
+verdict — pass after pass. A genuinely diverged hot row and a merely busy one
+stay indistinguishable for as long as the writes continue.
 
-The finite snapshot fallback can help append-heavy tails because later inserts
-do not expand its work set. It does not solve the continuously updated hot-row
-case. Replication-applier integration using change-stream row images and their
-application is planned to address that case, but is not implemented yet. For
-migrations with these workloads, use the default snapshot-based checksum.
+The way out is to stop reading the source. Any comparison between a `SELECT` of
+the source and a read of the target is between a source image at one position
+and a target state at a later one, and closing that window means stopping the
+writes. But the change stream already carries the answer: with
+`binlog_row_image=FULL`, an event's after-image **is** the source's value for
+that row at that position. MySQL guarantees it; no read is needed, and nothing
+has to hold still.
+
+**Settling** is the terminal step built on that. Once a range has failed
+`MaxHotAttempts` observations, each outstanding row is verified against the
+stream's own image of it, one row at a time:
+
+1. Ask the feed to wait for the next change to that row and park its reader
+   there (`change.Source.VerifyRowAtNextChange`). The change is buffered first and the reader parks
+   immediately after, so nothing past that event is admitted.
+2. Drain the feed, so the target holds exactly that image. This is *not* the
+   exported `Flush`, which ends in a `BlockWait` for the reader to reach the
+   source's current position — the reader is parked, so that wait could never
+   succeed. The parked drain applies what is buffered and stops, and reports
+   whether the buffer emptied.
+3. Compare the target row to the event's image, evaluating the same
+   column-mapping checksum expressions used everywhere else against the image
+   itself. (The image is rendered as a one-row derived table whose column types
+   come from the real table, so the `CAST`s land on a column of the right type.)
+
+A mismatch at step 3 is a real inconsistency: the feed delivered that image and
+the drain applied it, so apply lag cannot explain a difference. It goes to the
+ordinary repair path (or is fatal, per the policy below) instead of being
+deferred again.
+
+This terminates in the opposite direction from a lock: **the more often the row
+is written, the sooner its next event arrives.** The rows that defeat every
+read-and-compare strategy are exactly the ones this settles fastest, and a row
+quiet enough that no event arrives inside its one-second budget is one the
+ordinary poll was already converging on. A delete event is a verdict too, which
+is what lets an obligation that a row be *absent* be settled — no `SELECT` can
+prove a row will stay absent, because there is nothing to hold.
+
+Nothing here takes a lock. The cost is that the stream is held for the duration
+of one row's verification, which is why rows are settled one at a time, the whole
+escalation is bounded at five seconds, and it is reached only after a range has
+already failed `MaxHotAttempts` observations. `HotChunksSettledThisPass` counts
+it; a rising value alongside a falling `HotChunksDeferredThisPass` is it working.
+
+Three cases still defer rather than settle, and all three are honesty constraints:
+
+- **No change arrives inside the row's budget.** Not the case this exists for.
+- **The row was written again before the target could be read.** The image no
+  longer matches what the drain left behind, so the comparison would be against
+  a value the target was never meant to hold.
+- **The parked drain could not empty the buffer** — a batch that lost to lock
+  contention, a key held behind the copier's watermark. The watched change may
+  be among what is left, and reporting that as a divergence would be reporting
+  apply lag, the one mistake this whole path exists to avoid.
+
+A checker with no feed at all (library callers may have none) simply leaves the
+range where it was before settling existed.
 
 When a chunk's source CRC is stable across the retry window but the target still disagrees, that is a **stable divergence**. How the checker reacts is governed by whether it has a `Recopier`:
 

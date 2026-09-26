@@ -130,8 +130,10 @@ var ErrPermanentDivergence = errors.New("checksum: permanent divergence detected
 // a divergence proven, so this is deliberately distinct from
 // ErrPermanentDivergence. It is the optimistic counterpart of
 // ErrDifferencesExhausted: a bound that makes the run terminate instead of
-// re-walking the table forever, which is what a continuously updated hot row
-// would otherwise cause (see the hot-row limitation in the package README).
+// re-walking the table forever. Settling (lockless_settle.go) resolves most hot
+// rows before they get that far; what reaches this bound is a range that could
+// not even be settled — see "Continuously updated hot rows" in the package
+// README for the cases where that happens.
 var ErrVerificationUnresolved = errors.New("checksum: verification did not converge within the pass budget")
 
 // Default values applied for zero-valued config fields. Exported so callers
@@ -246,6 +248,7 @@ type LocklessChecker struct {
 	passedUnder10AttemptsThisPass atomic.Uint64 // 5+ attempts via retry
 	recopiesThisPass              atomic.Uint64 // chunks rewritten by Recopier
 	hotChunksDeferredThisPass     atomic.Uint64 // unstable chunks revisited next pass
+	hotChunksSettledThisPass      atomic.Uint64 // hot chunks settled against the change stream
 
 	permanentFailures atomic.Uint64
 	retryQueueDepth   atomic.Int64
@@ -626,6 +629,7 @@ func (c *LocklessChecker) runPasses(ctx context.Context, untilClean bool, minPas
 		c.passedUnder10AttemptsThisPass.Store(0)
 		c.recopiesThisPass.Store(0)
 		c.hotChunksDeferredThisPass.Store(0)
+		c.hotChunksSettledThisPass.Store(0)
 		c.inFlight.Store(0)
 
 		// Debug-level so production logs aren't swamped on a many-pass
@@ -677,6 +681,7 @@ func (c *LocklessChecker) runPasses(ctx context.Context, untilClean bool, minPas
 			"under_10_attempts", c.passedUnder10AttemptsThisPass.Load(),
 			"recopies", c.recopiesThisPass.Load(),
 			"hot_chunks_deferred", deferredHot,
+			"hot_chunks_settled", c.hotChunksSettledThisPass.Load(),
 			"hot_chunks_split", c.hotChunksSplitThisPass.Load(),
 			"duration", time.Since(passStart).Round(time.Millisecond).String(),
 		)
@@ -1033,13 +1038,75 @@ func (c *LocklessChecker) checkHotSnapshot(ctx context.Context, res *workResult,
 	res.passed, res.err = snapshot.check(ctx)
 	if res.err != nil {
 		res.err = fmt.Errorf("verify hot range snapshot: %w", res.err)
+		return
 	}
-	res.deferHot = !res.passed && snapshot.attempts >= c.cfg.MaxHotAttempts
 	if res.passed {
 		c.cfg.Logger.Info("lockless checksum: hot range snapshot verified", "chunk", res.item.chunk.String(), "attempts", snapshot.attempts)
-	} else if res.err == nil {
-		c.cfg.Logger.Debug("lockless checksum: hot range snapshot pending", "chunk", res.item.chunk.String(), "rows_remaining", len(snapshot.pending), "attempts", snapshot.attempts)
+		return
 	}
+	if snapshot.attempts < c.cfg.MaxHotAttempts {
+		c.cfg.Logger.Debug("lockless checksum: hot range snapshot pending", "chunk", res.item.chunk.String(), "rows_remaining", len(snapshot.pending), "attempts", snapshot.attempts)
+		return
+	}
+
+	// Waiting has not worked: this range has had its whole attempt budget and
+	// its source is still moving. Before giving up on it for the pass, try to
+	// settle each outstanding row against the change stream's own image of it —
+	// see lockless_settle.go for why that verdict is trustworthy where a poll's
+	// is not.
+	verdict, err := newRowSettler(c.sourceDB, c.feed, c.cfg.Logger).settle(ctx, snapshot)
+	if err != nil {
+		res.err = fmt.Errorf("settle hot range: %w", err)
+		return
+	}
+	switch verdict {
+	case settleClean:
+		snapshot.settled = true
+		clear(snapshot.pending)
+		res.passed = true
+		c.hotChunksSettledThisPass.Add(1)
+		c.cfg.Logger.Info("lockless checksum: hot range settled clean against the change stream",
+			"chunk", res.item.chunk.String(), "attempts", snapshot.attempts)
+	case settleDiverged:
+		// The stream delivered that row's image and the flush applied it, so
+		// this is not apply lag and not a read race. Hand it to the ordinary
+		// divergence path,
+		// which repairs it or reports it according to the configured policy.
+		snapshot.settled = true
+		c.hotChunksSettledThisPass.Add(1)
+		c.cfg.Logger.Warn("lockless checksum: hot range diverged against the change stream",
+			"chunk", res.item.chunk.String(), "rows_remaining", len(snapshot.pending), "attempts", snapshot.attempts)
+		c.resolveSettledDivergence(ctx, res)
+	case settleUnavailable:
+		res.deferHot = true
+		c.cfg.Logger.Info("lockless checksum: hot range could not be settled; deferring to the next pass",
+			"chunk", res.item.chunk.String(), "rows_remaining", len(snapshot.pending), "attempts", snapshot.attempts)
+	}
+}
+
+// resolveSettledDivergence applies the configured divergence policy to a range
+// that settling proved wrong. It is deliberately the same policy the aggregate
+// path uses (executeWork's stable-divergence branch): a settled verdict is a
+// better-evidenced divergence, not a different kind of one, so it must not
+// answer to a different rule. The difference is only that there is nothing left
+// to drain first — settling already flushed the stream through the event it
+// compared against.
+func (c *LocklessChecker) resolveSettledDivergence(ctx context.Context, res *workResult) {
+	chunk := res.item.chunk
+	if c.recopier == nil {
+		c.logRowDifferences(ctx, chunk, "hot chunk has diverged")
+		res.permanent = true
+		res.permanentEvidence = fmt.Sprintf("settled against the change stream after %d attempts, %d rows still outstanding; see the logged row differences",
+			res.snapshot.attempts, len(res.snapshot.pending))
+		return
+	}
+	c.logRowDifferences(ctx, chunk, "recopying diverged hot chunk")
+	if err := c.recopier.Recopy(ctx, chunk); err != nil {
+		res.err = fmt.Errorf("recopy hot chunk %s: %w", chunk.String(), err)
+		return
+	}
+	res.passed = true
+	res.recopied = true
 }
 
 // executeWork runs the source+target read for a single workItem and applies
@@ -1261,14 +1328,19 @@ func (c *LocklessChecker) handleResult(res *workResult, enqueueRetry func(*retry
 		)
 		return nil
 	}
-	if res.snapshot != nil {
-		return enqueueRetry(&retryEntry{chunk: res.item.chunk, snapshot: res.snapshot, splitBudget: res.item.splitBudget,
-			splitDepth: res.item.splitDepth, point: res.item.point, attempts: res.item.attempts + 1,
-			readDuration: res.item.readDuration, readRows: res.item.readRows,
-			consecutiveSrcChanged: max(2, res.item.consecutiveSrcChanged), notBefore: time.Now().Add(c.cfg.RetryDelay)})
-	}
+	// A verdict outranks a retry. This has to be checked before the snapshot
+	// re-enqueue below, because a range that settled carries its snapshot on
+	// the result: re-enqueueing it would poll a range whose answer is already
+	// known, forever, and the run would never return the divergence.
 	if res.permanent {
 		c.permanentFailures.Add(1)
+		if res.permanentEvidence != "" {
+			c.cfg.Logger.Error("lockless checksum: permanent divergence",
+				"chunk", res.item.chunk.String(),
+				"evidence", res.permanentEvidence,
+			)
+			return fmt.Errorf("%w: chunk %s (%s)", ErrPermanentDivergence, res.item.chunk.String(), res.permanentEvidence)
+		}
 		c.cfg.Logger.Error("lockless checksum: permanent divergence",
 			"chunk", res.item.chunk.String(),
 			"sourceCRC", res.newSrc.crc,
@@ -1279,6 +1351,12 @@ func (c *LocklessChecker) handleResult(res *workResult, enqueueRetry func(*retry
 		)
 		return fmt.Errorf("%w: chunk %s (source crc=%d count=%d, target crc=%d count=%d)", ErrPermanentDivergence,
 			res.item.chunk.String(), res.newSrc.crc, res.newSrc.count, res.newTgt.crc, res.newTgt.count)
+	}
+	if res.snapshot != nil {
+		return enqueueRetry(&retryEntry{chunk: res.item.chunk, snapshot: res.snapshot, splitBudget: res.item.splitBudget,
+			splitDepth: res.item.splitDepth, point: res.item.point, attempts: res.item.attempts + 1,
+			readDuration: res.item.readDuration, readRows: res.item.readRows,
+			consecutiveSrcChanged: max(2, res.item.consecutiveSrcChanged), notBefore: time.Now().Add(c.cfg.RetryDelay)})
 	}
 
 	// Mismatch — enqueue a retry. Either a fresh-walk first-time mismatch,
@@ -1538,6 +1616,7 @@ func (c *LocklessChecker) Stats() LocklessCheckerStats {
 		PassedUnder10AttemptsThisPass: c.passedUnder10AttemptsThisPass.Load(),
 		RecopiesThisPass:              c.recopiesThisPass.Load(),
 		HotChunksDeferredThisPass:     c.hotChunksDeferredThisPass.Load(),
+		HotChunksSettledThisPass:      c.hotChunksSettledThisPass.Load(),
 		HotChunksSplitThisPass:        c.hotChunksSplitThisPass.Load(),
 		RetryQueueDepth:               int(c.retryQueueDepth.Load()),
 		HotChunkCount:                 int(c.hotChunkCount.Load()),

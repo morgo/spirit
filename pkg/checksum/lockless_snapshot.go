@@ -27,6 +27,12 @@ type hotSnapshot struct {
 	chunk         *table.Chunk
 	targetColumns string
 	attempts      int
+
+	// settled records that the snapshot reached a verdict by comparing its
+	// outstanding rows against the change stream's images of them, rather than
+	// by waiting for the source to stop moving. See
+	// rowSettler.settle in lockless_settle.go.
+	settled bool
 }
 
 type hotSnapshotRow struct {
@@ -61,7 +67,27 @@ func captureHotSnapshot(ctx context.Context, sourceDB, targetDB *sql.DB, chunk *
 		pending[key] = row
 	}
 	maps.Copy(pending, source)
-	return &hotSnapshot{pending: pending, targetDB: targetDB, chunk: chunk, targetColumns: targetColumns}, nil
+	return &hotSnapshot{
+		pending:       pending,
+		targetDB:      targetDB,
+		chunk:         chunk,
+		targetColumns: targetColumns,
+	}, nil
+}
+
+// pendingPredicate renders the outstanding obligations as a disjunction of
+// point predicates, which is what the poll reads the target with. Empty when
+// nothing is outstanding. The settle path builds its own single-row predicate
+// instead (pointPredicate), because it resolves one row at a time.
+func (s *hotSnapshot) pendingPredicate() string {
+	predicates := make([]string, 0, len(s.pending))
+	for _, row := range s.pending {
+		point := *s.chunk
+		point.LowerBound = &table.Boundary{Value: row.key, Inclusive: true}
+		point.UpperBound = &table.Boundary{Value: row.key, Inclusive: true}
+		predicates = append(predicates, "("+point.String()+")")
+	}
+	return strings.Join(predicates, " OR ")
 }
 
 // check removes only obligations actually observed satisfied on the target.
@@ -73,14 +99,7 @@ func (s *hotSnapshot) check(ctx context.Context) (bool, error) {
 	if len(s.pending) == 0 {
 		return true, nil
 	}
-	predicates := make([]string, 0, len(s.pending))
-	for _, row := range s.pending {
-		point := *s.chunk
-		point.LowerBound = &table.Boundary{Value: row.key, Inclusive: true}
-		point.UpperBound = &table.Boundary{Value: row.key, Inclusive: true}
-		predicates = append(predicates, "("+point.String()+")")
-	}
-	rows, _, oversized, err := readHotSnapshotRows(ctx, s.targetDB, s.chunk, s.chunk.NewTable, s.targetColumns, strings.Join(predicates, " OR "), 2*int(hotSplitTargetRows))
+	rows, _, oversized, err := readHotSnapshotRows(ctx, s.targetDB, s.chunk, s.chunk.NewTable, s.targetColumns, s.pendingPredicate(), 2*int(hotSplitTargetRows))
 	if err != nil {
 		return false, err
 	}
@@ -109,7 +128,12 @@ func (s *hotSnapshot) check(ctx context.Context) (bool, error) {
 // readHotSnapshotRows preserves tuple identity without delimiter collisions.
 // Temporal keys are cast to their server representation to preserve fractional
 // seconds/zero dates with parseTime=true; predicates still use native key types.
-func readHotSnapshotRows(ctx context.Context, db *sql.DB, chunk *table.Chunk, info *table.TableInfo, columns, predicate string, limit int) (map[string]hotSnapshotRow, int, bool, error) {
+//
+// It takes a rowQuerier (see inspect.go) rather than a *sql.DB so a caller can
+// run the read inside a transaction. No caller does today — the settle path
+// reads the target with its own point predicate and no transaction, because
+// what it compares against is the stream's image rather than a frozen source.
+func readHotSnapshotRows(ctx context.Context, db rowQuerier, chunk *table.Chunk, info *table.TableInfo, columns, predicate string, limit int) (map[string]hotSnapshotRow, int, bool, error) {
 	if len(chunk.Key) == 0 {
 		return nil, 0, false, fmt.Errorf("snapshot range has no key")
 	}

@@ -56,7 +56,7 @@ type LocklessCheckerStats struct {
 	PassedFirstAttemptThisPass    uint64 // 1 attempt (no retry needed)
 	PassedSecondAttemptThisPass   uint64 // 2 attempts (1 retry)
 	PassedUnder5AttemptsThisPass  uint64 // 3-4 attempts
-	PassedUnder10AttemptsThisPass uint64 // 5-9 attempts
+	PassedUnder10AttemptsThisPass uint64 // 5+ attempts; 10+ outliers fold in here
 	// RecopiesThisPass is the count of chunks that were recopied this
 	// pass — i.e. retry detected stable target divergence (source CRC
 	// unchanged across the retry window, target still wrong) and the
@@ -69,9 +69,20 @@ type LocklessCheckerStats struct {
 	RecopiesThisPass uint64
 
 	// HotChunksDeferredThisPass is the number of continuously changing chunks
-	// deferred after MaxHotAttempts. They are not counted as passed; any value
+	// deferred after MaxHotAttempts *and* not settled against the change stream
+	// (see HotChunksSettledThisPass). They are not counted as passed; any value
 	// greater than zero makes this pass ineligible for FirstCleanPass.
 	HotChunksDeferredThisPass uint64
+	// HotChunksSettledThisPass counts chunks that exhausted MaxHotAttempts and
+	// then reached a real verdict by comparing the target against the change
+	// stream's own image of each outstanding row — verified outright, or
+	// diverged and handed to the repair path. It is the escalation that keeps a
+	// continuously written row from deferring forever; a rising count alongside
+	// a falling HotChunksDeferredThisPass is it working. It does not say which
+	// verdict was reached: a settled divergence is also counted by
+	// RecopiesThisPass (or ends the run), and a settled clean chunk by the
+	// ordinary passed counters.
+	HotChunksSettledThisPass uint64
 	// HotChunksSplitThisPass counts parents replaced by child ranges. A split
 	// is not a verification result; all children must resolve independently.
 	HotChunksSplitThisPass uint64

@@ -52,6 +52,13 @@ type binlogClient struct {
 	// access; reach the subscriptions only through these methods.
 	subs *subscriptionRegistry
 
+	// park / rowWatch back VerifyRowAtNextChange. The gate holds the reader between
+	// events; rowWatch is the single armed verification (verifyMu enforces
+	// "single"). See park.go for why one at a time is enough.
+	park     parkGate
+	rowWatch atomic.Pointer[rowWaiter]
+	verifyMu sync.Mutex
+
 	// callerCancelFunc is an optional callback that is called when a DDL
 	// change is detected on a subscribed table, or when a fatal stream
 	// error occurs; the FatalReason distinguishes the two so the caller
@@ -742,6 +749,12 @@ func (c *binlogClient) readStream(ctx context.Context) {
 		if ev == nil {
 			continue
 		}
+		// Hold here if a verification has parked the reader. The event is
+		// already read but not acted on, so nothing is consumed and lost;
+		// dispatch resumes with it once the gate opens. See park.go.
+		if err := c.park.wait(ctx); err != nil {
+			return
+		}
 		// Stamp before the switch, not inside it: RotateEvent `continue`s out
 		// below, and one call site per client is what keeps the two clients
 		// from drifting on this. The published position is at most one
@@ -1056,10 +1069,10 @@ func (c *binlogClient) processRowsEvent(ev *replication.BinlogEvent, e *replicat
 			}
 
 			if pkChanged(beforeKey, afterKey) {
-				sub.HasChanged(beforeKey, nil, true)      // delete old PK
-				sub.HasChanged(afterKey, afterRow, false) // insert new PK
+				c.dispatchRow(sub, tbl, beforeKey, nil, true)      // delete old PK
+				c.dispatchRow(sub, tbl, afterKey, afterRow, false) // insert new PK
 			} else {
-				sub.HasChanged(beforeKey, afterRow, false)
+				c.dispatchRow(sub, tbl, beforeKey, afterRow, false)
 			}
 		}
 		return nil
@@ -1073,9 +1086,9 @@ func (c *binlogClient) processRowsEvent(ev *replication.BinlogEvent, e *replicat
 		}
 		switch eventType { //nolint:exhaustive
 		case eventTypeInsert:
-			sub.HasChanged(key, row, false)
+			c.dispatchRow(sub, tbl, key, row, false)
 		case eventTypeDelete:
-			sub.HasChanged(key, nil, true)
+			c.dispatchRow(sub, tbl, key, nil, true)
 		default:
 			// Unreachable today: eventTypeUnknown is rejected above and
 			// eventTypeUpdate returned earlier. Kept as a hard error so a
@@ -1333,7 +1346,7 @@ func (c *binlogClient) FlushResidual() (int, int) {
 	return c.flushResidual, c.flushCount
 }
 
-// FeedStats satisfies StatsReporter, so the runner can fold the feed's
+// FeedStats satisfies Source, so the runner can fold the feed's
 // activity into the binlog row of its periodic status block.
 func (c *binlogClient) FeedStats() FeedStats {
 	// Collected before c.mu is taken: these lock each subscription, and the
@@ -1607,4 +1620,40 @@ func parseBinlogPositionString(s string) (mysql.Position, error) {
 		return mysql.Position{}, fmt.Errorf("malformed position %q: offset is not a uint32: %w", s, err)
 	}
 	return mysql.Position{Name: name, Pos: uint32(offset)}, nil
+}
+
+// dispatchRow delivers one row change to its subscription, cooperating with any
+// armed verification (see park.go). All three steps are ordered, and each one
+// is wrong anywhere else:
+//
+//   - watchRow runs first, so a rewrite of the watched row is counted before it
+//     can be buffered, and therefore before any flush could carry it;
+//   - the change is buffered next, so the flush the verification runs puts it on
+//     the target;
+//   - the reader parks before the verification is released, so nothing past this
+//     event is admitted while the target is read.
+//
+// The rest of this event still dispatches behind the park, which is what the
+// rewrite count covers; no later event does.
+func (c *binlogClient) dispatchRow(sub Subscription, tbl *table.TableInfo, key, image []any, deleted bool) {
+	watched := watchRow(&c.rowWatch, tbl, key, image, deleted)
+	sub.HasChanged(key, image, deleted)
+	if watched != nil {
+		watched.parkAndRelease(&c.park)
+	}
+}
+
+// VerifyRowAtNextChange satisfies Source. verifyMu is what makes the single
+// rowWatch slot enough: one verification runs at a time.
+func (c *binlogClient) VerifyRowAtNextChange(ctx context.Context, watch RowWatch, verify RowVerifier) error {
+	c.verifyMu.Lock()
+	defer c.verifyMu.Unlock()
+	return verifyRowAtNextChange(ctx, &c.park,
+		func(w *rowWaiter) { c.rowWatch.Store(w) },
+		func() { c.rowWatch.Store(nil) },
+		func(ctx context.Context) error {
+			return flushParked(ctx, func(ctx context.Context) error {
+				return c.flush(ctx, false, nil)
+			}, c.AllChangesFlushed)
+		}, watch, verify)
 }
