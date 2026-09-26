@@ -227,8 +227,8 @@ func TestHotSplitReadback(t *testing.T) {
 			chunker := &testChunker{chunks: []*table.Chunk{parent}}
 			cfg := fastConfig()
 			cfg.RetryDelay = time.Millisecond
-			c, err := NewLocklessChecker(source, target, chunker, nil, nil, &cfg)
-			require.NoError(t, err)
+			applySharedDefaults(&cfg)
+			c := newLocklessChecker(source, target, chunker, nil, nil, &cfg)
 			read := c.readChunk
 			var attempts atomic.Int64
 			c.readChunk = func(ctx context.Context, ch *table.Chunk) (int64, int64, uint64, uint64, error) {

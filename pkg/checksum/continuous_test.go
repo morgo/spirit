@@ -102,12 +102,12 @@ func TestContinuousFactoryDiscardsResumeEvidence(t *testing.T) {
 			chunker := &resumeChunker{testChunker: newTestChunker(0), watermark: "initial-verification"}
 			feed := &lifecycleFeed{}
 			cfg := NewCheckerDefaultConfig()
-			cfg.RepairApplier = &spyApplier{}
+			cfg.Applier = &spyApplier{}
 			if mode == "distributed" {
-				cfg.Applier = &spyApplier{}
+				cfg.Algorithm = Sharded
 			}
 			if mode == "lockless" {
-				cfg.Lockless = true
+				cfg.Algorithm = Lockless
 			}
 			checker, err := NewChecker([]*sql.DB{{}}, chunker, []change.Source{feed}, cfg)
 			require.NoError(t, err)
@@ -148,7 +148,7 @@ func TestLocklessContinuousReusesCheckerAfterInitialPass(t *testing.T) {
 		chunker := &continuousScanGate{testChunker: newTestChunker(0)}
 		feed := &lifecycleFeed{}
 		cfg := NewCheckerDefaultConfig()
-		cfg.Lockless = true
+		cfg.Algorithm = Lockless
 		cfg.MinPassInterval = time.Second
 		checker, err := NewChecker([]*sql.DB{{}}, chunker, []change.Source{feed}, cfg)
 		require.NoError(t, err)
@@ -191,8 +191,9 @@ func TestSnapshotContinuousActiveLifecycle(t *testing.T) {
 					return ctx.Err()
 				}}
 				cfg := NewCheckerDefaultConfig()
-				cfg.RepairApplier = &spyApplier{}
+				cfg.Applier = &spyApplier{}
 				if distributed {
+					cfg.Algorithm = Sharded
 					cfg.Applier = &continuousApplier{}
 				}
 				checker, err := NewChecker([]*sql.DB{{}}, newTestChunker(0), []change.Source{feed}, cfg)
@@ -265,7 +266,7 @@ func TestLocklessContinuousDefaultInterval(t *testing.T) {
 func newContinuousChecker(t *testing.T, chunker table.Chunker, feed change.Source) *LocklessChecker {
 	t.Helper()
 	cfg := NewCheckerDefaultConfig()
-	cfg.Lockless = true
+	cfg.Algorithm = Lockless
 	checker, err := NewChecker([]*sql.DB{{}}, chunker, []change.Source{feed}, cfg)
 	require.NoError(t, err)
 	return checker.(*LocklessChecker)
@@ -278,7 +279,7 @@ func (*canceledScan) Next() (*table.Chunk, error) { return nil, context.Canceled
 func TestLocklessContinuousForeignCancellation(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		cfg := NewCheckerDefaultConfig()
-		cfg.Lockless = true
+		cfg.Algorithm = Lockless
 		cfg.MinPassInterval = time.Second
 		checker, err := NewChecker([]*sql.DB{{}}, &canceledScan{newTestChunker(1)}, []change.Source{&fakeFeed{}}, cfg)
 		require.NoError(t, err)

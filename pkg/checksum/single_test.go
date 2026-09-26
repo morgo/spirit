@@ -25,12 +25,12 @@ func TestMain(m *testing.M) {
 }
 
 // newTestCheckerConfig is NewCheckerDefaultConfig plus the repair applier that
-// the single-server checker requires (see CheckerConfig.RepairApplier). The
+// repairs are written through (see CheckerConfig.Applier). The
 // applier writes to db, which in these tests holds both tables.
 func newTestCheckerConfig(t *testing.T, db *sql.DB) *CheckerConfig {
 	t.Helper()
 	config := NewCheckerDefaultConfig()
-	config.RepairApplier = applier.NewSingleTargetForTest(t, db)
+	config.Applier = applier.NewSingleTargetForTest(t, db)
 	return config
 }
 
@@ -101,23 +101,25 @@ func TestBasicValidation(t *testing.T) {
 	_, err = NewChecker([]*sql.DB{db}, chunker, nil, newTestCheckerConfig(t, db)) // no feed
 	require.EqualError(t, err, "at least one feed must be provided")
 
-	// The single checker cannot repair without an applier, and that has to fail
-	// here rather than on the first mismatch hours into a migration. It is only
+	// A checker cannot repair without an applier, and that has to fail here
+	// rather than on the first mismatch hours into a migration. It is only
 	// demanded when repairs were asked for: a checker that reports a divergence
 	// rather than healing it never needs a write path.
 	repairCfg := NewCheckerDefaultConfig()
 	repairCfg.FixDifferences = true
 	_, err = NewChecker([]*sql.DB{db}, chunker, []change.Source{feed}, repairCfg)
-	require.EqualError(t, err, "repair applier must be non-nil")
+	require.EqualError(t, err, "applier must be non-nil to repair differences")
 	_, err = NewChecker([]*sql.DB{db}, chunker, []change.Source{feed}, NewCheckerDefaultConfig())
 	require.NoError(t, err)
 
-	// ... but the distributed checker repairs through its own applier, so it does
-	// not need one.
-	distConfig := NewCheckerDefaultConfig()
-	distConfig.Applier = applier.NewSingleTargetForTest(t, db)
-	_, err = NewChecker([]*sql.DB{db}, chunker, []change.Source{feed}, distConfig)
+	// Supplying one does not select a different algorithm — that is what
+	// Algorithm is for. A config that differs from the default only by having
+	// an applier still builds the single-server checker.
+	applierCfg := NewCheckerDefaultConfig()
+	applierCfg.Applier = applier.NewSingleTargetForTest(t, db)
+	checker, err := NewChecker([]*sql.DB{db}, chunker, []change.Source{feed}, applierCfg)
 	require.NoError(t, err)
+	require.IsType(t, (*SingleChecker)(nil), checker)
 }
 
 func TestUnfixableUniqueChecksum(t *testing.T) {
@@ -999,7 +1001,7 @@ func TestChecksumCancelledMidAttempt(t *testing.T) {
 			config.MaxRetries = 1
 			tc.applier.Applier = applier.NewSingleTargetForTest(t, db)
 			tc.applier.cancel = cancel
-			config.RepairApplier = tc.applier
+			config.Applier = tc.applier
 			checker, err := NewChecker([]*sql.DB{db}, chunker, []change.Source{feed}, config)
 			require.NoError(t, err)
 

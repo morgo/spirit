@@ -79,7 +79,7 @@ func (f *parityFixture) start(t *testing.T, name string) {
 }
 
 // checker builds the checker the migration runner would build: FixDifferences
-// and a RepairApplier are always supplied (pkg/migration passes both
+// and an Applier are always supplied (pkg/migration passes both
 // unconditionally), and `lockless` selects the experimental algorithm exactly
 // as Migration.EnableExperimentalLocklessChecksum does.
 func (f *parityFixture) checker(t *testing.T, lockless bool, opts ...func(*CheckerConfig)) Checker {
@@ -87,9 +87,9 @@ func (f *parityFixture) checker(t *testing.T, lockless bool, opts ...func(*Check
 	config := NewCheckerDefaultConfig()
 	config.Concurrency = 2
 	config.FixDifferences = true
-	config.RepairApplier = applier.NewSingleTargetForTest(t, f.db)
+	config.Applier = applier.NewSingleTargetForTest(t, f.db)
 	if lockless {
-		config.Lockless = true
+		config.Algorithm = Lockless
 		// Repair policy is deliberately not set: the factory derives it from
 		// FixDifferences, which is the whole point of these tests.
 		//
@@ -173,9 +173,9 @@ func TestParityDivergenceWithoutRepair(t *testing.T) {
 			// Not required with FixDifferences off — neither checker builds a
 			// repair path it would never use — but supplied for both so the two
 			// differ in policy alone.
-			config.RepairApplier = applier.NewSingleTargetForTest(t, f.db)
+			config.Applier = applier.NewSingleTargetForTest(t, f.db)
 			if lockless {
-				config.Lockless = true
+				config.Algorithm = Lockless
 				config.RetryDelay = 100 * time.Millisecond
 			}
 			checker, err := NewChecker([]*sql.DB{f.db}, f.chunker, []change.Source{f.feed}, config)

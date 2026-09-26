@@ -22,12 +22,12 @@ import (
 //
 // Recopy must be safe to call concurrently from multiple worker
 // goroutines; implementations are expected to serialize internally where
-// needed (see MySQLRecopier for the production implementation).
+// needed (see mysqlRecopier for the production implementation).
 type Recopier interface {
 	Recopy(ctx context.Context, chunk *table.Chunk) error
 }
 
-// MySQLRecopier is the production Recopier used by `spirit sync`. Given a
+// mysqlRecopier is the production Recopier used by `spirit sync`. Given a
 // chunk that the lockless checker has identified as stably diverged
 // (source CRC unchanged across the retry window, target still wrong), it
 // rewrites the chunk's rows on the target from the source.
@@ -49,7 +49,7 @@ type Recopier interface {
 // context.WithoutCancel(ctx) so a parent cancellation between them does
 // not leave the target with rows deleted but not yet rewritten. A bounded
 // timeout (10 minutes) still protects against a hung Apply.
-type MySQLRecopier struct {
+type mysqlRecopier struct {
 	sourceDB *sql.DB
 	targetDB *sql.DB
 	applier  applier.Applier
@@ -61,13 +61,13 @@ type MySQLRecopier struct {
 }
 
 // Compile-time interface assertion.
-var _ Recopier = (*MySQLRecopier)(nil)
+var _ Recopier = (*mysqlRecopier)(nil)
 
-// NewMySQLRecopier constructs a recopier for the source/target pair. The
+// newMySQLRecopier constructs a recopier for the source/target pair. The
 // applier must be Started before Recopy is called (the production wiring
 // in datasync.Runner starts the applier during the copy phase and leaves
 // it running through continuous sync, so this is satisfied naturally).
-func NewMySQLRecopier(sourceDB, targetDB *sql.DB, app applier.Applier, dbConfig *dbconn.DBConfig, logger *slog.Logger) (*MySQLRecopier, error) {
+func newMySQLRecopier(sourceDB, targetDB *sql.DB, app applier.Applier, dbConfig *dbconn.DBConfig, logger *slog.Logger) (*mysqlRecopier, error) {
 	if sourceDB == nil {
 		return nil, errors.New("sourceDB must be non-nil")
 	}
@@ -83,7 +83,7 @@ func NewMySQLRecopier(sourceDB, targetDB *sql.DB, app applier.Applier, dbConfig 
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &MySQLRecopier{
+	return &mysqlRecopier{
 		sourceDB: sourceDB,
 		targetDB: targetDB,
 		applier:  app,
@@ -93,9 +93,9 @@ func NewMySQLRecopier(sourceDB, targetDB *sql.DB, app applier.Applier, dbConfig 
 }
 
 // Recopy rewrites the chunk's rows on the target from the source. See
-// MySQLRecopier's struct doc for the operation's shape and concurrency
+// mysqlRecopier's struct doc for the operation's shape and concurrency
 // rules.
-func (r *MySQLRecopier) Recopy(ctx context.Context, chunk *table.Chunk) error {
+func (r *mysqlRecopier) Recopy(ctx context.Context, chunk *table.Chunk) error {
 	r.recopyLock.Lock()
 	defer r.recopyLock.Unlock()
 

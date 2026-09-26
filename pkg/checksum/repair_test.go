@@ -50,7 +50,7 @@ func newRepairFixture(t *testing.T, srcName, dstName string, renames map[string]
 
 	config := NewCheckerDefaultConfig()
 	config.FixDifferences = true
-	config.RepairApplier = app
+	config.Applier = app
 	checkerIntf, err := NewChecker([]*sql.DB{db}, chunker, []change.Source{feed}, config)
 	require.NoError(t, err)
 	checker, ok := checkerIntf.(*SingleChecker)

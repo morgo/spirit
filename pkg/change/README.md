@@ -268,7 +268,7 @@ This is the same mechanism as [issue #746](https://github.com/block/spirit/issue
 | Flow | Backstop | Net effect today |
 |---|---|---|
 | `migrate`, `move` | Mandatory pre-cutover checksum with `FixDifferences=true` | Repaired before cutover. Cost: `differencesFound > 0`, a chunk recopy, and a "checksum found differences" signal that looks alarming |
-| `sync` (continuous) | Continuous checksum + `MySQLRecopier`, *lazy* | Real exposure: the target can serve a missing/stale/phantom row from copy time until a later checksum pass covers that chunk |
+| `sync` (continuous) | Continuous checksum + `mysqlRecopier`, *lazy* | Real exposure: the target can serve a missing/stale/phantom row from copy time until a later checksum pass covers that chunk |
 | Library consumers of pkg/copier + pkg/change with no checksum | None | Silent data loss |
 
 This is the same reliance already accepted knowingly for collation-imprecise key comparisons ([issue #479](https://github.com/block/spirit/issues/479), "checksum will fix any discrepancies") — except the visibility window affects every key type, not just collated strings.

@@ -99,7 +99,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -183,8 +182,8 @@ var (
 // LocklessChecker is the optimistic checker. It satisfies the whole Checker
 // contract natively: Run verifies the table once and returns, RunContinuous
 // verifies it forever in the background, and both drive the same pass loop.
-// Construct via NewChecker for a single-server migration, or NewLocklessChecker
-// to verify across two servers.
+// Construct it through NewChecker with Algorithm set to Lockless, naming a
+// TargetDB when the copy being verified is on another server.
 //
 // Run and RunContinuous must not overlap; everything else — Stats,
 // FirstCleanPass, ResumeWatermark, the status accessors — is safe to call
@@ -280,44 +279,23 @@ type LocklessChecker struct {
 	readChunk func(ctx context.Context, chunk *table.Chunk) (srcCRC, tgtCRC int64, srcCount, tgtCount uint64, err error)
 }
 
-// NewLocklessChecker constructs a checker with the given dependencies and
-// config. sourceDB and targetDB must be distinct connections to the source
-// and target databases respectively; a single-server caller passes the same
-// handle twice, which is what NewChecker does. chunker must be Open before a
-// run; the checker Resets it between passes but does not close it.
+// newLocklessChecker wires a checker to its dependencies and fills in the
+// defaults that are lockless-only — the cross-algorithm ones are NewChecker's,
+// which is the only caller. It validates nothing, because NewChecker has.
 //
-// recopier is the repair path, and supplying one is the whole of the repair
-// policy: with one, a confirmed divergence is repaired and verification
-// continues; without one (nil) it returns ErrPermanentDivergence. NewChecker
-// derives it from CheckerConfig.FixDifferences, but it cannot build a
-// cross-server repair path, so callers that verify across two servers pass
-// their own (see MySQLRecopier).
-//
-// Only the fields documented as applying to lockless verification are read —
-// the snapshot-only ones (YieldTimeout, RepairApplier, Applier) are ignored,
-// as is FixDifferences, which recopier supersedes here.
-func NewLocklessChecker(
+// sourceDB and targetDB are connections to the two copies being compared, and
+// are the same handle when one server holds both. chunker must be Open before
+// a run; the checker Resets it between passes but does not close it. feed may
+// be nil; it is advisory. recopier may be nil, which is what makes a confirmed
+// divergence fatal rather than repairable.
+func newLocklessChecker(
 	sourceDB, targetDB *sql.DB,
 	chunker table.Chunker,
 	feed change.Source,
 	recopier Recopier,
 	config *CheckerConfig,
-) (*LocklessChecker, error) {
-	if config == nil {
-		return nil, errors.New("config must be non-nil")
-	}
-	if sourceDB == nil {
-		return nil, errors.New("sourceDB must be non-nil")
-	}
-	if targetDB == nil {
-		return nil, errors.New("targetDB must be non-nil")
-	}
-	if chunker == nil {
-		return nil, errors.New("chunker must be non-nil")
-	}
+) *LocklessChecker {
 	cfg := *config
-	// feed is allowed to be nil — it's advisory.
-	cfg.Concurrency = defaultedConcurrency(cfg.Concurrency)
 	if cfg.RetryDelay <= 0 {
 		cfg.RetryDelay = DefaultLocklessRetryDelay
 	}
@@ -327,12 +305,14 @@ func NewLocklessChecker(
 	if cfg.MaxHotAttempts <= 0 {
 		cfg.MaxHotAttempts = DefaultLocklessMaxHotAttempts
 	}
+	// Detecting that a chunk's source is changing under the reader takes an
+	// initial read and at least one retry, so a positive value below two is a
+	// setting that cannot do what it names.
 	cfg.MaxHotAttempts = max(2, cfg.MaxHotAttempts)
-	if cfg.MaxRetries <= 0 {
-		cfg.MaxRetries = defaultMaxRetries
-	}
-	if cfg.Logger == nil {
-		cfg.Logger = slog.Default()
+	// Only the finite gate is bounded. A caller that goes on to RunContinuous
+	// is unbounded by design, and that path ignores MaxPasses.
+	if cfg.MaxPasses == 0 {
+		cfg.MaxPasses = DefaultLocklessMaxPasses
 	}
 	c := &LocklessChecker{
 		cfg:              cfg,
@@ -350,7 +330,7 @@ func NewLocklessChecker(
 	c.splitChunk = func(ctx context.Context, chunk *table.Chunk, rows uint64) ([]*table.Chunk, error) {
 		return splitHotChunk(ctx, sourceDB, chunk, rows)
 	}
-	return c, nil
+	return c
 }
 
 // SetThrottler installs pacing before a run. It is called during runner setup,

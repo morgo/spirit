@@ -43,10 +43,21 @@ All three use **CRC32 with XOR aggregation** for chunk comparison. The lockless 
 
 ## Checker contract
 
-`NewChecker` returns a `Checker`: its finite `Run` succeeds only after verification
-completes. Set `CheckerConfig.Lockless` to select optimistic verification on a
-single server, leave it false for the existing snapshot checkers. Supplying the
-distributed `Applier` and `Lockless` together is rejected.
+`NewChecker` returns a `Checker`: its finite `Run` succeeds only after
+verification completes. `CheckerConfig.Algorithm` picks which one, and nothing
+else does:
+
+| `Algorithm` | checker | compares |
+|---|---|---|
+| `Single` (zero value) | `SingleChecker` | two tables on one server, under a REPEATABLE READ snapshot taken behind a brief table lock |
+| `Sharded` | `DistributedChecker` | N sources against M targets, aggregating each chunk across every source |
+| `Lockless` | `LocklessChecker` | two tables with optimistic READ COMMITTED reads and a delayed-retry queue, taking no locks |
+
+Naming the algorithm is what lets there be one `Applier`. It used to be
+inferred: a non-nil `Applier` selected the distributed checker, so the write
+path a repair goes through doubled as the algorithm switch, and a second
+`RepairApplier` field had to exist for the single-server checker to have a write
+path without becoming a distributed one.
 
 Every algorithm is configured from the one `CheckerConfig`. The fields common to
 all of them (concurrency, autoscaling, throttler, metrics sink, logger,
@@ -58,9 +69,8 @@ to yield — and the retry, splitting and pacing fields are lockless-only.
 Repair policy is `FixDifferences`, for every algorithm, so a caller does not
 have to know which one it picked to say whether a divergence should be healed or
 should abort. The factory turns it into the `Recopier` the checker repairs
-through — the single-server one over `RepairApplier`, or the multi-source one
-over `Applier` when that selected the distributed checker — and the presence of
-that recopier *is* the policy: with one, a confirmed divergence is repaired and
+through, built over the one `Applier` every algorithm shares, and the presence
+of that recopier *is* the policy: with one, a confirmed divergence is repaired and
 verification continues; without one, a mismatch is reported as an error
 (`ErrPermanentDivergence` for lockless verification). `MaxRetries` bounds whole-run attempts for both. Migration reuses the factory
 result through `Checker.RunContinuous`, which owns pacing, chunker resets, feed
@@ -73,12 +83,14 @@ clean background pass. Copy progress is retained, but a restarted migration must
 repeat initial verification. This avoids interpreting a reset background walker
 or a cleared per-pass mismatch counter as resume evidence.
 
-Cross-server callers such as datasync construct through `NewLocklessChecker` and
-drive `RunContinuous` directly. They own their feed and repair-applier
-lifecycles, including the feed's periodic flush — only a checker built by
-`NewChecker` starts and stops that itself — and they pass their own `Recopier`
-to the constructor, because the factory can only build a repair path that writes
-back to the server it read from.
+Cross-server callers such as datasync go through the same factory. Naming a
+`TargetDB` says the copy being verified is on another server, which is what
+makes the factory build a repair path that reads one server and writes the
+other; it is lockless-only, because a table lock and a `REPEATABLE READ`
+snapshot cannot span two servers. Such a caller typically runs the feed's
+periodic flush itself for the whole process rather than per run, and says so
+with `ExternalFlushLoop` — otherwise every run starts and stops it, which is
+what a migration and a move want.
 
 Callers open the chunker before construction unless supplying a nonempty
 `CheckerConfig.Watermark`. In that case the factory opens it at that watermark,
@@ -219,8 +231,8 @@ migrations with these workloads, use the default snapshot-based checksum.
 
 When a chunk's source CRC is stable across the retry window but the target still disagrees, that is a **stable divergence**. How the checker reacts is governed by whether it has a `Recopier`:
 
-- **With one**, a stable divergence is *repaired* by recopying that chunk from the source: `DELETE` the key range on the target, re-`SELECT` from the source, and re-apply through the same write path the change feed uses. `MySQLRecopier` is the production implementation used by `spirit sync`, whose target is expected to converge, so divergences self-heal. Recopies are serialized and run under a cancellation-detached, time-bounded (10 minute) context, so a chunk is never left deleted-but-not-rewritten.
-- **Without one**, a stable divergence is fatal: `Run` returns `ErrPermanentDivergence` and the caller aborts. This is `spirit migrate`'s deferred-cutover policy — replication keeps the new table in sync, so a confirmed stable divergence there is a real bug, not something to paper over.
+- **With one**, a stable divergence is *repaired* by recopying that chunk from the source: `DELETE` the key range on the target, re-`SELECT` from the source, and re-apply through the same write path the change feed uses. Both tools ask for this — they set `FixDifferences` — so both self-heal a divergence and give up only when repeated passes keep re-finding one. `chunkRepairer` is the single-server implementation (`spirit migrate`), `mysqlRecopier` the cross-server one (`spirit sync`). Recopies are serialized and run under a cancellation-detached, time-bounded (10 minute) context, so a chunk is never left deleted-but-not-rewritten.
+- **Without one**, a stable divergence is fatal: `Run` returns `ErrPermanentDivergence` and the caller aborts. No production caller selects this today; it is what a caller that wants a divergence surfaced rather than papered over would get by leaving `FixDifferences` unset.
 
 Before either policy acts, the change feed is drained and the chunk re-read, so a target that was merely behind on applying buffered changes is not mistaken for a diverged one. On a confirmed divergence the checker logs a line per differing row (mismatched, missing on the target, missing on the source), the same diagnostic the snapshot checker emits.
 

@@ -136,11 +136,11 @@ func newTestChecker(t *testing.T, chunker table.Chunker, cfg CheckerConfig,
 	read func(ctx context.Context, chunk *table.Chunk, attempt int) (srcCRC, tgtCRC int64, tgtCount uint64, err error),
 ) *LocklessChecker {
 	t.Helper()
-	// Constructor demands non-nil DBs; we pass empty *sql.DB pointers — they
-	// are never used because readChunk is swapped before Run.
+	// Empty *sql.DB pointers: they are never used, because readChunk (and the
+	// snapshot/split hooks) are swapped before Run.
 	srcDB, tgtDB := &sql.DB{}, &sql.DB{}
-	c, err := NewLocklessChecker(srcDB, tgtDB, chunker, nil, nil, &cfg)
-	require.NoError(t, err)
+	applySharedDefaults(&cfg)
+	c := newLocklessChecker(srcDB, tgtDB, chunker, nil, nil, &cfg)
 	declineHotSnapshot(c)
 
 	attempts := sync.Map{}
@@ -171,8 +171,8 @@ func newTestCheckerSig(t *testing.T, chunker table.Chunker, cfg CheckerConfig,
 ) *LocklessChecker {
 	t.Helper()
 	srcDB, tgtDB := &sql.DB{}, &sql.DB{}
-	c, err := NewLocklessChecker(srcDB, tgtDB, chunker, nil, nil, &cfg)
-	require.NoError(t, err)
+	applySharedDefaults(&cfg)
+	c := newLocklessChecker(srcDB, tgtDB, chunker, nil, nil, &cfg)
 	declineHotSnapshot(c)
 
 	attempts := sync.Map{}
@@ -1199,10 +1199,18 @@ func TestLocklessAutoscaleConcurrency(t *testing.T) {
 	}
 }
 
+// blockingLocklessLoad is a load throttler whose BlockWait never returns. It
+// reports Utilization because the factory narrows a checker's throttler to the
+// ones with a continuous load signal (loadOnlyThrottler), so a stub without one
+// would be replaced by a Noop and never consulted.
 type blockingLocklessLoad struct {
 	throttler.Noop
 	entered chan struct{}
 }
+
+var _ throttler.GradualThrottler = (*blockingLocklessLoad)(nil)
+
+func (*blockingLocklessLoad) Utilization() float64 { return 0 }
 
 func (b *blockingLocklessLoad) BlockWait(ctx context.Context) {
 	select {
@@ -1675,7 +1683,7 @@ func TestFiniteLocklessRetriesTransientFailures(t *testing.T) {
 	newChecker := func(t *testing.T, chunker table.Chunker) Checker {
 		t.Helper()
 		cfg := NewCheckerDefaultConfig()
-		cfg.Lockless = true
+		cfg.Algorithm = Lockless
 		cfg.RetryDelay = time.Millisecond
 		checker, err := NewChecker([]*sql.DB{{}}, chunker, []change.Source{&fakeFeed{}}, cfg)
 		require.NoError(t, err)
@@ -1722,7 +1730,7 @@ func (c *partialProgressChunker) Progress() (uint64, uint64, uint64) {
 func TestFiniteLocklessReportsFullProgressAfterCleanPass(t *testing.T) {
 	chunker := &partialProgressChunker{testChunker: newTestChunker(0), verified: 3, total: 10}
 	cfg := NewCheckerDefaultConfig()
-	cfg.Lockless = true
+	cfg.Algorithm = Lockless
 	cfg.RetryDelay = time.Millisecond
 	checker, err := NewChecker([]*sql.DB{{}}, chunker, []change.Source{&fakeFeed{}}, cfg)
 	require.NoError(t, err)
