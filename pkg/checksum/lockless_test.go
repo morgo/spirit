@@ -103,6 +103,18 @@ func (c *testChunker) Reset() error {
 }
 func (c *testChunker) Tables() []*table.TableInfo { return nil }
 
+func (c *testChunker) resetCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.resets
+}
+
+func (c *testChunker) feedbackCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.feedback)
+}
+
 // newTestChecker builds a checker with a swapped readChunk hook. The hook
 // receives the chunk and an attempt counter (incremented each call for the
 // same chunk pointer) so tests can express "fail twice, then pass" etc.
@@ -1494,18 +1506,45 @@ func TestRepairedChunkIsNotResumeEvidence(t *testing.T) {
 // Carrying it forward would be unsound: the only way a re-walk fails to
 // re-verify a prefix it already verified is that the prefix stopped being
 // equal, which is exactly when a resume must not skip it.
+//
+// The watermark is polled during pass 1 the way the migration runner polls it
+// for checkpointing — an implementation that caches what it last reported has
+// to be asked at least once before the cache can go stale.
 func TestResumeWatermarkTracksCurrentWalkOnly(t *testing.T) {
 	cfg := fastConfig()
 	cfg.Concurrency = 1
 	cfg.RetryDelay = time.Millisecond
-	cfg.MinPassInterval = 50 * time.Millisecond
+	cfg.MinPassInterval = time.Millisecond
 	cfg.MaxHotAttempts = 2
 	chunker := newWatermarkChunker(3)
 	// The first two chunks verify; the last is permanently hot, so it is
 	// deferred and no pass is ever clean.
 	hot := chunker.chunks[2]
+	// Two gates hold the walk still at the two points the test inspects it, so
+	// neither observation depends on winning a race with the pass loop:
+	// holdPass1 keeps pass 1 from ending, and holdPass2 keeps pass 2 from
+	// re-verifying anything.
+	holdPass1, holdPass2 := make(chan struct{}), make(chan struct{})
+	wait := func(ctx context.Context, gate chan struct{}) error {
+		select {
+		case <-gate:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	c := newTestChecker(t, chunker, cfg,
-		func(_ context.Context, chunk *table.Chunk, attempt int) (int64, int64, uint64, error) {
+		func(ctx context.Context, chunk *table.Chunk, attempt int) (int64, int64, uint64, error) {
+			switch {
+			case chunk == hot && attempt == 1:
+				if err := wait(ctx, holdPass1); err != nil {
+					return 0, 0, 0, err
+				}
+			case chunk == chunker.chunks[0] && attempt == 2:
+				if err := wait(ctx, holdPass2); err != nil {
+					return 0, 0, 0, err
+				}
+			}
 			if chunk == hot {
 				return int64(attempt), 0, 10, nil
 			}
@@ -1515,20 +1554,34 @@ func TestResumeWatermarkTracksCurrentWalkOnly(t *testing.T) {
 	stop, _ := runUntil(t, c)
 	defer func() { require.ErrorIs(t, stop(), context.Canceled) }()
 
-	// Pass 1 publishes the prefix its two clean chunks cover.
+	// Pass 1 publishes the prefix its two clean chunks cover. It cannot end
+	// while the hot chunk is held, so this is an observation of pass 1.
 	require.Eventually(t, func() bool {
 		wm, err := c.ResumeWatermark()
 		return err == nil && wm != ""
-	}, 5*time.Second, time.Millisecond, "the verified prefix must be published")
+	}, 30*time.Second, time.Millisecond, "the verified prefix must be published")
+	close(holdPass1)
 
-	// The pass ends without converging, so the checker resets the chunker and
-	// re-walks. The evidence must start over with it rather than reporting the
-	// previous pass's further-along answer.
+	// Pass 1 ends without converging, so the checker resets the chunker and
+	// re-walks. holdPass2 keeps the re-walk on its first chunk, so the state
+	// below is examined at rest.
 	require.Eventually(t, func() bool {
-		_, err := c.ResumeWatermark()
-		return err != nil
-	}, 5*time.Second, time.Millisecond, "a new pass must not republish the previous walk's evidence")
-	require.Positive(t, chunker.resets, "the re-walk is what cleared it")
+		return chunker.resetCount() > 0
+	}, 30*time.Second, time.Millisecond, "the pass must end and re-walk")
+
+	require.GreaterOrEqual(t, chunker.feedbackCount(), 2,
+		"pass 1 verified a prefix, so there is an answer available to carry forward")
+	_, err := c.ResumeWatermark()
+	require.Error(t, err, "a new pass must not republish the previous walk's evidence")
+
+	// Releasing the re-walk republishes the prefix on its own evidence, which
+	// is what makes the assertion above a real constraint rather than a stub
+	// that can never produce a watermark.
+	close(holdPass2)
+	require.Eventually(t, func() bool {
+		wm, err := c.ResumeWatermark()
+		return err == nil && wm != ""
+	}, 30*time.Second, time.Millisecond, "the re-walk publishes its own verified prefix")
 }
 
 func TestHotSnapshotAdmission(t *testing.T) {
