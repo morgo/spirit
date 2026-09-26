@@ -219,21 +219,60 @@ criteria.
 
 `LocklessChecker` verifies a target that is still converging toward the source over a live replication feed, so a first-attempt mismatch is *expected* (the target simply hasn't caught up yet) rather than alarming. It runs in **passes**: each pass walks every chunk once and then drains a delayed-retry queue until empty. A mismatched chunk is re-read after a short delay and passes once the target's CRC matches a source CRC the checker has witnessed. A chunk whose source keeps changing (a "hot chunk") cycles to the back of the queue without blocking the pass.
 
-### Current limitation: continuously updated hot rows
+### Continuously updated hot rows
 
-Workloads that continuously update the same rows are not currently supported
-reliably by the lockless algorithm. Even with hot-chunk splitting and the
-snapshot fallback, a frozen source row image may be superseded before a target
-read observes it. Splitting to a single row cannot guarantee convergence. Deletes
-before verification can also leave frozen images unresolved. These ranges remain
-unverified and can prevent `RunUntilClean` from completing; they are not accepted
-as clean merely because replication is active.
+A row that is written continuously defeats every read-and-compare strategy the
+checker has: the frozen source image is stale before the first target read, so
+every attempt observes a different source and the range is deferred with no
+verdict — pass after pass. A genuinely diverged hot row and a merely busy one
+stay indistinguishable for as long as the writes continue.
 
-The finite snapshot fallback can help append-heavy tails because later inserts
-do not expand its work set. It does not solve the continuously updated hot-row
-case. Replication-applier integration using change-stream row images and their
-application is planned to address that case, but is not implemented yet. For
-migrations with these workloads, use the default snapshot-based checksum.
+**Settling** is the terminal step for exactly that case. Once a range has failed
+`MaxHotAttempts` observations, the checker stops waiting for the source to hold
+still and holds it still itself, for one bounded moment and only for the handful
+of rows still outstanding:
+
+1. `SELECT ... FOR SHARE` the outstanding source rows in their own `READ
+   COMMITTED` transaction, reading their images under that lock. No transaction
+   can now `UPDATE` or `DELETE` them.
+2. `BlockWait` the change feed. It samples the source's live binlog position and
+   waits for the reader to reach it, so every write that ever touched these rows
+   has been consumed — and while the lock is held, no further write can commit to
+   add one.
+3. `Flush` the feed, applying that whole history to the target.
+4. Read the target rows.
+
+At step 4 the target cannot move: no unapplied event for these rows exists and no
+new one can be produced. The target must therefore equal the images read at step
+1, and a mismatch is a real inconsistency rather than apply lag or a race — so it
+goes to the ordinary repair path (or is fatal, per the policy below) instead of
+being deferred again.
+
+This is not the table lock the snapshot checkers take. It is a row lock over at
+most 128 rows, held for at most five seconds, asked for with
+`innodb_lock_wait_timeout=2` so it loses to application writes rather than
+queueing ahead of them, and reached only after a range has already failed
+`MaxHotAttempts` observations. `HotChunksSettledThisPass` counts it; a rising
+value alongside a falling `HotChunksDeferredThisPass` is it working.
+
+Two cases still defer rather than settle, and both are honesty constraints rather
+than gaps to close later:
+
+- **An obligation that a row is *absent*** cannot be pinned. Under `READ
+  COMMITTED` there is no lock to take on a row that is not there, so a concurrent
+  `INSERT` can still land between the drain and the read.
+- **A lock the checker cannot get inside its budget.** Deferring is what would
+  have happened anyway; blocking would make verification a source of stalls.
+
+A purely lock-free variant — park the feed, then witness whether the watched rows
+changed — does not close this. The comparison is between a source image at some
+position `x` and a target state at a later position `R`, and the window `(x, R]`
+necessarily spans a `BlockWait`; for a row written continuously, *something*
+always lands in that window, so the witness is always dirty and the escalation
+never terminates. Narrowing `x` requires either stopping the writes (what
+`FOR SHARE` does) or deriving the expected image from the binlog after-images
+rather than from a `SELECT` — the latter is feasible but cannot evaluate the
+checksum's column-mapping expressions in Go, so it is not what this implements.
 
 When a chunk's source CRC is stable across the retry window but the target still disagrees, that is a **stable divergence**. How the checker reacts is governed by whether it has a `Recopier`:
 
