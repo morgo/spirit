@@ -55,14 +55,14 @@ with the algorithm they belong to, and are ignored by the others. `YieldTimeout`
 is snapshot-only — lockless reads are short by construction and hold no snapshot
 to yield — and the retry, splitting and pacing fields are lockless-only.
 
-Repair policy is **not** the caller's to set when going through the factory: `FixDifferences` selects it for both algorithms, so a caller does
-not have to know which one it picked to say whether a divergence should be healed
-or should abort. With `FixDifferences` set, the factory builds the same
-single-server repair path the snapshot checker uses (`RepairApplier` is then
-required) and a confirmed divergence is repaired; without it, a confirmed
-divergence returns `ErrPermanentDivergence`. Supplying `Recopier` or
-`DivergenceIsFatal` to the factory is rejected rather than silently overridden.
-`MaxRetries` bounds whole-run attempts for both. Migration reuses the factory
+Repair policy is `FixDifferences`, for every algorithm, so a caller does not
+have to know which one it picked to say whether a divergence should be healed or
+should abort. The factory turns it into the `Recopier` the checker repairs
+through — the single-server one over `RepairApplier`, or the multi-source one
+over `Applier` when that selected the distributed checker — and the presence of
+that recopier *is* the policy: with one, a confirmed divergence is repaired and
+verification continues; without one, a mismatch is reported as an error
+(`ErrPermanentDivergence` for lockless verification). `MaxRetries` bounds whole-run attempts for both. Migration reuses the factory
 result through `Checker.RunContinuous`, which owns pacing, chunker resets, feed
 flushing, and safe cancellation. `ContinuousActive` reports whether a pass is running rather than
 waiting for the next interval, so callers can report throttling accurately. Snapshot passes use the same configured repair/retry policy as the
@@ -76,9 +76,9 @@ or a cleared per-pass mismatch counter as resume evidence.
 Cross-server callers such as datasync construct through `NewLocklessChecker` and
 drive `RunContinuous` directly. They own their feed and repair-applier
 lifecycles, including the feed's periodic flush — only a checker built by
-`NewChecker` starts and stops that itself — and they set `Recopier` and
-`DivergenceIsFatal` themselves, since there is no `FixDifferences` to derive them
-from.
+`NewChecker` starts and stops that itself — and they pass their own `Recopier`
+to the constructor, because the factory can only build a repair path that writes
+back to the server it read from.
 
 Callers open the chunker before construction unless supplying a nonempty
 `CheckerConfig.Watermark`. In that case the factory opens it at that watermark,
@@ -204,8 +204,8 @@ criteria.
 ### Current limitation: continuously updated hot rows
 
 Workloads that continuously update the same rows are not currently supported
-reliably by the lockless algorithm. Even with `SplitHotChunks` and
-`SnapshotHotChunks`, a frozen source row image may be superseded before a target
+reliably by the lockless algorithm. Even with hot-chunk splitting and the
+snapshot fallback, a frozen source row image may be superseded before a target
 read observes it. Splitting to a single row cannot guarantee convergence. Deletes
 before verification can also leave frozen images unresolved. These ranges remain
 unverified and can prevent `RunUntilClean` from completing; they are not accepted
@@ -217,13 +217,11 @@ case. Replication-applier integration using change-stream row images and their
 application is planned to address that case, but is not implemented yet. For
 migrations with these workloads, use the default snapshot-based checksum.
 
-When a chunk's source CRC is stable across the retry window but the target still disagrees, that is a **stable divergence**. How the checker reacts is governed by two config fields:
+When a chunk's source CRC is stable across the retry window but the target still disagrees, that is a **stable divergence**. How the checker reacts is governed by whether it has a `Recopier`:
 
-- **`Recopier`** — when set, a stable divergence is *repaired* by recopying that chunk from the source: `DELETE` the key range on the target, re-`SELECT` from the source, and re-apply through the same write path the change feed uses. `MySQLRecopier` is the production implementation used by `spirit sync`. Recopies are serialized and run under a cancellation-detached, time-bounded (10 minute) context, so a chunk is never left deleted-but-not-rewritten.
-- **`DivergenceIsFatal`** — selects the policy explicitly, rather than inferring it from `Recopier` presence:
-  - `true` (e.g. `spirit migrate`'s deferred-cutover check): replication keeps the new table in sync, so a confirmed stable divergence is a real bug. `Run` returns `ErrPermanentDivergence` and the caller aborts the cutover. No `Recopier` is configured.
-  - `false` (e.g. `spirit sync`): the target is expected to converge, so divergences self-heal via the `Recopier`. A `Recopier` is **required** in this mode; without one, divergence is treated as fatal.
+- **With one**, a stable divergence is *repaired* by recopying that chunk from the source: `DELETE` the key range on the target, re-`SELECT` from the source, and re-apply through the same write path the change feed uses. `MySQLRecopier` is the production implementation used by `spirit sync`, whose target is expected to converge, so divergences self-heal. Recopies are serialized and run under a cancellation-detached, time-bounded (10 minute) context, so a chunk is never left deleted-but-not-rewritten.
+- **Without one**, a stable divergence is fatal: `Run` returns `ErrPermanentDivergence` and the caller aborts. This is `spirit migrate`'s deferred-cutover policy — replication keeps the new table in sync, so a confirmed stable divergence there is a real bug, not something to paper over.
 
-The two are decoupled: `DivergenceIsFatal: true` aborts even if a `Recopier` is supplied. Before either policy acts, the change feed is drained and the chunk re-read, so a target that was merely behind on applying buffered changes is not mistaken for a diverged one. On a confirmed divergence the checker logs a line per differing row (mismatched, missing on the target, missing on the source), the same diagnostic the snapshot checker emits.
+Before either policy acts, the change feed is drained and the chunk re-read, so a target that was merely behind on applying buffered changes is not mistaken for a diverged one. On a confirmed divergence the checker logs a line per differing row (mismatched, missing on the target, missing on the source), the same diagnostic the snapshot checker emits.
 
 Passes are paced by `MinPassInterval` so a small table is not re-checksummed back-to-back; the finite gate substitutes `RetryDelay` for an unset interval rather than the continuous default, because a cut-over is waiting on the answer. `MaxPasses` bounds the finite gate: a range that never converges returns `ErrVerificationUnresolved` instead of keeping the caller in an endless re-walk with no error and no end. `FirstCleanPass` exposes a channel that closes the first time a pass completes with every chunk read-verified equal and zero recopies — the signal that the target is known consistent.

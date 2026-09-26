@@ -337,13 +337,15 @@ func TestCheckerDefaultsToNoopThrottler(t *testing.T) {
 
 func TestCheckerZeroConcurrencyIsUsable(t *testing.T) {
 	// A zero here used to produce a transaction pool of zero transactions and a
-	// checksum that could not run at all.
+	// checksum that could not run at all. It now means "the caller did not
+	// choose", so it gets the default rather than the bare minimum — the same
+	// resolution every algorithm makes.
 	cfg := NewCheckerDefaultConfig()
 	cfg.Concurrency = 0
 	checker := checksumFixture(t, "checksum_zero_concurrency", 128, cfg)
 	single := checker.(*SingleChecker)
-	assert.Equal(t, 1, single.concurrency)
-	assert.Equal(t, 1, single.maxConcurrency)
+	assert.Equal(t, DefaultConcurrency, single.concurrency)
+	assert.Equal(t, DefaultConcurrency, single.maxConcurrency)
 	require.NoError(t, checker.Run(t.Context()))
 }
 

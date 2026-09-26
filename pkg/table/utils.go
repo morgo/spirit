@@ -146,7 +146,7 @@ const (
 // to store the text image, not the source bytes. Every repair path does so by
 // construction — each reads the document as text and writes it back through the
 // applier for the target to re-parse, which is one round-trip exactly. See the
-// replaceChunk implementations in pkg/checksum, which explain why they must not
+// Recopier implementations in pkg/checksum, which explain why they must not
 // add a round-trip cast on top of that.
 func castExpr(col, tp string, side castSide) string {
 	quotedCol := sqlescape.EscapeIdentifier(col)

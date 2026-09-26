@@ -45,24 +45,26 @@ type DistributedChecker struct {
 	throttler      throttler.Throttler
 	metricsSink    metrics.Sink
 	// limiter gates live concurrency for the current pass; nil until Run.
-	limiter          *autoscale.Limiter
-	targetChunkTime  time.Duration
-	chunks           *chunkObserver
-	feeds            []change.Source
-	sourceDBs        []*sql.DB // all source database connections
-	applier          applier.Applier
-	sourcePools      []sourcePool      // one per source DB, created during initConnPool
-	targetTrxPools   []*dbconn.TrxPool // transaction pools for each target
-	isInvalid        bool
-	chunker          table.Chunker
-	startTime        time.Time
-	execTime         time.Duration
-	dbConfig         *dbconn.DBConfig
-	logger           *slog.Logger
-	fixDifferences   bool
+	limiter         *autoscale.Limiter
+	targetChunkTime time.Duration
+	chunks          *chunkObserver
+	feeds           []change.Source
+	sourceDBs       []*sql.DB // all source database connections
+	applier         applier.Applier
+	sourcePools     []sourcePool      // one per source DB, created during initConnPool
+	targetTrxPools  []*dbconn.TrxPool // transaction pools for each target
+	isInvalid       bool
+	chunker         table.Chunker
+	startTime       time.Time
+	execTime        time.Duration
+	dbConfig        *dbconn.DBConfig
+	logger          *slog.Logger
+	// recopier is the repair path for a mismatched chunk, and its presence is
+	// the repair policy: nil means a divergence is an error rather than
+	// something to rewrite. See newRecopier.
+	recopier         Recopier
 	differencesFound atomic.Uint64
 	resume           snapshotResume
-	recopyLock       sync.Mutex
 	maxRetries       int
 	yieldTimeout     time.Duration
 	yieldsPerformed  atomic.Uint64 // number of yield/resume cycles performed
@@ -294,11 +296,11 @@ func (c *DistributedChecker) ChecksumChunk(ctx context.Context, chunk *table.Chu
 
 		// Are we allowed to fix the differences? If not, return an error.
 		// This is mostly used by the test-suite.
-		if !c.fixDifferences {
+		if c.recopier == nil {
 			return errors.New("checksum mismatch")
 		}
 		// Since we can fix differences, replace the chunk.
-		if err := c.replaceChunk(ctx, chunk); err != nil {
+		if err := c.recopier.Recopy(ctx, chunk); err != nil {
 			return err
 		}
 	}
@@ -312,132 +314,6 @@ func (c *DistributedChecker) ChecksumChunk(ctx context.Context, chunk *table.Chu
 func (c *DistributedChecker) GetProgress() status.ChecksumProgress {
 	rowsProcessed, _, totalRows := c.chunker.Progress()
 	return status.ChecksumProgress{RowsChecked: rowsProcessed, RowsTotal: totalRows}
-}
-
-// replaceChunk recopies the data from source to targets for a given chunk.
-// In the distributed case, we first delete the entire chunk range from all targets,
-// then use Apply to recopy the data from the source. This handles both missing rows
-// and extra rows on the destination.
-func (c *DistributedChecker) replaceChunk(ctx context.Context, chunk *table.Chunk) error {
-	c.logger.Warn("recopying chunk via DELETE + Apply", "chunk", chunk.String())
-
-	// We further prevent the chance of deadlocks from the recopying process by only re-copying one chunk at a time.
-	// We may revisit this in future, but since conflicts are expected to be low, it should be fine for now.
-	c.recopyLock.Lock()
-	defer c.recopyLock.Unlock()
-
-	// The fix is split into DELETE-from-targets and Apply-from-sources. If the
-	// parent ctx is cancelled between or during these steps, the target side
-	// would be left with rows DELETEd but not yet reapplied. The
-	// lockless-checksum loop's cancellation on sentinel drop hits this race,
-	// so we run the fix under a context that ignores the parent's
-	// cancellation. The bounded timeout still protects against a hung apply.
-	fixCtx, fixCancel := context.WithTimeout(context.WithoutCancel(ctx), fixChunkTimeout)
-	defer fixCancel()
-
-	// Step 1: Delete all rows in the chunk range from all targets
-	// This ensures we remove any extra rows that shouldn't be there.
-	// Use chunk.Table here to target the chunk's original table name consistently across targets.
-	deleteStmt := fmt.Sprintf("DELETE FROM %s WHERE %s", chunk.Table.QuotedTableName, chunk.String())
-
-	targets := c.applier.GetTargets()
-	for i, target := range targets {
-		c.logger.Debug("deleting chunk range from target", "targetID", i, "chunk", chunk.String(), "table", chunk.Table.TableName)
-		_, err := dbconn.RetryableTransaction(fixCtx, target.DB, dbconn.ErrorOnDupKey, c.dbConfig, deleteStmt)
-		if err != nil {
-			return fmt.Errorf("failed to delete chunk from target %d: %w", i, err)
-		}
-	}
-
-	// Step 2: Read all rows from ALL sources for the chunk range and merge them.
-	// Use NonGeneratedColumns because the applier expects non-generated columns only.
-	// This ensures the column ordinals match when the applier extracts the sharding column.
-	//
-	// JSON columns are deliberately read bare here — no text round-trip cast.
-	// This path is already text-mediated: the SELECT renders each document to
-	// text on the wire and the applier writes it back as a SQL literal that
-	// the target re-parses. The repaired row therefore lands as exactly the
-	// one-round-trip text image the checksum's source side predicts. Adding a
-	// round-trip cast on top would apply parse∘render twice, which does not
-	// converge for misparsed doubles.
-	columnList := table.QuoteColumns(chunk.Table.NonGeneratedColumns)
-	// Use the table name only; each source DB connection determines which database is queried.
-	query := fmt.Sprintf("SELECT %s FROM %s WHERE %s",
-		columnList,
-		chunk.Table.QuotedTableName,
-		chunk.String(),
-	)
-
-	var rowData [][]any
-	for i := range c.sourcePools {
-		c.logger.Debug("reading chunk data for recopy", "chunk", chunk.String(), "sourceID", i, "table", chunk.Table.TableName)
-
-		rows, err := c.sourcePools[i].db.QueryContext(fixCtx, query)
-		if err != nil {
-			return fmt.Errorf("failed to query chunk data from source %d: %w", i, err)
-		}
-
-		for rows.Next() {
-			values := make([]any, len(chunk.Table.NonGeneratedColumns))
-			valuePtrs := make([]any, len(chunk.Table.NonGeneratedColumns))
-			for j := range values {
-				valuePtrs[j] = &values[j]
-			}
-			if err := rows.Scan(valuePtrs...); err != nil {
-				utils.CloseAndLog(rows)
-				return fmt.Errorf("failed to scan row from source %d: %w", i, err)
-			}
-			rowData = append(rowData, values)
-		}
-		if err := rows.Err(); err != nil {
-			utils.CloseAndLog(rows)
-			return fmt.Errorf("error iterating rows from source %d: %w", i, err)
-		}
-		utils.CloseAndLog(rows)
-	}
-
-	c.logger.Info("recopying chunk via applier", "chunk", chunk.String(), "rowCount", len(rowData), "sourceCount", len(c.sourcePools))
-
-	// Step 3: Use the applier to write the rows to all targets
-	// The applier will handle distribution across shards if needed.
-	//
-	// The applier's worker goroutines run under context.WithoutCancel(ctx)
-	// (see Run() below), so a parent cancellation between the DELETEs above
-	// and the worker writes does not by itself cancel the inserts. The
-	// remaining limitation is that workers stop when the deferred Stop() at
-	// the end of Run runs — if Run returns due to a lockless-checksum
-	// cancel while writes are queued, those inserts may be dropped. The
-	// lockless-checksum loop's DifferencesFound() gate keeps cutover
-	// aborting in that case so the broken state stays internal and is
-	// recopied on resume; a tighter fix would scope a worker context to
-	// the repair window only.
-	if len(rowData) > 0 {
-		done := make(chan error, 1)
-		applyErr := c.applier.Apply(fixCtx, chunk, rowData, func(affectedRows int64, err error) {
-			if err != nil {
-				c.logger.Error("failed to recopy chunk via applier", "error", err)
-				done <- err
-			} else {
-				c.logger.Debug("successfully recopied chunk via applier", "affectedRows", affectedRows)
-				done <- nil
-			}
-		})
-		if applyErr != nil {
-			return fmt.Errorf("failed to initiate recopy via applier: %w", applyErr)
-		}
-
-		// Wait for the apply to complete
-		select {
-		case err := <-done:
-			if err != nil {
-				return fmt.Errorf("recopy via applier failed: %w", err)
-			}
-		case <-fixCtx.Done():
-			return fixCtx.Err()
-		}
-	}
-	c.logger.Info("successfully recopied chunk", "chunk", chunk.String(), "rowCount", len(rowData))
-	return nil
 }
 
 func (c *DistributedChecker) isHealthy(ctx context.Context) bool {
@@ -629,8 +505,8 @@ func (c *DistributedChecker) Run(ctx context.Context) error {
 	// that is decoupled from `ctx` so that a parent-ctx cancellation in the
 	// middle of a recopy (e.g. a sentinel drop during the lockless-checksum
 	// loop) does not abort the applier's worker writes between the DELETE
-	// step in replaceChunk and the actual reapply: replaceChunk builds its
-	// own fixCtx via context.WithoutCancel, but the workers would otherwise
+	// step in distributedRepairer.Recopy and the actual reapply: the repair
+	// builds its own fixCtx via context.WithoutCancel, but the workers would otherwise
 	// take their cancellation from the ctx that Start was given. The applier
 	// is still cleanly shut down via the deferred Stop() when Run returns.
 	if err := c.applier.Start(context.WithoutCancel(ctx)); err != nil {

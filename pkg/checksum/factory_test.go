@@ -80,21 +80,14 @@ func TestFactoryLocklessConfigAndLifecycle(t *testing.T) {
 	cfg.Concurrency = 2
 	cfg.Autoscale = AutoscaleConfig{MaxThreads: 3}
 	cfg.Lockless = true
-	cfg.SplitHotChunks = true
-	cfg.SnapshotHotChunks = true
 	checker, err := NewChecker([]*sql.DB{{}}, chunker, []change.Source{feed}, cfg)
 	require.NoError(t, err)
 	finite := checker.(*LocklessChecker)
 	require.Equal(t, 2, finite.cfg.Concurrency)
 	require.Equal(t, cfg.Autoscale, finite.cfg.Autoscale)
 	// FixDifferences was not set, so a confirmed divergence is an error rather
-	// than something to repair, and no Recopier was built.
-	require.True(t, finite.cfg.DivergenceIsFatal)
-	require.Nil(t, finite.cfg.Recopier)
-	require.True(t, finite.cfg.SplitHotChunks)
-	require.True(t, finite.cfg.SnapshotHotChunks)
-	require.False(t, cfg.DivergenceIsFatal, "factory must not mutate the caller's config")
-	require.Nil(t, cfg.Recopier, "factory must not mutate the caller's config")
+	// than something to repair, and no recopier was built.
+	require.Nil(t, finite.recopier)
 	checker.SetThrottler(&throttler.Noop{})
 	require.Contains(t, StatusRow(checker), "scanning")
 	for range 2 {
@@ -109,41 +102,71 @@ func TestFactoryLocklessConfigAndLifecycle(t *testing.T) {
 	require.Equal(t, feed.starts, feed.stops)
 }
 
-// Repair policy is derived from FixDifferences, not configured on the lockless
-// options, so both checkers answer a divergence the same way. Supplying either
-// of the two derived fields is rejected rather than silently overridden.
-func TestFactoryDerivesLocklessRepairPolicy(t *testing.T) {
-	newCfg := func() *CheckerConfig {
-		cfg := NewCheckerDefaultConfig()
-		cfg.Lockless = true
-		return cfg
-	}
+// Repair policy is derived from FixDifferences for every algorithm, and it is
+// the same derivation: the recopier the checker repairs through is built by the
+// factory, so a divergence is answered identically whichever checker the config
+// selected. The write path it is built over is the caller's, and it is required
+// when — and only when — repairs were asked for.
+func TestFactoryDerivesRepairPolicy(t *testing.T) {
+	for _, mode := range []string{"single", "distributed", "lockless"} {
+		t.Run(mode, func(t *testing.T) {
+			newCfg := func() *CheckerConfig {
+				cfg := NewCheckerDefaultConfig()
+				switch mode {
+				case "distributed":
+					cfg.Applier = &spyApplier{}
+				case "lockless":
+					cfg.Lockless = true
+				}
+				return cfg
+			}
+			recopierOf := func(c Checker) Recopier {
+				switch c := c.(type) {
+				case *SingleChecker:
+					return c.recopier
+				case *DistributedChecker:
+					return c.recopier
+				default:
+					return c.(*LocklessChecker).recopier
+				}
+			}
 
-	cfg := newCfg()
-	cfg.FixDifferences = true
-	cfg.RepairApplier = &spyApplier{}
+			// Without FixDifferences there is no repair path at all, and no
+			// applier is demanded for one.
+			checker, err := NewChecker([]*sql.DB{{}}, newTestChunker(0), []change.Source{&fakeFeed{}}, newCfg())
+			require.NoError(t, err)
+			require.Nil(t, recopierOf(checker), "a divergence is an error, not something to rewrite")
+
+			cfg := newCfg()
+			cfg.FixDifferences = true
+			cfg.RepairApplier = &spyApplier{}
+			checker, err = NewChecker([]*sql.DB{{}}, newTestChunker(0), []change.Source{&fakeFeed{}}, cfg)
+			require.NoError(t, err)
+			require.NotNil(t, recopierOf(checker))
+
+			if mode == "distributed" {
+				// The distributed repair path writes through Applier, which is
+				// already required to select that checker, so there is nothing
+				// further to demand.
+				return
+			}
+			cfg = newCfg()
+			cfg.FixDifferences = true
+			_, err = NewChecker([]*sql.DB{{}}, newTestChunker(0), []change.Source{&fakeFeed{}}, cfg)
+			require.ErrorContains(t, err, "repair applier must be non-nil")
+		})
+	}
+}
+
+// The finite until-clean loop must terminate, so the factory bounds it even
+// when the caller did not.
+func TestFactoryBoundsLocklessPasses(t *testing.T) {
+	cfg := NewCheckerDefaultConfig()
+	cfg.Lockless = true
 	checker, err := NewChecker([]*sql.DB{{}}, newTestChunker(0), []change.Source{&fakeFeed{}}, cfg)
 	require.NoError(t, err)
-	finite := checker.(*LocklessChecker)
-	require.False(t, finite.cfg.DivergenceIsFatal)
-	require.NotNil(t, finite.cfg.Recopier)
-	require.Positive(t, finite.cfg.MaxPasses, "the until-clean loop must be bounded")
-
-	cfg = newCfg()
-	cfg.FixDifferences = true
-	_, err = NewChecker([]*sql.DB{{}}, newTestChunker(0), []change.Source{&fakeFeed{}}, cfg)
-	require.ErrorContains(t, err, "repair applier must be non-nil")
-
-	for _, field := range []string{"recopier", "fatal"} {
-		cfg = newCfg()
-		if field == "recopier" {
-			cfg.Recopier = &fakeRecopier{}
-		} else {
-			cfg.DivergenceIsFatal = true
-		}
-		_, err = NewChecker([]*sql.DB{{}}, newTestChunker(0), []change.Source{&fakeFeed{}}, cfg)
-		require.ErrorContains(t, err, "owned by the factory")
-	}
+	require.Positive(t, checker.(*LocklessChecker).cfg.MaxPasses)
+	require.Zero(t, cfg.MaxPasses, "factory must not mutate the caller's config")
 }
 
 func TestFactoryRejectsUnsupportedLocklessTopology(t *testing.T) {

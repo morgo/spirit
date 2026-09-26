@@ -32,7 +32,7 @@ type Recopier interface {
 // (source CRC unchanged across the retry window, target still wrong), it
 // rewrites the chunk's rows on the target from the source.
 //
-// The operation is the cross-DB analog of SingleChecker.replaceChunk:
+// The operation is the cross-DB analog of chunkRepairer.Recopy:
 //
 //  1. DELETE the chunk's key range on the target.
 //  2. SELECT the chunk's rows from the source.
@@ -123,7 +123,7 @@ func (r *MySQLRecopier) Recopy(ctx context.Context, chunk *table.Chunk) error {
 	// distributed checker's recopy uses. JSON columns are deliberately read
 	// bare — the SELECT+applier pair already constitutes the one text
 	// round-trip the checksum's JSON contract expects; see the matching
-	// comment in DistributedChecker.replaceChunk.
+	// comment in distributedRepairer.Recopy.
 	columnList := table.QuoteColumns(chunk.Table.NonGeneratedColumns)
 	query := fmt.Sprintf("SELECT %s FROM %s WHERE %s",
 		columnList,

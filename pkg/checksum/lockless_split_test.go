@@ -116,7 +116,6 @@ func TestLocklessHotSplit(t *testing.T) {
 			parent := chunker.chunks[0]
 			children := []*table.Chunk{newTestChunk(0, 500), newTestChunk(500, 501), newTestChunk(501, 1000)}
 			cfg := fastConfig()
-			cfg.SplitHotChunks = true
 			cfg.RetryDelay = time.Millisecond
 			cfg.MinPassInterval = time.Hour
 			cfg.MaxHotAttempts = 4
@@ -160,7 +159,6 @@ func TestLocklessHotSplit(t *testing.T) {
 
 func TestHotSplitDoesNotInheritSignatures(t *testing.T) {
 	cfg := fastConfig()
-	cfg.SplitHotChunks = true
 	cfg.RetryDelay = time.Millisecond
 	chunker := newTestChunker(1)
 	parent := chunker.chunks[0]
@@ -181,7 +179,6 @@ func TestHotSplitDoesNotInheritSignatures(t *testing.T) {
 
 func TestHotSplitLimitsAndErrors(t *testing.T) {
 	cfg := fastConfig()
-	cfg.SplitHotChunks = true
 	c := newTestChecker(t, newTestChunker(1), cfg, func(context.Context, *table.Chunk, int) (int64, int64, uint64, error) { return 0, 0, 0, nil })
 	boom := errors.New("split query failed")
 	calls := 0
@@ -229,9 +226,8 @@ func TestHotSplitReadback(t *testing.T) {
 			parent := &table.Chunk{Key: []string{"id"}, Table: sourceTable, NewTable: targetTable, ColumnMapping: table.NewColumnMapping(sourceTable, targetTable, nil)}
 			chunker := &testChunker{chunks: []*table.Chunk{parent}}
 			cfg := fastConfig()
-			cfg.SplitHotChunks = true
 			cfg.RetryDelay = time.Millisecond
-			c, err := NewLocklessChecker(source, target, chunker, nil, &cfg)
+			c, err := NewLocklessChecker(source, target, chunker, nil, nil, &cfg)
 			require.NoError(t, err)
 			read := c.readChunk
 			var attempts atomic.Int64
@@ -258,7 +254,6 @@ func TestHotSplitRecursesToSmallRanges(t *testing.T) {
 	root := newTestChunk(0, 1600)
 	chunker := &testChunker{chunks: []*table.Chunk{root}}
 	cfg := fastConfig()
-	cfg.SplitHotChunks = true
 	cfg.RetryDelay = time.Millisecond
 	cfg.MinPassInterval = time.Hour
 	c := newTestChecker(t, chunker, cfg, func(_ context.Context, ch *table.Chunk, n int) (int64, int64, uint64, error) {
@@ -301,7 +296,6 @@ func TestHotSplitSmallRangesKeepRetryEvidence(t *testing.T) {
 			require.NoError(t, err)
 			require.Empty(t, children)
 			cfg := fastConfig()
-			cfg.SplitHotChunks = true
 			cfg.RetryDelay = time.Millisecond
 			cfg.MinPassInterval = time.Hour
 			cfg.MaxHotAttempts = 4
@@ -380,7 +374,6 @@ func TestHotSplitTemporalKeys(t *testing.T) {
 
 func TestHotSplitFailureDefersWithoutVerification(t *testing.T) {
 	cfg := fastConfig()
-	cfg.SplitHotChunks = true
 	cfg.MaxHotAttempts = 4
 	cfg.RetryDelay = time.Millisecond
 	cfg.MinPassInterval = time.Hour
@@ -510,7 +503,6 @@ func TestWideHotSplitCoverageAndTail(t *testing.T) {
 
 func TestHotSplitDescendantsDoNotWaitForHotness(t *testing.T) {
 	cfg := fastConfig()
-	cfg.SplitHotChunks = true
 	rows := uint64(10000)
 	c := newTestChecker(t, newTestChunker(1), cfg,
 		func(context.Context, *table.Chunk, int) (int64, int64, uint64, error) { return 1, 2, rows, nil })
@@ -599,7 +591,6 @@ func TestWideHotSplitRetainsEmptySuffix(t *testing.T) {
 
 func TestHotSplitBudgetIsSharedPerRoot(t *testing.T) {
 	cfg := fastConfig()
-	cfg.SplitHotChunks = true
 	c := newTestChecker(t, newTestChunker(1), cfg,
 		func(context.Context, *table.Chunk, int) (int64, int64, uint64, error) { return 1, 2, 400000, nil })
 	c.splitChunk = func(context.Context, *table.Chunk, uint64) ([]*table.Chunk, error) {

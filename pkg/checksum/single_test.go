@@ -102,9 +102,15 @@ func TestBasicValidation(t *testing.T) {
 	require.EqualError(t, err, "at least one feed must be provided")
 
 	// The single checker cannot repair without an applier, and that has to fail
-	// here rather than on the first mismatch hours into a migration.
-	_, err = NewChecker([]*sql.DB{db}, chunker, []change.Source{feed}, NewCheckerDefaultConfig())
+	// here rather than on the first mismatch hours into a migration. It is only
+	// demanded when repairs were asked for: a checker that reports a divergence
+	// rather than healing it never needs a write path.
+	repairCfg := NewCheckerDefaultConfig()
+	repairCfg.FixDifferences = true
+	_, err = NewChecker([]*sql.DB{db}, chunker, []change.Source{feed}, repairCfg)
 	require.EqualError(t, err, "repair applier must be non-nil")
+	_, err = NewChecker([]*sql.DB{db}, chunker, []change.Source{feed}, NewCheckerDefaultConfig())
+	require.NoError(t, err)
 
 	// ... but the distributed checker repairs through its own applier, so it does
 	// not need one.
@@ -710,7 +716,7 @@ func TestChecksumChunkReleasesTrxDuringRepair(t *testing.T) {
 	defer func() { require.NoError(t, pool.Close()) }()
 
 	// Simulate another worker's long-running repair.
-	checker.repairer.recopyLock.Lock()
+	checker.recopier.(*chunkRepairer).recopyLock.Lock()
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- checker.ChecksumChunk(t.Context(), pool, chunk)
@@ -745,7 +751,7 @@ func TestChecksumChunkReleasesTrxDuringRepair(t *testing.T) {
 	default:
 	}
 
-	checker.repairer.recopyLock.Unlock()
+	checker.recopier.(*chunkRepairer).recopyLock.Unlock()
 	require.NoError(t, <-errCh)
 
 	// And the repair actually repaired.

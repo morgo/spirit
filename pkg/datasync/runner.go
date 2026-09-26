@@ -548,27 +548,28 @@ func (r *Runner) runLocklessChecksum(ctx context.Context) error {
 	defer stopScaling()
 
 	// Construct the recopier — invoked by the checker when retry detects
-	// stable target divergence. Without one configured, the checker would
-	// instead return ErrPermanentDivergence and abort the sync.
+	// stable target divergence. Sync verifies a target it keeps converging, so
+	// a confirmed divergence is repaired rather than fatal; passing no recopier
+	// is what makes it fatal, and the checker would abort the sync with
+	// ErrPermanentDivergence instead.
+	//
+	// It is passed to the checker rather than derived from the config because
+	// this is the cross-server case: the factory can only build a repair path
+	// that writes back to the server it read from.
 	recopier, err := checksum.NewMySQLRecopier(r.source.db, r.target.DB, r.applier, r.targetDBConfig, r.logger)
 	if err != nil {
 		return fmt.Errorf("construct lockless-checksum recopier: %w", err)
 	}
 
 	checker, err := checksum.NewLocklessChecker(
-		r.source.db, r.target.DB, chunker, r.replClient,
+		r.source.db, r.target.DB, chunker, r.replClient, recopier,
 		&checksum.CheckerConfig{
 			Concurrency:     r.sync.Threads,
-			SplitHotChunks:  true,
 			Throttler:       r.currentLoadSignal(),
 			MetricsSink:     r.metricsSink,
 			Autoscale:       checksum.AutoscaleConfig{Enabled: r.autoscale.Enabled, MaxThreads: r.autoscale.MaxReadThreads},
 			MinPassInterval: checksum.LocklessMinPassInterval,
-			Recopier:        recopier,
 			Logger:          r.logger,
-			// Sync verifies a target it keeps converging, so a confirmed
-			// divergence is repaired by the Recopier, not fatal.
-			DivergenceIsFatal: false,
 		},
 	)
 	if err != nil {

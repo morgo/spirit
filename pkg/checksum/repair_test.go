@@ -17,11 +17,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// newRepairFixture wires a SingleChecker and a chunk for the tests below, which
-// exercise replaceChunk directly rather than through a whole pass. The chunk is
-// deliberately boundless (it covers the entire table, see Chunk.String) so the
-// tests do not depend on how the chunker happens to size chunks.
-func newRepairFixture(t *testing.T, srcName, dstName string, renames map[string]string) (*SingleChecker, *table.Chunk, *sql.DB) {
+// newRepairFixture wires a repair path and a chunk for the tests below, which
+// exercise Recopy directly rather than through a whole pass. It is built by the
+// factory, so these tests cover the repairer the single-server checker actually
+// gets. The chunk is deliberately boundless (it covers the entire table, see
+// Chunk.String) so the tests do not depend on how the chunker happens to size
+// chunks.
+func newRepairFixture(t *testing.T, srcName, dstName string, renames map[string]string) (*chunkRepairer, *table.Chunk, *sql.DB) {
 	t.Helper()
 
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
@@ -53,8 +55,10 @@ func newRepairFixture(t *testing.T, srcName, dstName string, renames map[string]
 	require.NoError(t, err)
 	checker, ok := checkerIntf.(*SingleChecker)
 	require.True(t, ok, "checker is not of type *SingleChecker")
+	repairer, ok := checker.recopier.(*chunkRepairer)
+	require.True(t, ok, "repair path is not of type *chunkRepairer")
 
-	return checker, &table.Chunk{
+	return repairer, &table.Chunk{
 		Key:           src.KeyColumns,
 		Table:         src,
 		NewTable:      dst,
@@ -147,9 +151,9 @@ func TestRepairStreamsChunkThroughApplier(t *testing.T) {
 	testutils.RunSQL(t, "UPDATE _repairbatch_t1_new SET c = 999 WHERE a = 7")
 	testutils.RunSQL(t, "INSERT INTO _repairbatch_t1_new (a, b, c) VALUES (999999, 'not in source', 1)")
 
-	checker, chunk, db := newRepairFixture(t, "repairbatch_t1", "_repairbatch_t1_new", nil)
+	repairer, chunk, db := newRepairFixture(t, "repairbatch_t1", "_repairbatch_t1_new", nil)
 
-	require.NoError(t, checker.replaceChunk(t.Context(), chunk))
+	require.NoError(t, repairer.Recopy(t.Context(), chunk))
 	requireTablesMatch(t, db, "repairbatch_t1", "_repairbatch_t1_new")
 
 	var rows int
@@ -177,7 +181,7 @@ func TestRepairDoesNotLockSourceRows(t *testing.T) {
 	testutils.RunSQL(t, "INSERT INTO repairlock_t1 VALUES (1, 'one', 1), (2, 'two', 2), (3, 'three', 3)")
 	testutils.RunSQL(t, "INSERT INTO _repairlock_t1_new VALUES (1, 'one', 1)") // rows 2 and 3 missing
 
-	checker, chunk, db := newRepairFixture(t, "repairlock_t1", "_repairlock_t1_new", nil)
+	repairer, chunk, db := newRepairFixture(t, "repairlock_t1", "_repairlock_t1_new", nil)
 
 	// Hold an exclusive row lock on a source row inside the chunk, uncommitted
 	// for the whole repair.
@@ -187,7 +191,7 @@ func TestRepairDoesNotLockSourceRows(t *testing.T) {
 	require.NoError(t, err)
 
 	start := time.Now()
-	err = checker.replaceChunk(t.Context(), chunk)
+	err = repairer.Recopy(t.Context(), chunk)
 	elapsed := time.Since(start)
 	require.NoError(t, err)
 	// innodb_lock_wait_timeout defaults to 50s, and the old locking read would
@@ -218,9 +222,9 @@ func TestRepairWithColumnRename(t *testing.T) {
 	testutils.RunSQL(t, "INSERT INTO repairrename_t1 VALUES (1, 'one', 1), (2, 'two', 2)")
 	testutils.RunSQL(t, "INSERT INTO _repairrename_t1_new VALUES (1, 'wrong', 1)") // row 2 missing too
 
-	checker, chunk, db := newRepairFixture(t, "repairrename_t1", "_repairrename_t1_new", map[string]string{"old_b": "b"})
+	repairer, chunk, db := newRepairFixture(t, "repairrename_t1", "_repairrename_t1_new", map[string]string{"old_b": "b"})
 
-	require.NoError(t, checker.replaceChunk(t.Context(), chunk))
+	require.NoError(t, repairer.Recopy(t.Context(), chunk))
 
 	var mismatched int
 	require.NoError(t, db.QueryRowContext(t.Context(),
@@ -243,11 +247,11 @@ func TestRepairEmptySourceRange(t *testing.T) {
 	testutils.RunSQL(t, "CREATE TABLE _repairempty_t1_chkpnt (a INT)") // for binlog advancement
 	testutils.RunSQL(t, "INSERT INTO _repairempty_t1_new VALUES (1, 'stale', 1), (2, 'stale', 2)")
 
-	checker, chunk, db := newRepairFixture(t, "repairempty_t1", "_repairempty_t1_new", nil)
-	spy := &spyApplier{Applier: checker.repairer.applier}
-	checker.repairer.applier = spy
+	repairer, chunk, db := newRepairFixture(t, "repairempty_t1", "_repairempty_t1_new", nil)
+	spy := &spyApplier{Applier: repairer.applier}
+	repairer.applier = spy
 
-	require.NoError(t, checker.replaceChunk(t.Context(), chunk))
+	require.NoError(t, repairer.Recopy(t.Context(), chunk))
 
 	var rows int
 	require.NoError(t, db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM _repairempty_t1_new").Scan(&rows))
@@ -270,16 +274,16 @@ func TestRepairRestartsApplierBetweenRepairs(t *testing.T) {
 	testutils.RunSQL(t, "INSERT INTO repairtwice_t1 VALUES (1, 'one', 1), (2, 'two', 2)")
 	testutils.RunSQL(t, "INSERT INTO _repairtwice_t1_new VALUES (1, 'one', 999)") // wrong, and row 2 missing
 
-	checker, chunk, db := newRepairFixture(t, "repairtwice_t1", "_repairtwice_t1_new", nil)
-	spy := &spyApplier{Applier: checker.repairer.applier}
-	checker.repairer.applier = spy
+	repairer, chunk, db := newRepairFixture(t, "repairtwice_t1", "_repairtwice_t1_new", nil)
+	spy := &spyApplier{Applier: repairer.applier}
+	repairer.applier = spy
 
-	require.NoError(t, checker.replaceChunk(t.Context(), chunk))
+	require.NoError(t, repairer.Recopy(t.Context(), chunk))
 	requireTablesMatch(t, db, "repairtwice_t1", "_repairtwice_t1_new")
 
 	// Diverge it again and repair a second time, now against a stopped applier.
 	testutils.RunSQL(t, "UPDATE _repairtwice_t1_new SET c = 999 WHERE a = 2")
-	require.NoError(t, checker.replaceChunk(t.Context(), chunk))
+	require.NoError(t, repairer.Recopy(t.Context(), chunk))
 	requireTablesMatch(t, db, "repairtwice_t1", "_repairtwice_t1_new")
 
 	require.Equal(t, 2, spy.starts, "each repair must start the applier")
@@ -312,12 +316,12 @@ func TestRepairSurfacesApplierErrors(t *testing.T) {
 			testutils.RunSQL(t, "CREATE TABLE _repairerr_t1_chkpnt (a INT)") // for binlog advancement
 			testutils.RunSQL(t, "INSERT INTO repairerr_t1 VALUES (1, 'one', 1), (2, 'two', 2)")
 
-			checker, chunk, _ := newRepairFixture(t, "repairerr_t1", "_repairerr_t1_new", nil)
-			spy := &spyApplier{Applier: checker.repairer.applier}
+			repairer, chunk, _ := newRepairFixture(t, "repairerr_t1", "_repairerr_t1_new", nil)
+			spy := &spyApplier{Applier: repairer.applier}
 			tc.inject(spy)
-			checker.repairer.applier = spy
+			repairer.applier = spy
 
-			err := checker.replaceChunk(t.Context(), chunk)
+			err := repairer.Recopy(t.Context(), chunk)
 			require.ErrorContains(t, err, tc.wantErr)
 			require.ErrorIs(t, err, injected, "the underlying failure must not be flattened away")
 			// A started applier is stopped on every return path, so a failed

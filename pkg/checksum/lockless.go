@@ -44,16 +44,15 @@
 //       pass-completion purposes (in the per-pass "recopies" bucket), but the
 //       pass is no longer clean — the repaired rows were never observed equal,
 //       so they are re-verified by the next pass's fresh walk. Without a
-//       Recopier (or when DivergenceIsFatal is set) it returns
-//       ErrPermanentDivergence.
+//       Recopier configured it returns ErrPermanentDivergence.
 //
-// With SplitHotChunks, two successive source changes trigger subdivision.
+// Two successive source changes trigger subdivision.
 // Large ranges yield up to eleven children; mismatching descendants above 128
 // rows subdivide immediately without waiting for new source-change evidence.
 // Every child needs fresh verification. Split parents never count as passed.
 // Depth, per-root (shared by descendants), and per-pass budgets bound work.
 //
-// With SnapshotHotChunks, small unresolved hot ranges freeze a finite source
+// Small unresolved hot ranges freeze a finite source
 // PK/CRC image after a target-key census. Retries require actual matching target
 // reads for those images and absence for observed target-only keys. Later inserts
 // do not expand this work set. No stream-backed matches are accepted. Snapshots
@@ -136,10 +135,9 @@ var ErrPermanentDivergence = errors.New("checksum: permanent divergence detected
 // would otherwise cause (see the hot-row limitation in the package README).
 var ErrVerificationUnresolved = errors.New("checksum: verification did not converge within the pass budget")
 
-// Default values applied by NewLocklessChecker for zero-valued config
-// fields. Exported so callers can reference them when tuning.
+// Default values applied for zero-valued config fields. Exported so callers
+// can reference them when tuning.
 const (
-	DefaultLocklessConcurrency  = 4
 	DefaultLocklessMaxQueueSize = 1024
 	// DefaultLocklessMaxHotAttempts bounds how long one continuously
 	// changing chunk can hold a pass open. The initial read counts as attempt
@@ -199,6 +197,12 @@ type LocklessChecker struct {
 	targetDB *sql.DB
 	chunker  table.Chunker
 	feed     change.Source
+
+	// recopier is the repair path, and its presence *is* the repair policy: a
+	// confirmed divergence is repaired when there is one and returns
+	// ErrPermanentDivergence when there is not. See newRecopier for how the
+	// factory chooses one.
+	recopier Recopier
 
 	// ownsFeedFlush makes a run start and stop the feed's periodic flush, the
 	// way the snapshot checkers do. Set by NewChecker. It is off by default
@@ -282,14 +286,21 @@ type LocklessChecker struct {
 // handle twice, which is what NewChecker does. chunker must be Open before a
 // run; the checker Resets it between passes but does not close it.
 //
+// recopier is the repair path, and supplying one is the whole of the repair
+// policy: with one, a confirmed divergence is repaired and verification
+// continues; without one (nil) it returns ErrPermanentDivergence. NewChecker
+// derives it from CheckerConfig.FixDifferences, but it cannot build a
+// cross-server repair path, so callers that verify across two servers pass
+// their own (see MySQLRecopier).
+//
 // Only the fields documented as applying to lockless verification are read —
-// the snapshot-only ones (YieldTimeout, RepairApplier, Applier) are ignored.
-// Unlike NewChecker this does not derive repair policy: set Recopier and
-// DivergenceIsFatal directly.
+// the snapshot-only ones (YieldTimeout, RepairApplier, Applier) are ignored,
+// as is FixDifferences, which recopier supersedes here.
 func NewLocklessChecker(
 	sourceDB, targetDB *sql.DB,
 	chunker table.Chunker,
 	feed change.Source,
+	recopier Recopier,
 	config *CheckerConfig,
 ) (*LocklessChecker, error) {
 	if config == nil {
@@ -306,9 +317,7 @@ func NewLocklessChecker(
 	}
 	cfg := *config
 	// feed is allowed to be nil — it's advisory.
-	if cfg.Concurrency <= 0 {
-		cfg.Concurrency = DefaultLocklessConcurrency
-	}
+	cfg.Concurrency = defaultedConcurrency(cfg.Concurrency)
 	if cfg.RetryDelay <= 0 {
 		cfg.RetryDelay = DefaultLocklessRetryDelay
 	}
@@ -327,6 +336,7 @@ func NewLocklessChecker(
 	}
 	c := &LocklessChecker{
 		cfg:              cfg,
+		recopier:         recopier,
 		sourceDB:         sourceDB,
 		targetDB:         targetDB,
 		chunker:          chunker,
@@ -978,7 +988,7 @@ func (c *LocklessChecker) worker(
 // is optional and never grants verification. Parent cancellation still aborts.
 func (c *LocklessChecker) trySplitHot(ctx context.Context, res *workResult) bool {
 	item := res.item
-	if !c.cfg.SplitHotChunks || item.point || res.newSrc.count <= 1 || item.splitDepth >= hotSplitDepthLimit {
+	if item.point || res.newSrc.count <= 1 || item.splitDepth >= hotSplitDepthLimit {
 		return false
 	}
 	// Descendants already belong to a proven-hot range. Do not make each
@@ -1019,7 +1029,7 @@ func (c *LocklessChecker) trySplitHot(ctx context.Context, res *workResult) bool
 // tryHotSnapshot is reached only after aggregate reads establish a changing
 // range and splitting declines it. Oversized ranges retain ordinary retries.
 func (c *LocklessChecker) tryHotSnapshot(ctx context.Context, res *workResult) bool {
-	if !c.cfg.SnapshotHotChunks || res.newSrc.count > hotSplitTargetRows || res.newTgt.count > hotSplitTargetRows {
+	if res.newSrc.count > hotSplitTargetRows || res.newTgt.count > hotSplitTargetRows {
 		return false
 	}
 	if res.item.splitDepth == 0 && res.item.consecutiveSrcChanged < 1 {
@@ -1171,9 +1181,9 @@ func (c *LocklessChecker) executeWork(ctx context.Context, item *workItem) *work
 	// Recopier is configured and the caller has not declared divergence fatal;
 	// otherwise surface ErrPermanentDivergence so the caller (a library user
 	// running a read-only verification) sees it as an error.
-	if c.cfg.Recopier != nil && !c.cfg.DivergenceIsFatal {
+	if c.recopier != nil {
 		c.logRowDifferences(ctx, item.chunk, "recopying diverged chunk")
-		if err := c.cfg.Recopier.Recopy(ctx, item.chunk); err != nil {
+		if err := c.recopier.Recopy(ctx, item.chunk); err != nil {
 			res.err = fmt.Errorf("recopy chunk %s: %w", item.chunk.String(), err)
 			return res
 		}

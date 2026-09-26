@@ -90,8 +90,6 @@ func (f *parityFixture) checker(t *testing.T, lockless bool, opts ...func(*Check
 	config.RepairApplier = applier.NewSingleTargetForTest(t, f.db)
 	if lockless {
 		config.Lockless = true
-		config.SplitHotChunks = true
-		config.SnapshotHotChunks = true
 		// Repair policy is deliberately not set: the factory derives it from
 		// FixDifferences, which is the whole point of these tests.
 		//
@@ -172,9 +170,9 @@ func TestParityDivergenceWithoutRepair(t *testing.T) {
 			config := NewCheckerDefaultConfig()
 			config.Concurrency = 2
 			config.FixDifferences = false
-			// Still required: the snapshot checker builds its repair path
-			// unconditionally and only consults FixDifferences at the point of
-			// use. Supplied for both so the two differ in policy alone.
+			// Not required with FixDifferences off — neither checker builds a
+			// repair path it would never use — but supplied for both so the two
+			// differ in policy alone.
 			config.RepairApplier = applier.NewSingleTargetForTest(t, f.db)
 			if lockless {
 				config.Lockless = true

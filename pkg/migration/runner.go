@@ -160,7 +160,7 @@ func NewRunner(m *Migration) (*Runner, error) {
 // top of its REPEATABLE READ transaction pool, for the two things it does that
 // the pool does not cover. Both are serialized, so one connection each:
 //
-//   - Chunk repair. When a chunk mismatches, replaceChunk runs its DELETE and
+//   - Chunk repair. When a chunk mismatches, the recopier runs its DELETE and
 //     then its re-read of the source on r.db rather than on the pooled read-view
 //     transaction, and repairs are serialized under the checker's recopyLock —
 //     so it is one connection at a time. (The rewrite itself goes through the
@@ -963,18 +963,16 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context, resumePosi
 		// Repair policy is not set here: NewChecker derives it from
 		// FixDifferences below, so both checkers answer a divergence the same
 		// way (repair it, re-verify next pass, fail if it keeps coming back).
-		Lockless:          lockless,
-		SplitHotChunks:    true,
-		SnapshotHotChunks: true,
-		Watermark:         checksumWatermark,
-		Concurrency:       r.migration.Threads,
-		TargetChunkTime:   table.ChunkerDefaultTarget,
-		DBConfig:          r.dbConfig,
-		Logger:            r.logger,
-		FixDifferences:    true,
-		MaxRetries:        3,
-		YieldTimeout:      r.migration.ChecksumYieldTimeout,
-		MetricsSink:       r.metricsSink,
+		Lockless:        lockless,
+		Watermark:       checksumWatermark,
+		Concurrency:     r.migration.Threads,
+		TargetChunkTime: table.ChunkerDefaultTarget,
+		DBConfig:        r.dbConfig,
+		Logger:          r.logger,
+		FixDifferences:  true,
+		MaxRetries:      3,
+		YieldTimeout:    r.migration.ChecksumYieldTimeout,
+		MetricsSink:     r.metricsSink,
 		// Repairing a mismatched chunk writes through the same applier the copy
 		// and binlog-apply phases use, so a repair inherits the configured write
 		// concurrency instead of standing up a second write path. The copier has
