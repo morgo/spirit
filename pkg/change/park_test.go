@@ -490,3 +490,32 @@ func TestVerifyRowAtNextChangeLive(t *testing.T) {
 	// reader whatever happened.
 	require.False(t, gateIsParked(&client.park), "a verification must release the reader")
 }
+
+// TestVerifyRowAtNextChangeRewrittenDuringVerify pins the second read of the
+// rewrite count, after the verifier returns.
+//
+// The gate stops the *next* event, not the rest of the current one, so a
+// multi-row event — an ODKU listing the key twice, a PK-shifting UPDATE — goes
+// on dispatching while the verifier reads the target. A periodic flush is not
+// serialized with the verification, so it can carry that second change through
+// while the read is in flight. The verifier's verdict is then about a target
+// that moved, which is not a verdict at all.
+func TestVerifyRowAtNextChangeRewrittenDuringVerify(t *testing.T) {
+	h := newVerifyHarness()
+	go func() {
+		<-h.armed
+		h.dispatch([]any{int64(1)}, []any{int64(1), "first"}, false)
+	}()
+
+	verified := 0
+	err := h.run(t.Context(), anyRow, func(_ context.Context, _, image []any, _ bool) error {
+		verified++
+		require.Equal(t, "first", image[1], "the verifier is handed the image the feed parked at")
+		// The rest of the event, arriving while the target is being read.
+		h.dispatch([]any{int64(1)}, []any{int64(1), "second"}, false)
+		return nil
+	})
+	require.ErrorIs(t, err, ErrRowRewritten, "a verdict reached against a target that moved must be discarded")
+	require.Equal(t, 1, verified, "the verifier ran; it is its verdict that is thrown away")
+	require.False(t, h.readerParked(), "the reader must be released even so")
+}

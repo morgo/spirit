@@ -593,6 +593,8 @@ func TestLocklessSettlesHotChunkEndToEnd(t *testing.T) {
 			}
 			require.ErrorIs(t, err, ErrPermanentDivergence,
 				"a settled divergence is reported; before settling it was invisible")
+			require.ErrorContains(t, err, "settled against the change stream",
+				"a settled divergence names its own evidence, not aggregate CRCs it never read")
 		})
 	}
 }
