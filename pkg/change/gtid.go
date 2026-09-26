@@ -1180,7 +1180,7 @@ func (c *gtidClient) countRotation(currentLogName, nextLogName string) string {
 	return nextLogName
 }
 
-// FeedStats satisfies StatsReporter. ForcedRotations is always zero: this
+// FeedStats satisfies Source. ForcedRotations is always zero: this
 // client never issues `FLUSH BINARY LOGS` — BlockWait polls
 // @@GLOBAL.gtid_executed instead of chasing a file offset.
 func (c *gtidClient) FeedStats() FeedStats {

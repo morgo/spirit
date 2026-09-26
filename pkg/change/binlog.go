@@ -1346,7 +1346,7 @@ func (c *binlogClient) FlushResidual() (int, int) {
 	return c.flushResidual, c.flushCount
 }
 
-// FeedStats satisfies StatsReporter, so the runner can fold the feed's
+// FeedStats satisfies Source, so the runner can fold the feed's
 // activity into the binlog row of its periodic status block.
 func (c *binlogClient) FeedStats() FeedStats {
 	// Collected before c.mu is taken: these lock each subscription, and the

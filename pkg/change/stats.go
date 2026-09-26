@@ -142,9 +142,10 @@ func (f FlushShape) String() string {
 }
 
 // ParkReporter is implemented by Subscription implementations that apply
-// backpressure to the change reader and can report on it. Optional, for the
-// same reason StatsReporter is: a subscription that never parks contributes
-// nothing rather than having to grow a method.
+// backpressure to the change reader and can report on it. Optional — unlike
+// Source.FeedStats, which is required — because a subscription that never
+// parks has nothing to report rather than something it declines to say, so an
+// absent implementation is not a gap in the status block.
 type ParkReporter interface {
 	ParkStats() (parks int64, parked bool)
 }
@@ -286,15 +287,6 @@ func mergeFlushShapes(stats *FeedStats, subs []Subscription) {
 	}
 }
 
-// StatsReporter is implemented by change.Source implementations that can
-// report FeedStats. It is deliberately a separate, optional interface rather
-// than part of Source: out-of-tree sources (e.g. a VStream-backed one) should
-// not have to grow a method to keep compiling, and a source that cannot
-// report simply contributes nothing to the status block.
-type StatsReporter interface {
-	FeedStats() FeedStats
-}
-
 // nowFunc is the clock the ages in String() are measured against. A var rather
 // than a direct time.Now call so tests can pin it, mirroring contentionBackoff
 // in subscription_buffered.go.
@@ -407,8 +399,10 @@ func (s FeedStats) flushShapeField() string {
 }
 
 // StatusRow renders the feed stats of srcs as the binlog row of a runner status
-// block, or "" when no source can report. Runner Status() can be called before
-// the feed is constructed, so nil sources are skipped.
+// block, or "" when there is no source to report on. Runner Status() can be
+// called before the feed is constructed, so nil sources are skipped — and a
+// call with nothing left after that produces no row rather than a row of zeros,
+// which would read as a feed that exists and has never flushed.
 //
 // Multiple sources (a sharded move reads one feed per source) are merged into
 // one set of fields: counters are summed, and the flush figures are taken from
@@ -421,11 +415,7 @@ func StatusRow(srcs ...Source) string {
 		if src == nil {
 			continue
 		}
-		reporter, ok := src.(StatsReporter)
-		if !ok {
-			continue
-		}
-		s := reporter.FeedStats()
+		s := src.FeedStats()
 		if !found || isStaler(s, merged) {
 			merged.LastFlushAt = s.LastFlushAt
 			merged.LastFlushDuration = s.LastFlushDuration

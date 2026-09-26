@@ -179,6 +179,18 @@ type Source interface {
 	// not the case this exists for.
 	VerifyRowAtNextChange(ctx context.Context, watch RowWatch, verify RowVerifier) error
 
+	// FeedStats reports what the runner's status block prints for this feed:
+	// rotation and park counters, the shape and timing of the last flush, and
+	// how far the reader has buffered. StatusRow merges it across feeds.
+	//
+	// An implementation with nothing to say returns the zero value, which
+	// renders as a feed that has never flushed. This was an optional interface
+	// (StatsReporter) so an out-of-tree source would not have to grow a method,
+	// but that traded a compile error for a status block that silently goes
+	// blank — and a source that cannot say when it last flushed is one an
+	// operator cannot tell apart from a stalled one.
+	FeedStats() FeedStats
+
 	// Stop ends delivery of events to subscriptions. Everything else stays
 	// live: the source keeps reading and tracking its position, and Flush /
 	// BlockWait / AllChangesFlushed / Position keep working. Close, not Stop,

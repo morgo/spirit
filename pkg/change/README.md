@@ -465,7 +465,7 @@ One verification runs at a time (`verifyMu`), which is what makes a single watch
 
 With `Inner` set it delegates to a real source and records the calls; with `Inner` nil every method is a success-shaped no-op reading from its configuration fields. A test that needs a scripted change delivered embeds it and overrides `VerifyRowAtNextChange`.
 
-Two cases it is deliberately not for: a stub that exists only to satisfy a parameter the code under test must never call, and one that must *not* implement an optional interface such as `StatsReporter` (`MockSource` reports stats). Embed a nil `change.Source` for both, so an unintended call panics and names itself.
+One case it is deliberately not for: a stub that exists only to satisfy a parameter the code under test must never call. Embed a nil `change.Source` there, so an unintended call panics and names itself.
 
 ## See Also
 

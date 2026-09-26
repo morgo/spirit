@@ -30,8 +30,7 @@ import (
 // is handed over.
 //
 // There is one case this is deliberately not for: a stub that exists only to
-// satisfy a parameter the code under test must never call, or one that must
-// *not* implement an optional interface such as StatsReporter. Embed a nil
+// satisfy a parameter the code under test must never call. Embed a nil
 // change.Source there instead, so an unintended call panics and names itself
 // rather than quietly succeeding.
 type MockSource struct {
@@ -80,10 +79,7 @@ type MockSource struct {
 	closes         int
 }
 
-var (
-	_ Source        = (*MockSource)(nil)
-	_ StatsReporter = (*MockSource)(nil)
-)
+var _ Source = (*MockSource)(nil)
 
 func (m *MockSource) AddSubscription(currentTable, newTable *table.TableInfo, chunker table.MappedChunker) error {
 	if m.Inner != nil {
@@ -236,9 +232,7 @@ func (m *MockSource) Close() {
 
 func (m *MockSource) FeedStats() FeedStats {
 	if m.Inner != nil {
-		if reporter, ok := m.Inner.(StatsReporter); ok {
-			return reporter.FeedStats()
-		}
+		return m.Inner.FeedStats()
 	}
 	return m.FixedStats
 }

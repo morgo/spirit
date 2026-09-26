@@ -15,13 +15,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// plainFeed is a Source that deliberately does NOT implement StatsReporter,
-// standing in for an out-of-tree source. Embedding the interface satisfies
-// Source without supplying FeedStats; StatusRow only type-asserts, so the nil
-// embedded value is never called. MockSource cannot stand in here: it reports
-// stats, which is the whole of what this case must not do.
-type plainFeed struct{ Source }
-
 // pinClock freezes the clock String() measures its ages against and returns the
 // instant it froze at, so a test can build timestamps relative to it and assert
 // the exact rendered age.
@@ -65,12 +58,22 @@ func TestFeedStatsString(t *testing.T) {
 		s.String())
 }
 
-func TestStatusRowNoReporter(t *testing.T) {
-	// A nil source, and a source that cannot report, both contribute nothing
-	// rather than printing empty fields.
+// Every Source reports stats, so the only way to have nothing to render is to
+// have no source: Status() can be called before the feed is constructed. That
+// must produce no row at all rather than a row of zeros, which would read as a
+// feed that exists and has never flushed — the shape of a stalled one.
+func TestStatusRowNoSource(t *testing.T) {
 	require.Empty(t, StatusRow())
 	require.Empty(t, StatusRow(nil))
-	require.Empty(t, StatusRow(&plainFeed{}))
+	require.Empty(t, StatusRow(nil, nil))
+
+	// A source present but idle is the case that must NOT be elided.
+	require.Equal(t,
+		"rotations=0 (0 forced)  parks=0 is-parked=false  never flushed",
+		StatusRow(&MockSource{}))
+	require.Equal(t,
+		"rotations=0 (0 forced)  parks=0 is-parked=false  never flushed",
+		StatusRow(nil, &MockSource{}))
 }
 
 func TestStatusRowSingleSource(t *testing.T) {
