@@ -3,6 +3,7 @@ package change
 import (
 	"testing"
 
+	"github.com/block/spirit/pkg/applier"
 	"github.com/block/spirit/pkg/autoscale"
 	"github.com/stretchr/testify/require"
 )
@@ -13,7 +14,7 @@ import (
 // widening produces, and the one that was observed holding full width in
 // production while the copier shed to almost nothing.
 func newLoadTestMap(underLoad *bool) *bufferedMap {
-	sub := newByteCapBufferedMap(&countingApplier{}, false)
+	sub := newByteCapBufferedMap(&applier.MockApplier{}, false)
 	sub.flushConcurrency, sub.batchSize = autoscale.FlushBounds(64)
 	sub.underLoad = func() bool { return *underLoad }
 	return sub
@@ -128,7 +129,7 @@ func TestFlushLoadShedHoldsRowsInFlightAtEveryDerivedWidth(t *testing.T) {
 	for _, vCPUs := range []int{12, 14, 16, 18, 20, 24, 26, 32, 34, 40, 48, 64, 96, 128} {
 		concurrency, batchSize := autoscale.FlushBounds(vCPUs)
 
-		sub := newByteCapBufferedMap(&countingApplier{}, false)
+		sub := newByteCapBufferedMap(&applier.MockApplier{}, false)
 		sub.flushConcurrency, sub.batchSize = concurrency, batchSize
 		sub.underLoad = func() bool { return true }
 
@@ -164,7 +165,7 @@ func TestFlushLoadShedHoldsRowsInFlightAtEveryDerivedWidth(t *testing.T) {
 // halved value would retract a caller's allowance the moment a single contention
 // step landed, narrowing the width without the widening that pays for it.
 func TestFlushLoadShedRepairsAgainstTheConfiguredBatch(t *testing.T) {
-	sub := newByteCapBufferedMap(&countingApplier{}, false)
+	sub := newByteCapBufferedMap(&applier.MockApplier{}, false)
 	// A caller who sized the drain themselves, above DefaultBatchSize.
 	sub.flushConcurrency, sub.batchSize = 32, 2000
 	sub.underLoad = func() bool { return true }
@@ -236,7 +237,7 @@ func TestFlushLoadShedIsANoOpBelowTheWidening(t *testing.T) {
 // idle-and-recover" — either would change the width of drains for callers that
 // never opted in.
 func TestFlushWithoutLoadSignalIsUnchanged(t *testing.T) {
-	sub := newByteCapBufferedMap(&countingApplier{}, false)
+	sub := newByteCapBufferedMap(&applier.MockApplier{}, false)
 	sub.flushConcurrency, sub.batchSize = autoscale.FlushBounds(64)
 	require.Nil(t, sub.underLoad)
 
@@ -332,7 +333,7 @@ func TestFlushLoadShedNeverRaisesAContendedWidth(t *testing.T) {
 func TestDrainAppliesTheLoadShedShape(t *testing.T) {
 	loaded := true
 	sub := newLoadTestMap(&loaded)
-	fake := sub.applier.(*countingApplier)
+	fake := sub.applier.(*applier.MockApplier)
 
 	const totalRows = 2000
 	for i := range totalRows {
@@ -350,7 +351,7 @@ func TestDrainAppliesTheLoadShedShape(t *testing.T) {
 	// 250 rows per batch is the configured shape and 500 the shed one, so the
 	// widest statement the drain actually issued says which shape it used.
 	widest, applied := 0, 0
-	for _, call := range fake.upserts() {
+	for _, call := range fake.UpsertCalls() {
 		widest = max(widest, len(call))
 		applied += len(call)
 	}

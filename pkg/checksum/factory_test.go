@@ -3,9 +3,11 @@ package checksum
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"testing"
 	"time"
 
+	"github.com/block/spirit/pkg/applier"
 	"github.com/block/spirit/pkg/change"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
@@ -37,12 +39,12 @@ func TestFactoryVerificationResume(t *testing.T) {
 			chunker := &resumeChunker{testChunker: newTestChunker(0), watermark: "verified-prefix"}
 			cfg := NewCheckerDefaultConfig()
 			cfg.Watermark = "saved-prefix"
-			cfg.RepairApplier = &spyApplier{}
+			cfg.Applier = &applier.MockApplier{}
 			switch mode {
 			case "distributed":
-				cfg.Applier = &spyApplier{}
+				cfg.Algorithm = Sharded
 			case "lockless":
-				cfg.Lockless = &LocklessCheckerConfig{}
+				cfg.Algorithm = Lockless
 			}
 			checker, err := NewChecker([]*sql.DB{{}}, chunker, []change.Source{&fakeFeed{}}, cfg)
 			require.NoError(t, err)
@@ -79,20 +81,15 @@ func TestFactoryLocklessConfigAndLifecycle(t *testing.T) {
 	cfg := NewCheckerDefaultConfig()
 	cfg.Concurrency = 2
 	cfg.Autoscale = AutoscaleConfig{MaxThreads: 3}
-	options := &LocklessCheckerConfig{SplitHotChunks: true, SnapshotHotChunks: true}
-	cfg.Lockless = options
+	cfg.Algorithm = Lockless
 	checker, err := NewChecker([]*sql.DB{{}}, chunker, []change.Source{feed}, cfg)
 	require.NoError(t, err)
-	finite := checker.(*locklessChecker)
+	finite := checker.(*LocklessChecker)
 	require.Equal(t, 2, finite.cfg.Concurrency)
 	require.Equal(t, cfg.Autoscale, finite.cfg.Autoscale)
 	// FixDifferences was not set, so a confirmed divergence is an error rather
-	// than something to repair, and no Recopier was built.
-	require.True(t, finite.cfg.DivergenceIsFatal)
-	require.Nil(t, finite.cfg.Recopier)
-	require.True(t, finite.cfg.SplitHotChunks)
-	require.True(t, finite.cfg.SnapshotHotChunks)
-	require.Zero(t, options.Concurrency, "factory must not mutate supplied lockless policy")
+	// than something to repair, and no recopier was built.
+	require.Nil(t, finite.recopier)
 	checker.SetThrottler(&throttler.Noop{})
 	require.Contains(t, StatusRow(checker), "scanning")
 	for range 2 {
@@ -107,48 +104,171 @@ func TestFactoryLocklessConfigAndLifecycle(t *testing.T) {
 	require.Equal(t, feed.starts, feed.stops)
 }
 
-// Repair policy is derived from FixDifferences, not configured on the lockless
-// options, so both checkers answer a divergence the same way. Supplying either
-// of the two derived fields is rejected rather than silently overridden.
-func TestFactoryDerivesLocklessRepairPolicy(t *testing.T) {
-	newCfg := func() *CheckerConfig {
-		cfg := NewCheckerDefaultConfig()
-		cfg.Lockless = &LocklessCheckerConfig{}
-		return cfg
-	}
+// Repair policy is derived from FixDifferences for every algorithm, and it is
+// the same derivation: the recopier the checker repairs through is built by the
+// factory, so a divergence is answered identically whichever checker the config
+// selected. The write path it is built over is the caller's, and it is required
+// when — and only when — repairs were asked for.
+func TestFactoryDerivesRepairPolicy(t *testing.T) {
+	for _, mode := range []string{"single", "distributed", "lockless"} {
+		t.Run(mode, func(t *testing.T) {
+			newCfg := func() *CheckerConfig {
+				cfg := NewCheckerDefaultConfig()
+				switch mode {
+				case "distributed":
+					cfg.Algorithm = Sharded
+					// Sharded needs an applier to reach its targets at all, so
+					// it always has one; whether it *repairs* through it is
+					// still FixDifferences' call, same as everywhere else.
+					cfg.Applier = &applier.MockApplier{}
+				case "lockless":
+					cfg.Algorithm = Lockless
+				}
+				return cfg
+			}
+			recopierOf := func(c Checker) Recopier {
+				switch c := c.(type) {
+				case *SingleChecker:
+					return c.recopier
+				case *DistributedChecker:
+					return c.recopier
+				default:
+					return c.(*LocklessChecker).recopier
+				}
+			}
 
-	cfg := newCfg()
-	cfg.FixDifferences = true
-	cfg.RepairApplier = &spyApplier{}
-	checker, err := NewChecker([]*sql.DB{{}}, newTestChunker(0), []change.Source{&fakeFeed{}}, cfg)
-	require.NoError(t, err)
-	finite := checker.(*locklessChecker)
-	require.False(t, finite.cfg.DivergenceIsFatal)
-	require.NotNil(t, finite.cfg.Recopier)
-	require.Positive(t, finite.cfg.MaxPasses, "the until-clean loop must be bounded")
+			// Without FixDifferences there is no repair path at all, and no
+			// applier is demanded for one.
+			checker, err := NewChecker([]*sql.DB{{}}, newTestChunker(0), []change.Source{&fakeFeed{}}, newCfg())
+			require.NoError(t, err)
+			require.Nil(t, recopierOf(checker), "a divergence is an error, not something to rewrite")
 
-	cfg = newCfg()
-	cfg.FixDifferences = true
-	_, err = NewChecker([]*sql.DB{{}}, newTestChunker(0), []change.Source{&fakeFeed{}}, cfg)
-	require.ErrorContains(t, err, "repair applier must be non-nil")
+			cfg := newCfg()
+			cfg.FixDifferences = true
+			cfg.Applier = &applier.MockApplier{}
+			checker, err = NewChecker([]*sql.DB{{}}, newTestChunker(0), []change.Source{&fakeFeed{}}, cfg)
+			require.NoError(t, err)
+			require.NotNil(t, recopierOf(checker))
 
-	for _, field := range []string{"recopier", "fatal"} {
-		cfg = newCfg()
-		if field == "recopier" {
-			cfg.Lockless.Recopier = &fakeRecopier{}
-		} else {
-			cfg.Lockless.DivergenceIsFatal = true
-		}
-		_, err = NewChecker([]*sql.DB{{}}, newTestChunker(0), []change.Source{&fakeFeed{}}, cfg)
-		require.ErrorContains(t, err, "owned by the factory")
+			if mode == "distributed" {
+				// Sharded already demanded its applier at validation, so there
+				// is nothing further to demand here.
+				return
+			}
+			cfg = newCfg()
+			cfg.FixDifferences = true
+			_, err = NewChecker([]*sql.DB{{}}, newTestChunker(0), []change.Source{&fakeFeed{}}, cfg)
+			require.ErrorContains(t, err, "applier must be non-nil to repair differences")
+		})
 	}
 }
 
+// TargetDB is the only thing that says "the copy being verified is on another
+// server", and it decides both halves of that: which handle the reads compare
+// against, and which repair implementation is built. It is lockless-only,
+// because the snapshot algorithms reach their target through a table lock and a
+// REPEATABLE READ snapshot, neither of which spans two servers.
+func TestFactoryCrossServerTarget(t *testing.T) {
+	source, target := &sql.DB{}, &sql.DB{}
+	newCfg := func() *CheckerConfig {
+		cfg := NewCheckerDefaultConfig()
+		cfg.Algorithm = Lockless
+		cfg.FixDifferences = true
+		cfg.Applier = &applier.MockApplier{}
+		return cfg
+	}
+
+	// Same server: the repair goes through the mapping-aware single-server
+	// path, which is what makes a migration's repair correct across a rename.
+	checker, err := NewChecker([]*sql.DB{source}, newTestChunker(0), []change.Source{&fakeFeed{}}, newCfg())
+	require.NoError(t, err)
+	lockless := checker.(*LocklessChecker)
+	require.Same(t, source, lockless.targetDB, "the target defaults to the server being read from")
+	require.IsType(t, &chunkRepairer{}, lockless.recopier)
+
+	cfg := newCfg()
+	cfg.TargetDB = target
+	checker, err = NewChecker([]*sql.DB{source}, newTestChunker(0), []change.Source{&fakeFeed{}}, cfg)
+	require.NoError(t, err)
+	lockless = checker.(*LocklessChecker)
+	require.Same(t, source, lockless.sourceDB)
+	require.Same(t, target, lockless.targetDB)
+	recopier, ok := lockless.recopier.(*mysqlRecopier)
+	require.True(t, ok, "a cross-server repair reads one server and writes the other")
+	require.Same(t, source, recopier.sourceDB)
+	require.Same(t, target, recopier.targetDB)
+
+	for _, algorithm := range []Algorithm{Single, Sharded} {
+		t.Run(algorithm.String(), func(t *testing.T) {
+			cfg := newCfg()
+			cfg.Algorithm = algorithm
+			cfg.TargetDB = target
+			_, err := NewChecker([]*sql.DB{source}, newTestChunker(0), []change.Source{&fakeFeed{}}, cfg)
+			require.ErrorContains(t, err, algorithm.String()+" verification cannot span two servers")
+		})
+	}
+}
+
+// TestFactoryRejectsExtraSourcesForSingleSource: before Algorithm existed, a
+// non-nil Applier was what selected the sharded checker. A caller written
+// against that rule passes N sources and an applier — and with Algorithm now
+// deciding, that same call would build a Single checker, verify sourceDBs[0],
+// and report the whole topology clean. Verification that passes by not looking
+// is the one failure mode worth a hard error, so the shape is rejected.
+func TestFactoryRejectsExtraSourcesForSingleSource(t *testing.T) {
+	for _, algorithm := range []Algorithm{Single, Lockless} {
+		t.Run(algorithm.String(), func(t *testing.T) {
+			cfg := NewCheckerDefaultConfig()
+			cfg.Algorithm = algorithm
+			cfg.Applier = &applier.MockApplier{}
+			sources := []*sql.DB{{}, {}}
+			feeds := []change.Source{&fakeFeed{}, &fakeFeed{}}
+
+			_, err := NewChecker(sources, newTestChunker(0), feeds[:1], cfg)
+			require.ErrorContains(t, err, algorithm.String()+" verification requires one source and one feed, got 2 and 1")
+
+			_, err = NewChecker(sources[:1], newTestChunker(0), feeds, cfg)
+			require.ErrorContains(t, err, algorithm.String()+" verification requires one source and one feed, got 1 and 2")
+
+			// A nil entry is the same class of mistake and must not reach the
+			// checker as a usable handle either.
+			_, err = NewChecker([]*sql.DB{nil}, newTestChunker(0), feeds[:1], cfg)
+			require.ErrorContains(t, err, algorithm.String()+" verification requires a non-nil source and feed")
+		})
+	}
+}
+
+// A checker owns the feed's periodic flush for the duration of a run, unless
+// the caller runs one for longer than any single run and says so.
+func TestFactoryExternalFlushLoop(t *testing.T) {
+	for _, external := range []bool{false, true} {
+		t.Run(fmt.Sprintf("external=%t", external), func(t *testing.T) {
+			cfg := NewCheckerDefaultConfig()
+			cfg.Algorithm = Lockless
+			cfg.ExternalFlushLoop = external
+			checker, err := NewChecker([]*sql.DB{{}}, newTestChunker(0), []change.Source{&fakeFeed{}}, cfg)
+			require.NoError(t, err)
+			require.Equal(t, !external, checker.(*LocklessChecker).ownsFeedFlush)
+		})
+	}
+}
+
+// The finite until-clean loop must terminate, so the factory bounds it even
+// when the caller did not.
+func TestFactoryBoundsLocklessPasses(t *testing.T) {
+	cfg := NewCheckerDefaultConfig()
+	cfg.Algorithm = Lockless
+	checker, err := NewChecker([]*sql.DB{{}}, newTestChunker(0), []change.Source{&fakeFeed{}}, cfg)
+	require.NoError(t, err)
+	require.Positive(t, checker.(*LocklessChecker).cfg.MaxPasses)
+	require.Zero(t, cfg.MaxPasses, "factory must not mutate the caller's config")
+}
+
 func TestFactoryRejectsUnsupportedLocklessTopology(t *testing.T) {
-	for _, mode := range []string{"sources", "feeds", "distributed", "nil-source", "nil-feed"} {
+	for _, mode := range []string{"sources", "feeds", "nil-source", "nil-feed"} {
 		t.Run(mode, func(t *testing.T) {
 			cfg := NewCheckerDefaultConfig()
-			cfg.Lockless = &LocklessCheckerConfig{}
+			cfg.Algorithm = Lockless
 			sources := []*sql.DB{{}}
 			feeds := []change.Source{&fakeFeed{}}
 			switch mode {
@@ -156,8 +276,6 @@ func TestFactoryRejectsUnsupportedLocklessTopology(t *testing.T) {
 				sources = append(sources, &sql.DB{})
 			case "feeds":
 				feeds = append(feeds, &fakeFeed{})
-			case "distributed":
-				cfg.Applier = &spyApplier{}
 			case "nil-source":
 				sources[0] = nil
 			case "nil-feed":
@@ -167,6 +285,48 @@ func TestFactoryRejectsUnsupportedLocklessTopology(t *testing.T) {
 			require.Error(t, err)
 		})
 	}
+}
+
+// The algorithm is named, not inferred, so an applier no longer selects one.
+// Supplying one to a single-server or lockless checker means "repair through
+// this" and nothing else; a sharded checker needs one whether or not it
+// repairs; and an unnamed algorithm is refused rather than silently defaulted.
+func TestFactoryAlgorithmSelection(t *testing.T) {
+	newCfg := func(a Algorithm) *CheckerConfig {
+		cfg := NewCheckerDefaultConfig()
+		cfg.Algorithm = a
+		cfg.Applier = &applier.MockApplier{}
+		return cfg
+	}
+	build := func(t *testing.T, cfg *CheckerConfig) (Checker, error) {
+		t.Helper()
+		return NewChecker([]*sql.DB{{}}, newTestChunker(0), []change.Source{&fakeFeed{}}, cfg)
+	}
+
+	for _, tc := range []struct {
+		algorithm Algorithm
+		want      Checker
+		name      string
+	}{
+		{Single, (*SingleChecker)(nil), "single"},
+		{Sharded, (*DistributedChecker)(nil), "sharded"},
+		{Lockless, (*LocklessChecker)(nil), "lockless"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.name, tc.algorithm.String())
+			checker, err := build(t, newCfg(tc.algorithm))
+			require.NoError(t, err)
+			require.IsType(t, tc.want, checker)
+		})
+	}
+
+	cfg := newCfg(Sharded)
+	cfg.Applier = nil
+	_, err := build(t, cfg)
+	require.ErrorContains(t, err, "sharded verification requires an applier")
+
+	_, err = build(t, newCfg(Algorithm(99)))
+	require.ErrorContains(t, err, "unknown checksum algorithm")
 }
 
 func TestSnapshotResumeWatermarkNotReady(t *testing.T) {
@@ -203,9 +363,9 @@ func TestFactoryResumeWithoutChildWatermarks(t *testing.T) {
 			t.Cleanup(func() { require.NoError(t, chunker.Close()) })
 			cfg := NewCheckerDefaultConfig()
 			cfg.Watermark = "{}"
-			cfg.RepairApplier = &spyApplier{}
+			cfg.Applier = &applier.MockApplier{}
 			if optimistic {
-				cfg.Lockless = &LocklessCheckerConfig{}
+				cfg.Algorithm = Lockless
 			}
 			_, err := NewChecker([]*sql.DB{{}}, chunker, []change.Source{&fakeFeed{}}, cfg)
 			require.NoError(t, err)
@@ -214,15 +374,5 @@ func TestFactoryResumeWithoutChildWatermarks(t *testing.T) {
 				require.NoError(t, err, "every child must be open from the beginning")
 			}
 		})
-	}
-}
-
-func TestFactoryRejectsConflictingLocklessConcurrency(t *testing.T) {
-	for _, concurrency := range []int{0, 2} {
-		cfg := NewCheckerDefaultConfig()
-		cfg.Concurrency = concurrency
-		cfg.Lockless = &LocklessCheckerConfig{Concurrency: 99}
-		_, err := NewChecker([]*sql.DB{{}}, newTestChunker(0), []change.Source{&fakeFeed{}}, cfg)
-		require.ErrorContains(t, err, "Concurrency conflicts")
 	}
 }

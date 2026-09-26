@@ -25,13 +25,13 @@ func shortenDrainDispatchBudget(t *testing.T, d time.Duration) {
 // slowApplier makes every applier round trip take a fixed amount of wall clock,
 // which is what the dispatch budget is measured against.
 type slowApplier struct {
-	countingApplier
+	applier.MockApplier
 	perCall time.Duration
 }
 
 func (s *slowApplier) UpsertRows(ctx context.Context, mapping *table.ColumnMapping, rows []applier.LogicalRow, locks []*dbconn.TableLock) (int64, error) {
 	time.Sleep(s.perCall)
-	return s.countingApplier.UpsertRows(ctx, mapping, rows, locks)
+	return s.MockApplier.UpsertRows(ctx, mapping, rows, locks)
 }
 
 // TestSoftLimitOnChangeCountParksTheReader is the regression test for the
@@ -42,7 +42,7 @@ func (s *slowApplier) UpsertRows(ctx context.Context, mapping *table.ColumnMappi
 // they weigh — so the buffer needs a cap in that unit too.
 func TestSoftLimitOnChangeCountParksTheReader(t *testing.T) {
 	const limit = 8
-	sub := newByteCapBufferedMap(&countingApplier{}, false)
+	sub := newByteCapBufferedMap(&applier.MockApplier{}, false)
 	sub.softLimitChanges = limit
 	// No byte cap at all, so this test can only pass on the count cap.
 	sub.softLimitBytes = 0
@@ -83,7 +83,7 @@ func TestSoftLimitOnChangeCountParksTheReader(t *testing.T) {
 // precisely the workload dedup handles for free.
 func TestChangeCountCapExemptsDedupOverwrites(t *testing.T) {
 	const limit = 4
-	sub := newByteCapBufferedMap(&countingApplier{}, false)
+	sub := newByteCapBufferedMap(&applier.MockApplier{}, false)
 	sub.softLimitChanges = limit
 	sub.softLimitBytes = 0
 
@@ -114,7 +114,7 @@ func TestChangeCountCapExemptsDedupOverwrites(t *testing.T) {
 // and the pending total — which is what Length() and AllChangesFlushed() see —
 // would be twice the cap.
 func TestChangeCountCapIncludesInFlightEntries(t *testing.T) {
-	sub := newByteCapBufferedMap(&countingApplier{}, false)
+	sub := newByteCapBufferedMap(&applier.MockApplier{}, false)
 	sub.softLimitChanges = 4
 	sub.softLimitBytes = 0
 
@@ -129,7 +129,7 @@ func TestChangeCountCapIncludesInFlightEntries(t *testing.T) {
 // SubscriptionSoftLimitChanges to zero, so this is the shape an explicit
 // opt-out reaches the subscription in.
 func TestChangeCountCapOptOut(t *testing.T) {
-	sub := newByteCapBufferedMap(&countingApplier{}, false)
+	sub := newByteCapBufferedMap(&applier.MockApplier{}, false)
 	sub.softLimitChanges = 0
 	sub.softLimitBytes = 0
 	sub.Lock()
@@ -147,7 +147,7 @@ func TestDrainDispatchBudgetDefersTheRemainder(t *testing.T) {
 	shortenDrainDispatchBudget(t, 50*time.Millisecond)
 	const totalRows = 6 * DefaultBatchSize
 	fake := &slowApplier{perCall: 40 * time.Millisecond}
-	sub := newByteCapBufferedMap(&fake.countingApplier, false)
+	sub := newByteCapBufferedMap(&fake.MockApplier, false)
 	sub.applier = fake
 	sub.flushConcurrency = 1 // serial, so the budget is spent predictably
 
@@ -164,7 +164,7 @@ func TestDrainDispatchBudgetDefersTheRemainder(t *testing.T) {
 
 	// Some batches landed and the rest are still buffered — nothing was lost.
 	applied := 0
-	for _, call := range fake.upserts() {
+	for _, call := range fake.UpsertCalls() {
 		applied += len(call)
 	}
 	require.Positive(t, applied, "the drain must have made progress before giving up")
@@ -197,7 +197,7 @@ func TestDrainDispatchBudgetBoundsQueueModeToo(t *testing.T) {
 	const segments = 4
 	const totalRows = segments * DefaultBatchSize
 	fake := &slowApplier{perCall: 40 * time.Millisecond}
-	sub := newByteCapBufferedMap(&fake.countingApplier, true) // queue mode
+	sub := newByteCapBufferedMap(&fake.MockApplier, true) // queue mode
 	sub.applier = fake
 	require.True(t, sub.queueModeActive(), "this test must exercise the queue drain")
 
@@ -213,7 +213,7 @@ func TestDrainDispatchBudgetBoundsQueueModeToo(t *testing.T) {
 		"the queue remainder is unattempted work too, and the map path must not be the only one to say so")
 
 	applied := 0
-	for _, call := range fake.upserts() {
+	for _, call := range fake.UpsertCalls() {
 		applied += len(call)
 	}
 	require.Positive(t, applied, "the drain must make progress before giving up")
@@ -250,7 +250,7 @@ func TestDrainDispatchBudgetIsNotDefeatedByASlotWait(t *testing.T) {
 	const batches = 3
 	const totalRows = batches * DefaultBatchSize
 	fake := &slowApplier{perCall: 300 * time.Millisecond}
-	sub := newByteCapBufferedMap(&fake.countingApplier, false)
+	sub := newByteCapBufferedMap(&fake.MockApplier, false)
 	sub.applier = fake
 	sub.flushConcurrency = 1
 
@@ -263,7 +263,7 @@ func TestDrainDispatchBudgetIsNotDefeatedByASlotWait(t *testing.T) {
 	require.False(t, allFlushed)
 
 	applied := 0
-	for _, call := range fake.upserts() {
+	for _, call := range fake.UpsertCalls() {
 		applied += len(call)
 	}
 	require.Equal(t, DefaultBatchSize, applied,
@@ -276,7 +276,7 @@ func TestDrainDispatchBudgetIsNotDefeatedByASlotWait(t *testing.T) {
 // which would freeze the checkpoint in the name of unfreezing it.
 func TestDrainWithinBudgetStillReportsComplete(t *testing.T) {
 	const totalRows = 3 * DefaultBatchSize
-	fake := &countingApplier{}
+	fake := &applier.MockApplier{}
 	sub := newByteCapBufferedMap(fake, false)
 	sub.flushConcurrency = 4
 
@@ -332,7 +332,7 @@ func TestDrainBoundDefaultsAreOrdered(t *testing.T) {
 // a healthy feed if the only evidence is a counter that stopped moving.
 func TestParkStatsReportsAnInFlightPark(t *testing.T) {
 	const limit = 4
-	sub := newByteCapBufferedMap(&countingApplier{}, false)
+	sub := newByteCapBufferedMap(&applier.MockApplier{}, false)
 	sub.softLimitChanges = limit
 	sub.softLimitBytes = 0
 
@@ -377,7 +377,7 @@ func TestParkStatsReportsAnInFlightPark(t *testing.T) {
 // own log lines.
 func TestFeedStatsReportsSubscriptionParks(t *testing.T) {
 	const limit = 2
-	sub := newByteCapBufferedMap(&countingApplier{}, false)
+	sub := newByteCapBufferedMap(&applier.MockApplier{}, false)
 	sub.softLimitChanges = limit
 	sub.softLimitBytes = 0
 

@@ -17,29 +17,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-type noopDistributedApplier struct{}
-
-func (a *noopDistributedApplier) Start(context.Context) error { return nil }
-
-func (a *noopDistributedApplier) Apply(context.Context, *table.Chunk, [][]any, applier.ApplyCallback) error {
-	return nil
-}
-
-func (a *noopDistributedApplier) DeleteKeys(context.Context, *table.TableInfo, *table.TableInfo, [][]any, []*dbconn.TableLock) (int64, error) {
-	return 0, nil
-}
-
-func (a *noopDistributedApplier) UpsertRows(context.Context, *table.ColumnMapping, []applier.LogicalRow, []*dbconn.TableLock) (int64, error) {
-	return 0, nil
-}
-
-func (a *noopDistributedApplier) Wait(context.Context) error { return nil }
-func (a *noopDistributedApplier) Stop() error                { return nil }
-func (a *noopDistributedApplier) Stats() applier.Stats       { return applier.Stats{} }
-func (a *noopDistributedApplier) GetTargets() []applier.Target {
-	return nil
-}
-
 type noopChangeSource struct{}
 
 func (s *noopChangeSource) AddSubscription(_, _ *table.TableInfo, _ table.MappedChunker) error {
@@ -72,7 +49,8 @@ func TestDistributedCheckerHonorsYieldTimeoutConfig(t *testing.T) {
 	defer utils.CloseAndLog(db)
 
 	config := NewCheckerDefaultConfig()
-	config.Applier = &noopDistributedApplier{}
+	config.Applier = &applier.MockApplier{}
+	config.Algorithm = Sharded
 	config.YieldTimeout = 137 * time.Millisecond
 
 	checker, err := NewChecker(
@@ -144,6 +122,7 @@ func TestDistributedCheckerYieldTimeout(t *testing.T) {
 
 	config := NewCheckerDefaultConfig()
 	config.Applier = app
+	config.Algorithm = Sharded
 	// Concurrency 1 so the first chunk completes in order and sets the low
 	// watermark; a short timeout so a pass yields mid-table before the table is
 	// fully read. The lock-acquisition phase runs under the parent context, not
@@ -214,6 +193,7 @@ func TestFixCorruptWithApplier(t *testing.T) {
 	config := NewCheckerDefaultConfig()
 	config.FixDifferences = true
 	config.Applier = applier
+	config.Algorithm = Sharded
 
 	checker, err := NewChecker([]*sql.DB{src}, chunker, []change.Source{feed}, config)
 	require.NoError(t, err)
@@ -273,6 +253,7 @@ func TestDistributedRetryDoesNotVacuouslyPass(t *testing.T) {
 
 	config := NewCheckerDefaultConfig()
 	config.Applier = app
+	config.Algorithm = Sharded
 	config.FixDifferences = false // surface the mismatch as an error
 	config.MaxRetries = 2
 	checker, err := NewChecker([]*sql.DB{src}, chunker, []change.Source{feed}, config)
@@ -339,6 +320,7 @@ func TestDistributedRunResetsPriorInvalidState(t *testing.T) {
 
 	config := NewCheckerDefaultConfig()
 	config.Applier = app
+	config.Algorithm = Sharded
 	checker, err := NewChecker([]*sql.DB{src}, chunker, []change.Source{feed}, config)
 	require.NoError(t, err)
 	distChecker, ok := checker.(*DistributedChecker)
@@ -442,6 +424,7 @@ func TestDistributedChecksum(t *testing.T) {
 	// Create distributed checker config
 	config := NewCheckerDefaultConfig()
 	config.Applier = shardedApplier
+	config.Algorithm = Sharded
 	config.FixDifferences = false // Should pass without needing fixes
 
 	// Create and run the distributed checker
@@ -569,6 +552,7 @@ func TestDistributedChecksumNtoM(t *testing.T) {
 	// Create the distributed checker with both source DBs and both feeds.
 	config := NewCheckerDefaultConfig()
 	config.Applier = shardedApplier
+	config.Algorithm = Sharded
 	config.FixDifferences = false
 
 	checker, err := NewChecker([]*sql.DB{src0DB, src1DB}, multiChunker, []change.Source{feed0, feed1}, config)
@@ -669,6 +653,7 @@ func TestDistributedChecksumPairCancellation(t *testing.T) {
 
 	config := NewCheckerDefaultConfig()
 	config.Applier = shardedApplier
+	config.Algorithm = Sharded
 	config.FixDifferences = false // we want the mismatch to surface as an error
 
 	checker, err := NewChecker([]*sql.DB{src0DB, src1DB}, multiChunker, []change.Source{feed0, feed1}, config)
@@ -809,6 +794,7 @@ func TestDistributedChecksumFlushUnderLock(t *testing.T) {
 	require.NoError(t, chunker.Open())
 	config := NewCheckerDefaultConfig()
 	config.Applier = shardedApplier
+	config.Algorithm = Sharded
 	config.FixDifferences = false
 	checker, err := NewChecker([]*sql.DB{srcDB}, chunker, []change.Source{feed}, config)
 	require.NoError(t, err)

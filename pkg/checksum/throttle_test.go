@@ -133,7 +133,7 @@ func checksumFixture(t *testing.T, name string, rows int, cfg *CheckerConfig) Ch
 	t.Cleanup(feed.Close)
 	// The single-server checker requires a repair applier even when the fixture
 	// never produces a mismatch; the callers here only care about pacing.
-	cfg.RepairApplier = app
+	cfg.Applier = app
 
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
 	require.NoError(t, err)
@@ -337,13 +337,15 @@ func TestCheckerDefaultsToNoopThrottler(t *testing.T) {
 
 func TestCheckerZeroConcurrencyIsUsable(t *testing.T) {
 	// A zero here used to produce a transaction pool of zero transactions and a
-	// checksum that could not run at all.
+	// checksum that could not run at all. It now means "the caller did not
+	// choose", so it gets the default rather than the bare minimum — the same
+	// resolution every algorithm makes.
 	cfg := NewCheckerDefaultConfig()
 	cfg.Concurrency = 0
 	checker := checksumFixture(t, "checksum_zero_concurrency", 128, cfg)
 	single := checker.(*SingleChecker)
-	assert.Equal(t, 1, single.concurrency)
-	assert.Equal(t, 1, single.maxConcurrency)
+	assert.Equal(t, DefaultConcurrency, single.concurrency)
+	assert.Equal(t, DefaultConcurrency, single.maxConcurrency)
 	require.NoError(t, checker.Run(t.Context()))
 }
 
@@ -391,7 +393,7 @@ func TestFiniteLocklessThrottleWiring(t *testing.T) {
 			name := fmt.Sprintf("setter=%v/composite=%v", setter, composite)
 			t.Run(name, func(t *testing.T) {
 				cfg := NewCheckerDefaultConfig()
-				cfg.Lockless = &LocklessCheckerConfig{}
+				cfg.Algorithm = Lockless
 				lag, load := &binaryThrottler{}, &alwaysLoaded{}
 				var signal throttler.Throttler = lag
 				if composite {
@@ -426,7 +428,7 @@ func (s *checksumGaugeSink) Send(_ context.Context, m *metrics.Metrics) error {
 
 func TestFiniteLocklessEmitsConfiguredMetrics(t *testing.T) {
 	cfg := NewCheckerDefaultConfig()
-	cfg.Lockless = &LocklessCheckerConfig{}
+	cfg.Algorithm = Lockless
 	cfg.Autoscale.Enabled = true
 	sink := &checksumGaugeSink{received: make(chan *metrics.Metrics, 1)}
 	cfg.MetricsSink = sink

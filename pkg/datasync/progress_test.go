@@ -6,16 +6,19 @@ import (
 	"time"
 
 	"github.com/block/spirit/pkg/applier"
+	"github.com/block/spirit/pkg/change"
 	"github.com/block/spirit/pkg/checksum"
 	"github.com/block/spirit/pkg/copier/copiertest"
+	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/table"
 	"github.com/stretchr/testify/require"
 )
 
-type progressApplier struct{ applier.Applier }
-
-func (progressApplier) Stats() applier.Stats { return applier.Stats{ActiveWorkers: 4} }
+// progressFeed satisfies the factory's "a lockless checker needs a feed" check.
+// The status assertions never run the checker, so no method on it is ever
+// called and the embedded nil interface is never dereferenced.
+type progressFeed struct{ change.Source }
 
 func TestSyncProgressAndLogFormat(t *testing.T) {
 	r, err := NewRunner(&Sync{})
@@ -40,7 +43,7 @@ func TestSyncProgressAndLogFormat(t *testing.T) {
 		Copy:  status.CopyProgress{RowsCopied: 7, RowsTotal: 9},
 		Chunk: 25,
 	}
-	r.applier = progressApplier{}
+	r.applier = &applier.MockApplier{FixedStats: applier.Stats{ActiveWorkers: 4}}
 	r.status.Set(status.CopyRows)
 	p = r.Progress()
 	require.Equal(t, status.ETA{State: status.ETAReady, Duration: time.Minute}, p.ETA)
@@ -59,9 +62,13 @@ func TestSyncProgressAndLogFormat(t *testing.T) {
 	require.Empty(t, r.Progress().ETA)
 	require.Equal(t, status.CopyProgress{RowsCopied: 70, RowsTotal: 300}, r.Progress().Copy) // The copy reading outlives the copy phase.
 	require.Empty(t, r.Progress().Checksum)                                                  // The continuous verifier has no finite initial-checksum phase.
-	checker, err := checksum.NewLocklessChecker(&sql.DB{}, &sql.DB{}, table.NewMockChunker("verify", 100), nil, checksum.LocklessCheckerConfig{})
+	checker, err := checksum.NewChecker([]*sql.DB{{}}, table.NewMockChunker("verify", 100), []change.Source{&progressFeed{}}, &checksum.CheckerConfig{
+		Algorithm: checksum.Lockless,
+		TargetDB:  &sql.DB{},
+		DBConfig:  dbconn.NewDBConfig(),
+	})
 	require.NoError(t, err)
-	r.locklessChecker = checker
+	r.locklessChecker = checker.(*checksum.LocklessChecker)
 	block = r.Status()
 	require.Contains(t, block, "\n  verify")
 	require.Contains(t, block, "remaining: 0 retrying (0 hot), 0 in flight, 0 deferred")

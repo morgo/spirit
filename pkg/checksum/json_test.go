@@ -193,6 +193,7 @@ func TestDistributedJSONChecksumTextImage(t *testing.T) {
 	// i.e. this passes on the first attempt with no repair.
 	config := NewCheckerDefaultConfig()
 	config.Applier = app
+	config.Algorithm = Sharded
 
 	checker, err := NewChecker([]*sql.DB{src}, chunker, []change.Source{feed}, config)
 	require.NoError(t, err)

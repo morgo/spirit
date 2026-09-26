@@ -116,21 +116,32 @@ func (c *testChunker) feedbackCount() int {
 	return len(c.feedback)
 }
 
+// declineHotSnapshot stubs out the hot-range snapshot fallback. These tests
+// swap readChunk for a hook, so their chunks are synthetic: no TableInfo, no
+// ColumnMapping, and sentinel *sql.DB values. Declining the capture is what
+// the real one does for a range it cannot freeze, and it keeps the fallback
+// out of tests that are about something else. Tests that are about the
+// snapshot itself install their own hook over this one.
+func declineHotSnapshot(c *LocklessChecker) {
+	c.snapshotChunk = func(context.Context, *table.Chunk) (*hotSnapshot, error) { return nil, nil }
+}
+
 // newTestChecker builds a checker with a swapped readChunk hook. The hook
 // receives the chunk and an attempt counter (incremented each call for the
 // same chunk pointer) so tests can express "fail twice, then pass" etc.
 //
 // We pass nil DB pointers (allowed because readChunk is swapped) but the
 // constructor requires non-nil, so use minimal sentinel values.
-func newTestChecker(t *testing.T, chunker table.Chunker, cfg LocklessCheckerConfig,
+func newTestChecker(t *testing.T, chunker table.Chunker, cfg CheckerConfig,
 	read func(ctx context.Context, chunk *table.Chunk, attempt int) (srcCRC, tgtCRC int64, tgtCount uint64, err error),
 ) *LocklessChecker {
 	t.Helper()
-	// Constructor demands non-nil DBs; we pass empty *sql.DB pointers — they
-	// are never used because readChunk is swapped before Run.
+	// Empty *sql.DB pointers: they are never used, because readChunk (and the
+	// snapshot/split hooks) are swapped before Run.
 	srcDB, tgtDB := &sql.DB{}, &sql.DB{}
-	c, err := NewLocklessChecker(srcDB, tgtDB, chunker, nil, cfg)
-	require.NoError(t, err)
+	applySharedDefaults(&cfg)
+	c := newLocklessChecker(srcDB, tgtDB, chunker, nil, nil, &cfg)
+	declineHotSnapshot(c)
 
 	attempts := sync.Map{}
 	c.readChunk = func(ctx context.Context, chunk *table.Chunk) (int64, int64, uint64, uint64, error) {
@@ -155,13 +166,14 @@ func newTestChecker(t *testing.T, chunker table.Chunker, cfg LocklessCheckerConf
 // signatures (CRC + count) for source and target independently, so tests can
 // exercise row-count divergence with matching CRCs (the defense-in-depth gap
 // this comparison closes).
-func newTestCheckerSig(t *testing.T, chunker table.Chunker, cfg LocklessCheckerConfig,
+func newTestCheckerSig(t *testing.T, chunker table.Chunker, cfg CheckerConfig,
 	read func(ctx context.Context, chunk *table.Chunk, attempt int) (srcCRC, tgtCRC int64, srcCount, tgtCount uint64, err error),
 ) *LocklessChecker {
 	t.Helper()
 	srcDB, tgtDB := &sql.DB{}, &sql.DB{}
-	c, err := NewLocklessChecker(srcDB, tgtDB, chunker, nil, cfg)
-	require.NoError(t, err)
+	applySharedDefaults(&cfg)
+	c := newLocklessChecker(srcDB, tgtDB, chunker, nil, nil, &cfg)
+	declineHotSnapshot(c)
 
 	attempts := sync.Map{}
 	c.readChunk = func(ctx context.Context, chunk *table.Chunk) (int64, int64, uint64, uint64, error) {
@@ -185,7 +197,14 @@ func runUntil(t *testing.T, c *LocklessChecker) (stop func() error, errCh <-chan
 	ctx, cancel := context.WithCancel(context.Background())
 	out := make(chan error, 1)
 	go func() {
-		out <- c.Run(ctx)
+		// RunContinuous is the unbounded pass loop: these tests drive the
+		// checker until they cancel it. It filters cancellation to nil, so the
+		// helper reports ctx.Err() instead — the tests assert on it.
+		if err := c.RunContinuous(ctx); err != nil {
+			out <- err
+			return
+		}
+		out <- ctx.Err()
 	}()
 	return func() error {
 		cancel()
@@ -198,14 +217,35 @@ func runUntil(t *testing.T, c *LocklessChecker) (stop func() error, errCh <-chan
 	}, out
 }
 
+// runUntilClean is runUntil for the finite contract: it drives RunUntilClean,
+// which keeps passing until a pass needs nothing (or MaxPasses gives up).
+func runUntilClean(t *testing.T, c *LocklessChecker) (stop func() error, errCh <-chan error) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	out := make(chan error, 1)
+	go func() { out <- c.RunUntilClean(ctx) }()
+	return func() error {
+		cancel()
+		select {
+		case err := <-out:
+			return err
+		case <-time.After(5 * time.Second):
+			return errors.New("RunUntilClean did not return within 5s of cancel")
+		}
+	}, out
+}
+
 // fastConfig is a default config tuned for fast tests: 50ms retry delay,
 // silent logger.
-func fastConfig() LocklessCheckerConfig {
-	return LocklessCheckerConfig{
-		Concurrency:  4,
-		RetryDelay:   50 * time.Millisecond,
-		MaxQueueSize: 16,
-		Logger:       slog.New(slog.NewTextHandler(testWriter{}, &slog.HandlerOptions{Level: slog.LevelError})),
+func fastConfig() CheckerConfig {
+	return CheckerConfig{
+		Concurrency: 4,
+		RetryDelay:  50 * time.Millisecond,
+		// Back-to-back passes. A zero here means "let the mode pick", which in
+		// continuous mode is an hour.
+		MinPassInterval: time.Millisecond,
+		MaxQueueSize:    16,
+		Logger:          slog.New(slog.NewTextHandler(testWriter{}, &slog.HandlerOptions{Level: slog.LevelError})),
 	}
 }
 
@@ -563,7 +603,6 @@ func TestRecopyOnStableDivergence(t *testing.T) {
 		},
 	}
 	cfg := fastConfig()
-	cfg.Recopier = recopier
 
 	c := newTestChecker(t, chunker, cfg,
 		func(ctx context.Context, chunk *table.Chunk, attempt int) (int64, int64, uint64, error) {
@@ -573,6 +612,7 @@ func TestRecopyOnStableDivergence(t *testing.T) {
 			return 100, 99, 1000, nil // pre-recopy mismatch (stable: src always 100)
 		},
 	)
+	c.recopier = recopier
 
 	stop, _ := runUntil(t, c)
 	select {
@@ -586,32 +626,6 @@ func TestRecopyOnStableDivergence(t *testing.T) {
 
 	err := stop()
 	require.True(t, errors.Is(err, context.Canceled) || err == nil)
-}
-
-// TestDivergenceIsFatalAbortsDespiteRecopier: with DivergenceIsFatal set, a
-// confirmed stable divergence returns ErrPermanentDivergence and the Recopier
-// is NOT invoked, even though one is configured. This is the migration cutover
-// gate's policy made explicit (vs. datasync, which leaves it false and heals).
-func TestDivergenceIsFatalAbortsDespiteRecopier(t *testing.T) {
-	chunker := newTestChunker(1)
-	recopier := &fakeRecopier{} // must never be called
-	cfg := fastConfig()
-	cfg.Recopier = recopier
-	cfg.DivergenceIsFatal = true
-
-	c := newTestChecker(t, chunker, cfg,
-		func(ctx context.Context, chunk *table.Chunk, attempt int) (int64, int64, uint64, error) {
-			return 100, 99, 1000, nil // stable divergence: src always 100, tgt 99
-		},
-	)
-
-	// Run returns ErrPermanentDivergence on its own; t.Context() is cancelled at
-	// test cleanup, which tears down any remaining workers.
-	err := c.Run(t.Context())
-	require.ErrorIs(t, err, ErrPermanentDivergence,
-		"DivergenceIsFatal must abort with ErrPermanentDivergence even with a Recopier set")
-	require.Equal(t, 0, recopier.callCount(), "the Recopier must not be called when DivergenceIsFatal")
-	require.Positive(t, c.Stats().PermanentFailures)
 }
 
 // fakeFeed is a minimal change.Source double for lockless-checksum tests.
@@ -649,21 +663,22 @@ func (f *fakeFeed) AllChangesFlushed() bool                              { retur
 func (f *fakeFeed) Stop()                                                {}
 func (f *fakeFeed) Close()                                               {}
 
-// TestDivergenceIsFatalReconcilesApplyLag is the regression test for the
+// TestFatalDivergenceReconcilesApplyLag is the regression test for the
 // false-positive cutover abort: a chunk that is merely behind on applying
 // buffered changes (apply lag) must NOT be reported as a fatal divergence.
 // Before declaring a stable divergence on the fatal path, the checker drains
 // the change feed and re-reads; once the feed flushes, the target catches up
 // and the chunk verifies clean — the same reconciliation the cutover performs
 // under its table lock.
-func TestDivergenceIsFatalReconcilesApplyLag(t *testing.T) {
+func TestFatalDivergenceReconcilesApplyLag(t *testing.T) {
 	chunker := newTestChunker(1)
 	var drained atomic.Bool
 	feed := &fakeFeed{
 		flushFn: func(context.Context) error { drained.Store(true); return nil },
 	}
 	cfg := fastConfig()
-	cfg.DivergenceIsFatal = true // migration cutover-gate policy; no Recopier
+	// No recopier: the migration cutover gate's policy is that a confirmed
+	// divergence is fatal rather than something to heal.
 
 	c := newTestChecker(t, chunker, cfg,
 		func(ctx context.Context, chunk *table.Chunk, attempt int) (int64, int64, uint64, error) {
@@ -698,8 +713,7 @@ func TestHotChunkDuringFeedDrainIsBounded(t *testing.T) {
 		sourceCRC.Add(1)
 		return nil
 	}}
-	cfg := fastConfig()
-	cfg.DivergenceIsFatal = true
+	cfg := fastConfig() // no recopier: a confirmed divergence is fatal
 	cfg.MaxHotAttempts = 3
 	cfg.MinPassInterval = time.Hour
 	c := newTestChecker(t, newTestChunker(1), cfg,
@@ -726,15 +740,14 @@ func TestHotChunkDuringFeedDrainIsBounded(t *testing.T) {
 	}
 }
 
-// TestDivergenceIsFatalStillAbortsAfterDrain guards the fix above: a genuine
+// TestFatalDivergenceStillAbortsAfterDrain guards the fix above: a genuine
 // divergence — one the feed drain does NOT reconcile — must still return
 // ErrPermanentDivergence. The drain rules out apply lag; it must not mask real
 // corruption.
-func TestDivergenceIsFatalStillAbortsAfterDrain(t *testing.T) {
+func TestFatalDivergenceStillAbortsAfterDrain(t *testing.T) {
 	chunker := newTestChunker(1)
 	feed := &fakeFeed{} // Flush is a no-op: draining changes nothing
-	cfg := fastConfig()
-	cfg.DivergenceIsFatal = true
+	cfg := fastConfig() // no recopier: a confirmed divergence is fatal
 
 	c := newTestChecker(t, chunker, cfg,
 		func(ctx context.Context, chunk *table.Chunk, attempt int) (int64, int64, uint64, error) {
@@ -766,7 +779,6 @@ func TestRecopyPassDoesNotFireFirstCleanPass(t *testing.T) {
 		},
 	}
 	cfg := fastConfig()
-	cfg.Recopier = recopier
 
 	// gate blocks the first post-recopy read (pass 2's fresh read) until
 	// the test has asserted that pass 1 completed without firing the
@@ -786,6 +798,7 @@ func TestRecopyPassDoesNotFireFirstCleanPass(t *testing.T) {
 			return 100, 99, 1000, nil // stable divergence: src constant, tgt wrong
 		},
 	)
+	c.recopier = recopier
 
 	stop, _ := runUntil(t, c)
 
@@ -839,7 +852,6 @@ func TestRecopiedChunkReverifiedBeforeCleanPass(t *testing.T) {
 		},
 	}
 	cfg := fastConfig()
-	cfg.Recopier = recopier
 
 	c := newTestChecker(t, chunker, cfg,
 		func(ctx context.Context, chunk *table.Chunk, attempt int) (int64, int64, uint64, error) {
@@ -853,6 +865,7 @@ func TestRecopiedChunkReverifiedBeforeCleanPass(t *testing.T) {
 			return 42, 42, 1000, nil
 		},
 	)
+	c.recopier = recopier
 
 	stop, _ := runUntil(t, c)
 	select {
@@ -880,13 +893,13 @@ func TestRecopyFailurePropagates(t *testing.T) {
 		},
 	}
 	cfg := fastConfig()
-	cfg.Recopier = recopier
 
 	c := newTestChecker(t, chunker, cfg,
 		func(ctx context.Context, chunk *table.Chunk, attempt int) (int64, int64, uint64, error) {
 			return 100, 99, 1000, nil // stable mismatch
 		},
 	)
+	c.recopier = recopier
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	err := c.Run(ctx)
@@ -908,7 +921,6 @@ func TestRecopyNotCalledForHotChunk(t *testing.T) {
 		},
 	}
 	cfg := fastConfig()
-	cfg.Recopier = recopier
 
 	// Source CRC keeps changing on each read; target lags. Eventually
 	// (on attempt 4) the target catches up and the chunk passes via the
@@ -929,6 +941,7 @@ func TestRecopyNotCalledForHotChunk(t *testing.T) {
 			}
 		},
 	)
+	c.recopier = recopier
 	stop, _ := runUntil(t, c)
 	select {
 	case <-c.FirstCleanPass():
@@ -959,7 +972,6 @@ func TestRecopyOnRowCountMismatch(t *testing.T) {
 		},
 	}
 	cfg := fastConfig()
-	cfg.Recopier = recopier
 
 	c := newTestCheckerSig(t, chunker, cfg,
 		func(ctx context.Context, chunk *table.Chunk, attempt int) (int64, int64, uint64, uint64, error) {
@@ -973,6 +985,7 @@ func TestRecopyOnRowCountMismatch(t *testing.T) {
 			return 42, 42, 11, 10, nil
 		},
 	)
+	c.recopier = recopier
 
 	stop, _ := runUntil(t, c)
 	select {
@@ -1186,10 +1199,18 @@ func TestLocklessAutoscaleConcurrency(t *testing.T) {
 	}
 }
 
+// blockingLocklessLoad is a load throttler whose BlockWait never returns. It
+// reports Utilization because the factory narrows a checker's throttler to the
+// ones with a continuous load signal (loadOnlyThrottler), so a stub without one
+// would be replaced by a Noop and never consulted.
 type blockingLocklessLoad struct {
 	throttler.Noop
 	entered chan struct{}
 }
+
+var _ throttler.GradualThrottler = (*blockingLocklessLoad)(nil)
+
+func (*blockingLocklessLoad) Utilization() float64 { return 0 }
 
 func (b *blockingLocklessLoad) BlockWait(ctx context.Context) {
 	select {
@@ -1292,7 +1313,9 @@ func TestScanCompleteResetsAndExcludesWalkerFailure(t *testing.T) {
 	c.chunker = blocked
 	c.scanComplete.Store(true) // Completion from the preceding pass must reset.
 	done := make(chan error, 1)
-	go func() { done <- c.Run(t.Context()) }()
+	// One attempt: the walker's failure is not retryable-in-this-test (the
+	// stub can only fail once), and Run's retry loop would call it again.
+	go func() { done <- c.RunUntilClean(t.Context()) }()
 	<-blocked.started
 	require.False(t, c.Stats().ScanComplete)
 	close(blocked.release)
@@ -1329,9 +1352,6 @@ func TestRunUntilClean(t *testing.T) {
 			cfg.RetryDelay = time.Millisecond
 			cfg.MaxHotAttempts = 2
 			cfg.MinPassInterval = time.Hour
-			if mode == "repaired" {
-				cfg.Recopier = &fakeRecopier{}
-			}
 			c := newTestChecker(t, newTestChunker(1), cfg,
 				func(ctx context.Context, chunk *table.Chunk, attempt int) (int64, int64, uint64, error) {
 					switch mode {
@@ -1343,6 +1363,9 @@ func TestRunUntilClean(t *testing.T) {
 						return 1, 0, 10, nil
 					}
 				})
+			if mode == "repaired" {
+				c.recopier = &fakeRecopier{}
+			}
 			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 			defer cancel()
 			var err error
@@ -1476,8 +1499,8 @@ func TestRepairedChunkIsNotResumeEvidence(t *testing.T) {
 	cfg.Concurrency = 1
 	cfg.MinPassInterval = time.Millisecond
 	cfg.MaxPasses = 1 // stop after the pass that repairs
-	cfg.Recopier = &fakeRecopier{}
 	chunker := newWatermarkChunker(3)
+	recopier := &fakeRecopier{}
 	bad := chunker.chunks[0]
 	c := newTestChecker(t, chunker, cfg,
 		func(_ context.Context, chunk *table.Chunk, _ int) (int64, int64, uint64, error) {
@@ -1486,18 +1509,20 @@ func TestRepairedChunkIsNotResumeEvidence(t *testing.T) {
 			}
 			return 1, 1, 10, nil
 		})
+	c.recopier = recopier
 
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	require.ErrorIs(t, c.RunUntilClean(ctx), ErrVerificationUnresolved)
 
-	require.Equal(t, 1, cfg.Recopier.(*fakeRecopier).callCount())
+	require.Equal(t, 1, recopier.callCount())
 	require.Len(t, chunker.feedback, 2, "the two clean chunks resolved; the repaired one did not")
 	for _, fb := range chunker.feedback {
 		require.NotSame(t, bad, fb.Chunk)
 	}
-	_, err := c.ResumeWatermark()
-	require.Error(t, err, "the repaired chunk is the first, so no prefix is verified")
+	wm, err := c.ResumeWatermark()
+	require.NoError(t, err)
+	require.Empty(t, wm, "the repaired chunk is the first, so no prefix is verified")
 }
 
 // Resume evidence describes the walk in progress, and nothing else. A second
@@ -1552,7 +1577,10 @@ func TestResumeWatermarkTracksCurrentWalkOnly(t *testing.T) {
 			return 1, 1, 10, nil
 		})
 
-	stop, _ := runUntil(t, c)
+	// The finite contract is what publishes resume evidence, so drive that.
+	// The hot chunk keeps it from ever converging, which is what gives this
+	// test a pass 2 to look at.
+	stop, _ := runUntilClean(t, c)
 	defer func() { require.ErrorIs(t, stop(), context.Canceled) }()
 
 	// Pass 1 publishes the prefix its two clean chunks cover. It cannot end
@@ -1572,8 +1600,9 @@ func TestResumeWatermarkTracksCurrentWalkOnly(t *testing.T) {
 
 	require.GreaterOrEqual(t, chunker.feedbackCount(), 2,
 		"pass 1 verified a prefix, so there is an answer available to carry forward")
-	_, err := c.ResumeWatermark()
-	require.Error(t, err, "a new pass must not republish the previous walk's evidence")
+	wm, err := c.ResumeWatermark()
+	require.NoError(t, err)
+	require.Empty(t, wm, "a new pass must not republish the previous walk's evidence")
 
 	// Releasing the re-walk republishes the prefix on its own evidence, which
 	// is what makes the assertion above a real constraint rather than a stub
@@ -1588,21 +1617,19 @@ func TestResumeWatermarkTracksCurrentWalkOnly(t *testing.T) {
 func TestHotSnapshotAdmission(t *testing.T) {
 	for _, tc := range []struct {
 		name           string
-		enabled        bool
 		source, target uint64
 		depth, changes int
 		want           bool
 	}{
-		{"disabled", false, 1, 1, 1, 0, false},
-		{"source oversized", true, 129, 1, 1, 0, false},
-		{"target oversized", true, 1, 129, 1, 0, false},
-		{"first root retry", true, 1, 1, 0, 0, false},
-		{"proven hot root", true, 128, 128, 0, 1, true},
-		{"small descendant", true, 128, 128, 1, 0, true},
+		{"source oversized", 129, 1, 1, 0, false},
+		{"target oversized", 1, 129, 1, 0, false},
+		{"first root retry", 1, 1, 0, 0, false},
+		{"proven hot root", 128, 128, 0, 1, true},
+		{"small descendant", 128, 128, 1, 0, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			called := false
-			c := &LocklessChecker{cfg: LocklessCheckerConfig{SnapshotHotChunks: tc.enabled}}
+			c := &LocklessChecker{}
 			c.snapshotChunk = func(context.Context, *table.Chunk) (*hotSnapshot, error) {
 				called = true
 				return nil, nil // capture declined; admission is what this test checks
@@ -1656,7 +1683,8 @@ func TestFiniteLocklessRetriesTransientFailures(t *testing.T) {
 	newChecker := func(t *testing.T, chunker table.Chunker) Checker {
 		t.Helper()
 		cfg := NewCheckerDefaultConfig()
-		cfg.Lockless = &LocklessCheckerConfig{RetryDelay: time.Millisecond}
+		cfg.Algorithm = Lockless
+		cfg.RetryDelay = time.Millisecond
 		checker, err := NewChecker([]*sql.DB{{}}, chunker, []change.Source{&fakeFeed{}}, cfg)
 		require.NoError(t, err)
 		return checker
@@ -1702,7 +1730,8 @@ func (c *partialProgressChunker) Progress() (uint64, uint64, uint64) {
 func TestFiniteLocklessReportsFullProgressAfterCleanPass(t *testing.T) {
 	chunker := &partialProgressChunker{testChunker: newTestChunker(0), verified: 3, total: 10}
 	cfg := NewCheckerDefaultConfig()
-	cfg.Lockless = &LocklessCheckerConfig{RetryDelay: time.Millisecond}
+	cfg.Algorithm = Lockless
+	cfg.RetryDelay = time.Millisecond
 	checker, err := NewChecker([]*sql.DB{{}}, chunker, []change.Source{&fakeFeed{}}, cfg)
 	require.NoError(t, err)
 

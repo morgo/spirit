@@ -50,13 +50,13 @@ type SingleChecker struct {
 	execTime         time.Duration
 	dbConfig         *dbconn.DBConfig
 	logger           *slog.Logger
-	fixDifferences   bool
 	differencesFound atomic.Uint64
 	resume           snapshotResume
-	// repairer is the write path a mismatched chunk is rewritten through (see
-	// replaceChunk). It is shared with the lockless checker's Recopier so both
-	// algorithms repair identically.
-	repairer        *chunkRepairer
+	// recopier is the write path a mismatched chunk is rewritten through, and
+	// its presence is the repair policy: nil means a divergence is an error
+	// rather than something to rewrite. Every algorithm repairs through the same
+	// interface; see newRecopier for how the factory chooses one.
+	recopier        Recopier
 	maxRetries      int
 	yieldTimeout    time.Duration
 	yieldsPerformed atomic.Uint64 // number of yield/resume cycles performed
@@ -147,7 +147,7 @@ func (c *SingleChecker) ChecksumChunk(ctx context.Context, trxPool *dbconn.TrxPo
 	// The transaction is only needed for the snapshot reads: the two checksum
 	// queries and (on mismatch) the row-level inspection. It must go back to
 	// the pool the moment those are done, not at function exit: the repair
-	// path below serializes on the shared repairer's lock and can park for
+	// path below serializes on the shared recopier's lock and can park for
 	// many minutes behind other repairs, and a checked-out transaction is
 	// invisible to the pool's keepalive — holding it there idled connections past the server's
 	// wait_timeout in production and killed the whole pool. Guarded so the
@@ -211,15 +211,15 @@ func (c *SingleChecker) ChecksumChunk(ctx context.Context, trxPool *dbconn.TrxPo
 		// The snapshot reads are done. The repair below reads current data
 		// through the pooled connections (deliberately outside the snapshot),
 		// so return the transaction now and let the keepalive cover it while
-		// this worker queues for the repairer's lock.
+		// this worker queues for the recopier's lock.
 		putTrx()
 		// Are we allowed to fix the differences? If not, return an error.
 		// This is mostly used by the test-suite.
-		if !c.fixDifferences {
+		if c.recopier == nil {
 			return errors.New("checksum mismatch")
 		}
 		// Since we can fix differences, replace the chunk.
-		if err = c.replaceChunk(ctx, chunk); err != nil {
+		if err = c.recopier.Recopy(ctx, chunk); err != nil {
 			return err
 		}
 	}
@@ -241,14 +241,6 @@ func (c *SingleChecker) GetProgress() status.ChecksumProgress {
 func (c *SingleChecker) inspectDifferences(ctx context.Context, trx *sql.Tx, chunk *table.Chunk) error {
 	c.logger.Info("inspecting differences for chunk", "chunk", chunk.String())
 	return inspectDifferences(ctx, trx, chunk, c.logger)
-}
-
-// replaceChunk recopies a mismatched chunk from the source table onto the
-// target. The implementation is shared with the lockless checker's repair path
-// — see chunkRepairer, which documents the operation, its locking, and the two
-// behaviours it inherits from the applier.
-func (c *SingleChecker) replaceChunk(ctx context.Context, chunk *table.Chunk) error {
-	return c.repairer.Recopy(ctx, chunk)
 }
 
 func (c *SingleChecker) isHealthy(ctx context.Context) bool {

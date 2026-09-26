@@ -1,7 +1,6 @@
 package change
 
 import (
-	"context"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -1812,101 +1811,10 @@ func TestBufferedMapSeparatorInPKValues(t *testing.T) {
 		"both upserted rows must be applied and the seeded row deleted")
 }
 
-// countingApplier is a minimal applier.Applier that records every
-// UpsertRows / DeleteKeys call so tests can assert on batch splitting.
-// The optional inner applier is delegated to (integration tests wrap a
-// real SingleTargetApplier); when inner is nil the calls succeed without
-// writing anywhere.
-type countingApplier struct {
-	mu          sync.Mutex
-	inner       applier.Applier
-	upsertCalls [][]applier.LogicalRow
-	deleteCalls [][][]any
-}
-
-func (c *countingApplier) Start(ctx context.Context) error {
-	if c.inner != nil {
-		return c.inner.Start(ctx)
-	}
-	return nil
-}
-
-func (c *countingApplier) Stats() applier.Stats {
-	if c.inner != nil {
-		return c.inner.Stats()
-	}
-	return applier.Stats{}
-}
-
-func (c *countingApplier) Apply(ctx context.Context, chunk *table.Chunk, rows [][]any, callback applier.ApplyCallback) error {
-	if c.inner != nil {
-		return c.inner.Apply(ctx, chunk, rows, callback)
-	}
-	callback(int64(len(rows)), nil)
-	return nil
-}
-
-func (c *countingApplier) DeleteKeys(ctx context.Context, sourceTable, targetTable *table.TableInfo, keys [][]any, locks []*dbconn.TableLock) (int64, error) {
-	c.mu.Lock()
-	c.deleteCalls = append(c.deleteCalls, keys)
-	c.mu.Unlock()
-	if c.inner != nil {
-		return c.inner.DeleteKeys(ctx, sourceTable, targetTable, keys, locks)
-	}
-	return int64(len(keys)), nil
-}
-
-func (c *countingApplier) UpsertRows(ctx context.Context, mapping *table.ColumnMapping, rows []applier.LogicalRow, locks []*dbconn.TableLock) (int64, error) {
-	c.mu.Lock()
-	c.upsertCalls = append(c.upsertCalls, rows)
-	c.mu.Unlock()
-	if c.inner != nil {
-		return c.inner.UpsertRows(ctx, mapping, rows, locks)
-	}
-	return int64(len(rows)), nil
-}
-
-func (c *countingApplier) Wait(ctx context.Context) error {
-	if c.inner != nil {
-		return c.inner.Wait(ctx)
-	}
-	return nil
-}
-
-func (c *countingApplier) Stop() error {
-	if c.inner != nil {
-		return c.inner.Stop()
-	}
-	return nil
-}
-
-func (c *countingApplier) GetTargets() []applier.Target {
-	if c.inner != nil {
-		return c.inner.GetTargets()
-	}
-	return nil
-}
-
-func (c *countingApplier) upserts() [][]applier.LogicalRow {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	out := make([][]applier.LogicalRow, len(c.upsertCalls))
-	copy(out, c.upsertCalls)
-	return out
-}
-
-func (c *countingApplier) deletes() [][][]any {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	out := make([][][]any, len(c.deleteCalls))
-	copy(out, c.deleteCalls)
-	return out
-}
-
-// newByteCapBufferedMap builds a bufferedMap wired to a countingApplier and
+// newByteCapBufferedMap builds a bufferedMap wired to a applier.MockApplier and
 // a mock chunker, detached from any binlog client / DB, for tests that
 // assert on flush batch splitting.
-func newByteCapBufferedMap(fake *countingApplier, queueMode bool) *bufferedMap {
+func newByteCapBufferedMap(fake *applier.MockApplier, queueMode bool) *bufferedMap {
 	mockChunker := table.NewMockChunker("bytecap", 1000)
 	sub := &bufferedMap{
 		logger:               slog.Default(),
@@ -1928,7 +1836,7 @@ func newByteCapBufferedMap(fake *countingApplier, queueMode bool) *bufferedMap {
 // REPLACE that could exceed max_allowed_packet — a deterministic,
 // non-retryable apply failure (every retry re-renders the same statement).
 func TestBufferedMapFlushByteCapSplitsUpserts(t *testing.T) {
-	fake := &countingApplier{}
+	fake := &applier.MockApplier{}
 	sub := newByteCapBufferedMap(fake, false)
 
 	// Five rows sized so each estimates to ~40% of the budget rendered
@@ -1947,7 +1855,7 @@ func TestBufferedMapFlushByteCapSplitsUpserts(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, allFlushed)
 
-	calls := fake.upserts()
+	calls := fake.UpsertCalls()
 	require.Len(t, calls, 3, "5 rows at ~40%% of the budget rendered each must split 2+2+1")
 	totalRows := 0
 	for _, call := range calls {
@@ -1968,7 +1876,7 @@ func TestBufferedMapFlushByteCapSplitsUpserts(t *testing.T) {
 // change the DefaultBatchSize row-count semantics: narrow rows still batch
 // 1000 at a time.
 func TestBufferedMapFlushRowCountCapStillApplies(t *testing.T) {
-	fake := &countingApplier{}
+	fake := &applier.MockApplier{}
 	sub := newByteCapBufferedMap(fake, false)
 
 	for i := range 2500 {
@@ -1979,7 +1887,7 @@ func TestBufferedMapFlushRowCountCapStillApplies(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, allFlushed)
 
-	calls := fake.upserts()
+	calls := fake.UpsertCalls()
 	require.Len(t, calls, 3)
 	var sizes []int
 	for _, call := range calls {
@@ -1996,7 +1904,7 @@ func TestBufferedMapFlushRowCountCapStillApplies(t *testing.T) {
 // well above MaxStatementSizeBytes, same as the copy path's chunklet splitting).
 // Queue mode is used for deterministic FIFO batching.
 func TestBufferedMapFlushByteCapOversizedRowAlone(t *testing.T) {
-	fake := &countingApplier{}
+	fake := &applier.MockApplier{}
 	sub := newByteCapBufferedMap(fake, true)
 
 	small := strings.Repeat("s", 1024)
@@ -2012,7 +1920,7 @@ func TestBufferedMapFlushByteCapOversizedRowAlone(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, allFlushed)
 
-	calls := fake.upserts()
+	calls := fake.UpsertCalls()
 	require.Len(t, calls, 3, "small, oversized, small must flush as three FIFO statements")
 	for i, call := range calls {
 		require.Len(t, call, 1, "call %d must contain exactly one row", i)
@@ -2027,7 +1935,7 @@ func TestBufferedMapFlushByteCapOversizedRowAlone(t *testing.T) {
 // DELETE batches: composite / binary PKs hex-encode in the IN(...) list and
 // can be wide too.
 func TestBufferedMapFlushByteCapSplitsDeletes(t *testing.T) {
-	fake := &countingApplier{}
+	fake := &applier.MockApplier{}
 	sub := newByteCapBufferedMap(fake, false)
 
 	// 100 deletes whose string PKs render to ~2x the total budget in
@@ -2043,7 +1951,7 @@ func TestBufferedMapFlushByteCapSplitsDeletes(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, allFlushed)
 
-	calls := fake.deletes()
+	calls := fake.DeleteCalls()
 	require.GreaterOrEqual(t, len(calls), 2, "byte cap must split wide-key DELETE batches")
 	totalKeys := 0
 	for _, call := range calls {
@@ -2091,7 +1999,7 @@ func TestBufferedMapWideRowsFlushSplitsStatements(t *testing.T) {
 	target := applier.Target{DB: db, KeyRange: "0", Config: cfg}
 	realApplier, err := applier.NewSingleTargetApplier(target, applier.NewApplierDefaultConfig())
 	require.NoError(t, err)
-	counting := &countingApplier{inner: realApplier}
+	counting := &applier.MockApplier{Inner: realApplier}
 
 	client := NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, counting, NewClientDefaultConfig()).(*binlogClient)
 	chunker, err := table.NewChunker(srcTable, table.ChunkerConfig{NewTable: dstTable})
@@ -2113,7 +2021,7 @@ func TestBufferedMapWideRowsFlushSplitsStatements(t *testing.T) {
 	require.NoError(t, client.Flush(t.Context()))
 	require.Equal(t, 0, client.GetDeltaLen())
 
-	calls := counting.upserts()
+	calls := counting.UpsertCalls()
 	require.GreaterOrEqual(t, len(calls), 2,
 		"wide rows must flush as multiple REPLACE statements, not one unbounded statement")
 	totalRows := 0

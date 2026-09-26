@@ -21,7 +21,7 @@ import (
 // repairs (CheckerConfig.FixDifferences). Sharing the implementation is what
 // makes the two algorithms repair identically rather than nearly-identically —
 // in particular both go through the caller's ColumnMapping, so a repair is
-// correct for an ALTER that renames or drops columns. (MySQLRecopier, the
+// correct for an ALTER that renames or drops columns. (mysqlRecopier, the
 // cross-server implementation used by `spirit sync`, reads
 // NonGeneratedColumns instead: there is no mapping between two copies of the
 // same logical table.)

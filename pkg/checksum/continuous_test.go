@@ -10,6 +10,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/block/spirit/pkg/applier"
 	"github.com/block/spirit/pkg/change"
 	"github.com/block/spirit/pkg/table"
 	"github.com/stretchr/testify/require"
@@ -102,12 +103,12 @@ func TestContinuousFactoryDiscardsResumeEvidence(t *testing.T) {
 			chunker := &resumeChunker{testChunker: newTestChunker(0), watermark: "initial-verification"}
 			feed := &lifecycleFeed{}
 			cfg := NewCheckerDefaultConfig()
-			cfg.RepairApplier = &spyApplier{}
+			cfg.Applier = &applier.MockApplier{}
 			if mode == "distributed" {
-				cfg.Applier = &spyApplier{}
+				cfg.Algorithm = Sharded
 			}
 			if mode == "lockless" {
-				cfg.Lockless = &LocklessCheckerConfig{}
+				cfg.Algorithm = Lockless
 			}
 			checker, err := NewChecker([]*sql.DB{{}}, chunker, []change.Source{feed}, cfg)
 			require.NoError(t, err)
@@ -148,7 +149,8 @@ func TestLocklessContinuousReusesCheckerAfterInitialPass(t *testing.T) {
 		chunker := &continuousScanGate{testChunker: newTestChunker(0)}
 		feed := &lifecycleFeed{}
 		cfg := NewCheckerDefaultConfig()
-		cfg.Lockless = &LocklessCheckerConfig{MinPassInterval: time.Second}
+		cfg.Algorithm = Lockless
+		cfg.MinPassInterval = time.Second
 		checker, err := NewChecker([]*sql.DB{{}}, chunker, []change.Source{feed}, cfg)
 		require.NoError(t, err)
 		require.NoError(t, checker.Run(t.Context()))
@@ -165,7 +167,7 @@ func TestLocklessContinuousReusesCheckerAfterInitialPass(t *testing.T) {
 		close(chunker.release)
 		synctest.Wait()
 		require.GreaterOrEqual(t, chunker.resets, 1)
-		require.Equal(t, uint64(1), checker.(*locklessChecker).Stats().PassesCompleted)
+		require.Equal(t, uint64(1), checker.(*LocklessChecker).Stats().PassesCompleted)
 		require.False(t, checker.ContinuousActive(), "inter-pass pacing is idle")
 		cancel()
 		require.NoError(t, <-done)
@@ -173,11 +175,6 @@ func TestLocklessContinuousReusesCheckerAfterInitialPass(t *testing.T) {
 		require.Equal(t, feed.starts, feed.stops)
 	})
 }
-
-type continuousApplier struct{ spyApplier }
-
-func (*continuousApplier) Start(context.Context) error { return nil }
-func (*continuousApplier) Stop() error                 { return nil }
 
 func TestSnapshotContinuousActiveLifecycle(t *testing.T) {
 	for _, distributed := range []bool{false, true} {
@@ -190,9 +187,10 @@ func TestSnapshotContinuousActiveLifecycle(t *testing.T) {
 					return ctx.Err()
 				}}
 				cfg := NewCheckerDefaultConfig()
-				cfg.RepairApplier = &spyApplier{}
+				cfg.Applier = &applier.MockApplier{}
 				if distributed {
-					cfg.Applier = &continuousApplier{}
+					cfg.Algorithm = Sharded
+					cfg.Applier = &applier.MockApplier{}
 				}
 				checker, err := NewChecker([]*sql.DB{{}}, newTestChunker(0), []change.Source{feed}, cfg)
 				require.NoError(t, err)
@@ -213,27 +211,61 @@ func TestSnapshotContinuousActiveLifecycle(t *testing.T) {
 	}
 }
 
+// The interval before the first continuous pass exists so that background
+// verification does not re-walk the table immediately behind the finite run
+// that just verified it. It is therefore paced off having run before, not off
+// the mode: a checker whose first run is continuous has nothing to re-verify
+// and starts straight away.
 func TestLocklessContinuousDefaultInterval(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		feed := &lifecycleFeed{}
-		cfg := NewCheckerDefaultConfig()
-		cfg.Lockless = &LocklessCheckerConfig{}
-		checker, err := NewChecker([]*sql.DB{{}}, newTestChunker(0), []change.Source{feed}, cfg)
-		require.NoError(t, err)
-		ctx, cancel := context.WithCancel(t.Context())
-		defer cancel()
-		done := make(chan error, 1)
-		go func() { done <- checker.RunContinuous(ctx) }()
-		time.Sleep(LocklessMinPassInterval / 2)
-		synctest.Wait()
-		require.Zero(t, checker.(*locklessChecker).Stats().PassesCompleted)
-		require.False(t, checker.ContinuousActive())
-		time.Sleep(LocklessMinPassInterval)
-		synctest.Wait()
-		require.Equal(t, uint64(1), checker.(*locklessChecker).Stats().PassesCompleted)
-		cancel()
-		require.NoError(t, <-done)
+	t.Run("after a finite run", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			feed := &lifecycleFeed{}
+			checker := newContinuousChecker(t, newTestChunker(0), feed)
+			require.NoError(t, checker.Run(t.Context()))
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			done := make(chan error, 1)
+			go func() { done <- checker.RunContinuous(ctx) }()
+
+			time.Sleep(LocklessMinPassInterval / 2)
+			synctest.Wait()
+			require.Zero(t, checker.Stats().PassesCompleted,
+				"the continuous run is still waiting out the interval (its counters start from zero)")
+			require.False(t, checker.ContinuousActive())
+
+			time.Sleep(LocklessMinPassInterval)
+			synctest.Wait()
+			require.Equal(t, uint64(1), checker.Stats().PassesCompleted,
+				"the first continuous pass ran once the interval elapsed")
+			cancel()
+			require.NoError(t, <-done)
+		})
 	})
+
+	t.Run("as the first run", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			checker := newContinuousChecker(t, newTestChunker(0), &lifecycleFeed{})
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			done := make(chan error, 1)
+			go func() { done <- checker.RunContinuous(ctx) }()
+
+			synctest.Wait()
+			require.Equal(t, uint64(1), checker.Stats().PassesCompleted,
+				"nothing has verified this table, so there is nothing to pace behind")
+			cancel()
+			require.NoError(t, <-done)
+		})
+	})
+}
+
+func newContinuousChecker(t *testing.T, chunker table.Chunker, feed change.Source) *LocklessChecker {
+	t.Helper()
+	cfg := NewCheckerDefaultConfig()
+	cfg.Algorithm = Lockless
+	checker, err := NewChecker([]*sql.DB{{}}, chunker, []change.Source{feed}, cfg)
+	require.NoError(t, err)
+	return checker.(*LocklessChecker)
 }
 
 type canceledScan struct{ *testChunker }
@@ -243,7 +275,8 @@ func (*canceledScan) Next() (*table.Chunk, error) { return nil, context.Canceled
 func TestLocklessContinuousForeignCancellation(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		cfg := NewCheckerDefaultConfig()
-		cfg.Lockless = &LocklessCheckerConfig{MinPassInterval: time.Second}
+		cfg.Algorithm = Lockless
+		cfg.MinPassInterval = time.Second
 		checker, err := NewChecker([]*sql.DB{{}}, &canceledScan{newTestChunker(1)}, []change.Source{&fakeFeed{}}, cfg)
 		require.NoError(t, err)
 		require.ErrorIs(t, checker.RunContinuous(t.Context()), context.Canceled)

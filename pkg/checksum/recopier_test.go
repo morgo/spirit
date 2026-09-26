@@ -16,11 +16,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// recopierHarness wires up everything MySQLRecopier needs against real
+// recopierHarness wires up everything mysqlRecopier needs against real
 // MySQL: a source table in the DSN database, an identical target table in
 // a unique throwaway database, TableInfos for both sides, and a started
 // SingleTargetApplier pointed at the target. This mirrors the production
-// wiring in datasync.Runner.runLocklessChecksum.
+// wiring in datasync.Runner.runChecksum.
 type recopierHarness struct {
 	srcDB        *sql.DB
 	dstDB        *sql.DB
@@ -28,7 +28,7 @@ type recopierHarness struct {
 	dstTable     *table.TableInfo
 	targetDBName string
 	tableName    string
-	recopier     *MySQLRecopier
+	recopier     *mysqlRecopier
 }
 
 // newRecopierHarness creates source + target copies of tableName and a
@@ -84,7 +84,7 @@ func newRecopierHarness(t *testing.T, tableName string) *recopierHarness {
 	require.NoError(t, app.Start(t.Context()))
 	t.Cleanup(func() { require.NoError(t, app.Stop()) })
 
-	recopier, err := NewMySQLRecopier(srcDB, dstDB, app, dbconn.NewDBConfig(), nil)
+	recopier, err := newMySQLRecopier(srcDB, dstDB, app, dbconn.NewDBConfig(), nil)
 	require.NoError(t, err)
 
 	return &recopierHarness{
@@ -242,15 +242,15 @@ func TestNewMySQLRecopierValidation(t *testing.T) {
 	app, err := applier.NewSingleTargetApplier(applier.Target{DB: srcDB}, applier.NewApplierDefaultConfig())
 	require.NoError(t, err)
 
-	_, err = NewMySQLRecopier(nil, srcDB, app, nil, nil)
+	_, err = newMySQLRecopier(nil, srcDB, app, nil, nil)
 	require.ErrorContains(t, err, "sourceDB must be non-nil")
-	_, err = NewMySQLRecopier(srcDB, nil, app, nil, nil)
+	_, err = newMySQLRecopier(srcDB, nil, app, nil, nil)
 	require.ErrorContains(t, err, "targetDB must be non-nil")
-	_, err = NewMySQLRecopier(srcDB, srcDB, nil, nil, nil)
+	_, err = newMySQLRecopier(srcDB, srcDB, nil, nil, nil)
 	require.ErrorContains(t, err, "applier must be non-nil")
 
 	// nil dbConfig and logger are allowed; defaults are applied.
-	r, err := NewMySQLRecopier(srcDB, srcDB, app, nil, nil)
+	r, err := newMySQLRecopier(srcDB, srcDB, app, nil, nil)
 	require.NoError(t, err)
 	require.NotNil(t, r.dbConfig)
 	require.NotNil(t, r.logger)

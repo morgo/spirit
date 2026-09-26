@@ -137,7 +137,7 @@ type Runner struct {
 	// through accessors on Runner. nil before runContinuous.
 	//
 	// locklessReadyCh closes once the checker has been constructed (the
-	// initial copy + post-copy flush have completed and runLocklessChecksum
+	// initial copy + post-copy flush have completed and runChecksum
 	// has started). Callers can wait on ChecksumReady() to gate on
 	// checker availability.
 	//
@@ -433,7 +433,7 @@ func (r *Runner) runContinuous(ctx context.Context) error {
 	var checksumErr error
 	go func() {
 		defer close(checksumDone)
-		checksumErr = r.runLocklessChecksum(checksumCtx)
+		checksumErr = r.runChecksum(checksumCtx)
 	}()
 
 	// Wait for either ctx cancellation (the normal shutdown path) or the
@@ -502,12 +502,13 @@ func (r *Runner) runContinuous(ctx context.Context) error {
 	return nil
 }
 
-// runLocklessChecksum builds a separate lockless-checksum chunker over
-// the source tables and drives a LocklessChecker until ctx is cancelled
-// or a permanent failure surfaces. The checker uses READ COMMITTED reads
-// (no table lock, no TrxPool), so it can run against a live system; see
-// pkg/checksum/lockless.go for the convergence model.
-func (r *Runner) runLocklessChecksum(ctx context.Context) error {
+// runChecksum builds a separate checksum chunker over the source tables and
+// verifies continuously until ctx is cancelled or a permanent failure
+// surfaces. Sync always picks the lockless algorithm: it reads at
+// READ COMMITTED with no table lock and no TrxPool, which is the only one that
+// can run against a live system indefinitely. See pkg/checksum/lockless.go for
+// the convergence model.
+func (r *Runner) runChecksum(ctx context.Context) error {
 	chunker, err := r.buildLocklessChunker()
 	if err != nil {
 		return fmt.Errorf("build lockless-checksum chunker: %w", err)
@@ -547,33 +548,37 @@ func (r *Runner) runLocklessChecksum(ctx context.Context) error {
 	stopScaling := copier.StartWriteAutoscaler(ctx, r.currentLoadSignal(), r.applier, r.autoscale, r.logger, r.metricsSink)
 	defer stopScaling()
 
-	// Construct the recopier — invoked by the checker when retry detects
-	// stable target divergence. Without one configured, the checker would
-	// instead return ErrPermanentDivergence and abort the sync.
-	recopier, err := checksum.NewMySQLRecopier(r.source.db, r.target.DB, r.applier, r.targetDBConfig, r.logger)
-	if err != nil {
-		return fmt.Errorf("construct lockless-checksum recopier: %w", err)
-	}
-
-	checker, err := checksum.NewLocklessChecker(
-		r.source.db, r.target.DB, chunker, r.replClient,
-		checksum.LocklessCheckerConfig{
-			Concurrency:     r.sync.Threads,
-			SplitHotChunks:  true,
-			Throttler:       r.currentLoadSignal(),
-			MetricsSink:     r.metricsSink,
-			Autoscale:       checksum.AutoscaleConfig{Enabled: r.autoscale.Enabled, MaxThreads: r.autoscale.MaxReadThreads},
-			MinPassInterval: checksum.LocklessMinPassInterval,
-			Recopier:        recopier,
-			Logger:          r.logger,
-			// Sync verifies a target it keeps converging, so a confirmed
-			// divergence is repaired by the Recopier, not fatal.
-			DivergenceIsFatal: false,
-		},
-	)
+	built, err := checksum.NewChecker([]*sql.DB{r.source.db}, chunker, []change.Source{r.replClient}, &checksum.CheckerConfig{
+		Algorithm: checksum.Lockless,
+		// TargetDB is what makes this the cross-server case: the factory builds
+		// a repair path that reads the source and writes the target, rather than
+		// the single-server one that does both on one connection.
+		TargetDB: r.target.DB,
+		DBConfig: r.targetDBConfig,
+		// Sync verifies a target it keeps converging, so a confirmed divergence
+		// is repaired rather than fatal. Leaving this unset is what would make
+		// it fatal — the checker would abort the sync with
+		// ErrPermanentDivergence on the first one instead.
+		FixDifferences: true,
+		Applier:        r.applier,
+		// The flush loop started in startBackgroundRoutines runs for the whole
+		// process at the configured interval; a verification pass must not stop
+		// it on its way out.
+		ExternalFlushLoop: true,
+		Concurrency:       r.sync.Threads,
+		Throttler:         r.currentLoadSignal(),
+		MetricsSink:       r.metricsSink,
+		Autoscale:         checksum.AutoscaleConfig{Enabled: r.autoscale.Enabled, MaxThreads: r.autoscale.MaxReadThreads},
+		MinPassInterval:   checksum.LocklessMinPassInterval,
+		Logger:            r.logger,
+	})
 	if err != nil {
 		return fmt.Errorf("construct lockless checker: %w", err)
 	}
+	// Algorithm decides the concrete type, so this cannot fail. Sync reads the
+	// lockless-only accessors (Stats, FirstCleanPass), which are not part of
+	// the Checker interface.
+	checker := built.(*checksum.LocklessChecker)
 
 	// Publish the checker + chunker so accessors (FirstCleanPass,
 	// ChecksumStats) can observe state from other goroutines. Close
@@ -598,9 +603,9 @@ func (r *Runner) runLocklessChecksum(ctx context.Context) error {
 		}
 	}()
 
-	runErr := checker.Run(ctx)
-	// A clean ctx-cancel run returns ctx.Err(); upstream filters that.
-	return runErr
+	// Continuous verification: passes keep running until ctx is cancelled.
+	// RunContinuous reports a cancellation as nil; any other error is real.
+	return checker.RunContinuous(ctx)
 }
 
 // buildLocklessChunker constructs a multi-chunker covering every source
@@ -641,7 +646,7 @@ func (r *Runner) FirstCleanPass() <-chan struct{} {
 
 // ChecksumReady returns a channel that is closed once the lockless
 // checker has been constructed — that is, when the initial copy and the
-// post-copy flush have completed and runLocklessChecksum has started.
+// post-copy flush have completed and runChecksum has started.
 func (r *Runner) ChecksumReady() <-chan struct{} {
 	return r.locklessReadyCh
 }

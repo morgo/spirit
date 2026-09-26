@@ -32,7 +32,7 @@ import (
 // serial one always times out alone. That keeps "fails iff concurrent" — the
 // property under test — deterministic rather than a timing race.
 type contendingApplier struct {
-	countingApplier
+	applier.MockApplier
 	expectConcurrent int
 	barrierWait      time.Duration
 
@@ -93,7 +93,7 @@ func (c *contendingApplier) UpsertRows(ctx context.Context, mapping *table.Colum
 			Message: "Deadlock found when trying to get lock; try restarting transaction",
 		}
 	}
-	return c.countingApplier.UpsertRows(ctx, mapping, rows, locks)
+	return c.MockApplier.UpsertRows(ctx, mapping, rows, locks)
 }
 
 // shortenContentionBackoff swaps the seconds-scale production backoff for a
@@ -140,7 +140,7 @@ func TestFlushRecoversFromSelfInflictedDeadlock(t *testing.T) {
 	shortenContentionBackoff(t)
 	const totalRows = 3 * DefaultBatchSize // 3 batches by construction
 	fake := &contendingApplier{expectConcurrent: 3, barrierWait: 2 * time.Second}
-	sub := newByteCapBufferedMap(&fake.countingApplier, false)
+	sub := newByteCapBufferedMap(&fake.MockApplier, false)
 	sub.applier = fake
 	sub.flushConcurrency = 8
 
@@ -156,7 +156,7 @@ func TestFlushRecoversFromSelfInflictedDeadlock(t *testing.T) {
 	// Every row landed, and the buffer is empty with balanced accounting.
 	require.Zero(t, sub.Length())
 	applied := 0
-	for _, call := range fake.upserts() {
+	for _, call := range fake.UpsertCalls() {
 		applied += len(call)
 	}
 	require.Equal(t, totalRows, applied)
@@ -183,7 +183,7 @@ func TestFlushRecoversFromSelfInflictedDeadlock(t *testing.T) {
 // interval of frozen checkpoint, while running one step narrow costs only
 // throughput.
 func TestFlushConcurrencyAdaptsAndRecovers(t *testing.T) {
-	sub := newByteCapBufferedMap(&countingApplier{}, false)
+	sub := newByteCapBufferedMap(&applier.MockApplier{}, false)
 	sub.flushConcurrency = 8
 
 	require.Equal(t, 8, sub.effectiveFlushConcurrency())
@@ -238,7 +238,7 @@ func TestFlushConcurrencyAdaptsAndRecovers(t *testing.T) {
 // batch size of a narrowed 32x250 drain to 500, which is the wrong direction at
 // exactly the moment the drain is telling us it is colliding.
 func TestDerivedFlushShapeAdapts(t *testing.T) {
-	sub := newByteCapBufferedMap(&countingApplier{}, false)
+	sub := newByteCapBufferedMap(&applier.MockApplier{}, false)
 	// The pair a 24xlarge derives.
 	sub.flushConcurrency, sub.batchSize = 32, 250
 
@@ -274,7 +274,7 @@ func TestDerivedFlushShapeAdapts(t *testing.T) {
 // implementations, a non-Aurora target, and an instance below
 // autoscale.MinVCPUs. Zero must mean DefaultBatchSize, never a zero-row batch.
 func TestZeroBatchSizeFallsBackToDefault(t *testing.T) {
-	sub := newByteCapBufferedMap(&countingApplier{}, false)
+	sub := newByteCapBufferedMap(&applier.MockApplier{}, false)
 	require.Zero(t, sub.batchSize)
 	require.Equal(t, DefaultBatchSize, sub.effectiveBatchSize())
 
@@ -297,7 +297,7 @@ func TestZeroBatchSizeFallsBackToDefault(t *testing.T) {
 // was always DefaultBatchSize, comfortably above the floor.
 func TestSmallBatchSizeIsNeverRaised(t *testing.T) {
 	for _, configured := range []int{1, 10, minAdaptiveBatchSize - 1} {
-		sub := newByteCapBufferedMap(&countingApplier{}, false)
+		sub := newByteCapBufferedMap(&applier.MockApplier{}, false)
 		// Wide enough that the contention step actually fires: the penalty is
 		// only taken while there is still something to narrow, and a drain
 		// already at concurrency 1 has nothing.
@@ -319,7 +319,7 @@ func TestSmallBatchSizeIsNeverRaised(t *testing.T) {
 
 	// A start above the floor still shrinks to it, which is what the floor is
 	// there for.
-	sub := newByteCapBufferedMap(&countingApplier{}, false)
+	sub := newByteCapBufferedMap(&applier.MockApplier{}, false)
 	sub.flushConcurrency, sub.batchSize = DefaultFlushConcurrency, minAdaptiveBatchSize*4
 	for range 10 {
 		sub.adaptFlushConcurrency(true)
@@ -331,7 +331,7 @@ func TestSmallBatchSizeIsNeverRaised(t *testing.T) {
 // while pinned at the floor: an unbounded penalty would make recovery take
 // proportionally longer once the contention finally clears.
 func TestAdaptFlushConcurrencyFloorsAtOne(t *testing.T) {
-	sub := newByteCapBufferedMap(&countingApplier{}, false)
+	sub := newByteCapBufferedMap(&applier.MockApplier{}, false)
 	sub.flushConcurrency = 2
 
 	for range 50 {
@@ -372,7 +372,7 @@ func TestNonContentionErrorStillFailsDrain(t *testing.T) {
 // so a test can stage a specific mix of contention and hard failure within one
 // concurrent pass. Calls past the end of the slice succeed.
 type sequencedApplier struct {
-	countingApplier
+	applier.MockApplier
 	mu     sync.Mutex
 	errs   []error
 	nCalls int
@@ -390,7 +390,7 @@ func (a *sequencedApplier) UpsertRows(ctx context.Context, mapping *table.Column
 	if err != nil {
 		return 0, err
 	}
-	return a.countingApplier.UpsertRows(ctx, mapping, rows, locks)
+	return a.MockApplier.UpsertRows(ctx, mapping, rows, locks)
 }
 
 func deadlockErr() error {
@@ -399,7 +399,7 @@ func deadlockErr() error {
 
 // alwaysContendingApplier fails every upsert with a deadlock, modelling a lock
 // holder that never lets go.
-type alwaysContendingApplier struct{ countingApplier }
+type alwaysContendingApplier struct{ applier.MockApplier }
 
 func (a *alwaysContendingApplier) UpsertRows(context.Context, *table.ColumnMapping, []applier.LogicalRow, []*dbconn.TableLock) (int64, error) {
 	return 0, deadlockErr()
@@ -422,7 +422,7 @@ func (a *alwaysContendingApplier) UpsertRows(context.Context, *table.ColumnMappi
 func TestSerialRetryExhaustionDefersWithoutFailing(t *testing.T) {
 	shortenContentionBackoff(t)
 	const totalRows = 3 * DefaultBatchSize
-	sub := newByteCapBufferedMap(&countingApplier{}, false)
+	sub := newByteCapBufferedMap(&applier.MockApplier{}, false)
 	sub.applier = &alwaysContendingApplier{}
 	sub.flushConcurrency = 4
 
@@ -455,7 +455,7 @@ func TestSerialRetryExhaustionDefersWithoutFailing(t *testing.T) {
 
 	// The deferral is not a one-way door: once the contention clears, the very
 	// next flush lands the same rows and reports the position as advanceable.
-	sub.applier = &countingApplier{}
+	sub.applier = &applier.MockApplier{}
 	allFlushed, err = sub.Flush(t.Context(), false, nil)
 	require.NoError(t, err)
 	require.True(t, allFlushed, "the retry must be able to complete the drain")
@@ -479,7 +479,7 @@ func TestPartialContentionKeepsLandedBatches(t *testing.T) {
 	// Fail the first upsert forever, so exactly one batch is unlandable while
 	// its three siblings succeed on their first attempt.
 	fake := &oneStubbornBatchApplier{}
-	sub := newByteCapBufferedMap(&fake.countingApplier, false)
+	sub := newByteCapBufferedMap(&fake.MockApplier, false)
 	sub.applier = fake
 	sub.flushConcurrency = 1 // serial pass 1, so "the first call" is deterministic
 
@@ -504,7 +504,7 @@ func TestPartialContentionKeepsLandedBatches(t *testing.T) {
 // oneStubbornBatchApplier fails every attempt at the batch it saw first, and
 // applies everything else normally.
 type oneStubbornBatchApplier struct {
-	countingApplier
+	applier.MockApplier
 	mu       sync.Mutex
 	stubborn []applier.LogicalRow
 }
@@ -519,7 +519,7 @@ func (a *oneStubbornBatchApplier) UpsertRows(ctx context.Context, mapping *table
 	if doomed {
 		return 0, deadlockErr()
 	}
-	return a.countingApplier.UpsertRows(ctx, mapping, rows, locks)
+	return a.MockApplier.UpsertRows(ctx, mapping, rows, locks)
 }
 
 // TestMixedContentionAndHardErrorDoesNotNarrow pins finding (a) on the AIMD
@@ -532,7 +532,7 @@ func (a *oneStubbornBatchApplier) UpsertRows(ctx context.Context, mapping *table
 func TestMixedContentionAndHardErrorDoesNotNarrow(t *testing.T) {
 	shortenContentionBackoff(t)
 	fake := &sequencedApplier{errs: []error{deadlockErr(), errInjected}}
-	sub := newByteCapBufferedMap(&fake.countingApplier, false)
+	sub := newByteCapBufferedMap(&fake.MockApplier, false)
 	sub.applier = fake
 	sub.flushConcurrency = 2
 
@@ -581,7 +581,7 @@ func TestRepeatedHardFailuresDoNotWiden(t *testing.T) {
 // An empty buffer never reaches the controller (Flush short-circuits on an
 // empty snapshot), so this is specifically the non-empty-but-all-deferred case.
 func TestAllDeferredDrainDoesNotWiden(t *testing.T) {
-	fake := &countingApplier{}
+	fake := &applier.MockApplier{}
 	chunker := table.NewMockChunker("deferred", 1000)
 	sub := newByteCapBufferedMap(fake, false)
 	sub.chunker = chunker
@@ -602,7 +602,7 @@ func TestAllDeferredDrainDoesNotWiden(t *testing.T) {
 		require.Equal(t, 4, sub.effectiveFlushConcurrency(),
 			"an all-deferred drain applied nothing and must not widen the drain")
 	}
-	require.Empty(t, fake.upserts(), "no applier call should have been made")
+	require.Empty(t, fake.UpsertCalls(), "no applier call should have been made")
 }
 
 // cancellingContendingApplier cancels the drain's parent context and then
@@ -610,7 +610,7 @@ func TestAllDeferredDrainDoesNotWiden(t *testing.T) {
 // the 1213 is a symptom of the connection going away, not something a narrower
 // flush would have avoided.
 type cancellingContendingApplier struct {
-	countingApplier
+	applier.MockApplier
 	cancel context.CancelFunc
 }
 
@@ -638,7 +638,7 @@ func TestContentionAtShutdownIsNotRetried(t *testing.T) {
 	defer cancel()
 
 	fake := &cancellingContendingApplier{cancel: cancel}
-	sub := newByteCapBufferedMap(&fake.countingApplier, false)
+	sub := newByteCapBufferedMap(&fake.MockApplier, false)
 	sub.applier = fake
 	sub.flushConcurrency = 1
 
@@ -664,7 +664,7 @@ func TestContentionAtShutdownIsNotRetried(t *testing.T) {
 // It also records whether it was ever handed an already-cancelled context,
 // which is the property the budget must never violate.
 type budgetBurningApplier struct {
-	countingApplier
+	applier.MockApplier
 	contendingCalls int64
 	burn            time.Duration
 
@@ -689,7 +689,7 @@ func (a *budgetBurningApplier) UpsertRows(ctx context.Context, mapping *table.Co
 		a.sawCanceledCtx.Store(true)
 		return 0, ctx.Err()
 	}
-	return a.countingApplier.UpsertRows(ctx, mapping, rows, locks)
+	return a.MockApplier.UpsertRows(ctx, mapping, rows, locks)
 }
 
 // TestRetryBudgetNeverCancelsAnAttempt pins the production defect this change
@@ -712,7 +712,7 @@ func TestRetryBudgetNeverCancelsAnAttempt(t *testing.T) {
 	shortenContentionBudget(t, 20*time.Millisecond)
 
 	fake := &budgetBurningApplier{contendingCalls: 1, burn: 200 * time.Millisecond}
-	sub := newByteCapBufferedMap(&fake.countingApplier, false)
+	sub := newByteCapBufferedMap(&fake.MockApplier, false)
 	sub.applier = fake
 	sub.flushConcurrency = 1
 
@@ -740,7 +740,7 @@ func TestRetryBudgetExpiryDefersRemainingBatches(t *testing.T) {
 	const batches = 3
 	const totalRows = batches * DefaultBatchSize
 	fake := &budgetBurningApplier{contendingCalls: batches, burn: 200 * time.Millisecond}
-	sub := newByteCapBufferedMap(&fake.countingApplier, false)
+	sub := newByteCapBufferedMap(&fake.MockApplier, false)
 	sub.applier = fake
 	sub.flushConcurrency = 1
 
@@ -775,7 +775,7 @@ func TestHardErrorDuringSerialRetryStillFailsDrain(t *testing.T) {
 	// First call contends (sending the batch to pass 2), the retry hits a
 	// non-retryable error.
 	fake := &sequencedApplier{errs: []error{deadlockErr(), errInjected}}
-	sub := newByteCapBufferedMap(&fake.countingApplier, false)
+	sub := newByteCapBufferedMap(&fake.MockApplier, false)
 	sub.applier = fake
 	sub.flushConcurrency = 1
 
@@ -809,7 +809,7 @@ func TestRetryBudgetIsNotDefeatedByTheBackoffSleep(t *testing.T) {
 	// Contends on every call, so nothing can land and the only thing bounding
 	// the pass is the budget.
 	fake := &budgetBurningApplier{contendingCalls: 1 << 30}
-	sub := newByteCapBufferedMap(&fake.countingApplier, false)
+	sub := newByteCapBufferedMap(&fake.MockApplier, false)
 	sub.applier = fake
 	sub.flushConcurrency = 1
 
@@ -837,7 +837,7 @@ func TestRetryBudgetIsNotDefeatedByTheBackoffSleep(t *testing.T) {
 // which the deferral count can silently lose the batches it had already
 // counted.
 type stallOnCallApplier struct {
-	countingApplier
+	applier.MockApplier
 	stallOnCall int64
 	stall       time.Duration
 
@@ -872,7 +872,7 @@ func TestStubbornBatchDoesNotStrandItsSiblings(t *testing.T) {
 	// lands on its first attempt (call 7).
 	errs := []error{deadlockErr(), deadlockErr(), deadlockErr(), deadlockErr(), deadlockErr(), deadlockErr()}
 	fake := &sequencedApplier{errs: errs}
-	sub := newByteCapBufferedMap(&fake.countingApplier, false)
+	sub := newByteCapBufferedMap(&fake.MockApplier, false)
 	sub.applier = fake
 	sub.flushConcurrency = 1
 
@@ -907,7 +907,7 @@ func TestBudgetExpiryCountsAlreadyDeferredBatches(t *testing.T) {
 	// attempts, all contending, so it is counted as deferred — and call 7 then
 	// outlasts the budget, so the pass gives up before reaching batch 2.
 	fake := &stallOnCallApplier{stallOnCall: 7, stall: 300 * time.Millisecond}
-	sub := newByteCapBufferedMap(&fake.countingApplier, false)
+	sub := newByteCapBufferedMap(&fake.MockApplier, false)
 	sub.applier = fake
 	sub.flushConcurrency = 1
 
@@ -944,7 +944,7 @@ func TestHardErrorAfterADeferralStillCountsIt(t *testing.T) {
 		errInjected,
 	}
 	fake := &sequencedApplier{errs: errs}
-	sub := newByteCapBufferedMap(&fake.countingApplier, false)
+	sub := newByteCapBufferedMap(&fake.MockApplier, false)
 	sub.applier = fake
 	sub.flushConcurrency = 1
 
@@ -968,7 +968,7 @@ func TestHardErrorAfterADeferralStillCountsIt(t *testing.T) {
 // the 32x250 it should be running, not in isolation, where it is
 // indistinguishable from a small instance running at its derived width.
 func TestFlushShapesReportsTheAIMDPenalty(t *testing.T) {
-	sub := newByteCapBufferedMap(&countingApplier{}, false)
+	sub := newByteCapBufferedMap(&applier.MockApplier{}, false)
 	sub.flushConcurrency, sub.batchSize = 32, 250
 
 	effective, configured := sub.FlushShapes()
@@ -993,7 +993,7 @@ func TestFlushShapesReportsTheAIMDPenalty(t *testing.T) {
 // rather than 0x0, which the row would suppress and an operator would read as
 // a feed with no drain at all.
 func TestFlushShapesFallsBackToDefaults(t *testing.T) {
-	sub := newByteCapBufferedMap(&countingApplier{}, false)
+	sub := newByteCapBufferedMap(&applier.MockApplier{}, false)
 	require.Zero(t, sub.flushConcurrency)
 	require.Zero(t, sub.batchSize)
 

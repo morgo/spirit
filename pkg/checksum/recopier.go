@@ -15,12 +15,24 @@ import (
 	"github.com/block/spirit/pkg/utils"
 )
 
-// MySQLRecopier is the production Recopier used by `spirit sync`. Given a
+// Recopier knows how to overwrite a single chunk's worth of data on the
+// target from the source. It is invoked when the lockless checker's
+// retry path detects stable target divergence — i.e. the source CRC is
+// unchanged across a retry window but the target CRC is still wrong.
+//
+// Recopy must be safe to call concurrently from multiple worker
+// goroutines; implementations are expected to serialize internally where
+// needed (see mysqlRecopier for the production implementation).
+type Recopier interface {
+	Recopy(ctx context.Context, chunk *table.Chunk) error
+}
+
+// mysqlRecopier is the production Recopier used by `spirit sync`. Given a
 // chunk that the lockless checker has identified as stably diverged
 // (source CRC unchanged across the retry window, target still wrong), it
 // rewrites the chunk's rows on the target from the source.
 //
-// The operation is the cross-DB analog of SingleChecker.replaceChunk:
+// The operation is the cross-DB analog of chunkRepairer.Recopy:
 //
 //  1. DELETE the chunk's key range on the target.
 //  2. SELECT the chunk's rows from the source.
@@ -37,7 +49,7 @@ import (
 // context.WithoutCancel(ctx) so a parent cancellation between them does
 // not leave the target with rows deleted but not yet rewritten. A bounded
 // timeout (10 minutes) still protects against a hung Apply.
-type MySQLRecopier struct {
+type mysqlRecopier struct {
 	sourceDB *sql.DB
 	targetDB *sql.DB
 	applier  applier.Applier
@@ -49,13 +61,13 @@ type MySQLRecopier struct {
 }
 
 // Compile-time interface assertion.
-var _ Recopier = (*MySQLRecopier)(nil)
+var _ Recopier = (*mysqlRecopier)(nil)
 
-// NewMySQLRecopier constructs a recopier for the source/target pair. The
+// newMySQLRecopier constructs a recopier for the source/target pair. The
 // applier must be Started before Recopy is called (the production wiring
 // in datasync.Runner starts the applier during the copy phase and leaves
 // it running through continuous sync, so this is satisfied naturally).
-func NewMySQLRecopier(sourceDB, targetDB *sql.DB, app applier.Applier, dbConfig *dbconn.DBConfig, logger *slog.Logger) (*MySQLRecopier, error) {
+func newMySQLRecopier(sourceDB, targetDB *sql.DB, app applier.Applier, dbConfig *dbconn.DBConfig, logger *slog.Logger) (*mysqlRecopier, error) {
 	if sourceDB == nil {
 		return nil, errors.New("sourceDB must be non-nil")
 	}
@@ -71,7 +83,7 @@ func NewMySQLRecopier(sourceDB, targetDB *sql.DB, app applier.Applier, dbConfig 
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &MySQLRecopier{
+	return &mysqlRecopier{
 		sourceDB: sourceDB,
 		targetDB: targetDB,
 		applier:  app,
@@ -81,9 +93,9 @@ func NewMySQLRecopier(sourceDB, targetDB *sql.DB, app applier.Applier, dbConfig 
 }
 
 // Recopy rewrites the chunk's rows on the target from the source. See
-// MySQLRecopier's struct doc for the operation's shape and concurrency
+// mysqlRecopier's struct doc for the operation's shape and concurrency
 // rules.
-func (r *MySQLRecopier) Recopy(ctx context.Context, chunk *table.Chunk) error {
+func (r *mysqlRecopier) Recopy(ctx context.Context, chunk *table.Chunk) error {
 	r.recopyLock.Lock()
 	defer r.recopyLock.Unlock()
 
@@ -111,7 +123,7 @@ func (r *MySQLRecopier) Recopy(ctx context.Context, chunk *table.Chunk) error {
 	// distributed checker's recopy uses. JSON columns are deliberately read
 	// bare — the SELECT+applier pair already constitutes the one text
 	// round-trip the checksum's JSON contract expects; see the matching
-	// comment in DistributedChecker.replaceChunk.
+	// comment in distributedRepairer.Recopy.
 	columnList := table.QuoteColumns(chunk.Table.NonGeneratedColumns)
 	query := fmt.Sprintf("SELECT %s FROM %s WHERE %s",
 		columnList,

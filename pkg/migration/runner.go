@@ -160,7 +160,7 @@ func NewRunner(m *Migration) (*Runner, error) {
 // top of its REPEATABLE READ transaction pool, for the two things it does that
 // the pool does not cover. Both are serialized, so one connection each:
 //
-//   - Chunk repair. When a chunk mismatches, replaceChunk runs its DELETE and
+//   - Chunk repair. When a chunk mismatches, the recopier runs its DELETE and
 //     then its re-read of the source on r.db rather than on the pooled read-view
 //     transaction, and repairs are serialized under the checker's recopyLock —
 //     so it is one connection at a time. (The rewrite itself goes through the
@@ -955,16 +955,20 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context, resumePosi
 		}
 	}
 
-	var lockless *checksum.LocklessCheckerConfig
+	// Choosing the algorithm is the whole of what the flag does. Everything
+	// downstream — the repair policy, the resume watermark, pacing, the pool
+	// reserve, the status block, cutover — is written once against the Checker
+	// contract and does not ask which one it got.
+	algorithm := checksum.Single
 	if r.migration.EnableExperimentalLocklessChecksum {
-		// Repair policy is not set here: NewChecker derives it from
-		// FixDifferences below, so both checkers answer a divergence the same
-		// way (repair it, re-verify next pass, fail if it keeps coming back).
-		lockless = &checksum.LocklessCheckerConfig{SplitHotChunks: true, SnapshotHotChunks: true}
+		algorithm = checksum.Lockless
 		r.logger.Warn("experimental lockless checksum enabled; verification uses optimistic reads, cutover locking is unchanged")
 	}
 	r.checker, err = checksum.NewChecker([]*sql.DB{r.db}, r.checksumChunker, []change.Source{r.replClient}, &checksum.CheckerConfig{
-		Lockless:        lockless,
+		// Repair policy is not set here: NewChecker derives it from
+		// FixDifferences below, so both checkers answer a divergence the same
+		// way (repair it, re-verify next pass, fail if it keeps coming back).
+		Algorithm:       algorithm,
 		Watermark:       checksumWatermark,
 		Concurrency:     r.migration.Threads,
 		TargetChunkTime: table.ChunkerDefaultTarget,
@@ -979,7 +983,7 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context, resumePosi
 		// concurrency instead of standing up a second write path. The copier has
 		// stopped it by the time the checksum runs; the checker starts and stops
 		// it around each repair.
-		RepairApplier: appl,
+		Applier: appl,
 		// The checksum reads with its own pool, so it shares the read side's
 		// bounds: it starts at Threads and grows to maxRead, which is already in
 		// the pool sizing above. The copier's readers have finished by the time the
