@@ -465,7 +465,7 @@ One verification runs at a time (`verifyMu`), which is what makes a single watch
 
 With `Inner` set it delegates to a real source and records the calls; with `Inner` nil every method is a success-shaped no-op reading from its configuration fields. A test that needs a scripted change delivered embeds it and overrides `VerifyRowAtNextChange`.
 
-One case it is deliberately not for: a stub that exists only to satisfy a parameter the code under test must never call. Embed a nil `change.Source` there, so an unintended call panics and names itself.
+Prefer it over embedding a nil `change.Source`, even for a feed a test believes is never touched. Promotion through an embedded interface satisfies `Source` with methods that panic, so growing the interface turns a passing test into a nil dereference at a call site nobody was thinking about — which is what moving `FeedStats` onto `Source` did to `pkg/migration`'s status stub. Embed a nil `Source` only where an unintended call *should* be a panic that names itself: a parameter the code under test must not reach at all.
 
 ## See Also
 

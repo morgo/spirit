@@ -29,10 +29,14 @@ import (
 // under test runs. The configuration fields are not: set them before the source
 // is handed over.
 //
-// There is one case this is deliberately not for: a stub that exists only to
-// satisfy a parameter the code under test must never call. Embed a nil
-// change.Source there instead, so an unintended call panics and names itself
-// rather than quietly succeeding.
+// Prefer it over embedding a nil change.Source, even for a feed a test believes
+// is never touched. Two such stubs existed and both were wrong or one method
+// away from it: promotion through an embedded interface satisfies Source with
+// methods that panic, so growing the interface turns a passing test into a nil
+// dereference at a call site nobody was thinking about. That is exactly what
+// moving FeedStats onto Source did to pkg/migration's status stub. Embed a nil
+// Source only where an unintended call *should* be a panic that names itself —
+// a parameter the code under test must not reach at all.
 type MockSource struct {
 	// Inner is the source to delegate to. Nil means this mock stands alone and
 	// every method succeeds without doing anything.

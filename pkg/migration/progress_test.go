@@ -220,9 +220,6 @@ func TestContinuousChecksumThrottleStatus(t *testing.T) {
 	require.Equal(t, status.ThrottleStatus{}, r.throttleStatus(status.WaitingOnSentinelTable))
 }
 
-type statusOnlyFeed struct{ change.Source }
-
-func (*statusOnlyFeed) GetDeltaLen() int { return 0 }
 func (*activeContinuousChecker) GetProgress() status.ChecksumProgress {
 	return status.ChecksumProgress{RowsChecked: 25, RowsTotal: 100}
 }
@@ -233,7 +230,7 @@ func (*explainedLoadThrottler) ThrottleReason() string { return "server load" }
 
 func TestContinuousChecksumStatusSurfaces(t *testing.T) {
 	checker := &activeContinuousChecker{}
-	r := &Runner{checker: checker, replClient: &statusOnlyFeed{}, changes: []*tableChange{{table: &table.TableInfo{SchemaName: "test"}}}}
+	r := &Runner{checker: checker, replClient: &change.MockSource{}, changes: []*tableChange{{table: &table.TableInfo{SchemaName: "test"}}}}
 	r.setThrottler(&explainedLoadThrottler{gradualTestThrottler{throttled: true}})
 	r.status.Set(status.WaitingOnSentinelTable)
 	for _, active := range []bool{false, true, false} {
