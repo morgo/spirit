@@ -72,8 +72,10 @@ func TestRowWaiterObserve(t *testing.T) {
 		t.Fatal("observe must not wake the verification: the change is not buffered yet")
 	default:
 	}
-	w.release()
-	w.release() // the caller cannot know it is the first; releasing twice is safe
+	var g parkGate
+	w.parkAndRelease(&g)
+	w.parkAndRelease(&g) // the caller cannot know it is the first; twice is safe
+	require.True(t, gateIsParked(&g), "the firing change must hold the reader")
 	<-w.ch
 	key, image, deleted, rewritten := w.result()
 	require.Equal(t, []any{int64(1)}, key)
@@ -102,11 +104,17 @@ type verifyHarness struct {
 	// deliver the change with nobody listening, which is the ordering bug the
 	// arm-before-unpark step exists to prevent — so the harness must not
 	// reproduce it by accident.
-	armed    chan struct{}
-	once     sync.Once
-	buffered [][]any
-	flushes  atomic.Int64
-	flushFn  func(context.Context) error
+	armed chan struct{}
+	once  sync.Once
+	// blockBuffer, if set, runs where a subscription's HasChanged blocks on its
+	// soft limit: after the watch has seen the change, before it is buffered and
+	// the reader parked. A dispatch can sit there for as long as the
+	// backpressure lasts, which is long enough for the verification waiting on
+	// it to give up.
+	blockBuffer func()
+	buffered    [][]any
+	flushes     atomic.Int64
+	flushFn     func(context.Context) error
 }
 
 func newVerifyHarness() *verifyHarness {
@@ -129,10 +137,12 @@ func (h *verifyHarness) run(ctx context.Context, watch RowWatch, verify RowVerif
 // dispatch is what a client's dispatchRow does, in the same order.
 func (h *verifyHarness) dispatch(key, image []any, deleted bool) {
 	watched := watchRow(&h.slot, &table.TableInfo{SchemaName: "test", TableName: "t1"}, key, image, deleted)
+	if h.blockBuffer != nil {
+		h.blockBuffer()
+	}
 	h.buffered = append(h.buffered, key)
 	if watched != nil {
-		h.gate.park()
-		watched.release()
+		watched.parkAndRelease(&h.gate)
 	}
 }
 
@@ -245,6 +255,66 @@ func TestVerifyRowAtNextChangeFailures(t *testing.T) {
 			require.Nil(t, h.slot.Load())
 		})
 	}
+}
+
+// TestRowWaiterAbandon pins the rule that makes the park safe to arm from
+// inside a dispatch: only a live verification's waiter may hold the reader.
+//
+// A dispatch and the verification that armed it run on different goroutines,
+// and the verification can give up — its budget ends, or it already returned —
+// while a dispatch is still on its way to parking. Parking for a verification
+// that is gone stops replication for the rest of the run, because the only
+// thing that would have unparked it is the verification itself.
+func TestRowWaiterAbandon(t *testing.T) {
+	var g parkGate
+	w := newRowWaiter(anyRow)
+
+	// A dispatch that lands while the verification is live parks the reader.
+	require.True(t, w.observe("test", "t1", []any{int64(1)}, nil, false))
+	w.parkAndRelease(&g)
+	require.True(t, gateIsParked(&g))
+	<-w.ch
+
+	// Abandoning releases whatever that dispatch parked: the verification is
+	// the only thing that can, and it is leaving.
+	w.abandon(&g)
+	require.False(t, gateIsParked(&g))
+
+	// And no dispatch still in flight on the same waiter can park it again.
+	w.parkAndRelease(&g)
+	require.False(t, gateIsParked(&g), "an abandoned waiter must not park the reader")
+}
+
+// TestVerifyRowAtNextChangeAbandonsInFlightDispatch is the same rule end to
+// end, in the window that actually produces it: a dispatch blocked in
+// HasChanged on the subscription's soft limit while the verification's budget
+// runs out. The change is buffered and the waiter parked long after the
+// verification has returned.
+func TestVerifyRowAtNextChangeAbandonsInFlightDispatch(t *testing.T) {
+	h := newVerifyHarness()
+	gaveUp := make(chan struct{})
+	h.blockBuffer = func() { <-gaveUp }
+
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		<-h.armed
+		h.dispatch([]any{int64(1)}, []any{int64(1)}, false)
+	})
+
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+	err := h.run(ctx, anyRow, func(context.Context, []any, []any, bool) error {
+		t.Error("the verifier must not run: the change never reached the buffer in time")
+		return nil
+	})
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+
+	// Only now does the dispatch finish, with nothing left to park for.
+	close(gaveUp)
+	wg.Wait()
+	require.False(t, h.readerParked(),
+		"a dispatch that finishes after the verification gave up must not park the reader")
+	require.Nil(t, h.slot.Load())
 }
 
 // TestFlushParked: the parked drain answers "did everything land", because that

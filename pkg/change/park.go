@@ -35,10 +35,13 @@ import (
 // state rather than a set of overlapping holds.
 //
 // This park is unrelated to the memory-backpressure park, which blocks inside
-// HasChanged when a subscription is over its soft limit. That one holds the
-// reader before the change is offered here, so while it is in effect a watch
-// cannot fire and the verification times out and defers — correct, if useless,
-// and the caller was already deferring the range anyway.
+// HasChanged when a subscription is over its soft limit. The two interact in
+// one place. A watch is offered the change *before* HasChanged, so it does fire
+// under backpressure — but the dispatch then blocks in HasChanged, and the
+// verification is not woken until the change is buffered. So the verification
+// times out and defers (correct, if useless: the caller was already deferring
+// the range), and the dispatch reaches the park long after the verification is
+// gone. That is what rowWaiter.abandon exists for.
 
 // ErrRowRewritten means the watched row was written again before the
 // verification could read the target, so the image the caller was handed is no
@@ -123,12 +126,13 @@ func (g *parkGate) wait(ctx context.Context) error {
 type rowWaiter struct {
 	watch RowWatch
 
-	mu       sync.Mutex
-	fired    bool
-	key      []any
-	image    []any
-	deleted  bool
-	rewrites int
+	mu        sync.Mutex
+	fired     bool
+	abandoned bool
+	key       []any
+	image     []any
+	deleted   bool
+	rewrites  int
 
 	releaseOnce sync.Once
 	ch          chan struct{}
@@ -168,12 +172,40 @@ func (w *rowWaiter) observe(schema, tbl string, key, image []any, deleted bool) 
 	return true
 }
 
-// release wakes the verification, and is called only once the change has been
-// buffered and the reader parked. Doing it from observe instead would let the
-// verification flush before the watched change was in the buffer, so the target
-// would not hold the image it was about to be compared against.
-func (w *rowWaiter) release() {
+// parkAndRelease holds the reader at this change and wakes the verification. It
+// is called from the dispatch, once the change has been buffered. Waking from
+// observe instead would let the verification flush before the watched change
+// was in the buffer, so the target would not hold the image it was about to be
+// compared against.
+//
+// The abandoned check is what makes it safe to park the reader from inside a
+// dispatch. The dispatch and the verification that armed the watch run on
+// different goroutines, and the verification can be gone by the time the
+// dispatch gets here: HasChanged blocks on the subscription's soft limit, for
+// as long as the backpressure lasts, which is easily longer than the caller's
+// budget. Parking for a verification that has returned stops the feed for the
+// rest of the run, because that verification was the only thing that would have
+// unparked it. Serializing against abandon on w.mu means one of the two always
+// happens: either the park is skipped, or abandon undoes it.
+func (w *rowWaiter) parkAndRelease(g *parkGate) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.abandoned {
+		return
+	}
+	g.park()
 	w.releaseOnce.Do(func() { close(w.ch) })
+}
+
+// abandon retires the waiter and releases the reader, whatever the verification
+// parked or did not park. After it returns, no dispatch still in flight on this
+// waiter can park the reader again. Every exit from a verification runs it,
+// including the ones that never fired.
+func (w *rowWaiter) abandon(g *parkGate) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.abandoned = true
+	g.unpark()
 }
 
 // result reports what fired, and whether a later change made it stale.
@@ -238,8 +270,12 @@ func verifyRowAtNextChange(
 ) error {
 	waiter := newRowWaiter(watch)
 	arm(waiter)
-	defer disarm()
-	defer gate.unpark()
+	defer func() {
+		// Disarm first, so no further dispatch can pick the waiter up; abandon
+		// then covers the ones already holding it, and releases the reader.
+		disarm()
+		waiter.abandon(gate)
+	}()
 
 	// Anything already parked would keep the watched change from ever
 	// arriving, so the reader runs until it fires.
@@ -251,8 +287,9 @@ func verifyRowAtNextChange(
 		return ctx.Err()
 	}
 
-	// observe parked the reader as it fired. Flushing now carries every change
-	// up to and including that event to the target, and no change after it.
+	// The dispatch parked the reader as it fired. Flushing now carries every
+	// change up to and including that event to the target, and no change after
+	// it.
 	if err := flush(ctx); err != nil {
 		return err
 	}
@@ -260,7 +297,20 @@ func verifyRowAtNextChange(
 	if rewritten {
 		return ErrRowRewritten
 	}
-	return verify(ctx, key, image, deleted)
+	if err := verify(ctx, key, image, deleted); err != nil {
+		return err
+	}
+	// Read the count again, because the verifier ran with the target readable
+	// by everything else. The gate stops the *next* event, not the rest of this
+	// one, so a multi-row event (an ODKU listing the key twice, a PK-shifting
+	// UPDATE) can still buffer a second change to the watched key — and a
+	// periodic flush, which is not serialized with this, can apply it while the
+	// verifier is mid-read. A verdict reached against a target that moved is
+	// not a verdict, so report the rewrite and let the caller retry.
+	if _, _, _, rewritten = waiter.result(); rewritten {
+		return ErrRowRewritten
+	}
+	return nil
 }
 
 // watchRow offers a row change to an armed verification *before* the change is

@@ -1376,8 +1376,7 @@ func (c *gtidClient) dispatchRow(sub Subscription, tbl *table.TableInfo, key, im
 	watched := watchRow(&c.rowWatch, tbl, key, image, deleted)
 	sub.HasChanged(key, image, deleted)
 	if watched != nil {
-		c.park.park()
-		watched.release()
+		watched.parkAndRelease(&c.park)
 	}
 }
 
