@@ -17,29 +17,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-type noopDistributedApplier struct{}
-
-func (a *noopDistributedApplier) Start(context.Context) error { return nil }
-
-func (a *noopDistributedApplier) Apply(context.Context, *table.Chunk, [][]any, applier.ApplyCallback) error {
-	return nil
-}
-
-func (a *noopDistributedApplier) DeleteKeys(context.Context, *table.TableInfo, *table.TableInfo, [][]any, []*dbconn.TableLock) (int64, error) {
-	return 0, nil
-}
-
-func (a *noopDistributedApplier) UpsertRows(context.Context, *table.ColumnMapping, []applier.LogicalRow, []*dbconn.TableLock) (int64, error) {
-	return 0, nil
-}
-
-func (a *noopDistributedApplier) Wait(context.Context) error { return nil }
-func (a *noopDistributedApplier) Stop() error                { return nil }
-func (a *noopDistributedApplier) Stats() applier.Stats       { return applier.Stats{} }
-func (a *noopDistributedApplier) GetTargets() []applier.Target {
-	return nil
-}
-
 type noopChangeSource struct{}
 
 func (s *noopChangeSource) AddSubscription(_, _ *table.TableInfo, _ table.MappedChunker) error {
@@ -72,7 +49,7 @@ func TestDistributedCheckerHonorsYieldTimeoutConfig(t *testing.T) {
 	defer utils.CloseAndLog(db)
 
 	config := NewCheckerDefaultConfig()
-	config.Applier = &noopDistributedApplier{}
+	config.Applier = &applier.MockApplier{}
 	config.Algorithm = Sharded
 	config.YieldTimeout = 137 * time.Millisecond
 

@@ -102,7 +102,7 @@ func TestSyncTargetLoadAndProgress(t *testing.T) {
 }
 
 func TestSyncAutoscaleUnsupportedApplier(t *testing.T) {
-	r, err := NewRunner(&Sync{EnableExperimentalAutoscaling: true, Applier: progressApplier{}})
+	r, err := NewRunner(&Sync{EnableExperimentalAutoscaling: true, Applier: &applier.MockApplier{}})
 	require.NoError(t, err)
 	require.NoError(t, r.setupAutoscaling(context.Background()))
 	require.False(t, r.autoscale.Enabled)

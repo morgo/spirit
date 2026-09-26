@@ -15,10 +15,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-type progressApplier struct{ applier.Applier }
-
-func (progressApplier) Stats() applier.Stats { return applier.Stats{ActiveWorkers: 4} }
-
 // progressFeed satisfies the factory's "a lockless checker needs a feed" check.
 // The status assertions never run the checker, so no method on it is ever
 // called and the embedded nil interface is never dereferenced.
@@ -47,7 +43,7 @@ func TestSyncProgressAndLogFormat(t *testing.T) {
 		Copy:  status.CopyProgress{RowsCopied: 7, RowsTotal: 9},
 		Chunk: 25,
 	}
-	r.applier = progressApplier{}
+	r.applier = &applier.MockApplier{FixedStats: applier.Stats{ActiveWorkers: 4}}
 	r.status.Set(status.CopyRows)
 	p = r.Progress()
 	require.Equal(t, status.ETA{State: status.ETAReady, Duration: time.Minute}, p.ETA)

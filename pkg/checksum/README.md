@@ -59,6 +59,12 @@ path a repair goes through doubled as the algorithm switch, and a second
 `RepairApplier` field had to exist for the single-server checker to have a write
 path without becoming a distributed one.
 
+Because that rule changed, `Single` and `Lockless` reject more than one source or
+feed rather than using the first and ignoring the rest. A call written against
+the old rule — N sources plus an applier — would otherwise build a single-server
+checker, verify one source, and report the whole topology clean. A checksum that
+passes by not looking is the one failure mode worth refusing to construct.
+
 Every algorithm is configured from the one `CheckerConfig`. The fields common to
 all of them (concurrency, autoscaling, throttler, metrics sink, logger,
 `MaxRetries`, `Watermark`) apply whichever is selected; the rest are documented

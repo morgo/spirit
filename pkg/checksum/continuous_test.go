@@ -10,6 +10,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/block/spirit/pkg/applier"
 	"github.com/block/spirit/pkg/change"
 	"github.com/block/spirit/pkg/table"
 	"github.com/stretchr/testify/require"
@@ -102,7 +103,7 @@ func TestContinuousFactoryDiscardsResumeEvidence(t *testing.T) {
 			chunker := &resumeChunker{testChunker: newTestChunker(0), watermark: "initial-verification"}
 			feed := &lifecycleFeed{}
 			cfg := NewCheckerDefaultConfig()
-			cfg.Applier = &spyApplier{}
+			cfg.Applier = &applier.MockApplier{}
 			if mode == "distributed" {
 				cfg.Algorithm = Sharded
 			}
@@ -175,11 +176,6 @@ func TestLocklessContinuousReusesCheckerAfterInitialPass(t *testing.T) {
 	})
 }
 
-type continuousApplier struct{ spyApplier }
-
-func (*continuousApplier) Start(context.Context) error { return nil }
-func (*continuousApplier) Stop() error                 { return nil }
-
 func TestSnapshotContinuousActiveLifecycle(t *testing.T) {
 	for _, distributed := range []bool{false, true} {
 		t.Run(fmt.Sprintf("distributed=%t", distributed), func(t *testing.T) {
@@ -191,10 +187,10 @@ func TestSnapshotContinuousActiveLifecycle(t *testing.T) {
 					return ctx.Err()
 				}}
 				cfg := NewCheckerDefaultConfig()
-				cfg.Applier = &spyApplier{}
+				cfg.Applier = &applier.MockApplier{}
 				if distributed {
 					cfg.Algorithm = Sharded
-					cfg.Applier = &continuousApplier{}
+					cfg.Applier = &applier.MockApplier{}
 				}
 				checker, err := NewChecker([]*sql.DB{{}}, newTestChunker(0), []change.Source{feed}, cfg)
 				require.NoError(t, err)

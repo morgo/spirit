@@ -19,7 +19,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// gatedApplier wraps countingApplier so tests can hold a flush mid-batch
+// gatedApplier wraps applier.MockApplier so tests can hold a flush mid-batch
 // deterministically: when a gate channel is set, every UpsertRows /
 // DeleteKeys call first announces itself on entered (when set), then
 // receives one token from its gate before proceeding. Waiting on
@@ -28,7 +28,7 @@ import (
 // the call error out (after the gate, without recording), exercising
 // the reattach paths.
 type gatedApplier struct {
-	countingApplier
+	applier.MockApplier
 	entered     chan struct{}
 	upsertGate  chan struct{}
 	deleteGate  chan struct{}
@@ -62,7 +62,7 @@ func (g *gatedApplier) UpsertRows(ctx context.Context, mapping *table.ColumnMapp
 	if g.failOneUpsert.CompareAndSwap(true, false) {
 		return 0, errInjected
 	}
-	return g.countingApplier.UpsertRows(ctx, mapping, rows, locks)
+	return g.MockApplier.UpsertRows(ctx, mapping, rows, locks)
 }
 
 func (g *gatedApplier) DeleteKeys(ctx context.Context, sourceTable, targetTable *table.TableInfo, keys [][]any, locks []*dbconn.TableLock) (int64, error) {
@@ -73,7 +73,7 @@ func (g *gatedApplier) DeleteKeys(ctx context.Context, sourceTable, targetTable 
 	if g.failDeletes.Load() {
 		return 0, errInjected
 	}
-	return g.countingApplier.DeleteKeys(ctx, sourceTable, targetTable, keys, locks)
+	return g.MockApplier.DeleteKeys(ctx, sourceTable, targetTable, keys, locks)
 }
 
 // awaitEntered blocks until the applier reports a gated call in
@@ -90,7 +90,7 @@ func awaitEntered(t *testing.T, fake *gatedApplier) {
 // newGatedBufferedMap builds a map-or-queue-mode bufferedMap wired to a
 // gatedApplier, mirroring newByteCapBufferedMap.
 func newGatedBufferedMap(fake *gatedApplier, queueMode bool) *bufferedMap {
-	sub := newByteCapBufferedMap(&fake.countingApplier, queueMode)
+	sub := newByteCapBufferedMap(&fake.MockApplier, queueMode)
 	sub.applier = fake
 	return sub
 }
@@ -249,7 +249,7 @@ func TestBufferedMapParkedReaderWakesPerBatch(t *testing.T) {
 
 	release() // release batch 2
 	require.NoError(t, <-flushDone)
-	require.Len(t, fake.upserts(), 2, "1100 rows must drain as two batches (1000 + 100)")
+	require.Len(t, fake.UpsertCalls(), 2, "1100 rows must drain as two batches (1000 + 100)")
 	require.Equal(t, 1, sub.Length(), "only the parker's row should remain buffered")
 }
 
@@ -435,7 +435,7 @@ func TestBufferedMapQueueModeFlushOrderAcrossSwapAndError(t *testing.T) {
 
 	// [U1, U2] applied; remainder [D3, U4] prepended ahead of the
 	// concurrent append [U5].
-	require.Len(t, fake.upserts(), 1)
+	require.Len(t, fake.UpsertCalls(), 1)
 	sub.Lock()
 	var keys []string
 	for _, qc := range sub.queue {
@@ -453,10 +453,10 @@ func TestBufferedMapQueueModeFlushOrderAcrossSwapAndError(t *testing.T) {
 	require.True(t, allFlushed)
 	require.Equal(t, 0, sub.Length())
 
-	deletes := fake.deletes()
+	deletes := fake.DeleteCalls()
 	require.Len(t, deletes, 1)
 	require.Equal(t, "k3", deletes[0][0][0])
-	upserts := fake.upserts()
+	upserts := fake.UpsertCalls()
 	require.Len(t, upserts, 2)
 	require.Equal(t, "k4", upserts[1][0].RowImage[0])
 	require.Equal(t, "k5", upserts[1][1].RowImage[0])
@@ -470,8 +470,8 @@ func TestBufferedMapFlushEmpty(t *testing.T) {
 	allFlushed, err := sub.Flush(t.Context(), false, nil)
 	require.NoError(t, err)
 	require.True(t, allFlushed)
-	require.Empty(t, fake.upserts())
-	require.Empty(t, fake.deletes())
+	require.Empty(t, fake.UpsertCalls())
+	require.Empty(t, fake.DeleteCalls())
 }
 
 // TestPeriodicFlushRespondsToParkRequest is the end-to-end signal test:
@@ -602,10 +602,8 @@ func TestPeriodicFlushPrioritizesParkedSubscription(t *testing.T) {
 
 // totalUpsertedRows sums the rows across all recorded UpsertRows calls.
 func totalUpsertedRows(fake *gatedApplier) int {
-	fake.mu.Lock()
-	defer fake.mu.Unlock()
 	total := 0
-	for _, call := range fake.upsertCalls {
+	for _, call := range fake.UpsertCalls() {
 		total += len(call)
 	}
 	return total
@@ -823,7 +821,7 @@ func TestFlushConcurrencyClientPlumbing(t *testing.T) {
 
 			cfg := NewClientDefaultConfig()
 			cfg.FlushConcurrency = tc.cfg
-			bc := NewBinlogClient(nil, "localhost", "user", "pass", &countingApplier{}, cfg).(*binlogClient)
+			bc := NewBinlogClient(nil, "localhost", "user", "pass", &applier.MockApplier{}, cfg).(*binlogClient)
 			require.Equal(t, tc.want, bc.flushConcurrency)
 			require.NoError(t, bc.AddSubscription(current, nil, table.NewMockChunker("plumbing", 1000)))
 			bsubs := bc.subs.Snapshot()
@@ -832,7 +830,7 @@ func TestFlushConcurrencyClientPlumbing(t *testing.T) {
 
 			gcfg := NewClientDefaultConfig()
 			gcfg.FlushConcurrency = tc.cfg
-			gc := NewGTIDClient(nil, "localhost", "user", "pass", &countingApplier{}, gcfg).(*gtidClient)
+			gc := NewGTIDClient(nil, "localhost", "user", "pass", &applier.MockApplier{}, gcfg).(*gtidClient)
 			require.Equal(t, tc.want, gc.flushConcurrency)
 			require.NoError(t, gc.AddSubscription(current, nil, table.NewMockChunker("plumbing", 1000)))
 			gsubs := gc.subs.Snapshot()
@@ -849,7 +847,7 @@ func TestFlushConcurrencyClientPlumbing(t *testing.T) {
 func TestBufferedSubscriptionZeroFlushConcurrencyStaysSerial(t *testing.T) {
 	sub, err := NewBufferedSubscription(BufferedSubscriptionConfig{
 		CurrentTable: &table.TableInfo{SchemaName: "test", TableName: "compat"},
-		Applier:      &countingApplier{},
+		Applier:      &applier.MockApplier{},
 		Chunker:      table.NewMockChunker("compat", 1000),
 	})
 	require.NoError(t, err)

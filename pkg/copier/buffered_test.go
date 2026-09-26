@@ -233,10 +233,7 @@ func TestBufferedCopierChunkTimingIncludesCallbackDelay(t *testing.T) {
 	// read could satisfy the timing assertion even if the copier reverted to reporting
 	// read-only time.
 	callbackDelay := 500 * time.Millisecond
-	stubApplier := &delayedCallbackApplier{
-		realApplier: nil, // We'll set this after creating it
-		delay:       callbackDelay,
-	}
+	stubApplier := &delayedCallbackApplier{delay: callbackDelay}
 
 	// Create the real applier
 	realApplier, err := applier.NewSingleTargetApplier(
@@ -244,7 +241,7 @@ func TestBufferedCopierChunkTimingIncludesCallbackDelay(t *testing.T) {
 		applier.NewApplierDefaultConfig(),
 	)
 	require.NoError(t, err)
-	stubApplier.realApplier = realApplier
+	stubApplier.Inner = realApplier
 
 	// Set our stub applier and concurrency in the config
 	cfg.Applier = stubApplier
@@ -319,56 +316,22 @@ func (f *feedbackCapturingChunker) GetFeedbackCalls() []feedbackCall {
 	return result
 }
 
-// delayedCallbackApplier is a stub applier that wraps a real applier
-// and introduces a controlled delay before invoking the callback.
-// This simulates the async write phase taking time.
+// delayedCallbackApplier delays the callback a real applier fires, simulating
+// an async write phase that takes time. Everything else is the shared mock's
+// delegation to the real applier underneath.
 type delayedCallbackApplier struct {
-	realApplier applier.Applier
-	delay       time.Duration
-}
-
-func (d *delayedCallbackApplier) Start(ctx context.Context) error {
-	return d.realApplier.Start(ctx)
-}
-
-func (d *delayedCallbackApplier) Stats() applier.Stats {
-	return d.realApplier.Stats()
+	applier.MockApplier
+	delay time.Duration
 }
 
 func (d *delayedCallbackApplier) Apply(ctx context.Context, chunk *table.Chunk, rows [][]any, callback applier.ApplyCallback) error {
-	// Wrap the callback to add delay
-	wrappedCallback := func(affectedRows int64, err error) {
-		// Introduce delay to simulate write time.
-		// We use time.Sleep instead of a timer with context cancellation because
-		// we want to simulate a real write operation that takes time to complete,
-		// not one that can be canceled mid-flight. This ensures the test accurately
-		// measures the full duration including the simulated write time.
+	return d.MockApplier.Apply(ctx, chunk, rows, func(affectedRows int64, err error) {
+		// time.Sleep rather than a cancellable timer: this stands in for a real
+		// write that takes time to complete, not one that can be abandoned
+		// mid-flight, so the test measures the full duration.
 		time.Sleep(d.delay)
 		callback(affectedRows, err)
-	}
-
-	// Call the real applier with the wrapped callback
-	return d.realApplier.Apply(ctx, chunk, rows, wrappedCallback)
-}
-
-func (d *delayedCallbackApplier) DeleteKeys(ctx context.Context, sourceTable, targetTable *table.TableInfo, keys [][]any, locks []*dbconn.TableLock) (int64, error) {
-	return d.realApplier.DeleteKeys(ctx, sourceTable, targetTable, keys, locks)
-}
-
-func (d *delayedCallbackApplier) UpsertRows(ctx context.Context, mapping *table.ColumnMapping, rows []applier.LogicalRow, locks []*dbconn.TableLock) (int64, error) {
-	return d.realApplier.UpsertRows(ctx, mapping, rows, locks)
-}
-
-func (d *delayedCallbackApplier) Wait(ctx context.Context) error {
-	return d.realApplier.Wait(ctx)
-}
-
-func (d *delayedCallbackApplier) Stop() error {
-	return d.realApplier.Stop()
-}
-
-func (d *delayedCallbackApplier) GetTargets() []applier.Target {
-	return d.realApplier.GetTargets()
+	})
 }
 
 // TestBufferedCopierGeometry tests that the buffered copier correctly handles

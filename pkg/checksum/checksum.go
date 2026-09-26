@@ -503,12 +503,20 @@ func NewChecker(sourceDBs []*sql.DB, chunker table.Chunker, feeds []change.Sourc
 		return nil, errors.New("dbconfig must be non-nil")
 	}
 	switch config.Algorithm {
-	case Lockless:
+	case Single, Lockless:
+		// Both read exactly one source through exactly one feed, and would
+		// otherwise use sourceDBs[0]/feeds[0] and silently ignore the rest.
+		// That matters most for a caller written against the old selection
+		// rule, where a non-nil Applier was what made a checker sharded: the
+		// same call that used to aggregate N sources would now verify one of
+		// them and report the whole topology clean. Rejecting the shape is what
+		// keeps a stale call site from becoming a checksum that passes by not
+		// looking.
 		if len(sourceDBs) != 1 || len(feeds) != 1 {
-			return nil, errors.New("lockless verification requires one source and one feed")
+			return nil, fmt.Errorf("%s verification requires one source and one feed, got %d and %d (Algorithm selects the checker; set it to Sharded to aggregate across sources)", config.Algorithm, len(sourceDBs), len(feeds))
 		}
 		if sourceDBs[0] == nil || feeds[0] == nil {
-			return nil, errors.New("lockless verification requires non-nil source and feed")
+			return nil, fmt.Errorf("%s verification requires a non-nil source and feed", config.Algorithm)
 		}
 	case Sharded:
 		// The applier is how a sharded checker reaches its targets at all —
@@ -517,7 +525,6 @@ func NewChecker(sourceDBs []*sql.DB, chunker table.Chunker, feeds []change.Sourc
 		if config.Applier == nil {
 			return nil, errors.New("sharded verification requires an applier")
 		}
-	case Single:
 	default:
 		return nil, fmt.Errorf("unknown checksum algorithm %d", config.Algorithm)
 	}

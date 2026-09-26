@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/block/spirit/pkg/applier"
 	"github.com/block/spirit/pkg/change"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
@@ -38,7 +39,7 @@ func TestFactoryVerificationResume(t *testing.T) {
 			chunker := &resumeChunker{testChunker: newTestChunker(0), watermark: "verified-prefix"}
 			cfg := NewCheckerDefaultConfig()
 			cfg.Watermark = "saved-prefix"
-			cfg.Applier = &spyApplier{}
+			cfg.Applier = &applier.MockApplier{}
 			switch mode {
 			case "distributed":
 				cfg.Algorithm = Sharded
@@ -119,7 +120,7 @@ func TestFactoryDerivesRepairPolicy(t *testing.T) {
 					// Sharded needs an applier to reach its targets at all, so
 					// it always has one; whether it *repairs* through it is
 					// still FixDifferences' call, same as everywhere else.
-					cfg.Applier = &spyApplier{}
+					cfg.Applier = &applier.MockApplier{}
 				case "lockless":
 					cfg.Algorithm = Lockless
 				}
@@ -144,7 +145,7 @@ func TestFactoryDerivesRepairPolicy(t *testing.T) {
 
 			cfg := newCfg()
 			cfg.FixDifferences = true
-			cfg.Applier = &spyApplier{}
+			cfg.Applier = &applier.MockApplier{}
 			checker, err = NewChecker([]*sql.DB{{}}, newTestChunker(0), []change.Source{&fakeFeed{}}, cfg)
 			require.NoError(t, err)
 			require.NotNil(t, recopierOf(checker))
@@ -173,7 +174,7 @@ func TestFactoryCrossServerTarget(t *testing.T) {
 		cfg := NewCheckerDefaultConfig()
 		cfg.Algorithm = Lockless
 		cfg.FixDifferences = true
-		cfg.Applier = &spyApplier{}
+		cfg.Applier = &applier.MockApplier{}
 		return cfg
 	}
 
@@ -204,6 +205,35 @@ func TestFactoryCrossServerTarget(t *testing.T) {
 			cfg.TargetDB = target
 			_, err := NewChecker([]*sql.DB{source}, newTestChunker(0), []change.Source{&fakeFeed{}}, cfg)
 			require.ErrorContains(t, err, algorithm.String()+" verification cannot span two servers")
+		})
+	}
+}
+
+// TestFactoryRejectsExtraSourcesForSingleSource: before Algorithm existed, a
+// non-nil Applier was what selected the sharded checker. A caller written
+// against that rule passes N sources and an applier — and with Algorithm now
+// deciding, that same call would build a Single checker, verify sourceDBs[0],
+// and report the whole topology clean. Verification that passes by not looking
+// is the one failure mode worth a hard error, so the shape is rejected.
+func TestFactoryRejectsExtraSourcesForSingleSource(t *testing.T) {
+	for _, algorithm := range []Algorithm{Single, Lockless} {
+		t.Run(algorithm.String(), func(t *testing.T) {
+			cfg := NewCheckerDefaultConfig()
+			cfg.Algorithm = algorithm
+			cfg.Applier = &applier.MockApplier{}
+			sources := []*sql.DB{{}, {}}
+			feeds := []change.Source{&fakeFeed{}, &fakeFeed{}}
+
+			_, err := NewChecker(sources, newTestChunker(0), feeds[:1], cfg)
+			require.ErrorContains(t, err, algorithm.String()+" verification requires one source and one feed, got 2 and 1")
+
+			_, err = NewChecker(sources[:1], newTestChunker(0), feeds, cfg)
+			require.ErrorContains(t, err, algorithm.String()+" verification requires one source and one feed, got 1 and 2")
+
+			// A nil entry is the same class of mistake and must not reach the
+			// checker as a usable handle either.
+			_, err = NewChecker([]*sql.DB{nil}, newTestChunker(0), feeds[:1], cfg)
+			require.ErrorContains(t, err, algorithm.String()+" verification requires a non-nil source and feed")
 		})
 	}
 }
@@ -265,7 +295,7 @@ func TestFactoryAlgorithmSelection(t *testing.T) {
 	newCfg := func(a Algorithm) *CheckerConfig {
 		cfg := NewCheckerDefaultConfig()
 		cfg.Algorithm = a
-		cfg.Applier = &spyApplier{}
+		cfg.Applier = &applier.MockApplier{}
 		return cfg
 	}
 	build := func(t *testing.T, cfg *CheckerConfig) (Checker, error) {
@@ -333,7 +363,7 @@ func TestFactoryResumeWithoutChildWatermarks(t *testing.T) {
 			t.Cleanup(func() { require.NoError(t, chunker.Close()) })
 			cfg := NewCheckerDefaultConfig()
 			cfg.Watermark = "{}"
-			cfg.Applier = &spyApplier{}
+			cfg.Applier = &applier.MockApplier{}
 			if optimistic {
 				cfg.Algorithm = Lockless
 			}
