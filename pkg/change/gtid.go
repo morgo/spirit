@@ -50,7 +50,7 @@ type gtidClient struct {
 
 	subs *subscriptionRegistry
 
-	// park / rowWatch back RowParker. The gate holds the reader between
+	// park / rowWatch back VerifyRowAtNextChange. The gate holds the reader between
 	// events; rowWatch is the single armed verification (verifyMu enforces
 	// "single"). See park.go for why one at a time is enough.
 	park     parkGate
@@ -1359,18 +1359,29 @@ func (c *gtidClient) SetWatermarkOptimization(ctx context.Context, newVal bool) 
 	return nil
 }
 
-// dispatchRow delivers one row change to its subscription and then offers it to
-// any armed verification. The order matters: the change must be buffered before
-// the reader parks, because the flush that follows is what puts it on the
-// target. See park.go.
+// dispatchRow delivers one row change to its subscription, cooperating with any
+// armed verification (see park.go). All three steps are ordered, and each one
+// is wrong anywhere else:
+//
+//   - watchRow runs first, so a rewrite of the watched row is counted before it
+//     can be buffered, and therefore before any flush could carry it;
+//   - the change is buffered next, so the flush the verification runs puts it on
+//     the target;
+//   - the reader parks before the verification is released, so nothing past this
+//     event is admitted while the target is read.
+//
+// The rest of this event still dispatches behind the park, which is what the
+// rewrite count covers; no later event does.
 func (c *gtidClient) dispatchRow(sub Subscription, tbl *table.TableInfo, key, image []any, deleted bool) {
+	watched := watchRow(&c.rowWatch, tbl, key, image, deleted)
 	sub.HasChanged(key, image, deleted)
-	observeRow(&c.park, &c.rowWatch, tbl, key, image, deleted)
+	if watched != nil {
+		c.park.park()
+		watched.release()
+	}
 }
 
-var _ RowParker = (*gtidClient)(nil)
-
-// VerifyRowAtNextChange implements RowParker. verifyMu is what makes the single
+// VerifyRowAtNextChange satisfies Source. verifyMu is what makes the single
 // rowWatch slot enough: one verification runs at a time.
 func (c *gtidClient) VerifyRowAtNextChange(ctx context.Context, watch RowWatch, verify RowVerifier) error {
 	c.verifyMu.Lock()

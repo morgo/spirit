@@ -240,7 +240,7 @@ has to hold still.
 stream's own image of it, one row at a time:
 
 1. Ask the feed to wait for the next change to that row and park its reader
-   there (`change.RowParker`). The change is buffered first and the reader parks
+   there (`change.Source.VerifyRowAtNextChange`). The change is buffered first and the reader parks
    immediately after, so nothing past that event is admitted.
 2. Drain the feed, so the target holds exactly that image. This is *not* the
    exported `Flush`, which ends in a `BlockWait` for the reader to reach the
@@ -282,8 +282,8 @@ Three cases still defer rather than settle, and all three are honesty constraint
   be among what is left, and reporting that as a divergence would be reporting
   apply lag, the one mistake this whole path exists to avoid.
 
-A feed that cannot park at all (library callers may have no feed) simply leaves
-the range where it was before settling existed.
+A checker with no feed at all (library callers may have none) simply leaves the
+range where it was before settling existed.
 
 When a chunk's source CRC is stable across the retry window but the target still disagrees, that is a **stable divergence**. How the checker reacts is governed by whether it has a `Recopier`:
 

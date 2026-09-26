@@ -68,10 +68,10 @@ const (
 type settleVerdict int
 
 const (
-	// settleUnavailable means no verdict was reached: the feed cannot park, no
-	// change arrived inside the budget, or a change landed in the middle of the
-	// comparison. The caller defers the range exactly as it did before this
-	// path existed.
+	// settleUnavailable means no verdict was reached: there is no feed, no
+	// change arrived inside the budget, the flush could not land it, or a
+	// change landed in the middle of the comparison. The caller defers the
+	// range exactly as it did before this path existed.
 	settleUnavailable settleVerdict = iota
 
 	// settleClean means every outstanding row was observed holding the image
@@ -98,31 +98,30 @@ func (v settleVerdict) String() string {
 
 // rowSettler performs the escalation described at the top of this file. It is
 // deliberately a type of its own rather than more methods on LocklessChecker:
-// settling needs the source, a feed that can park, and somewhere to log, and
-// nothing else about a running check.
+// settling needs the source, the feed, and somewhere to log, and nothing else
+// about a running check.
 type rowSettler struct {
 	sourceDB *sql.DB
-	parker   change.RowParker
+	feed     change.Source
 	logger   *slog.Logger
 }
 
-// newRowSettler returns nil when the feed cannot park, which is not a failure:
-// parking is the whole mechanism, library callers may have no feed at all, and
-// a settler that cannot park has nothing to offer over the poll the caller has
-// already been doing. A nil settler answers settleUnavailable to everything.
+// newRowSettler returns nil when there is no feed. That is not a failure — the
+// feed parking at the watched change is the whole mechanism, and library
+// callers may have none — so a nil settler answers settleUnavailable to
+// everything and the caller defers exactly as it did before settling existed.
 func newRowSettler(sourceDB *sql.DB, feed change.Source, logger *slog.Logger) *rowSettler {
-	parker, ok := feed.(change.RowParker)
-	if !ok {
+	if feed == nil {
 		return nil
 	}
-	return &rowSettler{sourceDB: sourceDB, parker: parker, logger: logger}
+	return &rowSettler{sourceDB: sourceDB, feed: feed, logger: logger}
 }
 
 // settle returns settleUnavailable rather than an error for every condition
-// that only means "not this time" — a feed that cannot park, a row that went
-// quiet, a change that landed mid-comparison — because the caller's response to
-// all of them is the deferral it would have done anyway. An error is reserved
-// for a read that failed in a way worth surfacing.
+// that only means "not this time" — a row that went quiet, a flush that could
+// not land, a change that arrived mid-comparison — because the caller's
+// response to all of them is the deferral it would have done anyway. An error
+// is reserved for a read that failed in a way worth surfacing.
 func (s *rowSettler) settle(ctx context.Context, snapshot *hotSnapshot) (settleVerdict, error) {
 	if s == nil || len(snapshot.pending) == 0 {
 		return settleUnavailable, nil
@@ -165,7 +164,7 @@ func (s *rowSettler) settleRow(ctx, parent context.Context, snapshot *hotSnapsho
 	defer cancel()
 
 	var verdict settleVerdict
-	err = s.parker.VerifyRowAtNextChange(rowCtx, change.RowWatch{
+	err = s.feed.VerifyRowAtNextChange(rowCtx, change.RowWatch{
 		Schema: chunk.Table.SchemaName,
 		Table:  chunk.Table.TableName,
 		Match:  matcher,

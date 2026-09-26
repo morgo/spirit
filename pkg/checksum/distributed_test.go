@@ -40,8 +40,16 @@ func (s *noopChangeSource) SetWatermarkOptimization(context.Context, bool) error
 func (s *noopChangeSource) StartPeriodicFlush(context.Context, time.Duration) {}
 func (s *noopChangeSource) StopPeriodicFlush()                                {}
 func (s *noopChangeSource) AllChangesFlushed() bool                           { return true }
-func (s *noopChangeSource) Stop()                                             {}
-func (s *noopChangeSource) Close()                                            {}
+
+// VerifyRowAtNextChange satisfies change.Source as a stream on which no
+// matching change ever arrives: the caller's budget ends the wait, which is
+// what a row that went quiet looks like.
+func (s *noopChangeSource) VerifyRowAtNextChange(ctx context.Context, _ change.RowWatch, _ change.RowVerifier) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+func (s *noopChangeSource) Stop()  {}
+func (s *noopChangeSource) Close() {}
 
 func TestDistributedCheckerHonorsYieldTimeoutConfig(t *testing.T) {
 	db, err := sql.Open("block-mysql", testutils.DSN())

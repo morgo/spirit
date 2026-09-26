@@ -67,6 +67,13 @@ func TestRowWaiterObserve(t *testing.T) {
 	}
 
 	require.True(t, w.observe("test", "t1", []any{int64(1)}, []any{int64(1), "first"}, false))
+	select {
+	case <-w.ch:
+		t.Fatal("observe must not wake the verification: the change is not buffered yet")
+	default:
+	}
+	w.release()
+	w.release() // the caller cannot know it is the first; releasing twice is safe
 	<-w.ch
 	key, image, deleted, rewritten := w.result()
 	require.Equal(t, []any{int64(1)}, key)
@@ -95,10 +102,11 @@ type verifyHarness struct {
 	// deliver the change with nobody listening, which is the ordering bug the
 	// arm-before-unpark step exists to prevent — so the harness must not
 	// reproduce it by accident.
-	armed   chan struct{}
-	once    sync.Once
-	flushes atomic.Int64
-	flushFn func(context.Context) error
+	armed    chan struct{}
+	once     sync.Once
+	buffered [][]any
+	flushes  atomic.Int64
+	flushFn  func(context.Context) error
 }
 
 func newVerifyHarness() *verifyHarness {
@@ -118,9 +126,14 @@ func (h *verifyHarness) run(ctx context.Context, watch RowWatch, verify RowVerif
 		}, watch, verify)
 }
 
-// dispatch is what the reader does: buffer the change, then offer it.
+// dispatch is what a client's dispatchRow does, in the same order.
 func (h *verifyHarness) dispatch(key, image []any, deleted bool) {
-	observeRow(&h.gate, &h.slot, &table.TableInfo{SchemaName: "test", TableName: "t1"}, key, image, deleted)
+	watched := watchRow(&h.slot, &table.TableInfo{SchemaName: "test", TableName: "t1"}, key, image, deleted)
+	h.buffered = append(h.buffered, key)
+	if watched != nil {
+		h.gate.park()
+		watched.release()
+	}
 }
 
 // readerParked reports whether a reader arriving at the gate right now would be
@@ -260,40 +273,72 @@ func TestFlushParked(t *testing.T) {
 		func() bool { return true }), boom)
 }
 
-// TestDispatchRowOrdersBufferBeforePark is the ordering both clients depend on:
-// the change has to be in the subscription before the reader parks, because the
-// flush that follows the park is what puts it on the target. Parking first
-// would leave the verification comparing against an image nothing applied.
-func TestDispatchRowOrdersBufferBeforePark(t *testing.T) {
+// TestDispatchRowOrdering pins the order both clients dispatch in, because each
+// step being elsewhere is a different wrong answer.
+//
+// The subtle one is the rewrite: a verification reads the rewrite count *after*
+// its flush, so a second change to the watched row must be counted before it
+// can be buffered. Counting it afterwards leaves a window where the flush
+// carries the newer image to the target while the count still reads zero — and
+// the verification then compares the target against an image it has already
+// moved past and calls it a divergence.
+func TestDispatchRowOrdering(t *testing.T) {
 	tbl := &table.TableInfo{SchemaName: "test", TableName: "t1"}
-	for name, dispatch := range map[string]func(sub Subscription){
-		"binlog": func(sub Subscription) {
+	for name, dispatch := range map[string]func(sub Subscription, watch *rowWaiter) *parkGate{
+		"binlog": func(sub Subscription, watch *rowWaiter) *parkGate {
 			c := &binlogClient{subs: newSubscriptionRegistry()}
-			c.rowWatch.Store(newRowWaiter(anyRow))
+			c.rowWatch.Store(watch)
 			c.dispatchRow(sub, tbl, []any{int64(1)}, []any{int64(1)}, false)
-			require.True(t, gateIsParked(&c.park), "the matching change must park the reader")
+			return &c.park
 		},
-		"gtid": func(sub Subscription) {
+		"gtid": func(sub Subscription, watch *rowWaiter) *parkGate {
 			c := &gtidClient{subs: newSubscriptionRegistry()}
-			c.rowWatch.Store(newRowWaiter(anyRow))
+			c.rowWatch.Store(watch)
 			c.dispatchRow(sub, tbl, []any{int64(1)}, []any{int64(1)}, false)
-			require.True(t, gateIsParked(&c.park), "the matching change must park the reader")
+			return &c.park
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			sub := &recordingSubscription{}
-			dispatch(sub)
-			require.Equal(t, 1, sub.changes, "the change must reach the subscription")
+			watch := newRowWaiter(anyRow)
+
+			// The firing change: it must be buffered before anything wakes the
+			// verification, or the flush would run without it.
+			first := &recordingSubscription{onChange: func() {
+				select {
+				case <-watch.ch:
+					t.Error("the verification was released before the change was buffered")
+				default:
+				}
+			}}
+			gate := dispatch(first, watch)
+			require.Equal(t, 1, first.changes, "the change must reach the subscription")
+			require.True(t, gateIsParked(gate), "the matching change must park the reader")
+			<-watch.ch
+
+			// A rewrite: counted before it is buffered, so a flush cannot carry
+			// it while the count still reads zero.
+			second := &recordingSubscription{onChange: func() {
+				_, _, _, rewritten := watch.result()
+				require.True(t, rewritten, "a rewrite must be counted before it can be buffered")
+			}}
+			dispatch(second, watch)
+			require.Equal(t, 1, second.changes)
 		})
 	}
 }
 
 type recordingSubscription struct {
 	Subscription
-	changes int
+	changes  int
+	onChange func()
 }
 
-func (s *recordingSubscription) HasChanged([]any, []any, bool) { s.changes++ }
+func (s *recordingSubscription) HasChanged([]any, []any, bool) {
+	s.changes++
+	if s.onChange != nil {
+		s.onChange()
+	}
+}
 
 // TestVerifyRowAtNextChangeLive runs the whole mechanism against a real binlog
 // stream and a row that is being written continuously — the case it exists for,

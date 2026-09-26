@@ -14,8 +14,7 @@ import (
 )
 
 // parkedEvent is one scripted change: the event the reader would have parked
-// at. err, if set, is delivered instead, which is how a rewrite or a feed that
-// cannot park is expressed.
+// at. err, if set, is delivered instead, which is how a rewrite is expressed.
 type parkedEvent struct {
 	key     []any
 	image   []any
@@ -23,8 +22,8 @@ type parkedEvent struct {
 	err     error
 }
 
-// parkingFeed is a change.Source that can also park, standing in for the real
-// clients. Each call to VerifyRowAtNextChange consumes the scripted event whose
+// parkingFeed scripts the change.Source half of a verification, standing in for
+// the real clients. Each call to VerifyRowAtNextChange consumes the scripted event whose
 // key the watch recognises — order-independent, because which row the settler
 // asks about first is map iteration order — and runs the feed's flush before
 // handing it to the verifier, in the order change.verifyRowAtNextChange does.
@@ -43,8 +42,6 @@ type parkingFeed struct {
 	rewriteAfter int
 	watches      []change.RowWatch
 }
-
-var _ change.RowParker = (*parkingFeed)(nil)
 
 func (f *parkingFeed) VerifyRowAtNextChange(ctx context.Context, watch change.RowWatch, verify change.RowVerifier) error {
 	f.mu.Lock()
@@ -265,26 +262,19 @@ func TestSettleHotSnapshotBanksProgress(t *testing.T) {
 	require.Len(t, snapshot.pending, 1, "the row that was verified must not be waited for again")
 }
 
-// TestSettleHotSnapshotWithoutParkerIsUnavailable: the whole mechanism is the
-// feed holding its reader at a chosen event. A feed that cannot do that, or no
-// feed at all, leaves the range exactly where it was before settling existed —
-// and must not produce a verdict from a comparison nothing was holding still.
-func TestSettleHotSnapshotWithoutParkerIsUnavailable(t *testing.T) {
-	for name, feed := range map[string]change.Source{
-		"no feed":     nil,
-		"cannot park": &fakeFeed{},
-	} {
-		t.Run(name, func(t *testing.T) {
-			db, chunk := snapshotTestTables(t, "id INT PRIMARY KEY, value INT", []string{"id"})
-			snapshotExec(t, db, "INSERT INTO src VALUES (1,10),(2,20)")
-			snapshotExec(t, db, "INSERT INTO dst VALUES (1,10),(2,99)")
-			snapshot := pendingSnapshot(t, db, chunk, 1)
+// TestSettleHotSnapshotWithoutFeedIsUnavailable: the feed parking at the
+// watched change is the whole mechanism, and library callers may have no feed.
+// Without one the range stays exactly where it was before settling existed,
+// rather than getting a verdict from a comparison nothing was holding still.
+func TestSettleHotSnapshotWithoutFeedIsUnavailable(t *testing.T) {
+	db, chunk := snapshotTestTables(t, "id INT PRIMARY KEY, value INT", []string{"id"})
+	snapshotExec(t, db, "INSERT INTO src VALUES (1,10),(2,20)")
+	snapshotExec(t, db, "INSERT INTO dst VALUES (1,10),(2,99)")
+	snapshot := pendingSnapshot(t, db, chunk, 1)
 
-			verdict, err := settleTestSettler(t, db, feed).settle(t.Context(), snapshot)
-			require.NoError(t, err)
-			require.Equal(t, settleUnavailable, verdict)
-		})
-	}
+	verdict, err := settleTestSettler(t, db, nil).settle(t.Context(), snapshot)
+	require.NoError(t, err)
+	require.Equal(t, settleUnavailable, verdict)
 }
 
 // TestSettleHotSnapshotPropagatesCancellation: the settle path swallows every

@@ -40,10 +40,6 @@ import (
 // cannot fire and the verification times out and defers — correct, if useless,
 // and the caller was already deferring the range anyway.
 
-// ErrParkUnsupported is returned by a Source that cannot park its reader.
-// Callers treat it as "not this time" rather than as a failure.
-var ErrParkUnsupported = errors.New("change: source does not support parking")
-
 // ErrRowRewritten means the watched row was written again before the
 // verification could read the target, so the image the caller was handed is no
 // longer what the target holds. The caller should retry.
@@ -69,24 +65,6 @@ type RowWatch struct {
 // nothing beyond it. Returning an error fails the verification; the reader is
 // unparked either way.
 type RowVerifier func(ctx context.Context, key []any, image []any, deleted bool) error
-
-// RowParker is the optional capability a Source exposes when it can hold its
-// reader at a chosen event. It is deliberately not part of Source: a source that
-// cannot do this is not broken, and its callers fall back to what they did
-// before parking existed.
-type RowParker interface {
-	// VerifyRowAtNextChange waits for the next change to a row matching watch,
-	// parks the reader at that event, flushes so the target holds its image,
-	// and calls verify with it. The reader is unparked before returning,
-	// whatever the outcome.
-	//
-	// It returns ErrRowRewritten if a further change to the same row was
-	// admitted before verify could run — the image handed over would no longer
-	// be what the target holds — and ctx.Err() if no change arrived in time.
-	// A row that is genuinely hot produces one almost immediately; a row that
-	// does not is not the case this exists for.
-	VerifyRowAtNextChange(ctx context.Context, watch RowWatch, verify RowVerifier) error
-}
 
 // parkGate holds a reader goroutine between events. It is advisory in one
 // direction only: arming it does not interrupt an event already being
@@ -145,25 +123,33 @@ func (g *parkGate) wait(ctx context.Context) error {
 type rowWaiter struct {
 	watch RowWatch
 
-	mu      sync.Mutex
-	fired   bool
-	key     []any
-	image   []any
-	deleted bool
-	// rewrites counts matching changes seen after the one that fired. Any of
-	// them makes the captured image stale, because the flush that follows will
-	// carry the newer one to the target.
+	mu       sync.Mutex
+	fired    bool
+	key      []any
+	image    []any
+	deleted  bool
 	rewrites int
-	ch       chan struct{}
+
+	releaseOnce sync.Once
+	ch          chan struct{}
 }
 
 func newRowWaiter(watch RowWatch) *rowWaiter {
 	return &rowWaiter{watch: watch, ch: make(chan struct{})}
 }
 
-// observe is called for every row change dispatched to a subscription. It
-// returns true when this change is the one being waited for, which is the
-// caller's signal to park the reader.
+// observe is called for every row change *before* it is buffered, and reports
+// whether the watch is interested in it.
+//
+// Recording before the buffer is what makes the rewrite count trustworthy, and
+// the ordering is load-bearing. A verification reads result() after its flush.
+// If a second change to the watched key were recorded after being buffered, a
+// flush could carry it to the target while result() still read zero rewrites —
+// and the comparison would then be against an image the target has already
+// moved past, reported as a divergence. Recording first makes that impossible:
+// anything a flush can carry was counted before it could be carried.
+//
+// Waking the verification is deliberately *not* done here — see release.
 func (w *rowWaiter) observe(schema, tbl string, key, image []any, deleted bool) bool {
 	if w.watch.Schema != schema || w.watch.Table != tbl || w.watch.Match == nil || !w.watch.Match(key) {
 		return false
@@ -171,13 +157,23 @@ func (w *rowWaiter) observe(schema, tbl string, key, image []any, deleted bool) 
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.fired {
+		// rewrites counts matching changes after the one that fired. Any of
+		// them makes the captured image stale, because a flush that carries
+		// the newer one moves the target past what we were handed.
 		w.rewrites++
 		return true
 	}
 	w.fired = true
 	w.key, w.image, w.deleted = key, image, deleted
-	close(w.ch)
 	return true
+}
+
+// release wakes the verification, and is called only once the change has been
+// buffered and the reader parked. Doing it from observe instead would let the
+// verification flush before the watched change was in the buffer, so the target
+// would not hold the image it was about to be compared against.
+func (w *rowWaiter) release() {
+	w.releaseOnce.Do(func() { close(w.ch) })
 }
 
 // result reports what fired, and whether a later change made it stale.
@@ -220,7 +216,8 @@ func flushParked(ctx context.Context, flush func(context.Context) error, allFlus
 	return ErrFlushIncomplete
 }
 
-// verifyRowAtNextChange is the shared body of RowParker for both clients. The
+// verifyRowAtNextChange is the shared body of Source.VerifyRowAtNextChange for
+// both clients. The
 // client supplies its own gate, waiter slot and flush, because those are the
 // only parts that differ between them.
 //
@@ -266,17 +263,21 @@ func verifyRowAtNextChange(
 	return verify(ctx, key, image, deleted)
 }
 
-// observeRow notifies an armed verification about a row change that has just
-// been buffered, and parks the reader when it is the change being waited for.
-// Parking here rather than after the whole event is what bounds the flush: the
-// rest of this event still dispatches, which the rewrite check covers, but no
-// later event does.
-func observeRow(gate *parkGate, slot *atomic.Pointer[rowWaiter], tbl *table.TableInfo, key, image []any, deleted bool) {
+// watchRow offers a row change to an armed verification *before* the change is
+// buffered, and returns the waiter when it is one being watched. The caller
+// must then buffer the change, park the reader, and call release — in that
+// order. dispatchRow on each client is the only caller; see there for why each
+// step is where it is.
+//
+// Returning nil (no verification armed, or not this row) is the overwhelmingly
+// common case, and costs one atomic load.
+func watchRow(slot *atomic.Pointer[rowWaiter], tbl *table.TableInfo, key, image []any, deleted bool) *rowWaiter {
 	w := slot.Load()
 	if w == nil || tbl == nil {
-		return
+		return nil
 	}
-	if w.observe(tbl.SchemaName, tbl.TableName, key, image, deleted) {
-		gate.park()
+	if !w.observe(tbl.SchemaName, tbl.TableName, key, image, deleted) {
+		return nil
 	}
+	return w
 }

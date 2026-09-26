@@ -165,6 +165,20 @@ type Source interface {
 	// "have all received events been applied?".
 	AllChangesFlushed() bool
 
+	// VerifyRowAtNextChange waits for the next change to a row matching watch,
+	// parks the reader at that event, flushes so the target holds its image,
+	// and calls verify with it. The reader is unparked before returning,
+	// whatever the outcome. See park.go for what this is for and why the image
+	// a change carries is a sound basis for comparison.
+	//
+	// It returns ErrRowRewritten if a further change to the same row was
+	// admitted before verify could run — the image handed over would no longer
+	// be what the target holds — ErrFlushIncomplete if the flush could not
+	// land it, and ctx.Err() if no change arrived in time. A row that is
+	// genuinely hot produces one almost immediately; a row that does not is
+	// not the case this exists for.
+	VerifyRowAtNextChange(ctx context.Context, watch RowWatch, verify RowVerifier) error
+
 	// Stop ends delivery of events to subscriptions. Everything else stays
 	// live: the source keeps reading and tracking its position, and Flush /
 	// BlockWait / AllChangesFlushed / Position keep working. Close, not Stop,

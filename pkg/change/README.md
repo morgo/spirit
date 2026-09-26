@@ -427,27 +427,30 @@ Override via `ClientConfig.SubscriptionSoftLimitBytes`; pass a negative value to
 
 **Limitation — binlog retention:** while parked, the binlog reader makes no progress. If the source rotates past the reader's current position (`binlog_expire_logs_seconds`) before the buffer drains, the reader will fail to resume and the migration will abort. Tune the soft limit and source retention together for sustained high-write workloads.
 
-### Parking at a row change (`RowParker`)
+### Parking at a row change (`VerifyRowAtNextChange`)
 
-`RowParker` is an optional capability, like `Paced` and `StatusReporter` — both clients implement it, and a `Source` that does not is not broken. It exists for one caller: the lockless checksum, verifying a row that is written continuously.
+`VerifyRowAtNextChange` is part of the `Source` contract: every source must be able to hold its reader at a chosen event. It exists for one caller — the lockless checksum, verifying a row that is written continuously.
 
 Such a row cannot be verified by reading both sides. Any SQL comparison is between a source image at one position and a target state at a later one, and closing that window means stopping the writes. But with `binlog_row_image=FULL`, an event's after-image **is** the source's value for that row at that position, so the verification becomes:
 
 ```
 VerifyRowAtNextChange(ctx, watch, verify):
   arm the watch, then release the reader
-  on the first change matching watch:
-      buffer it into the subscription, then park the reader
+  on a change matching watch, dispatchRow does, in this order:
+      record it against the watch
+      buffer it into the subscription
+      park the reader, then release the verification
   drain the buffer (not Flush — see below), so the target holds exactly that image
   call verify(key, image, deleted) with the reader still parked
   unpark, whatever happened
 ```
 
-Three details carry the correctness:
+Four details carry the correctness:
 
 - **The gate is checked after the event is read from the stream but before it is acted on**, so parking never consumes and discards an event. Dispatch resumes with it.
 - **The drain is not `Flush`.** `Flush` ends in `BlockWait`, which waits for the reader to reach the source's *current* position — and the reader is parked, by us, precisely so nothing past the watched event is admitted. That wait could never succeed. `flushParked` applies what is buffered, stops, and returns `ErrFlushIncomplete` if the buffer will not empty; the caller must then retry rather than treat a target difference as a divergence.
 - **A multi-row event keeps dispatching after the gate arms**, so a second change to the same key can still land and the following drain would carry it. The waiter counts those and the verification returns `ErrRowRewritten` instead of comparing against a stale image.
+- **Each of `dispatchRow`'s three steps is wrong anywhere else.** The verification reads the rewrite count *after* its flush, so a rewrite must be recorded before it can be buffered — otherwise a flush could carry the newer image to the target while the count still read zero, and the comparison would report a divergence against an image the target had already moved past. Equally, the verification must not be released until after the change is buffered, or the flush would run without it. `TestDispatchRowOrdering` pins both.
 
 One verification runs at a time (`verifyMu`), which is what makes a single watch slot enough. Note this park is unrelated to the [memory backpressure](#memory-backpressure) park: that one blocks inside `HasChanged`, so while a subscription is over its soft limit the watch cannot fire and the verification times out and defers.
 

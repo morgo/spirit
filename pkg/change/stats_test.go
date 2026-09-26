@@ -46,8 +46,16 @@ func (f *statsFeed) SetWatermarkOptimization(context.Context, bool) error       
 func (f *statsFeed) StartPeriodicFlush(context.Context, time.Duration)                  {}
 func (f *statsFeed) StopPeriodicFlush()                                                 {}
 func (f *statsFeed) AllChangesFlushed() bool                                            { return true }
-func (f *statsFeed) Stop()                                                              {}
-func (f *statsFeed) Close()                                                             {}
+
+// VerifyRowAtNextChange satisfies Source as a stream on which no
+// matching change ever arrives: the caller's budget ends the wait, which is
+// what a row that went quiet looks like.
+func (f *statsFeed) VerifyRowAtNextChange(ctx context.Context, _ RowWatch, _ RowVerifier) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+func (f *statsFeed) Stop()  {}
+func (f *statsFeed) Close() {}
 
 // pinClock freezes the clock String() measures its ages against and returns the
 // instant it froze at, so a test can build timestamps relative to it and assert

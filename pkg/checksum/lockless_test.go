@@ -660,8 +660,16 @@ func (f *fakeFeed) SetWatermarkOptimization(context.Context, bool) error { retur
 func (f *fakeFeed) StartPeriodicFlush(context.Context, time.Duration)    {}
 func (f *fakeFeed) StopPeriodicFlush()                                   {}
 func (f *fakeFeed) AllChangesFlushed() bool                              { return true }
-func (f *fakeFeed) Stop()                                                {}
-func (f *fakeFeed) Close()                                               {}
+
+// VerifyRowAtNextChange satisfies change.Source as a stream on which no
+// matching change ever arrives: the caller's budget ends the wait, which is
+// what a row that went quiet looks like.
+func (f *fakeFeed) VerifyRowAtNextChange(ctx context.Context, _ change.RowWatch, _ change.RowVerifier) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+func (f *fakeFeed) Stop()  {}
+func (f *fakeFeed) Close() {}
 
 // TestFatalDivergenceReconcilesApplyLag is the regression test for the
 // false-positive cutover abort: a chunk that is merely behind on applying

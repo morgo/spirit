@@ -197,8 +197,16 @@ func (f *fakeChangeSource) SetWatermarkOptimization(_ context.Context, _ bool) e
 func (f *fakeChangeSource) StartPeriodicFlush(_ context.Context, _ time.Duration) {}
 func (f *fakeChangeSource) StopPeriodicFlush()                                    {}
 func (f *fakeChangeSource) AllChangesFlushed() bool                               { return !f.notFlushed.Load() }
-func (f *fakeChangeSource) Stop()                                                 {}
-func (f *fakeChangeSource) Close()                                                { f.closed.Store(true) }
+
+// VerifyRowAtNextChange satisfies change.Source as a stream on which no
+// matching change ever arrives: the caller's budget ends the wait, which is
+// what a row that went quiet looks like.
+func (f *fakeChangeSource) VerifyRowAtNextChange(ctx context.Context, _ change.RowWatch, _ change.RowVerifier) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+func (f *fakeChangeSource) Stop()  {}
+func (f *fakeChangeSource) Close() { f.closed.Store(true) }
 
 // TestCloseRunsAllClosersOnError pins the Close() aggregation contract:
 // every cleanup step runs even when an early one fails. Previously the
