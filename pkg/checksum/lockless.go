@@ -427,12 +427,6 @@ type LocklessChecker struct {
 	firstCleanPassAt time.Time
 	nextPassAt       time.Time
 
-	// resumeMu guards the resume-watermark pair below. ResumeWatermark is
-	// called from the caller's checkpoint goroutine while the pass loop runs.
-	resumeMu        sync.Mutex
-	resumeWatermark string
-	resumeFrozen    bool
-
 	firstCleanPassOnce sync.Once
 	firstCleanPassCh   chan struct{}
 
@@ -714,11 +708,10 @@ func (c *LocklessChecker) run(ctx context.Context, untilClean bool) error {
 				c.nextPassAt = time.Time{}
 				c.statsMu.Unlock()
 			}
-			// Freeze the resume evidence before Reset discards the tracker
-			// state it is read from. Done here, not in ResumeWatermark, because
-			// Reset runs before currentPass advances: a reader could not tell
-			// a pre-Reset watermark from a post-Reset one on its own.
-			c.freezeResumeWatermark()
+			// Note that this discards the resume evidence published so far:
+			// ResumeWatermark reports the current walk's verified prefix, and
+			// the new pass has not verified anything yet. That is deliberate —
+			// see ResumeWatermark.
 			if err := c.chunker.Reset(); err != nil {
 				return fmt.Errorf("reset chunker for pass %d: %w", passNum, err)
 			}
@@ -1478,53 +1471,24 @@ func (c *LocklessChecker) feedbackResolved(res *workResult) {
 	c.chunker.Feedback(res.item.chunk, duration, rows)
 }
 
-// ResumeWatermark returns the verified-clean prefix of the table: every row
-// below it was read on both sides and observed equal, so a resumed run may
-// start there instead of at the beginning. It is the direct consequence of
-// feedbackResolved — see that method for why the chunker's low watermark
-// carries this meaning at all.
+// ResumeWatermark returns the verified-clean prefix of the table for the walk
+// now in progress: every row below it was read on both sides and observed
+// equal, so a resumed run may start there instead of at the beginning. It is
+// the direct consequence of feedbackResolved — see that method for why the
+// chunker's low watermark carries this meaning at all.
 //
-// Only the first pass produces evidence. A second pass only happens because the
-// first one repaired or deferred something, and it re-walks from the start of
-// the table, so its low watermark says nothing about the prefix; the first
-// pass's answer is frozen at that point and reported unchanged. That is still
-// sound evidence: the prefix was verified equal, and the change feed has been
-// keeping it equal ever since.
+// A second pass resets the chunker and so resets this to nothing. The prefix
+// the first pass verified is deliberately not carried over: the second pass
+// exists because the first one repaired or deferred something, and if it now
+// fails to re-verify a range the first pass verified, that range stopped being
+// equal — exactly the case where reporting the older, further-along answer
+// would let a resume skip the damage.
 //
 // A watermark that is not yet available (no chunk has resolved) surfaces as
 // table.ErrWatermarkNotReady from the chunker, which the caller treats as
 // "nothing to persist".
 func (c *LocklessChecker) ResumeWatermark() (string, error) {
-	c.resumeMu.Lock()
-	defer c.resumeMu.Unlock()
-	if c.resumeFrozen {
-		return c.resumeWatermark, nil
-	}
-	wm, err := c.chunker.GetLowWatermark()
-	if err != nil {
-		return "", err
-	}
-	c.resumeWatermark = wm
-	return wm, nil
-}
-
-// freezeResumeWatermark pins the evidence reported from here on. Called once,
-// immediately before the chunker is reset for a second pass.
-func (c *LocklessChecker) freezeResumeWatermark() {
-	c.resumeMu.Lock()
-	defer c.resumeMu.Unlock()
-	if c.resumeFrozen {
-		return
-	}
-	// An unavailable watermark freezes as "no evidence" rather than keeping the
-	// last successfully read one: this runs before any Reset, so a failure here
-	// is a real failure to read, not a race with one.
-	if wm, err := c.chunker.GetLowWatermark(); err == nil {
-		c.resumeWatermark = wm
-	} else {
-		c.resumeWatermark = ""
-	}
-	c.resumeFrozen = true
+	return c.chunker.GetLowWatermark()
 }
 
 // bucketPassed records a passed chunk into the per-pass attempts histogram.

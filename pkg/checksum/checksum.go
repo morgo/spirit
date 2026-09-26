@@ -229,10 +229,12 @@ func StatusSuffix(c Checker) string {
 
 type CheckerConfig struct {
 	// Lockless selects finite optimistic verification on one server. Common
-	// concurrency, throttling, autoscaling and logging fields below apply;
-	// retry/splitting and divergence policy come from this configuration.
-	// Snapshot repair and yield settings do not apply. Watermark is ignored
-	// until optimistic verification supports durable resume evidence.
+	// concurrency, throttling, autoscaling and logging fields below apply, and
+	// so do FixDifferences, RepairApplier, MaxRetries and Watermark — see each
+	// field. Retry and splitting policy come from this configuration; repair
+	// policy does not (Recopier and DivergenceIsFatal are derived from
+	// FixDifferences and are rejected here). YieldTimeout does not apply:
+	// optimistic reads hold no snapshot to yield.
 	Lockless    *LocklessCheckerConfig
 	Concurrency int
 	// TargetChunkTime is reporting-only: it is the target the chunk-size
@@ -244,9 +246,18 @@ type CheckerConfig struct {
 	DBConfig        *dbconn.DBConfig
 	Logger          *slog.Logger
 	FixDifferences  bool
-	Watermark       string // optional verification watermark; leave the chunker unopened when supplying it
-	MaxRetries      int
-	Applier         applier.Applier // optional; indicates it is a distributed checker
+	// Watermark is verification evidence from a previous run: every row below
+	// it was read on both sides and observed equal. Supplying it makes the
+	// factory open the chunker there, so verification resumes rather than
+	// restarting; leave the chunker unopened when supplying it. Every algorithm
+	// honours it — the claim it encodes does not depend on which checker
+	// observed it. Take it from Checker.ResumeWatermark, never from the
+	// chunker's traversal watermark.
+	Watermark string
+	// MaxRetries bounds whole-run attempts for every algorithm: a transient
+	// infrastructure failure costs an attempt rather than the migration.
+	MaxRetries int
+	Applier    applier.Applier // optional; indicates it is a distributed checker
 	// RepairApplier is the write path the single-server checker rewrites a
 	// mismatched chunk through (see SingleChecker.replaceChunk). Required for
 	// that checker, whether or not FixDifferences is set — a checker that cannot

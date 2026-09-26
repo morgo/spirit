@@ -82,7 +82,7 @@ func (f *parityFixture) start(t *testing.T, name string) {
 // and a RepairApplier are always supplied (pkg/migration passes both
 // unconditionally), and `lockless` selects the experimental algorithm exactly
 // as Migration.EnableExperimentalLocklessChecksum does.
-func (f *parityFixture) checker(t *testing.T, lockless bool) Checker {
+func (f *parityFixture) checker(t *testing.T, lockless bool, opts ...func(*CheckerConfig)) Checker {
 	t.Helper()
 	config := NewCheckerDefaultConfig()
 	config.Concurrency = 2
@@ -99,6 +99,9 @@ func (f *parityFixture) checker(t *testing.T, lockless bool) Checker {
 			// here so a confirmed divergence surfaces within the test budget.
 			RetryDelay: 100 * time.Millisecond,
 		}
+	}
+	for _, opt := range opts {
+		opt(config)
 	}
 	checker, err := NewChecker([]*sql.DB{f.db}, f.chunker, []change.Source{f.feed}, config)
 	require.NoError(t, err)
@@ -240,12 +243,42 @@ func TestParityResumeWatermark(t *testing.T) {
 	}
 }
 
-// A chunk that had to be repaired is never reported to the chunker, so the
-// resume watermark stops below it: a resumed run re-verifies from there rather
-// than skipping the range that was just rewritten. With the diverged row at the
-// very first chunk, that means no evidence at all.
-func TestLocklessRepairParksResumeWatermark(t *testing.T) {
+// A repaired chunk is not resume evidence. The repair happens after the read
+// that condemned the chunk, so nothing has compared source and target since;
+// publishing it would let a resume skip a range no one has verified.
+//
+// The run is capped at the repairing pass so the assertion lands on that pass
+// rather than on the clean re-verification that normally follows it.
+func TestLocklessRepairIsNotResumeEvidence(t *testing.T) {
 	name := "parity_repair_wm"
+	f := newParityFixture(t, name, "id INT NOT NULL AUTO_INCREMENT PRIMARY KEY, b INT NOT NULL")
+	testutils.RunSQL(t, fmt.Sprintf("INSERT INTO %s (b) SELECT 1 FROM dual", name))
+	for range 10 {
+		testutils.RunSQL(t, fmt.Sprintf("INSERT INTO %s (b) SELECT 1 FROM %s", name, name))
+	}
+	testutils.RunSQL(t, fmt.Sprintf("INSERT INTO %s SELECT * FROM %s", utils.NewTableName(name), name))
+	testutils.RunSQL(t, fmt.Sprintf("UPDATE %s SET b = 99 WHERE id = 1", utils.NewTableName(name)))
+	f.start(t, name)
+
+	checker := f.checker(t, true, func(c *CheckerConfig) { c.Lockless.MaxPasses = 1 })
+	require.ErrorIs(t, checker.Run(t.Context()), ErrVerificationUnresolved,
+		"the repairing pass is not clean, and the budget stops the re-verification")
+
+	wm, err := checker.ResumeWatermark()
+	require.NoError(t, err)
+	require.Empty(t, wm, "the first chunk was repaired, so nothing below it is verified evidence")
+
+	var b int
+	require.NoError(t, f.db.QueryRowContext(t.Context(),
+		"SELECT b FROM "+utils.NewTableName(name)+" WHERE id = 1").Scan(&b))
+	require.Equal(t, 1, b, "the diverged row was repaired from the source")
+}
+
+// After a run that repaired and then re-verified cleanly, the watermark is
+// evidence from the clean pass: every chunk below it was compared equal after
+// the repair landed.
+func TestLocklessRepairWatermarkIsCleanPassEvidence(t *testing.T) {
+	name := "parity_repair_wm2"
 	f := newParityFixture(t, name, "id INT NOT NULL AUTO_INCREMENT PRIMARY KEY, b INT NOT NULL")
 	testutils.RunSQL(t, fmt.Sprintf("INSERT INTO %s (b) SELECT 1 FROM dual", name))
 	for range 10 {
@@ -257,12 +290,8 @@ func TestLocklessRepairParksResumeWatermark(t *testing.T) {
 
 	checker := f.checker(t, true)
 	require.NoError(t, checker.Run(t.Context()))
+
 	wm, err := checker.ResumeWatermark()
 	require.NoError(t, err)
-	require.Empty(t, wm, "the first chunk was repaired, so nothing below it is verified evidence")
-
-	var b int
-	require.NoError(t, f.db.QueryRowContext(t.Context(),
-		"SELECT b FROM "+utils.NewTableName(name)+" WHERE id = 1").Scan(&b))
-	require.Equal(t, 1, b, "the diverged row was repaired from the source")
+	require.NotEmpty(t, wm, "the re-verification pass compared every chunk equal")
 }

@@ -36,10 +36,6 @@ type locklessChecker struct {
 	// selected background verification there is no run to resume, so no
 	// evidence may be published even between passes.
 	continuous atomic.Bool
-	// watermark is the best evidence published so far. It only ever moves
-	// forward — see ResumeWatermark.
-	watermarkMu sync.Mutex
-	watermark   string
 }
 
 var _ Checker = (*locklessChecker)(nil)
@@ -203,9 +199,9 @@ func (c *locklessChecker) ExecTime() time.Duration {
 	return time.Since(c.started)
 }
 
-// ResumeWatermark reports the prefix of the table that has been verified clean
-// and that a resumed run may therefore skip. Continuous mode reports nothing:
-// it never finishes, so there is no run to resume.
+// ResumeWatermark reports the prefix of the table that the walk now in progress
+// has verified clean, and that a resumed run may therefore skip. Continuous mode
+// reports nothing: it never finishes, so there is no run to resume.
 //
 // Unlike the snapshot checker there is no "any difference found ⇒ no evidence"
 // gate here, and there does not need to be. Optimistic reads mismatch routinely
@@ -216,12 +212,15 @@ func (c *locklessChecker) ExecTime() time.Duration {
 // feedbackResolved), so a chunk that was repaired, deferred, or split parks the
 // watermark below itself.
 //
-// The answer never moves backwards. A retried attempt re-walks from the start
-// of the table, and so does the second pass within an attempt, so the live
-// watermark can be behind one already published. Both describe a prefix that
-// was observed equal and that the change feed has kept equal since, so the
-// further-along one stays valid; keeping it is what stops a retry from
-// discarding the previous attempt's verified work.
+// The answer is always the CURRENT walk's, and is allowed to move backwards. A
+// retried attempt, and the second pass within an attempt, both re-walk from the
+// start of the table, which resets the watermark. It is tempting to keep
+// republishing the further-along answer from the previous walk — it costs a
+// resume real work to discard it — but that is not sound: the only way a
+// re-walk fails to re-verify a prefix it already verified is that the prefix
+// stopped being equal, and that is exactly the case where republishing would
+// let a resume skip the damage. The snapshot checker regresses its watermark on
+// a retry for the same reason.
 func (c *locklessChecker) ResumeWatermark() (string, error) {
 	if c.continuous.Load() {
 		return "", nil
@@ -229,30 +228,24 @@ func (c *locklessChecker) ResumeWatermark() (string, error) {
 	c.mu.RLock()
 	checker := c.checker
 	c.mu.RUnlock()
-	var (
-		live string
-		err  error
-	)
 	if checker == nil {
 		// Not started yet. The only evidence that exists is whatever a previous
 		// run left behind, which the factory installed with OpenAtWatermark.
 		// Republish it rather than blanking the checkpoint during the window
 		// between entering the checksum state and Run being called.
-		live, err = c.chunker.GetLowWatermark()
-	} else {
-		live, err = checker.ResumeWatermark()
+		return watermarkOrEmpty(c.chunker.GetLowWatermark())
 	}
-	// An unavailable watermark is not a failure to report: it means nothing has
-	// resolved yet, so the previously published answer still stands.
+	return watermarkOrEmpty(checker.ResumeWatermark())
+}
+
+// watermarkOrEmpty maps "no watermark yet" onto the empty string. Nothing has
+// resolved, so there is nothing to persist — which is not a failure to report,
+// and must not stop the caller writing the rest of its checkpoint.
+func watermarkOrEmpty(wm string, err error) (string, error) {
 	if err != nil {
-		live = ""
+		return "", nil
 	}
-	c.watermarkMu.Lock()
-	defer c.watermarkMu.Unlock()
-	if live != "" {
-		c.watermark = live
-	}
-	return c.watermark, nil
+	return wm, nil
 }
 
 func (c *locklessChecker) ChecksumStatus() ChecksumStatus {
