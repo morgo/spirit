@@ -33,7 +33,7 @@ type parkedEvent struct {
 // than a shortcut around it. Scripting one the watch does *not* recognise is a
 // harness bug and says so, rather than looking like a quiet row.
 type parkingFeed struct {
-	fakeFeed
+	change.MockSource
 
 	mu     sync.Mutex
 	events []parkedEvent
@@ -123,7 +123,7 @@ func TestSettleHotRowCleanAgainstStreamImage(t *testing.T) {
 	snapshot := pendingSnapshot(t, db, chunk, 1)
 
 	feed := &parkingFeed{events: []parkedEvent{{key: []any{int64(2)}, image: []any{int64(2), int64(20)}}}}
-	feed.flushFn = func(ctx context.Context) error {
+	feed.FlushFn = func(ctx context.Context) error {
 		_, err := db.ExecContext(ctx, "REPLACE INTO dst VALUES (2,20)")
 		return err
 	}
@@ -183,7 +183,7 @@ func TestSettleHotRowDeleteIsAVerdict(t *testing.T) {
 
 			feed := &parkingFeed{events: []parkedEvent{{key: []any{int64(2)}, deleted: true}}}
 			if !targetKeepsRow {
-				feed.flushFn = func(ctx context.Context) error {
+				feed.FlushFn = func(ctx context.Context) error {
 					_, err := db.ExecContext(ctx, "DELETE FROM dst WHERE id=2")
 					return err
 				}
@@ -468,7 +468,7 @@ func TestLocklessSettlesHotChunkEndToEnd(t *testing.T) {
 			// missing.
 			feed := &parkingFeed{events: []parkedEvent{{key: []any{int64(2)}, image: []any{int64(2), int64(20)}}}}
 			if converge {
-				feed.flushFn = func(ctx context.Context) error {
+				feed.FlushFn = func(ctx context.Context) error {
 					_, err := db.ExecContext(ctx, "REPLACE INTO dst SELECT * FROM src")
 					return err
 				}

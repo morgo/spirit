@@ -15,47 +15,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// statsFeed is a minimal change.Source double. Only FeedStats carries
-// behaviour; reporting is opt-in so a source with reports=false exercises the
-// "does not implement StatsReporter" path.
-type statsFeed struct {
-	stats FeedStats
-}
-
-var _ Source = (*statsFeed)(nil)
-
-func (f *statsFeed) FeedStats() FeedStats { return f.stats }
-
 // plainFeed is a Source that deliberately does NOT implement StatsReporter,
 // standing in for an out-of-tree source. Embedding the interface satisfies
 // Source without supplying FeedStats; StatusRow only type-asserts, so the nil
-// embedded value is never called.
+// embedded value is never called. MockSource cannot stand in here: it reports
+// stats, which is the whole of what this case must not do.
 type plainFeed struct{ Source }
-
-func (f *statsFeed) AddSubscription(_, _ *table.TableInfo, _ table.MappedChunker) error { return nil }
-func (f *statsFeed) Start(context.Context) error                                        { return nil }
-func (f *statsFeed) StartFromPosition(context.Context, string) error                    { return nil }
-func (f *statsFeed) Position() string                                                   { return "" }
-func (f *statsFeed) CurrentPosition(context.Context) (string, error)                    { return "", nil }
-func (f *statsFeed) Flush(context.Context) error                                        { return nil }
-func (f *statsFeed) FlushUnderTableLock(context.Context, []*dbconn.TableLock) error     { return nil }
-func (f *statsFeed) BlockWait(context.Context) error                                    { return nil }
-func (f *statsFeed) GetDeltaLen() int                                                   { return 0 }
-func (f *statsFeed) FlushResidual() (int, int)                                          { return 0, 0 }
-func (f *statsFeed) SetWatermarkOptimization(context.Context, bool) error               { return nil }
-func (f *statsFeed) StartPeriodicFlush(context.Context, time.Duration)                  {}
-func (f *statsFeed) StopPeriodicFlush()                                                 {}
-func (f *statsFeed) AllChangesFlushed() bool                                            { return true }
-
-// VerifyRowAtNextChange satisfies Source as a stream on which no
-// matching change ever arrives: the caller's budget ends the wait, which is
-// what a row that went quiet looks like.
-func (f *statsFeed) VerifyRowAtNextChange(ctx context.Context, _ RowWatch, _ RowVerifier) error {
-	<-ctx.Done()
-	return ctx.Err()
-}
-func (f *statsFeed) Stop()  {}
-func (f *statsFeed) Close() {}
 
 // pinClock freezes the clock String() measures its ages against and returns the
 // instant it froze at, so a test can build timestamps relative to it and assert
@@ -110,7 +75,7 @@ func TestStatusRowNoReporter(t *testing.T) {
 
 func TestStatusRowSingleSource(t *testing.T) {
 	now := pinClock(t)
-	src := &statsFeed{stats: FeedStats{
+	src := &MockSource{FixedStats: FeedStats{
 		LastFlushAt:       now.Add(-3 * time.Second),
 		LastFlushDuration: 5 * time.Millisecond,
 		LastFlushRows:     12,
@@ -127,14 +92,14 @@ func TestStatusRowSingleSource(t *testing.T) {
 // least recently, because that is the one holding the position back.
 func TestStatusRowMergesSources(t *testing.T) {
 	now := pinClock(t)
-	recent := &statsFeed{stats: FeedStats{
+	recent := &MockSource{FixedStats: FeedStats{
 		LastFlushAt:       now.Add(-time.Second),
 		LastFlushDuration: time.Millisecond,
 		LastFlushRows:     1,
 		Rotations:         2,
 		ForcedRotations:   1,
 	}}
-	stale := &statsFeed{stats: FeedStats{
+	stale := &MockSource{FixedStats: FeedStats{
 		LastFlushAt:       now.Add(-90 * time.Second),
 		LastFlushDuration: 7 * time.Millisecond,
 		LastFlushRows:     900,
@@ -151,13 +116,13 @@ func TestStatusRowMergesSources(t *testing.T) {
 // A feed that has never flushed is the stalest of all: it must not be masked
 // by a sibling that has.
 func TestStatusRowNeverFlushedWins(t *testing.T) {
-	flushed := &statsFeed{stats: FeedStats{
+	flushed := &MockSource{FixedStats: FeedStats{
 		LastFlushAt:       time.Now().Add(-time.Second),
 		LastFlushDuration: time.Millisecond,
 		LastFlushRows:     5,
 		Rotations:         1,
 	}}
-	never := &statsFeed{stats: FeedStats{Rotations: 1}}
+	never := &MockSource{FixedStats: FeedStats{Rotations: 1}}
 	require.Equal(t,
 		"rotations=2 (0 forced)  parks=0 is-parked=false  never flushed",
 		StatusRow(flushed, never))
@@ -381,13 +346,13 @@ func TestFeedStatsStringOmitsEmptyBufferedPosition(t *testing.T) {
 // feed is the one whose reader progress is in question.
 func TestStatusRowBufferedPositionFollowsStalestFeed(t *testing.T) {
 	now := pinClock(t)
-	recent := &statsFeed{stats: FeedStats{
+	recent := &MockSource{FixedStats: FeedStats{
 		LastFlushAt:      now.Add(-time.Second),
 		BufferedPosition: "recent-feed-pos",
 		BufferedEventAt:  now.Add(-5 * time.Second),
 		Rotations:        2,
 	}}
-	stale := &statsFeed{stats: FeedStats{
+	stale := &MockSource{FixedStats: FeedStats{
 		LastFlushAt:      now.Add(-90 * time.Second),
 		BufferedPosition: "stale-feed-pos",
 		BufferedEventAt:  now.Add(-2 * time.Minute),
@@ -463,12 +428,12 @@ func TestMergeParkStatsAcrossSubscriptions(t *testing.T) {
 // Same merge rules across feeds: a sharded move reads one feed per source, and
 // a stall on any of them is a stall.
 func TestStatusRowMergesParkStats(t *testing.T) {
-	busy := &statsFeed{stats: FeedStats{
+	busy := &MockSource{FixedStats: FeedStats{
 		LastFlushAt: time.Now().Add(-time.Second),
 		Parks:       9,
 		IsParked:    true,
 	}}
-	idle := &statsFeed{stats: FeedStats{
+	idle := &MockSource{FixedStats: FeedStats{
 		LastFlushAt: time.Now().Add(-2 * time.Second),
 		Parks:       1,
 		IsParked:    false,
@@ -567,12 +532,12 @@ func TestMergeFlushShapesKeepsTheNarrowestPair(t *testing.T) {
 // Same rule across feeds: a sharded move reads one feed per source, and the
 // narrowest of them is the one holding the move back.
 func TestStatusRowMergesFlushShapes(t *testing.T) {
-	wide := &statsFeed{stats: FeedStats{
+	wide := &MockSource{FixedStats: FeedStats{
 		LastFlushAt:          time.Now().Add(-time.Second),
 		FlushShape:           FlushShape{Concurrency: 8, BatchSize: 1000},
 		ConfiguredFlushShape: FlushShape{Concurrency: 8, BatchSize: 1000},
 	}}
-	narrow := &statsFeed{stats: FeedStats{
+	narrow := &MockSource{FixedStats: FeedStats{
 		LastFlushAt:          time.Now().Add(-2 * time.Second),
 		FlushShape:           FlushShape{Concurrency: 1, BatchSize: 125},
 		ConfiguredFlushShape: FlushShape{Concurrency: 8, BatchSize: 1000},

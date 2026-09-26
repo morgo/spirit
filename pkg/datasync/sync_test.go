@@ -1471,31 +1471,16 @@ func TestSyncResumeSourceSchemaChanged(t *testing.T) {
 	require.NotContains(t, runErr.Error(), "t2")
 }
 
-type resumeSource struct {
-	change.Source
-	started               bool
-	watermarkOptimization bool
-}
-
-func (s *resumeSource) SetWatermarkOptimization(_ context.Context, enabled bool) error {
-	s.watermarkOptimization = enabled
-	return nil
-}
-
-func (s *resumeSource) Start(context.Context) error {
-	s.started = true
-	return nil
-}
-
 func TestStartResumeChangeSourceRejectsCopyProgressWithoutStreamPosition(t *testing.T) {
-	source := &resumeSource{watermarkOptimization: true}
+	source := &change.MockSource{Watermark: true}
 	r := &Runner{
 		replClient: source,
 	}
 
 	require.ErrorContains(t, r.startResumeChangeSource(t.Context(), "finished-watermark", ""), "refusing an unsafe resume")
-	require.False(t, source.started)
-	require.True(t, source.watermarkOptimization)
+	require.Zero(t, source.Starts())
+	require.True(t, source.WatermarkEnabled(),
+		"a refused resume must leave the watermark optimization as it found it")
 }
 
 // TestSyncTargetSchemaVerifyIgnoresDeferredIndexes guards the resume-time schema

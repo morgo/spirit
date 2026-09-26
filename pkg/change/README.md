@@ -459,6 +459,14 @@ One verification runs at a time (`verifyMu`), which is what makes a single watch
 - **Automatic recovery**: Handles transient errors and reconnects to the binlog stream without data loss
 - **DDL detection**: Monitors for schema changes and notifies the migration coordinator. This is used to abandon any schema changes if the table was externally modified.
 
+## Testing against a Source
+
+`change.MockSource` (mock.go) is the shared test double, for this package and for every package that is handed a feed. `Source` is a wide interface, so a hand-rolled double is ~20 lines of no-op methods around the one or two that carry behaviour, and adding a method to `Source` means writing it once per copy — which is how the checksum, move and sync packages each ended up with their own.
+
+With `Inner` set it delegates to a real source and records the calls; with `Inner` nil every method is a success-shaped no-op reading from its configuration fields. A test that needs a scripted change delivered embeds it and overrides `VerifyRowAtNextChange`.
+
+Two cases it is deliberately not for: a stub that exists only to satisfy a parameter the code under test must never call, and one that must *not* implement an optional interface such as `StatsReporter` (`MockSource` reports stats). Embed a nil `change.Source` for both, so an unintended call panics and names itself.
+
 ## See Also
 
 - [Applier Package](../applier/README.md) - Handles writing changes to target tables

@@ -358,9 +358,8 @@ func TestReverseFeedShardedConfigValidation(t *testing.T) {
 // reports that by leaving the changes buffered, and Flush's own loop exits on a
 // *trivial* backlog rather than an empty one.
 func TestReverseFeedAllChangesFlushed(t *testing.T) {
-	clean := &fakeChangeSource{}
-	stuck := &fakeChangeSource{}
-	stuck.notFlushed.Store(true)
+	clean := &change.MockSource{}
+	stuck := &change.MockSource{Pending: true}
 
 	require.True(t, (&ReverseFeed{clients: []change.Source{clean}}).AllChangesFlushed())
 	require.True(t, (&ReverseFeed{clients: []change.Source{clean, clean}}).AllChangesFlushed())

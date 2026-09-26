@@ -23,21 +23,13 @@ type continuousRunStub struct {
 
 func (c *continuousRunStub) Run(ctx context.Context) error { return c.run(ctx) }
 
-type continuousFeed struct {
-	fakeFeed
-	starts, stops atomic.Int64
-}
-
-func (f *continuousFeed) StartPeriodicFlush(context.Context, time.Duration) { f.starts.Add(1) }
-func (f *continuousFeed) StopPeriodicFlush()                                { f.stops.Add(1) }
-
 func TestContinuousSnapshotLifecycle(t *testing.T) {
 	for _, outcome := range []string{"clean", "cancel", "repair-cancel", "failure", "joined-cancel", "foreign-cancel"} {
 		t.Run(outcome, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				ctx, cancel := context.WithCancel(t.Context())
 				defer cancel()
-				feed := &continuousFeed{}
+				feed := &change.MockSource{}
 				var resume snapshotResume
 				failure := errors.New("verification failed")
 				resets := 0
@@ -46,7 +38,7 @@ func TestContinuousSnapshotLifecycle(t *testing.T) {
 					passes.Add(1)
 					require.True(t, resume.active.Load(), "executing a pass reports active")
 					require.Equal(t, int64(resets), passes.Load(), "every pass starts with a reset")
-					require.Equal(t, feed.starts.Load(), feed.stops.Load(), "flushing must stop before snapshot setup")
+					require.Equal(t, feed.PeriodicFlushStarts(), feed.PeriodicFlushStops(), "flushing must stop before snapshot setup")
 					if outcome == "clean" {
 						cancel()
 						return nil
@@ -72,8 +64,8 @@ func TestContinuousSnapshotLifecycle(t *testing.T) {
 				synctest.Wait()
 				require.Zero(t, passes.Load(), "initial pacing must precede the first pass")
 				require.False(t, resume.active.Load())
-				require.Equal(t, int64(1), feed.starts.Load())
-				require.Zero(t, feed.stops.Load(), "replication keeps flushing during pacing")
+				require.Equal(t, 1, feed.PeriodicFlushStarts())
+				require.Zero(t, feed.PeriodicFlushStops(), "replication keeps flushing during pacing")
 				time.Sleep(LocklessMinPassInterval)
 				err := <-done
 				switch outcome {
@@ -91,7 +83,7 @@ func TestContinuousSnapshotLifecycle(t *testing.T) {
 				}
 				require.Equal(t, int64(1), passes.Load())
 				require.False(t, resume.active.Load(), "exiting clears active status")
-				require.Equal(t, feed.starts.Load(), feed.stops.Load())
+				require.Equal(t, feed.PeriodicFlushStarts(), feed.PeriodicFlushStops())
 			})
 		})
 	}
@@ -101,7 +93,7 @@ func TestContinuousFactoryDiscardsResumeEvidence(t *testing.T) {
 	for _, mode := range []string{"single", "distributed", "lockless"} {
 		t.Run(mode, func(t *testing.T) {
 			chunker := &resumeChunker{testChunker: newTestChunker(0), watermark: "initial-verification"}
-			feed := &lifecycleFeed{}
+			feed := &change.MockSource{}
 			cfg := NewCheckerDefaultConfig()
 			cfg.Applier = &applier.MockApplier{}
 			if mode == "distributed" {
@@ -122,7 +114,7 @@ func TestContinuousFactoryDiscardsResumeEvidence(t *testing.T) {
 			wm, err = checker.ResumeWatermark()
 			require.NoError(t, err)
 			require.Empty(t, wm, "later traversal cannot restore resume evidence")
-			require.Equal(t, feed.starts, feed.stops)
+			require.Equal(t, feed.PeriodicFlushStarts(), feed.PeriodicFlushStops())
 		})
 	}
 }
@@ -147,7 +139,7 @@ func (c *continuousScanGate) Next() (*table.Chunk, error) {
 func TestLocklessContinuousReusesCheckerAfterInitialPass(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		chunker := &continuousScanGate{testChunker: newTestChunker(0)}
-		feed := &lifecycleFeed{}
+		feed := &change.MockSource{}
 		cfg := NewCheckerDefaultConfig()
 		cfg.Algorithm = Lockless
 		cfg.MinPassInterval = time.Second
@@ -172,7 +164,7 @@ func TestLocklessContinuousReusesCheckerAfterInitialPass(t *testing.T) {
 		cancel()
 		require.NoError(t, <-done)
 		require.False(t, checker.ContinuousActive(), "finished checker is idle")
-		require.Equal(t, feed.starts, feed.stops)
+		require.Equal(t, feed.PeriodicFlushStarts(), feed.PeriodicFlushStops())
 	})
 }
 
@@ -181,7 +173,7 @@ func TestSnapshotContinuousActiveLifecycle(t *testing.T) {
 		t.Run(fmt.Sprintf("distributed=%t", distributed), func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				entered := make(chan struct{})
-				feed := &fakeFeed{flushFn: func(ctx context.Context) error {
+				feed := &change.MockSource{FlushFn: func(ctx context.Context) error {
 					close(entered)
 					<-ctx.Done()
 					return ctx.Err()
@@ -219,7 +211,7 @@ func TestSnapshotContinuousActiveLifecycle(t *testing.T) {
 func TestLocklessContinuousDefaultInterval(t *testing.T) {
 	t.Run("after a finite run", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
-			feed := &lifecycleFeed{}
+			feed := &change.MockSource{}
 			checker := newContinuousChecker(t, newTestChunker(0), feed)
 			require.NoError(t, checker.Run(t.Context()))
 			ctx, cancel := context.WithCancel(t.Context())
@@ -244,7 +236,7 @@ func TestLocklessContinuousDefaultInterval(t *testing.T) {
 
 	t.Run("as the first run", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
-			checker := newContinuousChecker(t, newTestChunker(0), &lifecycleFeed{})
+			checker := newContinuousChecker(t, newTestChunker(0), &change.MockSource{})
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			done := make(chan error, 1)
@@ -277,7 +269,7 @@ func TestLocklessContinuousForeignCancellation(t *testing.T) {
 		cfg := NewCheckerDefaultConfig()
 		cfg.Algorithm = Lockless
 		cfg.MinPassInterval = time.Second
-		checker, err := NewChecker([]*sql.DB{{}}, &canceledScan{newTestChunker(1)}, []change.Source{&fakeFeed{}}, cfg)
+		checker, err := NewChecker([]*sql.DB{{}}, &canceledScan{newTestChunker(1)}, []change.Source{&change.MockSource{}}, cfg)
 		require.NoError(t, err)
 		require.ErrorIs(t, checker.RunContinuous(t.Context()), context.Canceled)
 		require.NoError(t, t.Context().Err(), "parent is still alive")
