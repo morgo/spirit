@@ -4,12 +4,14 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/block/spirit/pkg/change"
 	"github.com/block/spirit/pkg/table"
+	"github.com/block/spirit/pkg/testutils"
 	"github.com/stretchr/testify/require"
 )
 
@@ -593,4 +595,46 @@ func TestLocklessSettlesHotChunkEndToEnd(t *testing.T) {
 				"a settled divergence is reported; before settling it was invisible")
 		})
 	}
+}
+
+// TestCompareRowToImageRefusesAmbiguousTargetRead pins the guard that a point
+// predicate must address exactly one target row before its value is read as a
+// verdict.
+//
+// The predicate is rendered from the *source's* key, but it is evaluated by the
+// target, under the target's collation. When those differ, one source key can
+// address two target rows — here a case-sensitive source holding 'a' against a
+// case-insensitive target holding both 'a' and 'A'. Neither of the two is "the"
+// row, so whichever came back first would decide a verdict by accident. The
+// range defers instead, and the ordinary retries carry it.
+func TestCompareRowToImageRefusesAmbiguousTargetRead(t *testing.T) {
+	schema, db := testutils.CreateUniqueTestDatabase(t)
+	snapshotExec(t, db, "CREATE TABLE src (k VARCHAR(10) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_as_cs PRIMARY KEY, v INT)")
+	// k alone is not unique on the target, which is what lets it hold both rows.
+	snapshotExec(t, db, "CREATE TABLE dst (k VARCHAR(10) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci, v INT, PRIMARY KEY (k, v))")
+	snapshotExec(t, db, "INSERT INTO src VALUES ('a',1)")
+	snapshotExec(t, db, "INSERT INTO dst VALUES ('a',1),('A',2)")
+
+	source, target := table.NewTableInfo(db, schema, "src"), table.NewTableInfo(db, schema, "dst")
+	require.NoError(t, source.SetInfo(t.Context()))
+	require.NoError(t, target.SetInfo(t.Context()))
+	chunk := &table.Chunk{Key: []string{"k"}, Table: source, NewTable: target, ColumnMapping: table.NewColumnMapping(source, target, nil)}
+
+	snapshot, err := captureHotSnapshot(t.Context(), db, db, chunk)
+	require.NoError(t, err)
+	require.NotNil(t, snapshot)
+
+	var row hotSnapshotRow
+	var found bool
+	for _, pending := range snapshot.pending {
+		if pending.present {
+			row, found = pending, true
+		}
+	}
+	require.True(t, found, "the source row should be an outstanding obligation")
+
+	settler := newRowSettler(db, &change.MockSource{}, slog.Default())
+	verdict, err := settler.compareRowToImage(t.Context(), snapshot, row, []any{[]byte("a"), int32(1)}, false)
+	require.NoError(t, err)
+	require.Equal(t, settleUnavailable, verdict, "two target rows for one key is not a verdict")
 }
