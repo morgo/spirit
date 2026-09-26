@@ -227,52 +227,63 @@ every attempt observes a different source and the range is deferred with no
 verdict — pass after pass. A genuinely diverged hot row and a merely busy one
 stay indistinguishable for as long as the writes continue.
 
-**Settling** is the terminal step for exactly that case. Once a range has failed
-`MaxHotAttempts` observations, the checker stops waiting for the source to hold
-still and holds it still itself, for one bounded moment and only for the handful
-of rows still outstanding:
+The way out is to stop reading the source. Any comparison between a `SELECT` of
+the source and a read of the target is between a source image at one position
+and a target state at a later one, and closing that window means stopping the
+writes. But the change stream already carries the answer: with
+`binlog_row_image=FULL`, an event's after-image **is** the source's value for
+that row at that position. MySQL guarantees it; no read is needed, and nothing
+has to hold still.
 
-1. `SELECT ... FOR SHARE` the outstanding source rows in their own `READ
-   COMMITTED` transaction, reading their images under that lock. No transaction
-   can now `UPDATE` or `DELETE` them.
-2. `BlockWait` the change feed. It samples the source's live binlog position and
-   waits for the reader to reach it, so every write that ever touched these rows
-   has been consumed — and while the lock is held, no further write can commit to
-   add one.
-3. `Flush` the feed, applying that whole history to the target.
-4. Read the target rows.
+**Settling** is the terminal step built on that. Once a range has failed
+`MaxHotAttempts` observations, each outstanding row is verified against the
+stream's own image of it, one row at a time:
 
-At step 4 the target cannot move: no unapplied event for these rows exists and no
-new one can be produced. The target must therefore equal the images read at step
-1, and a mismatch is a real inconsistency rather than apply lag or a race — so it
-goes to the ordinary repair path (or is fatal, per the policy below) instead of
-being deferred again.
+1. Ask the feed to wait for the next change to that row and park its reader
+   there (`change.RowParker`). The change is buffered first and the reader parks
+   immediately after, so nothing past that event is admitted.
+2. Drain the feed, so the target holds exactly that image. This is *not* the
+   exported `Flush`, which ends in a `BlockWait` for the reader to reach the
+   source's current position — the reader is parked, so that wait could never
+   succeed. The parked drain applies what is buffered and stops, and reports
+   whether the buffer emptied.
+3. Compare the target row to the event's image, evaluating the same
+   column-mapping checksum expressions used everywhere else against the image
+   itself. (The image is rendered as a one-row derived table whose column types
+   come from the real table, so the `CAST`s land on a column of the right type.)
 
-This is not the table lock the snapshot checkers take. It is a row lock over at
-most 128 rows, held for at most five seconds, asked for with
-`innodb_lock_wait_timeout=2` so it loses to application writes rather than
-queueing ahead of them, and reached only after a range has already failed
-`MaxHotAttempts` observations. `HotChunksSettledThisPass` counts it; a rising
-value alongside a falling `HotChunksDeferredThisPass` is it working.
+A mismatch at step 3 is a real inconsistency: the feed delivered that image and
+the drain applied it, so apply lag cannot explain a difference. It goes to the
+ordinary repair path (or is fatal, per the policy below) instead of being
+deferred again.
 
-Two cases still defer rather than settle, and both are honesty constraints rather
-than gaps to close later:
+This terminates in the opposite direction from a lock: **the more often the row
+is written, the sooner its next event arrives.** The rows that defeat every
+read-and-compare strategy are exactly the ones this settles fastest, and a row
+quiet enough that no event arrives inside its one-second budget is one the
+ordinary poll was already converging on. A delete event is a verdict too, which
+is what lets an obligation that a row be *absent* be settled — no `SELECT` can
+prove a row will stay absent, because there is nothing to hold.
 
-- **An obligation that a row is *absent*** cannot be pinned. Under `READ
-  COMMITTED` there is no lock to take on a row that is not there, so a concurrent
-  `INSERT` can still land between the drain and the read.
-- **A lock the checker cannot get inside its budget.** Deferring is what would
-  have happened anyway; blocking would make verification a source of stalls.
+Nothing here takes a lock. The cost is that the stream is held for the duration
+of one row's verification, which is why rows are settled one at a time, the whole
+escalation is bounded at five seconds, and it is reached only after a range has
+already failed `MaxHotAttempts` observations. `HotChunksSettledThisPass` counts
+it; a rising value alongside a falling `HotChunksDeferredThisPass` is it working.
 
-A purely lock-free variant — park the feed, then witness whether the watched rows
-changed — does not close this. The comparison is between a source image at some
-position `x` and a target state at a later position `R`, and the window `(x, R]`
-necessarily spans a `BlockWait`; for a row written continuously, *something*
-always lands in that window, so the witness is always dirty and the escalation
-never terminates. Narrowing `x` requires either stopping the writes (what
-`FOR SHARE` does) or deriving the expected image from the binlog after-images
-rather than from a `SELECT` — the latter is feasible but cannot evaluate the
-checksum's column-mapping expressions in Go, so it is not what this implements.
+Three cases still defer rather than settle, and all three are honesty constraints:
+
+- **No change arrives inside the row's budget.** Not the case this exists for.
+- **The row was written again before the target could be read.** The image no
+  longer matches what the drain left behind, so the comparison would be against
+  a value the target was never meant to hold.
+- **The parked drain could not empty the buffer** — a batch that lost to lock
+  contention, a key held behind the copier's watermark. The watched change may
+  be among what is left, and reporting that as a divergence would be reporting
+  apply lag, the one mistake this whole path exists to avoid.
+
+A feed that cannot park at all (library callers may have no feed) simply leaves
+the range where it was before settling existed.
 
 When a chunk's source CRC is stable across the retry window but the target still disagrees, that is a **stable divergence**. How the checker reacts is governed by whether it has a `Recopier`:
 

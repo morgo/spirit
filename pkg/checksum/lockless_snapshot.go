@@ -25,13 +25,13 @@ type hotSnapshot struct {
 	pending       map[string]hotSnapshotRow
 	targetDB      *sql.DB
 	chunk         *table.Chunk
-	sourceColumns string
 	targetColumns string
 	attempts      int
 
-	// settled records that the snapshot reached a verdict by holding its source
-	// rows still rather than by waiting for them to stop moving. See
-	// LocklessChecker.settleHotSnapshot.
+	// settled records that the snapshot reached a verdict by comparing its
+	// outstanding rows against the change stream's images of them, rather than
+	// by waiting for the source to stop moving. See
+	// rowSettler.settle in lockless_settle.go.
 	settled bool
 }
 
@@ -50,11 +50,11 @@ func captureHotSnapshot(ctx context.Context, sourceDB, targetDB *sql.DB, chunk *
 	if err != nil {
 		return nil, err
 	}
-	target, size, oversized, err := readHotSnapshotRows(ctx, targetDB, chunk, chunk.NewTable, targetColumns, chunk.String(), "", int(hotSplitTargetRows))
+	target, size, oversized, err := readHotSnapshotRows(ctx, targetDB, chunk, chunk.NewTable, targetColumns, chunk.String(), int(hotSplitTargetRows))
 	if err != nil || oversized {
 		return nil, err
 	}
-	source, sourceSize, oversized, err := readHotSnapshotRows(ctx, sourceDB, chunk, chunk.Table, sourceColumns, chunk.String(), "", int(hotSplitTargetRows))
+	source, sourceSize, oversized, err := readHotSnapshotRows(ctx, sourceDB, chunk, chunk.Table, sourceColumns, chunk.String(), int(hotSplitTargetRows))
 	if err != nil || oversized {
 		return nil, err
 	}
@@ -71,7 +71,6 @@ func captureHotSnapshot(ctx context.Context, sourceDB, targetDB *sql.DB, chunk *
 		pending:       pending,
 		targetDB:      targetDB,
 		chunk:         chunk,
-		sourceColumns: sourceColumns,
 		targetColumns: targetColumns,
 	}, nil
 }
@@ -99,7 +98,7 @@ func (s *hotSnapshot) check(ctx context.Context) (bool, error) {
 	if len(s.pending) == 0 {
 		return true, nil
 	}
-	rows, _, oversized, err := readHotSnapshotRows(ctx, s.targetDB, s.chunk, s.chunk.NewTable, s.targetColumns, s.pendingPredicate(), "", 2*int(hotSplitTargetRows))
+	rows, _, oversized, err := readHotSnapshotRows(ctx, s.targetDB, s.chunk, s.chunk.NewTable, s.targetColumns, s.pendingPredicate(), 2*int(hotSplitTargetRows))
 	if err != nil {
 		return false, err
 	}
@@ -130,11 +129,7 @@ func (s *hotSnapshot) check(ctx context.Context) (bool, error) {
 // path can run the same read inside the transaction holding the source rows.
 // Temporal keys are cast to their server representation to preserve fractional
 // seconds/zero dates with parseTime=true; predicates still use native key types.
-//
-// lockClause is appended to the statement ("FOR SHARE" for the settle path,
-// empty for an ordinary read). It is a constant at every call site, never
-// caller data.
-func readHotSnapshotRows(ctx context.Context, db rowQuerier, chunk *table.Chunk, info *table.TableInfo, columns, predicate, lockClause string, limit int) (map[string]hotSnapshotRow, int, bool, error) {
+func readHotSnapshotRows(ctx context.Context, db rowQuerier, chunk *table.Chunk, info *table.TableInfo, columns, predicate string, limit int) (map[string]hotSnapshotRow, int, bool, error) {
 	if len(chunk.Key) == 0 {
 		return nil, 0, false, fmt.Errorf("snapshot range has no key")
 	}
@@ -153,7 +148,7 @@ func readHotSnapshotRows(ctx context.Context, db rowQuerier, chunk *table.Chunk,
 			projections[i] = "CAST(" + projections[i] + " AS CHAR)"
 		}
 	}
-	query := fmt.Sprintf("SELECT %s, CRC32(CONCAT(%s)) FROM %s WHERE %s LIMIT %d%s", strings.Join(projections, ","), columns, info.QuotedTableName, predicate, limit+1, lockClause)
+	query := fmt.Sprintf("SELECT %s, CRC32(CONCAT(%s)) FROM %s WHERE %s LIMIT %d", strings.Join(projections, ","), columns, info.QuotedTableName, predicate, limit+1)
 	rows, err := db.QueryContext(ctx, query)
 	if err != nil {
 		return nil, 0, false, err

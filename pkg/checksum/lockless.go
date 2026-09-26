@@ -130,10 +130,10 @@ var ErrPermanentDivergence = errors.New("checksum: permanent divergence detected
 // a divergence proven, so this is deliberately distinct from
 // ErrPermanentDivergence. It is the optimistic counterpart of
 // ErrDifferencesExhausted: a bound that makes the run terminate instead of
-// re-walking the table forever. Settling (lockless_pin.go) resolves most hot
+// re-walking the table forever. Settling (lockless_settle.go) resolves most hot
 // rows before they get that far; what reaches this bound is a range that could
 // not even be settled — see "Continuously updated hot rows" in the package
-// README for the two cases where that happens.
+// README for the cases where that happens.
 var ErrVerificationUnresolved = errors.New("checksum: verification did not converge within the pass budget")
 
 // Default values applied for zero-valued config fields. Exported so callers
@@ -248,7 +248,7 @@ type LocklessChecker struct {
 	passedUnder10AttemptsThisPass atomic.Uint64 // 5+ attempts via retry
 	recopiesThisPass              atomic.Uint64 // chunks rewritten by Recopier
 	hotChunksDeferredThisPass     atomic.Uint64 // unstable chunks revisited next pass
-	hotChunksSettledThisPass      atomic.Uint64 // hot chunks that reached a verdict with their source pinned
+	hotChunksSettledThisPass      atomic.Uint64 // hot chunks settled against the change stream
 
 	permanentFailures atomic.Uint64
 	retryQueueDepth   atomic.Int64
@@ -270,11 +270,6 @@ type LocklessChecker struct {
 
 	// snapshotChunk captures bounded per-row evidence for a proven-hot range.
 	snapshotChunk func(context.Context, *table.Chunk) (*hotSnapshot, error)
-
-	// pinSourceRows holds a snapshot's outstanding rows still on the source and
-	// reads them under that lock. It is the one piece of settleHotSnapshot that
-	// needs a real server, so it is the seam tests swap. See lockless_pin.go.
-	pinSourceRows func(context.Context, *hotSnapshot, [][]table.Datum) (*pinnedRows, error)
 
 	// readChunk performs the source+target CRC read for a single chunk and
 	// returns the new source CRC, new target CRC, source row count, and
@@ -333,9 +328,6 @@ func newLocklessChecker(
 	}
 	c.snapshotChunk = func(ctx context.Context, chunk *table.Chunk) (*hotSnapshot, error) {
 		return captureHotSnapshot(ctx, sourceDB, targetDB, chunk)
-	}
-	c.pinSourceRows = func(ctx context.Context, s *hotSnapshot, keys [][]table.Datum) (*pinnedRows, error) {
-		return pinSourceRows(ctx, sourceDB, s, keys)
 	}
 	c.readChunk = readChunkCRC2(sourceDB, targetDB)
 	c.splitChunk = func(ctx context.Context, chunk *table.Chunk, rows uint64) ([]*table.Chunk, error) {
@@ -1059,31 +1051,33 @@ func (c *LocklessChecker) checkHotSnapshot(ctx context.Context, res *workResult,
 
 	// Waiting has not worked: this range has had its whole attempt budget and
 	// its source is still moving. Before giving up on it for the pass, try to
-	// settle it by holding those rows still — see lockless_pin.go for why the
-	// verdict that produces is trustworthy where a poll's is not.
-	verdict, err := c.settleHotSnapshot(ctx, snapshot)
+	// settle each outstanding row against the change stream's own image of it —
+	// see lockless_settle.go for why that verdict is trustworthy where a poll's
+	// is not.
+	verdict, err := newRowSettler(c.sourceDB, c.feed, c.cfg.Logger).settle(ctx, snapshot)
 	if err != nil {
 		res.err = fmt.Errorf("settle hot range: %w", err)
 		return
 	}
 	switch verdict {
-	case pinnedClean:
+	case settleClean:
 		snapshot.settled = true
 		clear(snapshot.pending)
 		res.passed = true
 		c.hotChunksSettledThisPass.Add(1)
-		c.cfg.Logger.Info("lockless checksum: hot range verified with its source pinned",
+		c.cfg.Logger.Info("lockless checksum: hot range settled clean against the change stream",
 			"chunk", res.item.chunk.String(), "attempts", snapshot.attempts)
-	case pinnedDiverged:
-		// Nothing was in flight and nothing could change, so this is not apply
-		// lag and not a read race. Hand it to the ordinary divergence path,
+	case settleDiverged:
+		// The stream delivered that row's image and the flush applied it, so
+		// this is not apply lag and not a read race. Hand it to the ordinary
+		// divergence path,
 		// which repairs it or reports it according to the configured policy.
 		snapshot.settled = true
 		c.hotChunksSettledThisPass.Add(1)
-		c.cfg.Logger.Warn("lockless checksum: hot range diverged with its source pinned",
+		c.cfg.Logger.Warn("lockless checksum: hot range diverged against the change stream",
 			"chunk", res.item.chunk.String(), "rows_remaining", len(snapshot.pending), "attempts", snapshot.attempts)
 		c.resolveSettledDivergence(ctx, res)
-	case pinnedUnavailable:
+	case settleUnavailable:
 		res.deferHot = true
 		c.cfg.Logger.Info("lockless checksum: hot range could not be settled; deferring to the next pass",
 			"chunk", res.item.chunk.String(), "rows_remaining", len(snapshot.pending), "attempts", snapshot.attempts)
@@ -1095,7 +1089,8 @@ func (c *LocklessChecker) checkHotSnapshot(ctx context.Context, res *workResult,
 // path uses (executeWork's stable-divergence branch): a settled verdict is a
 // better-evidenced divergence, not a different kind of one, so it must not
 // answer to a different rule. The difference is only that there is nothing left
-// to drain first — settling already did that, under a lock.
+// to drain first — settling already flushed the stream through the event it
+// compared against.
 func (c *LocklessChecker) resolveSettledDivergence(ctx context.Context, res *workResult) {
 	chunk := res.item.chunk
 	if c.recopier == nil {

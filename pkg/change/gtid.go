@@ -50,6 +50,13 @@ type gtidClient struct {
 
 	subs *subscriptionRegistry
 
+	// park / rowWatch back RowParker. The gate holds the reader between
+	// events; rowWatch is the single armed verification (verifyMu enforces
+	// "single"). See park.go for why one at a time is enough.
+	park     parkGate
+	rowWatch atomic.Pointer[rowWaiter]
+	verifyMu sync.Mutex
+
 	callerCancelFunc func(FatalReason) bool
 	ddlFilterSchema  string
 	ddlFilterTables  map[string]struct{}
@@ -653,6 +660,12 @@ func (c *gtidClient) readStream(ctx context.Context) {
 		if ev == nil {
 			continue
 		}
+		// Hold here if a verification has parked the reader. The event is
+		// already read but not acted on, so nothing is consumed and lost;
+		// dispatch resumes with it once the gate opens. See park.go.
+		if err := c.park.wait(ctx); err != nil {
+			return
+		}
 		// Stamp before the switch, not inside it: several cases below
 		// `continue` out, and one call site per client is what keeps the two
 		// clients from drifting on this. The published position is at most one
@@ -976,10 +989,10 @@ func (c *gtidClient) processRowsEvent(ev *replication.BinlogEvent, e *replicatio
 				return err
 			}
 			if pkChanged(beforeKey, afterKey) {
-				sub.HasChanged(beforeKey, nil, true)
-				sub.HasChanged(afterKey, afterRow, false)
+				c.dispatchRow(sub, tbl, beforeKey, nil, true)
+				c.dispatchRow(sub, tbl, afterKey, afterRow, false)
 			} else {
-				sub.HasChanged(beforeKey, afterRow, false)
+				c.dispatchRow(sub, tbl, beforeKey, afterRow, false)
 			}
 		}
 		return nil
@@ -992,9 +1005,9 @@ func (c *gtidClient) processRowsEvent(ev *replication.BinlogEvent, e *replicatio
 		}
 		switch eventType { //nolint:exhaustive
 		case eventTypeInsert:
-			sub.HasChanged(key, row, false)
+			c.dispatchRow(sub, tbl, key, row, false)
 		case eventTypeDelete:
-			sub.HasChanged(key, nil, true)
+			c.dispatchRow(sub, tbl, key, nil, true)
 		default:
 			// Unreachable; kept as a hard error for the same reason as the
 			// matching branch in binlogClient.processRowsEvent.
@@ -1344,4 +1357,30 @@ func (c *gtidClient) SetWatermarkOptimization(ctx context.Context, newVal bool) 
 		}
 	}
 	return nil
+}
+
+// dispatchRow delivers one row change to its subscription and then offers it to
+// any armed verification. The order matters: the change must be buffered before
+// the reader parks, because the flush that follows is what puts it on the
+// target. See park.go.
+func (c *gtidClient) dispatchRow(sub Subscription, tbl *table.TableInfo, key, image []any, deleted bool) {
+	sub.HasChanged(key, image, deleted)
+	observeRow(&c.park, &c.rowWatch, tbl, key, image, deleted)
+}
+
+var _ RowParker = (*gtidClient)(nil)
+
+// VerifyRowAtNextChange implements RowParker. verifyMu is what makes the single
+// rowWatch slot enough: one verification runs at a time.
+func (c *gtidClient) VerifyRowAtNextChange(ctx context.Context, watch RowWatch, verify RowVerifier) error {
+	c.verifyMu.Lock()
+	defer c.verifyMu.Unlock()
+	return verifyRowAtNextChange(ctx, &c.park,
+		func(w *rowWaiter) { c.rowWatch.Store(w) },
+		func() { c.rowWatch.Store(nil) },
+		func(ctx context.Context) error {
+			return flushParked(ctx, func(ctx context.Context) error {
+				return c.flush(ctx, false, nil)
+			}, c.AllChangesFlushed)
+		}, watch, verify)
 }
