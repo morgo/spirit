@@ -1331,12 +1331,10 @@ func (c *LocklessChecker) handleResult(res *workResult, enqueueRetry func(*retry
 		)
 		return nil
 	}
-	if res.snapshot != nil {
-		return enqueueRetry(&retryEntry{chunk: res.item.chunk, snapshot: res.snapshot, splitBudget: res.item.splitBudget,
-			splitDepth: res.item.splitDepth, point: res.item.point, attempts: res.item.attempts + 1,
-			readDuration: res.item.readDuration, readRows: res.item.readRows,
-			consecutiveSrcChanged: max(2, res.item.consecutiveSrcChanged), notBefore: time.Now().Add(c.cfg.RetryDelay)})
-	}
+	// A verdict outranks a retry. This has to be checked before the snapshot
+	// re-enqueue below, because a range that settled carries its snapshot on
+	// the result: re-enqueueing it would poll a range whose answer is already
+	// known, forever, and the run would never return the divergence.
 	if res.permanent {
 		c.permanentFailures.Add(1)
 		c.cfg.Logger.Error("lockless checksum: permanent divergence",
@@ -1349,6 +1347,12 @@ func (c *LocklessChecker) handleResult(res *workResult, enqueueRetry func(*retry
 		)
 		return fmt.Errorf("%w: chunk %s (source crc=%d count=%d, target crc=%d count=%d)", ErrPermanentDivergence,
 			res.item.chunk.String(), res.newSrc.crc, res.newSrc.count, res.newTgt.crc, res.newTgt.count)
+	}
+	if res.snapshot != nil {
+		return enqueueRetry(&retryEntry{chunk: res.item.chunk, snapshot: res.snapshot, splitBudget: res.item.splitBudget,
+			splitDepth: res.item.splitDepth, point: res.item.point, attempts: res.item.attempts + 1,
+			readDuration: res.item.readDuration, readRows: res.item.readRows,
+			consecutiveSrcChanged: max(2, res.item.consecutiveSrcChanged), notBefore: time.Now().Add(c.cfg.RetryDelay)})
 	}
 
 	// Mismatch — enqueue a retry. Either a fresh-walk first-time mismatch,

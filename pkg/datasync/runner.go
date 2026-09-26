@@ -1835,8 +1835,8 @@ func appendVerificationStatus(b *status.Block, stats checksum.LocklessCheckerSta
 	}
 	b.Row("", "remaining: %d retrying (%d hot), %d in flight, %d deferred",
 		stats.RetryQueueDepth, stats.HotChunkCount, stats.InFlight, stats.HotChunksDeferredThisPass)
-	b.Row("", "pass activity: %d chunks mismatched: %d split, %d recopied",
-		stats.MismatchesThisPass, stats.HotChunksSplitThisPass, stats.RecopiesThisPass)
+	b.Row("", "pass activity: %d chunks mismatched: %d split, %d recopied, %d settled",
+		stats.MismatchesThisPass, stats.HotChunksSplitThisPass, stats.RecopiesThisPass, stats.HotChunksSettledThisPass)
 	if stats.RecopiesThisPass > 0 {
 		b.Row("", "repaired ranges need verification in the next pass")
 	}

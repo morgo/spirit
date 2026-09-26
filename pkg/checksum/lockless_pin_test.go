@@ -3,7 +3,9 @@ package checksum
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"testing"
+	"time"
 
 	"github.com/block/spirit/pkg/change"
 	"github.com/block/spirit/pkg/table"
@@ -212,4 +214,79 @@ func TestCheckHotSnapshotEscalatesOnlyWhenExhausted(t *testing.T) {
 	require.False(t, res.deferHot, "a settled divergence is a verdict, not a deferral")
 	require.True(t, res.permanent, "no recopier configured, so a settled divergence is fatal")
 	require.Equal(t, uint64(1), c.hotChunksSettledThisPass.Load())
+}
+
+// TestLocklessSettlesHotChunkEndToEnd is the whole point of the escalation,
+// driven through RunUntilClean rather than by calling settleHotSnapshot.
+//
+// The chunk's aggregate never matches — the source CRC changes on every read,
+// which is what a continuously written range looks like — so the checker falls
+// back to the row snapshot, and the snapshot never converges by polling either,
+// because polling is passive: it reads the target and waits. Before settling,
+// that combination had exactly one outcome regardless of whether the data was
+// actually wrong. Now it reaches a verdict, and which verdict depends on the
+// data:
+//
+//   - converge: the missing row is buffered in the feed and lands when the
+//     settle path flushes it, so the range verifies and the pass goes clean.
+//   - diverge: the target holds a value nothing will ever correct, so the
+//     range is reported rather than deferred for the rest of the run.
+func TestLocklessSettlesHotChunkEndToEnd(t *testing.T) {
+	for _, converge := range []bool{true, false} {
+		t.Run(fmt.Sprint(converge), func(t *testing.T) {
+			db, chunk := snapshotTestTables(t, "id INT PRIMARY KEY, value INT", []string{"id"})
+			snapshotExec(t, db, "INSERT INTO src VALUES (1,10),(2,20)")
+			snapshotExec(t, db, "INSERT INTO dst VALUES (1,10)")
+			if !converge {
+				// Present but wrong, which no flush can fix.
+				snapshotExec(t, db, "INSERT INTO dst VALUES (2,99)")
+			}
+
+			chunker := newTestChunker(1)
+			chunker.chunks[0] = chunk
+			cfg := fastConfig()
+			cfg.RetryDelay = time.Millisecond
+			cfg.MaxHotAttempts = 3
+			cfg.MinPassInterval = time.Hour
+			// No recopier: a settled divergence must be reported, which is the
+			// clearest way to see that a verdict was reached at all.
+			c := newTestChecker(t, chunker, cfg, func(_ context.Context, _ *table.Chunk, attempt int) (int64, int64, uint64, error) {
+				return int64(attempt), 0, 1, nil // the source never stops moving
+			})
+			c.snapshotChunk = func(ctx context.Context, chunk *table.Chunk) (*hotSnapshot, error) {
+				return captureHotSnapshot(ctx, db, db, chunk)
+			}
+			c.pinSourceRows = func(ctx context.Context, s *hotSnapshot, keys [][]table.Datum) (*pinnedRows, error) {
+				return pinSourceRows(ctx, db, s, keys)
+			}
+			// The feed holds the row the target is missing. Flushing it inside
+			// the settle window is what the drain step is for.
+			c.feed = &fakeFeed{flushFn: func(ctx context.Context) error {
+				if converge {
+					_, err := db.ExecContext(ctx, "REPLACE INTO dst SELECT * FROM src")
+					return err
+				}
+				return nil
+			}}
+
+			ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+			defer cancel()
+			err := c.RunUntilClean(ctx)
+
+			stats := c.Stats()
+			require.Equal(t, uint64(1), stats.HotChunksSettledThisPass, "the range must reach a verdict, not defer")
+			require.Zero(t, stats.HotChunksDeferredThisPass)
+			if converge {
+				require.NoError(t, err)
+				require.False(t, stats.FirstCleanPassAt.IsZero())
+				var diffs int
+				require.NoError(t, db.QueryRowContext(t.Context(),
+					"SELECT COUNT(*) FROM src LEFT JOIN dst USING (id, value) WHERE dst.id IS NULL").Scan(&diffs))
+				require.Zero(t, diffs, "the settle path's drain must have landed the missing row")
+				return
+			}
+			require.ErrorIs(t, err, ErrPermanentDivergence,
+				"a settled divergence is reported; before settling it was invisible")
+		})
+	}
 }

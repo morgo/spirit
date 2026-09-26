@@ -29,7 +29,10 @@ func (s ChecksumStatus) String() string {
 	if !stats.FirstCleanPassAt.IsZero() {
 		phase = "verified"
 	}
-	return fmt.Sprintf("experimental lockless: %s scan≈%.1f%% passed=%d retrying=%d in-flight=%d deferred=%d", phase, float64(stats.ProgressBasisPoints)/100, stats.ChunksPassedThisPass, stats.RetryQueueDepth, stats.InFlight, stats.HotChunksDeferredThisPass)
+	// settled= is shown next to deferred= because neither reads correctly
+	// alone: a falling deferred count means the checker is converging only if
+	// those ranges reached a verdict rather than simply stopping being hot.
+	return fmt.Sprintf("experimental lockless: %s scan≈%.1f%% passed=%d retrying=%d in-flight=%d deferred=%d settled=%d", phase, float64(stats.ProgressBasisPoints)/100, stats.ChunksPassedThisPass, stats.RetryQueueDepth, stats.InFlight, stats.HotChunksDeferredThisPass, stats.HotChunksSettledThisPass)
 }
 
 // StatusSummary formats rich status when supported, otherwise basic progress.

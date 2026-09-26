@@ -56,7 +56,7 @@ type LocklessCheckerStats struct {
 	PassedFirstAttemptThisPass    uint64 // 1 attempt (no retry needed)
 	PassedSecondAttemptThisPass   uint64 // 2 attempts (1 retry)
 	PassedUnder5AttemptsThisPass  uint64 // 3-4 attempts
-	PassedUnder10AttemptsThisPass uint64 // 5-9 attempts
+	PassedUnder10AttemptsThisPass uint64 // 5+ attempts; 10+ outliers fold in here
 	// RecopiesThisPass is the count of chunks that were recopied this
 	// pass — i.e. retry detected stable target divergence (source CRC
 	// unchanged across the retry window, target still wrong) and the
