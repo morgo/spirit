@@ -13,6 +13,7 @@ import (
 
 	"github.com/block/spirit/pkg/change"
 	"github.com/block/spirit/pkg/dbconn"
+	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/throttler"
 	"github.com/stretchr/testify/assert"
@@ -1611,4 +1612,101 @@ func TestHotSnapshotAdmission(t *testing.T) {
 			require.Equal(t, tc.want, called)
 		})
 	}
+}
+
+// failingWalk fails the walk for the first failPasses passes and then walks
+// normally, which is the shape of a transient infrastructure failure: nothing
+// has been proven about the data, and the condition is plausibly gone by the
+// next attempt.
+type failingWalk struct {
+	*testChunker
+	failPasses int
+	failures   atomic.Int64
+}
+
+var errTransientWalk = errors.New("transient walk failure")
+
+func (c *failingWalk) Next() (*table.Chunk, error) {
+	if c.failing() {
+		c.failures.Add(1)
+		return nil, errTransientWalk
+	}
+	return c.testChunker.Next()
+}
+
+// IsRead reports the table as unread while there is still a failure to inject,
+// so the dispatcher actually asks for a chunk. An empty testChunker is read
+// from the outset, which would skip Next entirely.
+func (c *failingWalk) IsRead() bool {
+	if c.failing() {
+		return false
+	}
+	return c.testChunker.IsRead()
+}
+
+func (c *failingWalk) failing() bool { return int(c.failures.Load()) < c.failPasses }
+
+// A transient failure costs an attempt, not the migration. This is the same
+// bargain SingleChecker.Run makes, and for the same reason: a checksum is the
+// last thing standing between a migration and a cut-over, so a pool of
+// connections killed mid-pass must not fail the whole thing.
+func TestFiniteLocklessRetriesTransientFailures(t *testing.T) {
+	maxRetries := NewCheckerDefaultConfig().MaxRetries
+	require.Greater(t, maxRetries, 1, "this test needs a budget of more than one attempt to mean anything")
+	newChecker := func(t *testing.T, chunker table.Chunker) Checker {
+		t.Helper()
+		cfg := NewCheckerDefaultConfig()
+		cfg.Lockless = &LocklessCheckerConfig{RetryDelay: time.Millisecond}
+		checker, err := NewChecker([]*sql.DB{{}}, chunker, []change.Source{&fakeFeed{}}, cfg)
+		require.NoError(t, err)
+		return checker
+	}
+
+	t.Run("recovers within the budget", func(t *testing.T) {
+		// Two attempts are spent on the failure, the third walks cleanly.
+		chunker := &failingWalk{testChunker: newTestChunker(0), failPasses: maxRetries - 1}
+		require.NoError(t, newChecker(t, chunker).Run(t.Context()))
+		require.Equal(t, int64(maxRetries-1), chunker.failures.Load())
+	})
+
+	t.Run("gives up at the budget", func(t *testing.T) {
+		// A failure that outlasts the budget is reported as exhausted attempts,
+		// wrapping the last one so it is the error an operator triages. It must
+		// not be mistaken for a verdict about the data.
+		chunker := &failingWalk{testChunker: newTestChunker(0), failPasses: maxRetries + 1}
+		err := newChecker(t, chunker).Run(t.Context())
+		require.ErrorIs(t, err, ErrAttemptsExhausted)
+		require.ErrorIs(t, err, errTransientWalk)
+		require.NotErrorIs(t, err, ErrPermanentDivergence)
+		require.NotErrorIs(t, err, ErrVerificationUnresolved)
+		require.Equal(t, int64(maxRetries), chunker.failures.Load(),
+			"exactly MaxRetries attempts, no more and no fewer")
+	})
+}
+
+// partialProgressChunker reports fewer verified rows than the table holds, the
+// way the real one does for a pass that repaired or deferred a range: those
+// chunks are never fed back, so they never advance the count.
+type partialProgressChunker struct {
+	*testChunker
+	verified, total uint64
+}
+
+func (c *partialProgressChunker) Progress() (uint64, uint64, uint64) {
+	return c.verified, c.verified, c.total
+}
+
+// A clean pass verified every row, including the ranges an earlier pass
+// repaired or deferred and so never fed back. Reporting the feedback count
+// after one would leave a finished checksum reading as permanently incomplete.
+func TestFiniteLocklessReportsFullProgressAfterCleanPass(t *testing.T) {
+	chunker := &partialProgressChunker{testChunker: newTestChunker(0), verified: 3, total: 10}
+	cfg := NewCheckerDefaultConfig()
+	cfg.Lockless = &LocklessCheckerConfig{RetryDelay: time.Millisecond}
+	checker, err := NewChecker([]*sql.DB{{}}, chunker, []change.Source{&fakeFeed{}}, cfg)
+	require.NoError(t, err)
+
+	require.Equal(t, status.ChecksumProgress{RowsChecked: 3, RowsTotal: 10}, checker.GetProgress())
+	require.NoError(t, checker.Run(t.Context()))
+	require.Equal(t, status.ChecksumProgress{RowsChecked: 10, RowsTotal: 10}, checker.GetProgress())
 }

@@ -1460,6 +1460,19 @@ func (c *LocklessChecker) handleResult(res *workResult, enqueueRetry func(*retry
 // The duration and row count are the fresh-walk read's, carried on the entry,
 // so chunk sizing still sees the initial read rather than the slower retry
 // path — just delivered later.
+//
+// Withholding feedback has a cost inside the chunker's watermark tracker: a
+// chunk that is never fed back is never retired, so every chunk resolved after
+// it stays buffered in the tracker's out-of-order map until the next Reset, and
+// the tracker's in-flight count never returns to zero. The first repaired or
+// deferred range in a large table therefore makes the pass's tracker memory
+// O(remaining chunks), and chunker.IsRead() stays false for the rest of it.
+// Nothing reads IsRead() on the checksum chunker today — the runner status
+// block reads the copy chunker — but a future caller would be surprised. Both
+// are consequences of the tracker having one signal for "this chunk is done"
+// and "this chunk is verified"; separating them is tracked in block/spirit#1272
+// rather than done here, because the watermark meaning above is what this
+// change is for and it is correct as written.
 func (c *LocklessChecker) feedbackResolved(res *workResult) {
 	if res.item.splitDepth != 0 {
 		return

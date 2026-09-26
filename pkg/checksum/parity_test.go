@@ -182,7 +182,17 @@ func TestParityDivergenceWithoutRepair(t *testing.T) {
 			}
 			checker, err := NewChecker([]*sql.DB{f.db}, f.chunker, []change.Source{f.feed}, config)
 			require.NoError(t, err)
-			require.Error(t, checker.Run(t.Context()))
+			err = checker.Run(t.Context())
+			require.Error(t, err)
+			if lockless {
+				require.ErrorIs(t, err, ErrPermanentDivergence)
+				// A divergence verdict is about the data, so a fresh attempt
+				// reaches the same conclusion. Assert it was not retried:
+				// ErrAttemptsExhausted wraps the last attempt's error with %w,
+				// so an ErrorIs on the sentinel alone would still pass after
+				// three attempts had been spent on it.
+				require.NotErrorIs(t, err, ErrAttemptsExhausted, "a divergence verdict is not retried")
+			}
 			require.Equal(t, 2, f.rowsOnTarget(t, name), "no repair was attempted")
 		})
 	}
@@ -190,9 +200,11 @@ func TestParityDivergenceWithoutRepair(t *testing.T) {
 
 // TestParityLossyAlter: adding a UNIQUE index over non-unique data must fail
 // under both algorithms. The sentinel differs (ErrDifferencesExhausted vs
-// ErrPermanentDivergence) but pkg/migration wraps either with the same
-// "likely a UNIQUE index on non-unique data" guidance, so the operator-visible
-// outcome is at parity.
+// ErrVerificationUnresolved — repairs are on, so the lockless gate keeps
+// repairing and re-reading the chunk until MaxPasses is spent rather than
+// declaring the divergence permanent) but pkg/migration wraps either with the
+// same "likely a UNIQUE index on non-unique data" guidance, so the
+// operator-visible outcome is at parity.
 func TestParityLossyAlter(t *testing.T) {
 	for _, lockless := range []bool{false, true} {
 		t.Run(fmt.Sprintf("lockless=%v", lockless), func(t *testing.T) {
@@ -213,7 +225,16 @@ func TestParityLossyAlter(t *testing.T) {
 			f := &parityFixture{db: db}
 			f.start(t, name)
 
-			require.Error(t, f.checker(t, lockless).Run(t.Context()))
+			err = f.checker(t, lockless).Run(t.Context())
+			require.Error(t, err)
+			if lockless {
+				// Repairs are on, so the chunk is rewritten and re-read rather
+				// than condemned; INSERT IGNORE cannot close the gap, so the
+				// pass budget is what ends it.
+				require.ErrorIs(t, err, ErrVerificationUnresolved)
+			} else {
+				require.ErrorIs(t, err, ErrDifferencesExhausted)
+			}
 		})
 	}
 }
