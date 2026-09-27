@@ -27,7 +27,7 @@ func TestForceExecWaitsForKilledSessionCleanup(t *testing.T) {
 	require.NoError(t, err)
 	blockerDB.SetMaxIdleConns(0) // Rollback also closes the physical session.
 	t.Cleanup(func() { _ = blockerDB.Close() })
-	blocker, pid, err := BeginStandardTrx(t.Context(), blockerDB, nil)
+	blocker, err := blockerDB.BeginTx(t.Context(), nil)
 	require.NoError(t, err)
 	// Simulate the interval between KILL's acknowledgement and server cleanup,
 	// using a real MDL-holding transaction. Release later than the old retry's
@@ -35,6 +35,8 @@ func TestForceExecWaitsForKilledSessionCleanup(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	var workers sync.WaitGroup
 	t.Cleanup(func() { cancel(); workers.Wait(); _ = blocker.Rollback() })
+	var pid int
+	require.NoError(t, blocker.QueryRowContext(t.Context(), "SELECT CONNECTION_ID()").Scan(&pid))
 	_, err = blocker.ExecContext(ctx, "SELECT * FROM forceexec_delayed_cleanup")
 	require.NoError(t, err)
 	calls := 0
@@ -52,7 +54,7 @@ func TestForceExecWaitsForKilledSessionCleanup(t *testing.T) {
 				_ = blocker.Rollback()
 			})
 			return []int{pid}, nil
-		}, waitForKilledTransactions)
+		}, waitForKilledTransactions, nil)
 	require.NoError(t, err)
 	require.Equal(t, 1, calls, "must not kill a fresh set of blockers on retry")
 	var column string
@@ -64,14 +66,17 @@ func TestWaitForKilledTransactionsHonorsCancellation(t *testing.T) {
 	db, err := New(testutils.DSN(), NewDBConfig())
 	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
-	blocker, pid, err := BeginStandardTrx(t.Context(), db, nil)
+	// This test needs a live session, not a transaction or a metadata lock.
+	conn, err := db.Conn(t.Context())
 	require.NoError(t, err)
-	defer func() { _ = blocker.Rollback() }()
+	defer utils.CloseAndLog(conn)
+	var pid int
+	require.NoError(t, conn.QueryRowContext(t.Context(), "SELECT CONNECTION_ID()").Scan(&pid))
 	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 	defer cancel()
 	require.ErrorIs(t, waitForKilledTransactions(ctx, db, []int{pid}), context.DeadlineExceeded)
 	var alive int
-	require.NoError(t, blocker.QueryRowContext(t.Context(), "SELECT 1").Scan(&alive))
+	require.NoError(t, conn.QueryRowContext(t.Context(), "SELECT 1").Scan(&alive))
 	require.Equal(t, 1, alive, "waiting must never kill a session")
 	// Already-gone sessions and the empty set do not wait on unrelated sessions.
 	require.NoError(t, waitForKilledTransactions(t.Context(), db, nil))
@@ -89,9 +94,14 @@ func TestForceExecAncillaryFailuresPreserveRetry(t *testing.T) {
 				db, err := New(testutils.DSN(), config)
 				require.NoError(t, err)
 				defer utils.CloseAndLog(db)
-				blocker, pid, err := BeginStandardTrx(t.Context(), tt.DB, nil)
+				// The retry must reuse the reserved session, not borrow a second one.
+				SetPoolSize(db, 1)
+				// Keep the SELECT's metadata lock until Rollback so ALTER TABLE blocks.
+				blocker, err := tt.DB.BeginTx(t.Context(), nil)
 				require.NoError(t, err)
 				defer func() { _ = blocker.Rollback() }()
+				var pid int
+				require.NoError(t, blocker.QueryRowContext(t.Context(), "SELECT CONNECTION_ID()").Scan(&pid))
 				ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 				defer cancel()
 				_, err = blocker.ExecContext(ctx, "SELECT * FROM forceexec_ancillary_failure")
@@ -121,7 +131,7 @@ func TestForceExecAncillaryFailuresPreserveRetry(t *testing.T) {
 							return nil, fail()
 						}
 						return []int{pid}, nil
-					}, func(context.Context, *sql.DB, []int) error { cleanupCalls++; return fail() })
+					}, func(context.Context, *sql.DB, []int) error { cleanupCalls++; return fail() }, nil)
 				require.Equal(t, 1, killCalls)
 				if stage == "cleanup" {
 					require.Equal(t, 1, cleanupCalls)
@@ -152,7 +162,8 @@ func TestForceExecRetriesWhenBlockerExitsWithoutKill(t *testing.T) {
 	db, err := New(testutils.DSN(), config)
 	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
-	blocker, _, err := BeginStandardTrx(t.Context(), tt.DB, nil)
+	// Keep the SELECT's metadata lock until Rollback so ALTER TABLE blocks.
+	blocker, err := tt.DB.BeginTx(t.Context(), nil)
 	require.NoError(t, err)
 	defer func() { _ = blocker.Rollback() }()
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
@@ -174,11 +185,84 @@ func TestForceExecRetriesWhenBlockerExitsWithoutKill(t *testing.T) {
 			case <-timer.C:
 			}
 			return nil, blocker.Rollback()
-		}, waitForKilledTransactions)
+		}, waitForKilledTransactions, nil)
 	require.NoError(t, err)
 	require.Equal(t, 1, calls)
 	var count int
 	require.NoError(t, tt.DB.QueryRowContext(ctx,
 		"SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'forceexec_no_kill' AND column_name = 'c'").Scan(&count))
 	require.Equal(t, 1, count)
+}
+
+// Cancellation after DDL has completed must not return the session to the pool
+// while the force-kill worker is still using its identity.
+func TestForceExecRetainsConnectionUntilKillWorkerExits(t *testing.T) {
+	tt := testutils.NewTestTable(t, "forceexec_session_owner", "CREATE TABLE forceexec_session_owner (id INT PRIMARY KEY)")
+	cfg := NewDBConfig()
+	cfg.LockWaitTimeout = 5
+	cfg.ForceKillAfter = time.Millisecond
+	db, err := New(testutils.DSN(), cfg)
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+	SetPoolSize(db, 1)
+
+	// Keep the SELECT's metadata lock until Rollback so ALTER TABLE blocks.
+	blocker, err := tt.DB.BeginTx(t.Context(), nil)
+	require.NoError(t, err)
+	defer func() { _ = blocker.Rollback() }()
+	_, err = blocker.ExecContext(t.Context(), "SELECT * FROM forceexec_session_owner")
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	workerStarted := make(chan int, 1)
+	releaseWorker := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseWorker) }) }
+	result := make(chan error, 1)
+	statementDone := make(chan error, 1)
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		result <- forceExec(ctx, db, cfg, slog.Default(),
+			"ALTER TABLE forceexec_session_owner ADD COLUMN c INT, ALGORITHM=INSTANT",
+			func(_ context.Context, pid int) ([]int, error) {
+				workerStarted <- pid
+				<-releaseWorker
+				return nil, nil
+			}, waitForKilledTransactions, func(err error) { statementDone <- err })
+	})
+	defer func() { release(); wg.Wait() }()
+
+	var pid int
+	select {
+	case pid = <-workerStarted:
+	case <-ctx.Done():
+		t.Fatal("force-kill worker did not start")
+	}
+	require.NoError(t, blocker.Rollback())
+	// Server-side Sleep does not prove the client consumed the OK packet.
+	// Cancel only after ExecContext has returned and stopped its watcher.
+	select {
+	case err := <-statementDone:
+		require.NoError(t, err)
+	case <-ctx.Done():
+		t.Fatal("DDL did not complete on the client")
+	}
+
+	cancel()
+	borrowCtx, cancelBorrow := context.WithTimeout(t.Context(), 200*time.Millisecond)
+	defer cancelBorrow()
+	borrowed, borrowErr := db.Conn(borrowCtx)
+	if borrowed != nil {
+		_ = borrowed.Close()
+	}
+	require.ErrorIs(t, borrowErr, context.DeadlineExceeded,
+		"the session must remain reserved until the kill worker exits")
+	release()
+	wg.Wait()
+	require.NoError(t, <-result, "completed DDL must retain its successful result")
+	require.Zero(t, db.Stats().InUse)
+	var after int
+	require.NoError(t, db.QueryRowContext(t.Context(), "SELECT CONNECTION_ID()").Scan(&after))
+	require.Equal(t, pid, after, "the same session can be reused after the worker exits")
 }

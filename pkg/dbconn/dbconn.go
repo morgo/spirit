@@ -381,30 +381,29 @@ func ForceExec(ctx context.Context, db *sql.DB, tables []*table.TableInfo, dbCon
 	}
 	return forceExec(ctx, db, dbConfig, logger, stmt, func(ctx context.Context, connID int) ([]int, error) {
 		return killLockingTransactions(ctx, db, tables, dbConfig, logger, []int{connID})
-	}, waitForKilledTransactions)
+	}, waitForKilledTransactions, nil)
 }
 
 // forceExec receives the kill and cleanup operations so tests can control their
 // failures while exercising the statement and retry against real MySQL.
-func forceExec(ctx context.Context, db *sql.DB, dbConfig *DBConfig, logger *slog.Logger, stmt string, kill func(context.Context, int) ([]int, error), waitForCleanup func(context.Context, *sql.DB, []int) error) error {
+// afterExec, when provided by a test, observes the first client-side statement
+// result before the kill-worker join; production callers leave it nil.
+func forceExec(ctx context.Context, db *sql.DB, dbConfig *DBConfig, logger *slog.Logger, stmt string, kill func(context.Context, int) ([]int, error), waitForCleanup func(context.Context, *sql.DB, []int) error, afterExec func(error)) error {
 	if err := dbConfig.ValidateForceKillAfter(); err != nil {
 		return err
 	}
-	trx, connId, err := BeginStandardTrx(ctx, db, nil)
+	// DDL needs session affinity for the connection ID and retry, not a
+	// transaction (ALTER TABLE implicitly commits). Keep ownership through
+	// the kill-worker join even if the caller cancels while the session is idle.
+	conn, err := db.Conn(ctx)
 	if err != nil {
 		return err
 	}
-	defer func() {
-		// We need to ensure we always clean up the transaction.
-		// In the typically case we are using this for non-transactional
-		// statements (and could rollback either way), but just to be safe
-		// we check the error and commit on-nil.
-		if err != nil {
-			_ = trx.Rollback()
-		} else {
-			_ = trx.Commit()
-		}
-	}()
+	defer utils.CloseAndLog(conn)
+	var connID int
+	if err := conn.QueryRowContext(ctx, "SELECT CONNECTION_ID()").Scan(&connID); err != nil {
+		return err
+	}
 
 	duration := dbConfig.forceKillDelay()
 	var wg sync.WaitGroup
@@ -415,9 +414,12 @@ func forceExec(ctx context.Context, db *sql.DB, dbConfig *DBConfig, logger *slog
 	timer := time.AfterFunc(duration, func() {
 		defer wg.Done()
 		killTimerFired.Store(true)
-		killed, killErr = kill(ctx, connId)
+		killed, killErr = kill(ctx, connID)
 	})
-	_, err = trx.ExecContext(ctx, stmt)
+	_, err = conn.ExecContext(ctx, stmt)
+	if afterExec != nil {
+		afterExec(err)
+	}
 	if timer.Stop() {
 		// Timer was stopped before it fired, so the goroutine never started.
 		// We need to manually decrement the WaitGroup.
@@ -444,7 +446,7 @@ func forceExec(ctx context.Context, db *sql.DB, dbConfig *DBConfig, logger *slog
 			}
 		}
 		logger.Warn("retrying statement after lock wait timeout because force-kill timer fired", "error", err)
-		_, err = trx.ExecContext(ctx, stmt)
+		_, err = conn.ExecContext(ctx, stmt)
 	}
 	return err
 }
@@ -471,19 +473,4 @@ func Exec(ctx context.Context, db *sql.DB, stmt string, args ...any) error {
 	}
 	_, err = db.ExecContext(ctx, stmt)
 	return err
-}
-
-// BeginStandardTrx is like db.BeginTx but returns the connection id.
-func BeginStandardTrx(ctx context.Context, db *sql.DB, opts *sql.TxOptions) (*sql.Tx, int, error) {
-	trx, err := db.BeginTx(ctx, opts)
-	if err != nil {
-		return nil, 0, err
-	}
-	// get the connection id.
-	var connectionID int
-	err = trx.QueryRowContext(ctx, "SELECT CONNECTION_ID()").Scan(&connectionID)
-	if err != nil {
-		return nil, 0, err
-	}
-	return trx, connectionID, nil
 }
