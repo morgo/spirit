@@ -747,7 +747,7 @@ func (a *ShardedApplier) feedbackCoordinator(ctx context.Context) {
 // resolveShardLocks maps each shard to the table lock that was acquired on
 // that shard's own database connection. A LOCK TABLES ... WRITE held on a
 // shard blocks writes from every other connection, so each shard's
-// statements MUST execute on the transaction holding that shard's lock —
+// statements MUST execute on the connection holding that shard's lock —
 // executing them on another shard's lock connection would silently write
 // the rows to the wrong server.
 //
@@ -836,7 +836,7 @@ func (a *ShardedApplier) DeleteKeys(ctx context.Context, sourceTable, targetTabl
 			var affected int64
 			var err error
 			// Execute under this shard's own lock if locks were provided.
-			// The lock transaction is the only connection allowed to write
+			// The lock connection is the only connection allowed to write
 			// to this shard's table while LOCK TABLES is held.
 			if shardLocks != nil {
 				if err = shardLocks[shard.shardID].ExecUnderLock(ctx, deleteStmt); err != nil {
@@ -1048,7 +1048,7 @@ func (a *ShardedApplier) UpsertRows(ctx context.Context, mapping *table.ColumnMa
 			var err error
 
 			// Execute under this shard's own lock if locks were provided.
-			// The lock transaction is the only connection allowed to write
+			// The lock connection is the only connection allowed to write
 			// to this shard's table while LOCK TABLES is held.
 			if shardLocks != nil {
 				if err = shardLocks[sid].ExecUnderLock(ctx, upsertStmt); err != nil {
