@@ -28,7 +28,9 @@ type shardedFixture struct {
 	applier          applier.Applier
 }
 
-const shardedTableDDL = "CREATE TABLE t1 (id INT NOT NULL PRIMARY KEY, name VARCHAR(255) NOT NULL)"
+// BIGINT because testutils.EvenOddHasher takes an int64, which is what the
+// binlog decodes a BIGINT to; an INT arrives as int32 when a feed applies it.
+const shardedTableDDL = "CREATE TABLE t1 (id BIGINT NOT NULL PRIMARY KEY, name VARCHAR(255) NOT NULL)"
 
 // newShardedFixture creates the schemas, runs the per-schema setup SQL (index
 // i of sourceSQL runs on source i, likewise targetSQL), and starts the feeds.
@@ -267,6 +269,10 @@ func TestHotSnapshotRowsAcross(t *testing.T) {
 	_, oversized = read(3)
 	require.True(t, oversized, "each slice fits the budget but their union does not")
 
+	rows, oversized = read(1)
+	require.True(t, oversized, "one slice over the budget makes the union oversized")
+	require.Nil(t, rows)
+
 	_, err := f.targets[1].ExecContext(t.Context(), "INSERT INTO t1 VALUES (4,'d')")
 	require.NoError(t, err)
 	_, oversized = read(10)
@@ -276,4 +282,80 @@ func TestHotSnapshotRowsAcross(t *testing.T) {
 	cancel()
 	_, _, _, err = readHotSnapshotRowsAcross(ctx, f.targets, chunk, info, "name", "1=1", 10)
 	require.ErrorIs(t, err, context.Canceled)
+}
+
+// Binlog lag during an N:M check. The second source changes after its feed has
+// started and before the check, so every target is behind on that source's
+// changes until its feed is drained. The check must drain every feed, not just
+// the first, before it believes a mismatch: the target is lagging, not
+// diverged.
+func TestShardedNtoMReconcilesFeedLag(t *testing.T) {
+	f := newShardedFixture(t,
+		[]string{
+			"INSERT INTO t1 VALUES (1,'one'),(2,'two'),(3,'three'),(4,'four')",
+			"INSERT INTO t1 VALUES (5,'five'),(6,'six'),(7,'seven'),(8,'eight')",
+		},
+		[]string{
+			"INSERT INTO t1 VALUES (2,'two'),(4,'four'),(6,'six'),(8,'eight')",
+			"INSERT INTO t1 VALUES (1,'one'),(3,'three'),(5,'five'),(7,'seven')",
+		})
+	_, err := f.sources[1].ExecContext(t.Context(), "UPDATE t1 SET name = CONCAT(name, '-changed') WHERE id IN (6, 7)")
+	require.NoError(t, err)
+	require.Eventually(t, func() bool { return f.feeds[1].GetDeltaLen() == 2 }, 10*time.Second, 10*time.Millisecond,
+		"the second feed must be holding the changes the targets lack")
+
+	checker := f.checker(t, false)
+	require.NoError(t, checker.Run(t.Context()), "lag on the second feed is reconciled by draining it")
+	require.Positive(t, checker.DifferencesFound(), "the targets were read behind at least once")
+	require.Equal(t, rowsAcross(t, f.sources), rowsAcross(t, f.targets))
+}
+
+// The byte budget holds over the union of servers, not per server: each
+// target's keys fit in hotSnapshotMaxBytes, their union does not.
+func TestHotSnapshotRowsAcrossByteBudget(t *testing.T) {
+	// 55*55 = 3025 rows per target of 13-digit keys: 3025*(13+8) bytes, just
+	// under the 64 KiB budget on each server and over it for the pair.
+	keys := func(parity int) string {
+		return fmt.Sprintf("INSERT INTO t1 SELECT 1000000000000 + 2*(a.n*55+b.n) + %d, 'x' FROM "+
+			"(WITH RECURSIVE s(n) AS (SELECT 0 UNION ALL SELECT n+1 FROM s WHERE n < 54) SELECT n FROM s) a, "+
+			"(WITH RECURSIVE s(n) AS (SELECT 0 UNION ALL SELECT n+1 FROM s WHERE n < 54) SELECT n FROM s) b", parity)
+	}
+	f := newShardedFixture(t, []string{""}, []string{keys(0), keys(1)})
+	info := table.NewTableInfo(f.targets[0], "", "t1")
+	require.NoError(t, info.SetInfo(t.Context()))
+	chunk := &table.Chunk{Key: []string{"id"}, Table: info, NewTable: info}
+	const noRowLimit = 1 << 20
+	for i, db := range f.targets {
+		rows, size, oversized, err := readHotSnapshotRowsAcross(t.Context(), []*sql.DB{db}, chunk, info, "name", "1=1", noRowLimit)
+		require.NoError(t, err)
+		require.False(t, oversized, "target %d alone fits (size %d)", i, size)
+		require.Len(t, rows, 3025)
+	}
+	rows, size, oversized, err := readHotSnapshotRowsAcross(t.Context(), f.targets, chunk, info, "name", "1=1", noRowLimit)
+	require.NoError(t, err)
+	require.True(t, oversized, "the union (size %d) exceeds the byte budget", size)
+	require.Nil(t, rows)
+}
+
+// A hot snapshot reads every target. A row only the second target holds is an
+// obligation (the source does not have it), so it must be in the pending set.
+func TestCaptureHotSnapshotReadsEveryTarget(t *testing.T) {
+	f := newShardedFixture(t,
+		[]string{"INSERT INTO t1 VALUES (1,'a'),(2,'b')"},
+		[]string{"INSERT INTO t1 VALUES (2,'b')", "INSERT INTO t1 VALUES (1,'a'),(99,'extra')"})
+	info := table.NewTableInfo(f.sources[0], "", "t1")
+	require.NoError(t, info.SetInfo(t.Context()))
+	chunk := &table.Chunk{Key: []string{"id"}, Table: info, NewTable: info, ColumnMapping: table.NewColumnMapping(info, nil, nil)}
+	snapshot, err := captureHotSnapshot(t.Context(), f.sources, f.targets, chunk)
+	require.NoError(t, err)
+	require.NotNil(t, snapshot)
+	require.Len(t, snapshot.pending, 3, "both source rows plus the second target's extra row")
+	var targetOnly int
+	for _, row := range snapshot.pending {
+		if !row.present {
+			targetOnly++
+			require.Equal(t, -1, row.source, "a target-only row has no owning source")
+		}
+	}
+	require.Equal(t, 1, targetOnly)
 }

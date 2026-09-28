@@ -3,10 +3,12 @@ package move
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/block/mysql"
+	"github.com/block/spirit/pkg/checksum"
 	"github.com/block/spirit/pkg/sentinel"
 	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/testutils"
@@ -82,4 +84,87 @@ func TestMoveSentinelDropReleasesCutover(t *testing.T) {
 	require.True(t, cutoverCalled, "cutover must run once the sentinel is dropped")
 	require.True(t, sentinelTestTableExists(t, ctl, "sentrel_src", "t1_old"), "source retired after cutover")
 	require.True(t, sentinelTestTableExists(t, ctl, "sentrel_dst", "t1"), "target serving after cutover")
+}
+
+// TestMoveContinuousChecksumAbortsThenResumeRepairs drives a real continuous
+// pass during the sentinel wait, which the production 1h interval otherwise
+// keeps out of every test. A divergence the continuous checksum confirms must
+// abort the move rather than be recopied while cutover may be imminent
+// (docs/move.md); the resumed move must then re-run the initial checksum,
+// repair the range, and complete once the sentinel is dropped.
+//
+// Sequential by design: it shortens the package-level pass interval.
+func TestMoveContinuousChecksumAbortsThenResumeRepairs(t *testing.T) {
+	prev := continuousChecksumMinInterval
+	continuousChecksumMinInterval = 500 * time.Millisecond
+	t.Cleanup(func() { continuousChecksumMinInterval = prev })
+
+	const srcDB, dstDB = "contabort_src", "contabort_dst"
+	testutils.RunSQL(t, "DROP DATABASE IF EXISTS "+srcDB)
+	testutils.RunSQL(t, "DROP DATABASE IF EXISTS "+dstDB)
+	testutils.RunSQL(t, "CREATE DATABASE "+srcDB)
+	testutils.RunSQL(t, "CREATE DATABASE "+dstDB)
+	testutils.RunSQL(t, "CREATE TABLE "+srcDB+".t1 (id INT NOT NULL PRIMARY KEY AUTO_INCREMENT, val VARBINARY(64))")
+	testutils.RunSQL(t, "INSERT INTO "+srcDB+".t1 (val) SELECT RANDOM_BYTES(64)")
+	for range 3 { // 1 -> 2 -> 10 -> 1010 rows: several chunks, so a watermark is checkpointed
+		testutils.RunSQL(t, "INSERT INTO "+srcDB+".t1 (val) SELECT RANDOM_BYTES(64) FROM "+srcDB+".t1 a JOIN "+srcDB+".t1 b JOIN "+srcDB+".t1 c LIMIT 5000")
+	}
+
+	ctl, err := sql.Open("block-mysql", testutils.DSN())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(ctl)
+
+	move := &Move{
+		SourceDSN:    testutils.DSNForDatabase(srcDB),
+		TargetDSN:    testutils.DSNForDatabase(dstDB),
+		Threads:      1,
+		WriteThreads: 1,
+		DeferCutOver: true,
+	}
+
+	// First run: corrupt the target once the move is waiting on the sentinel.
+	// The target-side write is invisible to the source feed, so no drain can
+	// reconcile it.
+	runner, err := NewRunner(move)
+	require.NoError(t, err)
+	runner.SetCutover(func(context.Context) error { return errors.New("cutover must not run") })
+	errCh := make(chan error, 1)
+	go func() { errCh <- runner.Run(t.Context()) }()
+	waitForMoveStatus(t, runner, status.WaitingOnSentinelTable, errCh)
+	testutils.RunSQL(t, "UPDATE "+dstDB+".t1 SET val = 'corrupt' WHERE id = 1")
+	select {
+	case err := <-errCh:
+		require.ErrorIs(t, err, checksum.ErrPermanentDivergence,
+			"the continuous checksum must report the divergence, not recopy it")
+	case <-time.After(60 * time.Second):
+		t.Fatal("the continuous checksum did not abort the move")
+	}
+	require.NoError(t, runner.Close())
+	var val string
+	require.NoError(t, ctl.QueryRowContext(t.Context(), "SELECT val FROM "+dstDB+".t1 WHERE id = 1").Scan(&val))
+	require.Equal(t, "corrupt", val, "the continuous checksum must not repair")
+
+	// Resume: the initial checksum re-verifies from the start and repairs.
+	runner, err = NewRunner(move)
+	require.NoError(t, err)
+	defer utils.CloseAndLog(runner)
+	var cutoverCalled bool
+	runner.SetCutover(func(context.Context) error { cutoverCalled = true; return nil })
+	errCh = make(chan error, 1)
+	go func() { errCh <- runner.Run(t.Context()) }()
+	waitForMoveStatus(t, runner, status.WaitingOnSentinelTable, errCh)
+	require.True(t, runner.usedResumeFromCheckpoint.Load(), "the move must resume, not start over")
+	var diverged int
+	require.NoError(t, ctl.QueryRowContext(t.Context(),
+		"SELECT COUNT(*) FROM "+srcDB+".t1 s LEFT JOIN "+dstDB+".t1 d USING (id, val) WHERE d.id IS NULL").Scan(&diverged))
+	require.Zero(t, diverged, "the resumed initial checksum must have repaired the range")
+
+	testutils.RunSQL(t, "DROP TABLE "+dstDB+"."+sentinel.TableName)
+	select {
+	case err := <-errCh:
+		require.NoError(t, err)
+	case <-time.After(60 * time.Second):
+		t.Fatal("move did not complete after the sentinel was dropped")
+	}
+	require.True(t, cutoverCalled)
 }

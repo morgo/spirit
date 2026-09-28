@@ -259,10 +259,15 @@ type LocklessChecker struct {
 	hotChunksSettledThisPass      atomic.Uint64 // hot chunks settled against the change stream
 
 	permanentFailures atomic.Uint64
-	retryQueueDepth   atomic.Int64
-	hotChunkCount     atomic.Int64
-	inFlight          atomic.Int64
-	walkerStalls      atomic.Uint64
+	// confirmedDifferences counts divergences that survived a drain of every
+	// feed (or were settled against the change stream): each one is repaired
+	// or reported. Unlike mismatchesDetected it excludes apply lag, and unlike
+	// every other counter it is never reset. See ConfirmedDifferences.
+	confirmedDifferences atomic.Uint64
+	retryQueueDepth      atomic.Int64
+	hotChunkCount        atomic.Int64
+	inFlight             atomic.Int64
+	walkerStalls         atomic.Uint64
 
 	statsMu          sync.RWMutex
 	firstCleanPassAt time.Time
@@ -355,18 +360,6 @@ func newLocklessChecker(
 // row-level diff inspector needs: it compares both sides inside one session.
 func (c *LocklessChecker) sameServer() bool {
 	return len(c.sourceDBs) == 1 && len(c.targetDBs) == 1 && c.sourceDBs[0] == c.targetDBs[0]
-}
-
-// settlingFeed is the one feed a hot row can be settled against, or nil. With
-// several sources the row's next change could arrive on any of them, and
-// parking all of them to wait for it is not worth its complexity for a
-// terminal escalation, so a multi-source range defers instead (a nil feed
-// makes newRowSettler answer settleUnavailable).
-func (c *LocklessChecker) settlingFeed() change.Source {
-	if len(c.feeds) != 1 {
-		return nil
-	}
-	return c.feeds[0]
 }
 
 // flushFeeds drains every feed, so a target merely behind on applying buffered
@@ -1120,7 +1113,7 @@ func (c *LocklessChecker) checkHotSnapshot(ctx context.Context, res *workResult,
 	// settle each outstanding row against the change stream's own image of it —
 	// see lockless_settle.go for why that verdict is trustworthy where a poll's
 	// is not.
-	verdict, err := newRowSettler(c.sourceDBs[0], c.settlingFeed(), c.cfg.Logger).settle(ctx, snapshot)
+	verdict, err := newRowSettler(c.sourceDBs, c.feeds, c.cfg.Logger).settle(ctx, snapshot)
 	if err != nil {
 		res.err = fmt.Errorf("settle hot range: %w", err)
 		return
@@ -1159,6 +1152,7 @@ func (c *LocklessChecker) checkHotSnapshot(ctx context.Context, res *workResult,
 // compared against.
 func (c *LocklessChecker) resolveSettledDivergence(ctx context.Context, res *workResult) {
 	chunk := res.item.chunk
+	c.confirmedDifferences.Add(1) // before any repair; see ConfirmedDifferences
 	if c.recopier == nil {
 		c.logRowDifferences(ctx, chunk, "hot chunk has diverged")
 		res.permanent = true
@@ -1293,7 +1287,10 @@ func (c *LocklessChecker) executeWork(ctx context.Context, item *workItem) *work
 	// Confirmed stable divergence. Self-heal by recopying the chunk when a
 	// Recopier is configured and the caller has not declared divergence fatal;
 	// otherwise surface ErrPermanentDivergence so the caller (a library user
-	// running a read-only verification) sees it as an error.
+	// running a read-only verification) sees it as an error. Counted before
+	// the repair, so a caller gating on ConfirmedDifferences never sees a
+	// rewritten range as clean.
+	c.confirmedDifferences.Add(1)
 	if c.recopier != nil {
 		c.logRowDifferences(ctx, item.chunk, "recopying diverged chunk")
 		if err := c.recopier.Recopy(ctx, item.chunk); err != nil {
@@ -1722,6 +1719,17 @@ func (c *LocklessChecker) Stats() LocklessCheckerStats {
 // persisted watermark and forces re-verification on resume.
 func (c *LocklessChecker) DifferencesFound() uint64 {
 	return c.mismatchesDetected.Load()
+}
+
+// ConfirmedDifferences returns the lifetime number of chunks judged diverged
+// after every feed was drained, or settled diverged against the change stream:
+// the ones that are repaired or reported, and never apply lag that reconciled
+// on retry. It is counted before a repair starts and never reset, so it is the
+// signal for "this checker has seen the copy wrong", which DifferencesFound is
+// too noisy to be: an optimistic read of a table taking writes mismatches
+// routinely.
+func (c *LocklessChecker) ConfirmedDifferences() uint64 {
+	return c.confirmedDifferences.Load()
 }
 
 // FirstCleanPass returns a channel that is closed the first time a pass

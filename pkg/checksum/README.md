@@ -118,6 +118,11 @@ Snapshot checkers suppress evidence after differences. Lockless verification has
 no equivalent gate and does not need one — optimistic reads mismatch routinely on
 a table taking writes and almost all of those resolve on retry, so gating on the
 mismatch counter would discard the watermark on essentially every real migration.
+(A caller that must know whether a *separate* lockless checker ever saw the copy
+wrong — move, gating its checkpoint on the sentinel-wait checker — reads
+`LocklessChecker.ConfirmedDifferences()`: divergences confirmed after every feed
+was drained, or settled against the stream, counted before any repair and never
+reset. `DifferencesFound()` includes the lag that reconciled.)
 What makes the prefix trustworthy instead is that a chunk is reported to the
 chunker only once it has resolved clean, so a chunk that was repaired, deferred
 as hot, or split parks the watermark below itself and a resumed run re-verifies
@@ -294,6 +299,16 @@ Three cases still defer rather than settle, and all three are honesty constraint
 
 A checker with no feed at all (library callers may have none) simply leaves the
 range where it was before settling existed.
+
+**Several sources** (a move with N sources) settle each row on the feed of the
+source it was read from. A key found on two sources is refused as a snapshot
+(it is either a disjointness violation or a row mid-move, and a per-key image
+cannot say which copy is the row), so every source row has exactly one owner,
+and only that owner's stream carries its next change; only that feed is parked.
+A row that only the target holds has no source, and so no owning feed, when
+there are several: its obligation is to be *absent*, and only a delete event
+from the source it would have come from could settle that, which cannot be
+identified. It defers, and the ordinary retries carry it.
 
 When a chunk's source CRC is stable across the retry window but the target still disagrees, that is a **stable divergence**. How the checker reacts is governed by whether it has a `Recopier`:
 

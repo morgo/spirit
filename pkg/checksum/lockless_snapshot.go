@@ -41,6 +41,11 @@ type hotSnapshotRow struct {
 	key     []table.Datum
 	crc     uint64
 	present bool
+	// source is the index of the server the row was read from, within the set
+	// passed to readHotSnapshotRowsAcross. In a snapshot's pending set that is
+	// the owning source, whose feed carries the row's next change (see
+	// rowSettler.owner), or -1 for a row only the target holds.
+	source int
 }
 
 // captureHotSnapshot reads at most 128 rows from each side. A nil snapshot means
@@ -66,6 +71,7 @@ func captureHotSnapshot(ctx context.Context, sourceDBs, targetDBs []*sql.DB, chu
 	pending := make(map[string]hotSnapshotRow, len(target)+len(source))
 	for key, row := range target {
 		row.present = false // not in the source snapshot unless overwritten below
+		row.source = -1
 		pending[key] = row
 	}
 	maps.Copy(pending, source)
@@ -177,11 +183,12 @@ func readHotSnapshotRowsAcross(ctx context.Context, dbs []*sql.DB, chunk *table.
 		return nil, total, true, nil
 	}
 	merged := make(map[string]hotSnapshotRow)
-	for _, rows := range results {
+	for i, rows := range results {
 		for key, row := range rows {
 			if _, dup := merged[key]; dup {
 				return nil, total, true, nil
 			}
+			row.source = i
 			merged[key] = row
 		}
 		if len(merged) > limit {

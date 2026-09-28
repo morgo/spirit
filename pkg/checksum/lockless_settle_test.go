@@ -94,7 +94,7 @@ func settleTestSettler(t *testing.T, db *sql.DB, feed change.Source) *rowSettler
 	t.Helper()
 	cfg := CheckerConfig{}
 	applySharedDefaults(&cfg)
-	return newRowSettler(db, feed, cfg.Logger)
+	return newRowSettler([]*sql.DB{db}, []change.Source{feed}, cfg.Logger)
 }
 
 // pendingSnapshot captures a snapshot and asserts the fallback really did leave
@@ -317,8 +317,7 @@ func TestExpectedImageCRCMatchesRealRow(t *testing.T) {
 		require.NoError(t, db.QueryRowContext(t.Context(),
 			"SELECT CRC32(CONCAT("+sourceExprs+")) FROM src WHERE id=1").Scan(&want))
 
-		s := &rowSettler{sourceDB: db}
-		got, err := s.expectedImageCRC(t.Context(), chunk, readRowImage(t, db, "SELECT * FROM src WHERE id=1"))
+		got, err := expectedImageCRC(t.Context(), db, chunk, readRowImage(t, db, "SELECT * FROM src WHERE id=1"))
 		require.NoError(t, err)
 		require.Equal(t, want, got, "ddl=%s", ddl)
 	}
@@ -373,7 +372,7 @@ func TestExpectedImageCRCMatchesRealRowForBinlogTypes(t *testing.T) {
 			require.NoError(t, db.QueryRowContext(t.Context(),
 				"SELECT CRC32(CONCAT("+sourceExprs+")) FROM src WHERE id=1").Scan(&want))
 
-			got, err := (&rowSettler{sourceDB: db}).expectedImageCRC(t.Context(), chunk, tc.image)
+			got, err := expectedImageCRC(t.Context(), db, chunk, tc.image)
 			require.NoError(t, err)
 			require.Equal(t, want, got)
 		})
@@ -426,8 +425,7 @@ func TestImageValueExpr(t *testing.T) {
 // mapping expects would otherwise index out of range.
 func TestExpectedImageCRCRejectsShortImage(t *testing.T) {
 	db, chunk := snapshotTestTables(t, "id INT PRIMARY KEY, value INT", []string{"id"})
-	s := &rowSettler{sourceDB: db}
-	_, err := s.expectedImageCRC(t.Context(), chunk, []any{int64(1)})
+	_, err := expectedImageCRC(t.Context(), db, chunk, []any{int64(1)})
 	require.ErrorContains(t, err, "binlog row image has 1 columns")
 }
 
@@ -519,6 +517,7 @@ func TestCheckHotSnapshotEscalatesOnlyWhenExhausted(t *testing.T) {
 	require.False(t, res.deferHot, "a settled divergence is a verdict, not a deferral")
 	require.True(t, res.permanent, "no recopier configured, so a settled divergence is fatal")
 	require.Equal(t, uint64(1), c.hotChunksSettledThisPass.Load())
+	require.Equal(t, uint64(1), c.ConfirmedDifferences(), "a settled divergence is a confirmed one")
 }
 
 // TestLocklessSettlesHotChunkEndToEnd is the whole point of the escalation,
@@ -584,6 +583,7 @@ func TestLocklessSettlesHotChunkEndToEnd(t *testing.T) {
 			require.Zero(t, stats.HotChunksDeferredThisPass)
 			if converge {
 				require.NoError(t, err)
+				require.Zero(t, c.ConfirmedDifferences(), "a settle that converged confirmed nothing")
 				require.False(t, stats.FirstCleanPassAt.IsZero())
 				var diffs int
 				require.NoError(t, db.QueryRowContext(t.Context(),
@@ -593,6 +593,7 @@ func TestLocklessSettlesHotChunkEndToEnd(t *testing.T) {
 			}
 			require.ErrorIs(t, err, ErrPermanentDivergence,
 				"a settled divergence is reported; before settling it was invisible")
+			require.Equal(t, uint64(1), c.ConfirmedDifferences())
 			require.ErrorContains(t, err, "settled against the change stream",
 				"a settled divergence names its own evidence, not aggregate CRCs it never read")
 		})
@@ -635,8 +636,71 @@ func TestCompareRowToImageRefusesAmbiguousTargetRead(t *testing.T) {
 	}
 	require.True(t, found, "the source row should be an outstanding obligation")
 
-	settler := newRowSettler(db, &change.MockSource{}, slog.Default())
-	verdict, err := settler.compareRowToImage(t.Context(), snapshot, row, []any{[]byte("a"), int32(1)}, false)
+	verdict, err := compareRowToImage(t.Context(), db, snapshot, row, []any{[]byte("a"), int32(1)}, false)
 	require.NoError(t, err)
 	require.Equal(t, settleUnavailable, verdict, "two target rows for one key is not a verdict")
+}
+
+// A move reads N sources, each with its own feed. A continuously updated row
+// lives on exactly one of them, so its next change arrives on that source's
+// feed and the range is settled there, as a one-source range is. The row here
+// is on the second source, so settling on the first feed would wait out its
+// budget and defer.
+func TestLocklessSettlesHotRowOnTheFeedThatOwnsIt(t *testing.T) {
+	db, chunk := snapshotTestTables(t, "id INT PRIMARY KEY, value INT", []string{"id"})
+	other, _ := snapshotTestTables(t, "id INT PRIMARY KEY, value INT", []string{"id"})
+	snapshotExec(t, db, "INSERT INTO src VALUES (1,10),(2,20)")
+	snapshotExec(t, db, "INSERT INTO dst VALUES (1,10)")
+
+	chunker := newTestChunker(1)
+	chunker.chunks[0] = chunk
+	cfg := fastConfig()
+	cfg.RetryDelay = time.Millisecond
+	cfg.MaxHotAttempts = 3
+	cfg.MaxPasses = 1
+	cfg.MinPassInterval = time.Hour
+	c := newTestChecker(t, chunker, cfg, func(_ context.Context, _ *table.Chunk, attempt int) (int64, int64, uint64, error) {
+		return int64(attempt), 0, 1, nil // the source never stops moving
+	})
+	sources := []*sql.DB{other, db}
+	c.sourceDBs = sources
+	c.snapshotChunk = func(ctx context.Context, chunk *table.Chunk) (*hotSnapshot, error) {
+		return captureHotSnapshot(ctx, sources, []*sql.DB{db}, chunk)
+	}
+	owner := &parkingFeed{events: []parkedEvent{{key: []any{int64(2)}, image: []any{int64(2), int64(20)}}}}
+	owner.FlushFn = func(ctx context.Context) error {
+		_, err := db.ExecContext(ctx, "REPLACE INTO dst SELECT * FROM src")
+		return err
+	}
+	c.feeds = []change.Source{&parkingFeed{}, owner}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	defer cancel()
+	err := c.RunUntilClean(ctx)
+
+	stats := c.Stats()
+	require.Equal(t, uint64(1), stats.HotChunksSettledThisPass, "the hot row must be settled on its own source's feed, not deferred")
+	require.NoError(t, err)
+}
+
+// owner routes a row to the feed of the source it was read from. A row only
+// the target holds has no source; with one feed that is still the only place
+// its next change can arrive, and with several it has no owner.
+func TestRowSettlerOwner(t *testing.T) {
+	a, b := &sql.DB{}, &sql.DB{}
+	fa, fb := &change.MockSource{}, &change.MockSource{}
+	multi := newRowSettler([]*sql.DB{a, b}, []change.Source{fa, fb}, slog.Default())
+	db, feed := multi.owner(hotSnapshotRow{source: 1})
+	require.Same(t, b, db)
+	require.Same(t, fb, feed)
+	db, feed = multi.owner(hotSnapshotRow{source: -1})
+	require.Nil(t, db)
+	require.Nil(t, feed, "a target-only row has no owning source among several")
+
+	single := newRowSettler([]*sql.DB{a}, []change.Source{fa}, slog.Default())
+	db, feed = single.owner(hotSnapshotRow{source: -1})
+	require.Same(t, a, db)
+	require.Same(t, fa, feed)
+
+	require.Nil(t, newRowSettler([]*sql.DB{a}, nil, slog.Default()), "no feed means no settler")
 }

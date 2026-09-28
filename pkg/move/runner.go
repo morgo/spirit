@@ -133,12 +133,12 @@ type Runner struct {
 	// continuousChecker is the sentinel-wait re-verification checker built
 	// by runContinuousChecksum. It is deliberately separate from r.checker
 	// (fresh chunker, not wired into resume), but DumpCheckpoint must
-	// consult it: once it has repaired any chunk, the initial checksum's
-	// watermark no longer proves the tables clean, so persisting it would
-	// let a resumed run skip re-verifying the repaired range. Written once
-	// by the continuous-checksum goroutine and read by the checkpoint
-	// dumper goroutine — both under checkpointMu. Mirrors pkg/migration.
-	continuousChecker checksum.Checker
+	// consult it: once it has confirmed any divergence, the initial
+	// checksum's watermark no longer proves the tables clean, so persisting
+	// it would let a resumed run skip re-verifying the diverged range.
+	// Written once by the continuous-checksum goroutine and read by the
+	// checkpoint dumper goroutine — both under checkpointMu.
+	continuousChecker continuousVerifier
 
 	// lastCheckpoint is when the checkpoint was last persisted and the
 	// position(s) it saved, reported together on the ckpt row of the status
@@ -2078,7 +2078,7 @@ func (r *Runner) throttleStatus(state status.State) status.ThrottleStatus {
 
 // invalidateChecksumWatermark blanks the checksum_watermark on the persisted
 // checkpoint rows if (and only if) the sentinel-wait continuous checker
-// recorded any differences. Called from the sentinel-abort path: the
+// confirmed any divergence (see continuousVerifier). Called from the sentinel-abort path: the
 // periodic dumper already refuses to persist a watermark once the difference
 // counter is non-zero, but the difference can be recorded between a dump's
 // condition read and its INSERT — this UPDATE, serialized against the dumper
@@ -2090,14 +2090,25 @@ func (r *Runner) throttleStatus(state status.State) status.ThrottleStatus {
 func (r *Runner) invalidateChecksumWatermark(ctx context.Context) error {
 	r.checkpointMu.Lock()
 	defer r.checkpointMu.Unlock()
-	if r.continuousChecker == nil || r.continuousChecker.DifferencesFound() == 0 {
+	if r.continuousChecker == nil || r.continuousChecker.ConfirmedDifferences() == 0 {
 		return nil
 	}
-	r.logger.Warn("continuous checksum found differences; clearing persisted checksum watermark so the next run re-verifies from the start of the checksum phase")
+	r.logger.Warn("continuous checksum confirmed a divergence; clearing persisted checksum watermark so the next run re-verifies from the start of the checksum phase")
 	return dbconn.Exec(ctx, r.targets[0].DB, "UPDATE %n SET checksum_watermark = %?",
 		r.checkpointTable.TableName,
 		"",
 	)
+}
+
+// continuousVerifier is what the runner consults on the continuous checker
+// outside RunContinuous. ConfirmedDifferences, not DifferencesFound, gates the
+// checksum watermark: an optimistic read of tables taking writes mismatches
+// whenever the target lags the source, and that lag reconciling on retry says
+// nothing against the initial checksum's verdict. Satisfied by
+// *checksum.LocklessChecker and *checksum.MockChecker.
+type continuousVerifier interface {
+	ContinuousActive() bool
+	ConfirmedDifferences() uint64
 }
 
 // runContinuousChecksum runs a fresh checker over the source/target tables in
@@ -2127,34 +2138,22 @@ func (r *Runner) runContinuousChecksum(ctx context.Context) error {
 		sourceDBs[i] = r.sources[i].db
 		feeds[i] = r.sources[i].replClient
 	}
-	checker, err := checksum.NewChecker(sourceDBs, chunker, feeds, &checksum.CheckerConfig{
-		// Keep the fixed-mode single worker; autoscaling can grow it on load feedback.
-		Concurrency: 1,
-		Lockless:    true,
-		DBConfig:    r.dbConfig,
-		Logger:      r.logger,
-		Applier:     r.applier,
-		// No repair here: a divergence that survives a full drain of the
-		// feeds returns ErrPermanentDivergence and aborts the move, rather
-		// than being recopied while cutover may be imminent. Resuming blanks
-		// the checksum watermark, and the initial checksum repairs the chunk.
-		FixDifferences:  false,
-		Throttler:       r.currentThrottler(),
-		Autoscale:       checksum.AutoscaleConfig{Enabled: r.autoscale.Enabled, MaxThreads: r.autoscale.MaxReadThreads},
-		MetricsSink:     r.metricsSink,
-		MinPassInterval: continuousChecksumMinInterval,
-	})
+	checker, err := checksum.NewChecker(sourceDBs, chunker, feeds, r.continuousCheckerConfig())
 	if err != nil {
 		return fmt.Errorf("failed to create continuous checker: %w", err)
 	}
+	verifier, ok := checker.(continuousVerifier)
+	if !ok {
+		return fmt.Errorf("continuous checker %T does not report confirmed differences", checker)
+	}
 	// Publish the checker so DumpCheckpoint (on the WatchTask goroutine)
-	// can consult its DifferencesFound() when deciding whether the
+	// can consult its ConfirmedDifferences() when deciding whether the
 	// persisted checksum_watermark is still trustworthy. Published before
-	// the first pass starts, so there is no window where a difference
-	// could be recorded while the dumper still believes the tables clean —
-	// the checker increments its counter atomically when it finds one.
+	// the first pass starts, so there is no window where a divergence
+	// could be confirmed while the dumper still believes the tables clean —
+	// the checker increments its counter atomically, before any repair.
 	r.checkpointMu.Lock()
-	r.continuousChecker = checker
+	r.continuousChecker = verifier
 	r.checkpointMu.Unlock()
 
 	// Wait the full interval before the first pass, flushing every source
@@ -2182,6 +2181,29 @@ func (r *Runner) runContinuousChecksum(ctx context.Context) error {
 	// error — including a cancellation that interrupted a repair — aborts
 	// cutover.
 	return checker.RunContinuous(ctx)
+}
+
+// continuousCheckerConfig is the sentinel-wait checker's configuration,
+// separate from runContinuousChecksum so its policy (lockless, no repair,
+// hourly passes) can be pinned without waiting out a pass interval.
+func (r *Runner) continuousCheckerConfig() *checksum.CheckerConfig {
+	return &checksum.CheckerConfig{
+		// Keep the fixed-mode single worker; autoscaling can grow it on load feedback.
+		Concurrency: 1,
+		Lockless:    true,
+		DBConfig:    r.dbConfig,
+		Logger:      r.logger,
+		Applier:     r.applier,
+		// No repair here: a divergence that survives a full drain of the
+		// feeds returns ErrPermanentDivergence and aborts the move, rather
+		// than being recopied while cutover may be imminent. Resuming blanks
+		// the checksum watermark, and the initial checksum repairs the chunk.
+		FixDifferences:  false,
+		Throttler:       r.currentThrottler(),
+		Autoscale:       checksum.AutoscaleConfig{Enabled: r.autoscale.Enabled, MaxThreads: r.autoscale.MaxReadThreads},
+		MetricsSink:     r.metricsSink,
+		MinPassInterval: continuousChecksumMinInterval,
+	}
 }
 
 // continuousChecksumRunning reports whether a continuous pass is reading, as
@@ -2253,7 +2275,7 @@ func (r *Runner) DumpCheckpoint(ctx context.Context) error {
 		if wmErr != nil {
 			return status.ErrWatermarkNotReady
 		}
-		if r.continuousChecker == nil || r.continuousChecker.DifferencesFound() == 0 {
+		if r.continuousChecker == nil || r.continuousChecker.ConfirmedDifferences() == 0 {
 			checksumWatermark = wm
 		}
 	}

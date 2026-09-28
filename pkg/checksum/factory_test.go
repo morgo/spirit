@@ -272,7 +272,6 @@ func TestFactoryLocklessTopology(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []*sql.DB{a}, checker.targetDBs, "a lone source is compared with itself")
 	require.True(t, checker.sameServer())
-	require.NotNil(t, checker.settlingFeed())
 
 	checker, err = build([]*sql.DB{a}, feeds[:1], &applier.MockApplier{Targets: []applier.Target{{DB: a}}})
 	require.NoError(t, err)
@@ -283,7 +282,6 @@ func TestFactoryLocklessTopology(t *testing.T) {
 	require.Equal(t, []*sql.DB{a, b}, checker.sourceDBs)
 	require.Equal(t, []*sql.DB{c, a}, checker.targetDBs)
 	require.False(t, checker.sameServer())
-	require.Nil(t, checker.settlingFeed(), "no single feed orders a multi-source range")
 
 	// Targets sharing a handle hold one table between them; reading it once per
 	// target would count every row twice.
