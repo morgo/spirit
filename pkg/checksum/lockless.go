@@ -26,7 +26,10 @@
 // source — so failures are not noisy events. They go through a retry queue:
 //
 //  1. On initial mismatch, record {originalSrcCRC, originalTgtCRC} and
-//     enqueue with a not-before time of now+RetryDelay.
+//     enqueue with a not-before time of now+RetryDelay. With a change feed,
+//     the retry also waits (up to RetryFlushWait) for the feed to complete a
+//     flush, since until then the target cannot have moved. This applies to
+//     every re-enqueue below as well.
 //  2. When the retry fires, re-read source and target (in parallel).
 //     - If newTgtCRC == originalSrcCRC OR newTgtCRC == newSrcCRC → pass.
 //       The target has caught up to a version of the source we have
@@ -176,12 +179,16 @@ var (
 	LocklessMinPassInterval = 1 * time.Hour
 	// DefaultLocklessRetryDelay is the constructor default for RetryDelay: the
 	// wait before re-reading a mismatched chunk. It is short because it is not
-	// what keeps apply lag from being mistaken for divergence — a stable
-	// mismatch drains the change feed and re-reads before any verdict (see
-	// executeWork) — so a shorter delay costs extra re-reads, not correctness.
-	// What it does bound is how long a hot range waits between attempts, and
-	// with it how quickly a finite gate under sustained writes converges.
+	// what keeps apply lag from being mistaken for divergence: a retry also
+	// waits for the change feed to flush (see gateOnFlush), and a stable
+	// mismatch drains the feed and re-reads before any verdict (see
+	// executeWork). With a feed it is only a floor; without one it is the
+	// whole wait.
 	DefaultLocklessRetryDelay = 5 * time.Second
+	// DefaultLocklessRetryFlushWait is the constructor default for
+	// RetryFlushWait: two flush intervals, so a periodic flush lands inside it
+	// even when the flush before it ran long.
+	DefaultLocklessRetryFlushWait = 2 * change.DefaultFlushInterval
 )
 
 var (
@@ -320,6 +327,9 @@ func newLocklessChecker(
 	if cfg.RetryDelay <= 0 {
 		cfg.RetryDelay = DefaultLocklessRetryDelay
 	}
+	if cfg.RetryFlushWait <= 0 {
+		cfg.RetryFlushWait = DefaultLocklessRetryFlushWait
+	}
 	if cfg.MaxQueueSize <= 0 {
 		cfg.MaxQueueSize = DefaultLocklessMaxQueueSize
 	}
@@ -397,6 +407,52 @@ func (c *LocklessChecker) flushResidual() (int, int) {
 		flushes = min(flushes, f)
 	}
 	return total, flushes
+}
+
+// gateOnFlush makes a queued retry wait for the change feed as well as the
+// clock: it is not due until every feed has completed a flush after this call
+// (see flushResidual for why that is the minimum count), or until
+// RetryFlushWait has passed.
+//
+// This is what keeps a short RetryDelay from being mistaken for apply lag. The
+// target only moves when a feed flushes, which is every DefaultFlushInterval
+// (30s), so a retry that re-reads it sooner can only see the image it already
+// saw. On the stable path that costs a forced drain, but on the hot and
+// snapshot paths nothing drains: each such re-read spends one of the
+// MaxHotAttempts on a target that had no chance to catch up, and the budget
+// runs out after one or two flushes rather than the many it is sized for.
+// Waiting for the flush makes every attempt one the target could have passed.
+//
+// Without feeds there is nothing to wait for, so the entry is left ungated.
+// The deadline covers a feed that has stopped flushing — the retry then
+// proceeds on RetryDelay alone, as if ungated.
+func (c *LocklessChecker) gateOnFlush(e *retryEntry) {
+	if len(c.feeds) == 0 {
+		return
+	}
+	_, e.flushes = c.flushResidual()
+	e.flushDeadline = time.Now().Add(c.cfg.RetryFlushWait)
+}
+
+// retryFlushPoll is how often the dispatcher re-checks the flush count for a
+// retry that is past its notBefore but still waiting on a flush. The check is
+// a mutex read per feed, so this only bounds how late after a flush the retry
+// is picked up.
+const retryFlushPoll = 250 * time.Millisecond
+
+// retryDue reports whether e may be retried at now and, if not, how long to
+// wait before asking again. See gateOnFlush.
+func (c *LocklessChecker) retryDue(e *retryEntry, now time.Time) (bool, time.Duration) {
+	if wait := e.notBefore.Sub(now); wait > 0 {
+		return false, wait
+	}
+	if e.flushDeadline.IsZero() || !now.Before(e.flushDeadline) {
+		return true, 0
+	}
+	if _, flushes := c.flushResidual(); flushes > e.flushes {
+		return true, 0
+	}
+	return false, min(retryFlushPoll, e.flushDeadline.Sub(now))
 }
 
 // SetThrottler installs pacing before a run. It is called during runner setup,
@@ -802,7 +858,15 @@ func (c *LocklessChecker) runOnePass(ctx context.Context, workCh chan<- *workIte
 	// process the existing retry and re-stall the walker than drop the
 	// chunk's divergence info.
 	enqueueRetry := func(e *retryEntry) error {
-		queue.PushBack(e)
+		if e.fresh {
+			// A fresh entry is a first read (a split child), not a retry, so
+			// it has nothing to wait for. Queue it ahead of the retries, which
+			// may be waiting on a flush, rather than behind them.
+			queue.PushFront(e)
+		} else {
+			c.gateOnFlush(e)
+			queue.PushBack(e)
+		}
 		c.retryQueueDepth.Store(int64(queue.Len()))
 		if e.consecutiveSrcChanged >= 2 {
 			c.hotChunkCount.Add(1)
@@ -821,15 +885,21 @@ func (c *LocklessChecker) runOnePass(ctx context.Context, workCh chan<- *workIte
 		var emit *workItem
 		emitFresh := false
 		var dueHead *retryEntry
+		var headWait time.Duration
 		switch {
 		case pendingFresh != nil:
 			emit = pendingFresh
 			emitFresh = true
 		default:
-			// Peek the retry queue head; emit if it's due.
+			// Peek the retry queue head; emit if it's due. Only the head is
+			// examined: entries are queued in order of both notBefore and
+			// flush count, so nothing behind it is due any sooner. (Fresh
+			// entries are ungated and go to the front.)
 			if front := queue.Front(); front != nil {
 				e := front.Value.(*retryEntry)
-				if !e.notBefore.After(time.Now()) {
+				var due bool
+				due, headWait = c.retryDue(e, time.Now())
+				if due {
 					dueHead = e
 					emit = &workItem{
 						chunk:                 e.chunk,
@@ -856,10 +926,8 @@ func (c *LocklessChecker) runOnePass(ctx context.Context, workCh chan<- *workIte
 		var dueTimer *time.Timer
 		var dueCh <-chan time.Time
 		if emit == nil {
-			if front := queue.Front(); front != nil {
-				e := front.Value.(*retryEntry)
-				wait := max(time.Until(e.notBefore), 0)
-				dueTimer = time.NewTimer(wait)
+			if queue.Front() != nil {
+				dueTimer = time.NewTimer(headWait)
 				dueCh = dueTimer.C
 			}
 		}

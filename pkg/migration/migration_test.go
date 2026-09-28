@@ -38,6 +38,7 @@ func TestMain(m *testing.M) {
 	// inter-pass interval, so they run a single pass regardless of the value.
 	checksum.LocklessMinPassInterval = 2 * time.Second
 	checksum.DefaultLocklessRetryDelay = 1 * time.Second
+	checksum.DefaultLocklessRetryFlushWait = 1 * time.Second
 	goleak.VerifyTestMain(m)
 }
 

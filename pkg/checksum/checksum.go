@@ -253,6 +253,15 @@ type CheckerConfig struct {
 	// the re-walk between finite passes.
 	RetryDelay time.Duration
 
+	// RetryFlushWait bounds how long a retry additionally waits for the
+	// change feeds to complete a flush since the attempt that queued it. The
+	// target only moves when a feed flushes, so a retry before then re-reads
+	// an image it has already seen. It is an upper bound, not a delay: the
+	// retry runs as soon as a flush lands (and RetryDelay has passed), and
+	// without feeds there is no wait at all. Default
+	// DefaultLocklessRetryFlushWait (2 × change.DefaultFlushInterval).
+	RetryFlushWait time.Duration
+
 	// MaxQueueSize is the cap on entries in the delayed-retry queue. Reaching
 	// it stalls the walker until retries drain rather than failing the run.
 	// Default 1024.

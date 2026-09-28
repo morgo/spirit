@@ -1392,6 +1392,81 @@ func TestRunUntilCleanHonoursMaxPasses(t *testing.T) {
 	require.True(t, c.Stats().FirstCleanPassAt.IsZero())
 }
 
+// A retry waits for the change feed to flush, because until then the target
+// cannot have moved. The chunk here is hot and the target shows the source as
+// of the last flush — the shape of a feed that applies every
+// DefaultFlushInterval. Retried on RetryDelay alone, every re-read would see
+// the same stale target, spend the MaxHotAttempts budget on it, and defer the
+// chunk; gated on the flush, the one retry passes.
+func TestRetryWaitsForFeedFlush(t *testing.T) {
+	var (
+		mu      sync.Mutex
+		reads   int
+		lastSrc int64
+		tgt     int64 // the source as of the last flush
+	)
+	feed := &change.MockSource{FlushFn: func(context.Context) error {
+		mu.Lock()
+		defer mu.Unlock()
+		tgt = lastSrc
+		return nil
+	}}
+	readCount := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return reads
+	}
+	newChecker := func(t *testing.T, flushWait time.Duration) *LocklessChecker {
+		cfg := fastConfig()
+		cfg.RetryDelay = time.Millisecond
+		cfg.RetryFlushWait = flushWait
+		cfg.MaxHotAttempts = 2
+		cfg.MaxPasses = 1
+		c := newTestChecker(t, newTestChunker(1), cfg,
+			func(context.Context, *table.Chunk, int) (int64, int64, uint64, error) {
+				mu.Lock()
+				defer mu.Unlock()
+				reads++
+				lastSrc = int64(reads * 10) // the source moves on every read
+				return lastSrc, tgt, 10, nil
+			})
+		c.feeds = []change.Source{feed}
+		return c
+	}
+
+	t.Run("gated until a flush", func(t *testing.T) {
+		c := newChecker(t, time.Minute)
+		errCh := make(chan error, 1)
+		go func() { errCh <- c.RunUntilClean(t.Context()) }()
+
+		require.Eventually(t, func() bool { return readCount() == 1 }, 5*time.Second, time.Millisecond)
+		time.Sleep(300 * time.Millisecond) // 300 RetryDelays
+		require.Equal(t, 1, readCount(), "no retry before the feed has flushed")
+
+		require.NoError(t, feed.Flush(t.Context()))
+		select {
+		case err := <-errCh:
+			require.NoError(t, err, "the first retry after the flush sees the target caught up")
+		case <-time.After(5 * time.Second):
+			t.Fatal("retry was not released by the flush")
+		}
+		require.Equal(t, 2, readCount())
+	})
+
+	t.Run("deadline releases a feed that never flushes", func(t *testing.T) {
+		mu.Lock()
+		reads, lastSrc, tgt = 0, 0, 0
+		mu.Unlock()
+		c := newChecker(t, 20*time.Millisecond)
+		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+		defer cancel()
+		require.ErrorIs(t, c.RunUntilClean(ctx), ErrVerificationUnresolved,
+			"without a flush the target never catches up; the chunk is deferred, not stuck")
+		require.NoError(t, ctx.Err())
+		require.Equal(t, 2, readCount(), "the retry ran once the flush wait expired")
+	})
+}
+
 // MaxPasses does not apply to continuous verification, which is unbounded by
 // design: Run keeps passing until its caller cancels it.
 func TestRunIgnoresMaxPasses(t *testing.T) {

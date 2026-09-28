@@ -21,6 +21,11 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	// Most tests here drive a feed nothing flushes on a timer (a MockSource, or
+	// a real feed whose periodic flush is 30s), so waiting on a flush would
+	// only stretch each retry to the cap. TestRetryWaitsForFeedFlush sets its
+	// own RetryFlushWait to cover the gate itself.
+	DefaultLocklessRetryFlushWait = time.Millisecond
 	goleak.VerifyTestMain(m)
 }
 
