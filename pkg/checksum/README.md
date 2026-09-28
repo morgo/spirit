@@ -70,7 +70,10 @@ topology clean. A checksum that passes by not looking is the one failure mode
 worth refusing to construct. `LocklessChecker` requires one feed per source and takes
 its targets from, in order: `TargetDB` (one source only), the applier's
 `GetTargets`, or the lone source itself. Several sources with no target named is
-an error for the same reason.
+an error for the same reason. Applier targets that share a handle are read once:
+a chunk read carries no key range, so each would otherwise return the whole
+table's rows and double the count. Sources must be distinct handles, because
+each is paired with its own feed.
 
 Both checkers are configured from the one `CheckerConfig`. The fields common to
 both (concurrency, autoscaling, throttler, metrics sink, logger,

@@ -15,16 +15,20 @@ func (r *Runner) fitReadThreadsToPools() error {
 	}
 	reserve := minChecksumPhaseReserve + max(0, len(r.sourceTables)-1)
 	// Usually each source/target owns a distinct *sql.DB, even when hosts are
-	// shared. Programmatic callers may reuse a handle across targets, however,
-	// and a checksum worker reads a chunk from every source and every target at
-	// once, so each worker then holds one connection per occurrence of that
-	// handle.
+	// shared. A checksum worker reads a chunk from every source and every
+	// distinct target handle at once, so a handle that serves as both a source
+	// and a target is held twice by each worker. Targets reusing one handle
+	// count once: the checker reads each distinct target handle once.
 	uses := make(map[*sql.DB]int)
 	for _, source := range r.sources {
 		uses[source.db]++
 	}
+	targetHandles := make(map[*sql.DB]bool)
 	for _, target := range r.targets {
-		uses[target.DB]++
+		if !targetHandles[target.DB] {
+			targetHandles[target.DB] = true
+			uses[target.DB]++
+		}
 	}
 	copies := 1
 	for db, n := range uses {

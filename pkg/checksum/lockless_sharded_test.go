@@ -1,6 +1,7 @@
 package checksum
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"testing"
@@ -203,4 +204,76 @@ func TestShardedFixCorruptOneToOne(t *testing.T) {
 	require.Equal(t, "0/3 0.00%", checker.GetProgress().String())
 	require.NoError(t, checker.Run(t.Context()))
 	require.Equal(t, rowsAcross(t, f.sources), rowsAcross(t, f.targets))
+}
+
+// sharedTargetHandleFixture is one source whose applier routes two disjoint
+// key ranges onto one target handle, so both targets write into one table.
+func sharedTargetHandleFixture(t *testing.T, targetRows string) *shardedFixture {
+	t.Helper()
+	f := newShardedFixture(t, []string{"INSERT INTO t1 VALUES (1,'a'),(2,'b'),(3,'c'),(4,'d')"}, []string{targetRows})
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	require.NoError(t, f.targets[0].QueryRowContext(t.Context(), "SELECT DATABASE()").Scan(&cfg.DBName))
+	f.applier, err = applier.NewShardedApplier([]applier.Target{
+		{DB: f.targets[0], KeyRange: "-80", Config: cfg},
+		{DB: f.targets[0], KeyRange: "80-", Config: cfg},
+	}, applier.NewApplierDefaultConfig())
+	require.NoError(t, err)
+	return f
+}
+
+// Targets sharing a handle hold one table between them. The checksum must read
+// it once; reading it per target would double the target count and fail a
+// correct copy.
+func TestShardedSharedTargetHandle(t *testing.T) {
+	f := sharedTargetHandleFixture(t, "INSERT INTO t1 VALUES (1,'a'),(2,'b'),(3,'c'),(4,'d')")
+	checker := f.checker(t, false)
+	require.NoError(t, checker.Run(t.Context()))
+	require.Zero(t, checker.DifferencesFound())
+}
+
+// A repair through a shared target handle deletes the range once and restores
+// each row once.
+func TestShardedSharedTargetHandleRepair(t *testing.T) {
+	f := sharedTargetHandleFixture(t, "INSERT INTO t1 VALUES (1,'a'),(2,'b'),(3,'corrupt')")
+	checker := f.checker(t, true)
+	require.NoError(t, checker.Run(t.Context()))
+	require.Positive(t, checker.DifferencesFound())
+	require.Equal(t, map[int]string{1: "a", 2: "b", 3: "c", 4: "d"}, rowsAcross(t, f.targets))
+}
+
+// readHotSnapshotRowsAcross reads every server concurrently but keeps the
+// sequential version's verdicts: the union of disjoint slices, and "oversized"
+// (no evidence) for a key held twice or a union over the row budget.
+func TestHotSnapshotRowsAcross(t *testing.T) {
+	f := newShardedFixture(t, []string{""}, []string{
+		"INSERT INTO t1 VALUES (2,'b'),(4,'d')",
+		"INSERT INTO t1 VALUES (1,'a'),(3,'c')",
+	})
+	info := table.NewTableInfo(f.targets[0], "", "t1")
+	require.NoError(t, info.SetInfo(t.Context()))
+	chunk := &table.Chunk{Key: []string{"id"}, Table: info, NewTable: info}
+	read := func(limit int) (map[string]hotSnapshotRow, bool) {
+		t.Helper()
+		rows, _, oversized, err := readHotSnapshotRowsAcross(t.Context(), f.targets, chunk, info, "name", "1=1", limit)
+		require.NoError(t, err)
+		return rows, oversized
+	}
+
+	rows, oversized := read(10)
+	require.False(t, oversized)
+	require.Len(t, rows, 4, "the union of both targets' slices")
+
+	_, oversized = read(3)
+	require.True(t, oversized, "each slice fits the budget but their union does not")
+
+	_, err := f.targets[1].ExecContext(t.Context(), "INSERT INTO t1 VALUES (4,'d')")
+	require.NoError(t, err)
+	_, oversized = read(10)
+	require.True(t, oversized, "a key on two servers is not evidence for either copy")
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	_, _, _, err = readHotSnapshotRowsAcross(ctx, f.targets, chunk, info, "name", "1=1", 10)
+	require.ErrorIs(t, err, context.Canceled)
 }

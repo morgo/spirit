@@ -31,31 +31,23 @@ func TestMoveConnectionBudget(t *testing.T) {
 	require.Equal(t, 8, r.move.MaxConnections)
 }
 
-// A handle reused across targets is read once per occurrence by every checksum
-// worker, so the budget left after the reserve is divided among them. It never
-// drops below one reader.
+// The checker reads each distinct target handle once per chunk, so targets
+// reusing one handle cost one connection per worker. A handle that is both a
+// source and a target is read on both sides at once, so it costs two.
 func TestMoveSharedHandleBudget(t *testing.T) {
 	r, err := NewRunner(&Move{Threads: 4, MaxConnections: 16})
 	require.NoError(t, err)
 	db := new(sql.DB) // Identity only; this test performs no database operations.
-	r.targets = []applier.Target{{DB: db}, {DB: db}}
-	// 16 less the reserve of 6 leaves 10, and each worker holds two.
+	r.targets = []applier.Target{{DB: db}, {DB: db}, {DB: db}}
+	// 16 less the reserve of 6 leaves 10, and each worker holds one.
 	require.NoError(t, r.fitReadThreadsToPools())
-	require.Equal(t, 4, r.move.Threads)
+	require.Equal(t, 4, r.move.Threads, "a target handle reused three times counts once")
 
-	r.move.Threads = 4
-	for range 3 {
-		r.targets = append(r.targets, applier.Target{DB: db})
-	}
+	r.move.Threads = 8
+	r.sources = []sourceInfo{{db: db}}
+	// Each worker now holds two connections on db: 10/2 leaves room for five.
 	require.NoError(t, r.fitReadThreadsToPools())
-	require.Equal(t, 2, r.move.Threads, "five occurrences leave room for two workers")
-
-	r.move.Threads = 4
-	for range 10 {
-		r.targets = append(r.targets, applier.Target{DB: db})
-	}
-	require.NoError(t, r.fitReadThreadsToPools())
-	require.Equal(t, 1, r.move.Threads, "at least one reader is preserved")
+	require.Equal(t, 5, r.move.Threads, "a handle shared by a source and a target counts twice")
 }
 
 func TestMoveTableStatisticsReserve(t *testing.T) {

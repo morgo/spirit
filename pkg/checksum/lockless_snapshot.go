@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"maps"
 	"strings"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/utils"
+	"golang.org/x/sync/errgroup"
 )
 
 const hotSnapshotMaxBytes = 64 * 1024
@@ -128,6 +130,12 @@ func (s *hotSnapshot) check(ctx context.Context) (bool, error) {
 // readHotSnapshotRowsAcross is readHotSnapshotRows over the union of several
 // servers holding slices of one side, under the same row and byte budget.
 //
+// The servers are read concurrently, so one caller deadline covers one round
+// trip rather than one per server. Each read is individually bounded by the
+// budget, and the union is checked against it once every read has returned,
+// so what is held in memory is at most one budget per server. A read that
+// overflows cancels the rest.
+//
 // A key read from two servers is reported as oversized, which every caller
 // treats as "no evidence" rather than as a verdict. On the target side that is
 // a row caught mid-move between shards; on the source side it is a
@@ -137,26 +145,56 @@ func readHotSnapshotRowsAcross(ctx context.Context, dbs []*sql.DB, chunk *table.
 	if len(dbs) == 1 {
 		return readHotSnapshotRows(ctx, dbs[0], chunk, info, columns, predicate, limit)
 	}
-	merged := make(map[string]hotSnapshotRow)
+	results := make([]map[string]hotSnapshotRow, len(dbs))
+	sizes := make([]int, len(dbs))
+	g, gctx := errgroup.WithContext(ctx)
+	for i, db := range dbs {
+		g.Go(func() error {
+			rows, size, oversized, err := readHotSnapshotRows(gctx, db, chunk, info, columns, predicate, limit)
+			sizes[i] = size
+			if err != nil {
+				return err
+			}
+			if oversized {
+				return errHotSnapshotOversized
+			}
+			results[i] = rows
+			return nil
+		})
+	}
+	err := g.Wait()
 	total := 0
-	for _, db := range dbs {
-		rows, size, oversized, err := readHotSnapshotRows(ctx, db, chunk, info, columns, predicate, limit)
+	for _, size := range sizes {
 		total += size
-		if err != nil || oversized {
-			return nil, total, oversized, err
-		}
+	}
+	if errors.Is(err, errHotSnapshotOversized) {
+		return nil, total, true, nil
+	}
+	if err != nil {
+		return nil, total, false, err
+	}
+	if total > hotSnapshotMaxBytes {
+		return nil, total, true, nil
+	}
+	merged := make(map[string]hotSnapshotRow)
+	for _, rows := range results {
 		for key, row := range rows {
 			if _, dup := merged[key]; dup {
 				return nil, total, true, nil
 			}
 			merged[key] = row
 		}
-		if len(merged) > limit || total > hotSnapshotMaxBytes {
+		if len(merged) > limit {
 			return nil, total, true, nil
 		}
 	}
 	return merged, total, false, nil
 }
+
+// errHotSnapshotOversized is how one read in readHotSnapshotRowsAcross cancels
+// its siblings on overflow. It never leaves this file: the caller reports it as
+// oversized, which is not an error.
+var errHotSnapshotOversized = errors.New("hot snapshot exceeds its budget")
 
 // readHotSnapshotRows preserves tuple identity without delimiter collisions.
 // Temporal keys are cast to their server representation to preserve fractional

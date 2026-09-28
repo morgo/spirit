@@ -284,6 +284,17 @@ func TestFactoryLocklessTopology(t *testing.T) {
 	require.Equal(t, []*sql.DB{c, a}, checker.targetDBs)
 	require.False(t, checker.sameServer())
 	require.Nil(t, checker.settlingFeed(), "no single feed orders a multi-source range")
+
+	// Targets sharing a handle hold one table between them; reading it once per
+	// target would count every row twice.
+	checker, err = build([]*sql.DB{a}, feeds[:1], &applier.MockApplier{Targets: []applier.Target{{DB: c, KeyRange: "-80"}, {DB: b}, {DB: c, KeyRange: "80-"}}})
+	require.NoError(t, err)
+	require.Equal(t, []*sql.DB{c, b}, checker.targetDBs, "a shared target handle is read once, in first-seen order")
+
+	// A repeated source cannot be collapsed the same way: each occurrence is
+	// paired with its own feed.
+	_, err = build([]*sql.DB{a, a}, feeds, &applier.MockApplier{Targets: []applier.Target{{DB: c}}})
+	require.ErrorContains(t, err, "requires distinct sources, source 1 repeats an earlier handle")
 }
 
 // Lockless alone selects the checker; an applier does not. Supplying one to a

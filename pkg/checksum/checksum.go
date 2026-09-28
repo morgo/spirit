@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"time"
 
 	"github.com/block/spirit/pkg/applier"
@@ -388,6 +389,12 @@ func newRecopier(sourceDBs, targetDBs []*sql.DB, config *CheckerConfig) (Recopie
 // Without a TargetDB or applier targets nothing says where N sources' rows
 // went, and guessing sourceDBs[0] would verify one shard's slice and report
 // the whole topology clean, so that shape is refused.
+//
+// Applier targets are reduced to distinct handles. A chunk read carries no key
+// range, so two targets that share a handle (disjoint ranges written into one
+// table) would each return every row of the chunk: the summed count would
+// double and a correct copy would be judged divergent, and a repair would
+// delete the same range twice. Reading each handle once reads each row once.
 func resolveLocklessTargets(sourceDBs []*sql.DB, config *CheckerConfig) ([]*sql.DB, error) {
 	if config.TargetDB != nil {
 		if len(sourceDBs) != 1 {
@@ -397,12 +404,14 @@ func resolveLocklessTargets(sourceDBs []*sql.DB, config *CheckerConfig) ([]*sql.
 	}
 	if config.Applier != nil {
 		if targets := config.Applier.GetTargets(); len(targets) != 0 {
-			dbs := make([]*sql.DB, len(targets))
+			dbs := make([]*sql.DB, 0, len(targets))
 			for i, target := range targets {
 				if target.DB == nil {
 					return nil, fmt.Errorf("applier target %d has no connection", i)
 				}
-				dbs[i] = target.DB
+				if !slices.Contains(dbs, target.DB) {
+					dbs = append(dbs, target.DB)
+				}
 			}
 			return dbs, nil
 		}
@@ -486,7 +495,10 @@ func NewChecker(sourceDBs []*sql.DB, chunker table.Chunker, feeds []change.Sourc
 
 // checkLocklessTopology validates the sources and feeds a lockless checker
 // reads. Every source is read, and each one's feed is what keeps its apply lag
-// from being judged divergence, so they must pair up.
+// from being judged divergence, so they must pair up. A source handle may not
+// repeat: it would be read once per occurrence and its rows counted twice,
+// and unlike a shared target it cannot be collapsed, because each occurrence
+// is paired with its own feed.
 func checkLocklessTopology(sourceDBs []*sql.DB, feeds []change.Source) error {
 	if len(feeds) != len(sourceDBs) {
 		return fmt.Errorf("lockless verification requires one feed per source, got %d sources and %d feeds", len(sourceDBs), len(feeds))
@@ -494,6 +506,9 @@ func checkLocklessTopology(sourceDBs []*sql.DB, feeds []change.Source) error {
 	for i := range sourceDBs {
 		if sourceDBs[i] == nil || feeds[i] == nil {
 			return fmt.Errorf("lockless verification requires a non-nil source and feed, source %d has none", i)
+		}
+		if slices.Contains(sourceDBs[:i], sourceDBs[i]) {
+			return fmt.Errorf("lockless verification requires distinct sources, source %d repeats an earlier handle", i)
 		}
 	}
 	return nil
