@@ -121,9 +121,10 @@ import (
 // error is never returned: stable divergence triggers a Recopy and the
 // chunk is counted in the per-pass "recopies" bucket.
 //
-// This can technically false-positive if replication lag exceeds the
-// retry delay — there may be changes that are still pending but we've not
-// observed them yet. The retry delay defaults to 1 minute for that reason.
+// Apply lag cannot produce it when a feed is supplied: a stable mismatch
+// drains the feed and re-reads before the verdict. Without a feed (library
+// callers only) the mismatch is taken at face value, so lag longer than the
+// retry delay can false-positive.
 var ErrPermanentDivergence = errors.New("checksum: permanent divergence detected")
 
 // ErrVerificationUnresolved is returned by RunUntilClean when MaxPasses passes
@@ -174,9 +175,13 @@ var (
 	// legitimately means "back-to-back", which the package's own tests rely on.)
 	LocklessMinPassInterval = 1 * time.Hour
 	// DefaultLocklessRetryDelay is the constructor default for RetryDelay: the
-	// wait before re-reading a mismatched chunk, giving in-flight replication
-	// time to converge so transient lag isn't mistaken for real divergence.
-	DefaultLocklessRetryDelay = time.Minute
+	// wait before re-reading a mismatched chunk. It is short because it is not
+	// what keeps apply lag from being mistaken for divergence — a stable
+	// mismatch drains the change feed and re-reads before any verdict (see
+	// executeWork) — so a shorter delay costs extra re-reads, not correctness.
+	// What it does bound is how long a hot range waits between attempts, and
+	// with it how quickly a finite gate under sustained writes converges.
+	DefaultLocklessRetryDelay = 5 * time.Second
 )
 
 var (

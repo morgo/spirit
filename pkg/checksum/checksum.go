@@ -249,10 +249,8 @@ type CheckerConfig struct {
 
 	// RetryDelay is the minimum wait between attempts for any given chunk —
 	// measured from the *last* attempt of that chunk, not from the original
-	// failure. Default 1m, because changes are queued in the replication
-	// applier for 30s by default. It is also what paces the re-walk between
-	// finite passes, which is the same "give the target a moment to catch up"
-	// wait.
+	// failure. Default DefaultLocklessRetryDelay (5s). It is also what paces
+	// the re-walk between finite passes.
 	RetryDelay time.Duration
 
 	// MaxQueueSize is the cap on entries in the delayed-retry queue. Reaching
