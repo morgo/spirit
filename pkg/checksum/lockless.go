@@ -105,6 +105,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -186,8 +187,11 @@ var (
 	// whole wait.
 	DefaultLocklessRetryDelay = 5 * time.Second
 	// DefaultLocklessRetryFlushWait is the constructor default for
-	// RetryFlushWait: two flush intervals, so a periodic flush lands inside it
-	// even when the flush before it ran long.
+	// RetryFlushWait: two *default* flush intervals, so a periodic flush lands
+	// inside it even when the flush before it ran long. A caller whose feeds
+	// flush on another interval sets RetryFlushWait from it (spirit sync does,
+	// from --flush-interval); otherwise the cap expires first and retries fall
+	// back to RetryDelay alone.
 	DefaultLocklessRetryFlushWait = 2 * change.DefaultFlushInterval
 )
 
@@ -410,9 +414,15 @@ func (c *LocklessChecker) flushResidual() (int, int) {
 }
 
 // gateOnFlush makes a queued retry wait for the change feed as well as the
-// clock: it is not due until every feed has completed a flush after this call
-// (see flushResidual for why that is the minimum count), or until
-// RetryFlushWait has passed.
+// clock: it is not due until every feed has completed a flush after this call,
+// or until RetryFlushWait has passed.
+//
+// "Every feed" is tracked per feed, not as flushResidual's minimum. Feeds'
+// counters drift apart (a forced drain re-flushes a busy feed several times),
+// so the minimum belongs to the quietest feed, and one periodic flush of it
+// would release the retry before the busier feed — where hot chunks live —
+// had flushed at all. The minimum stays the right aggregate for the
+// autoscaler's backlog signal; it is the wrong predicate here.
 //
 // This is what keeps a short RetryDelay from being mistaken for apply lag. The
 // target only moves when a feed flushes, which is every DefaultFlushInterval
@@ -423,6 +433,13 @@ func (c *LocklessChecker) flushResidual() (int, int) {
 // runs out after one or two flushes rather than the many it is sized for.
 // Waiting for the flush makes every attempt one the target could have passed.
 //
+// The counts are taken when the retry is queued, after the read that
+// mismatched. A flush counts once it completes, so the one case this cannot
+// tell apart is a single flush that was already running before the read began
+// and finished after it: it releases the retry with the target as of that
+// flush's start, and the re-read spends one attempt. Requiring two flushes
+// would close that, at the cost of doubling every gated wait.
+//
 // Without feeds there is nothing to wait for, so the entry is left ungated.
 // The deadline covers a feed that has stopped flushing — the retry then
 // proceeds on RetryDelay alone, as if ungated.
@@ -430,7 +447,10 @@ func (c *LocklessChecker) gateOnFlush(e *retryEntry) {
 	if len(c.feeds) == 0 {
 		return
 	}
-	_, e.flushes = c.flushResidual()
+	e.flushes = make([]int, len(c.feeds))
+	for i, feed := range c.feeds {
+		_, e.flushes[i] = feed.FlushResidual()
+	}
 	e.flushDeadline = time.Now().Add(c.cfg.RetryFlushWait)
 }
 
@@ -449,10 +469,12 @@ func (c *LocklessChecker) retryDue(e *retryEntry, now time.Time) (bool, time.Dur
 	if e.flushDeadline.IsZero() || !now.Before(e.flushDeadline) {
 		return true, 0
 	}
-	if _, flushes := c.flushResidual(); flushes > e.flushes {
-		return true, 0
+	for i, feed := range c.feeds {
+		if _, flushes := feed.FlushResidual(); flushes <= e.flushes[i] {
+			return false, min(retryFlushPoll, e.flushDeadline.Sub(now))
+		}
 	}
-	return false, min(retryFlushPoll, e.flushDeadline.Sub(now))
+	return true, 0
 }
 
 // SetThrottler installs pacing before a run. It is called during runner setup,
@@ -628,8 +650,10 @@ func (c *LocklessChecker) run(ctx context.Context, untilClean bool) error {
 // RetryDelay. The finite gate re-walks only to re-verify what the previous pass
 // repaired or deferred, and something is waiting on the answer (the cut-over),
 // so pacing it in minutes would stall a migration that is otherwise ready.
-// RetryDelay is the interval the algorithm already uses for "give the target a
-// moment to catch up", which is the same thing being waited on here.
+// RetryDelay is short (DefaultLocklessRetryDelay), and that is enough here:
+// waiting for the target to catch up happens inside a pass, where each retry
+// is gated on a feed flush (see gateOnFlush), and a repair is re-verifiable as
+// soon as it returns. This wait only paces the re-walk itself.
 func (c *LocklessChecker) passInterval(continuous bool) time.Duration {
 	if c.cfg.MinPassInterval != 0 {
 		return c.cfg.MinPassInterval
@@ -1434,7 +1458,9 @@ func (c *LocklessChecker) handleResult(res *workResult, enqueueRetry func(*retry
 		// Replace the unresolved parent with independently verified leaves.
 		// The parent is recorded as split, never as passed.
 		c.cfg.Logger.Info("lockless checksum: splitting hot range", "chunk", res.item.chunk.String(), "depth", res.item.splitDepth+1, "children", len(res.children))
-		for i, child := range res.children {
+		// Children are fresh, so enqueueRetry pushes each to the front; walk
+		// them backwards so they are read in key order.
+		for i, child := range slices.Backward(res.children) {
 			if err := enqueueRetry(&retryEntry{chunk: child, fresh: true, splitBudget: res.item.splitBudget, splitDepth: res.item.splitDepth + 1, point: i%2 == 1, notBefore: time.Now()}); err != nil {
 				return err
 			}
