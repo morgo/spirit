@@ -97,7 +97,7 @@ func TestContinuousFactoryDiscardsResumeEvidence(t *testing.T) {
 			cfg := NewCheckerDefaultConfig()
 			cfg.Applier = &applier.MockApplier{}
 			if mode == "lockless" {
-				cfg.Algorithm = Lockless
+				cfg.Lockless = true
 			}
 			checker, err := NewChecker([]*sql.DB{{}}, chunker, []change.Source{feed}, cfg)
 			require.NoError(t, err)
@@ -138,7 +138,7 @@ func TestLocklessContinuousReusesCheckerAfterInitialPass(t *testing.T) {
 		chunker := &continuousScanGate{testChunker: newTestChunker(0)}
 		feed := &change.MockSource{}
 		cfg := NewCheckerDefaultConfig()
-		cfg.Algorithm = Lockless
+		cfg.Lockless = true
 		cfg.MinPassInterval = time.Second
 		checker, err := NewChecker([]*sql.DB{{}}, chunker, []change.Source{feed}, cfg)
 		require.NoError(t, err)
@@ -243,7 +243,7 @@ func TestLocklessContinuousDefaultInterval(t *testing.T) {
 func newContinuousChecker(t *testing.T, chunker table.Chunker, feed change.Source) *LocklessChecker {
 	t.Helper()
 	cfg := NewCheckerDefaultConfig()
-	cfg.Algorithm = Lockless
+	cfg.Lockless = true
 	checker, err := NewChecker([]*sql.DB{{}}, chunker, []change.Source{feed}, cfg)
 	require.NoError(t, err)
 	return checker.(*LocklessChecker)
@@ -256,7 +256,7 @@ func (*canceledScan) Next() (*table.Chunk, error) { return nil, context.Canceled
 func TestLocklessContinuousForeignCancellation(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		cfg := NewCheckerDefaultConfig()
-		cfg.Algorithm = Lockless
+		cfg.Lockless = true
 		cfg.MinPassInterval = time.Second
 		checker, err := NewChecker([]*sql.DB{{}}, &canceledScan{newTestChunker(1)}, []change.Source{&change.MockSource{}}, cfg)
 		require.NoError(t, err)

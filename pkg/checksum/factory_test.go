@@ -31,7 +31,7 @@ func TestFactoryVerificationResume(t *testing.T) {
 			cfg.Watermark = "saved-prefix"
 			cfg.Applier = &applier.MockApplier{}
 			if mode == "lockless" {
-				cfg.Algorithm = Lockless
+				cfg.Lockless = true
 			}
 			checker, err := NewChecker([]*sql.DB{{}}, chunker, []change.Source{&change.MockSource{}}, cfg)
 			require.NoError(t, err)
@@ -63,7 +63,7 @@ func TestFactoryLocklessConfigAndLifecycle(t *testing.T) {
 	cfg := NewCheckerDefaultConfig()
 	cfg.Concurrency = 2
 	cfg.Autoscale = AutoscaleConfig{MaxThreads: 3}
-	cfg.Algorithm = Lockless
+	cfg.Lockless = true
 	checker, err := NewChecker([]*sql.DB{{}}, chunker, []change.Source{feed}, cfg)
 	require.NoError(t, err)
 	finite := checker.(*LocklessChecker)
@@ -97,7 +97,7 @@ func TestFactoryDerivesRepairPolicy(t *testing.T) {
 			newCfg := func() *CheckerConfig {
 				cfg := NewCheckerDefaultConfig()
 				if mode == "lockless" {
-					cfg.Algorithm = Lockless
+					cfg.Lockless = true
 				}
 				return cfg
 			}
@@ -138,7 +138,7 @@ func TestFactoryCrossServerTarget(t *testing.T) {
 	source, target := &sql.DB{}, &sql.DB{}
 	newCfg := func() *CheckerConfig {
 		cfg := NewCheckerDefaultConfig()
-		cfg.Algorithm = Lockless
+		cfg.Lockless = true
 		cfg.FixDifferences = true
 		cfg.Applier = &applier.MockApplier{}
 		return cfg
@@ -165,21 +165,19 @@ func TestFactoryCrossServerTarget(t *testing.T) {
 	require.Same(t, target, recopier.targetDB)
 
 	cfg = newCfg()
-	cfg.Algorithm = Single
+	cfg.Lockless = false
 	cfg.TargetDB = target
 	_, err = NewChecker([]*sql.DB{source}, newTestChunker(0), []change.Source{&change.MockSource{}}, cfg)
 	require.ErrorContains(t, err, "single verification cannot span two servers")
 }
 
-// TestFactoryRejectsExtraSourcesForSingleSource: before Algorithm existed, a
-// non-nil Applier was what selected the (since removed) sharded checker. A caller written
-// against that rule passes N sources and an applier — and with Algorithm now
-// deciding, that same call would build a Single checker, verify sourceDBs[0],
-// and report the whole topology clean. Verification that passes by not looking
-// is the one failure mode worth a hard error, so the shape is rejected.
+// TestFactoryRejectsExtraSourcesForSingleSource: a caller that passes N sources
+// and an applier without setting Lockless would otherwise build a
+// SingleChecker, verify sourceDBs[0], and report the whole topology clean.
+// Verification that passes by not looking is the one failure mode worth a hard
+// error, so the shape is rejected.
 func TestFactoryRejectsExtraSourcesForSingleSource(t *testing.T) {
 	cfg := NewCheckerDefaultConfig()
-	cfg.Algorithm = Single
 	cfg.Applier = &applier.MockApplier{}
 	sources := []*sql.DB{{}, {}}
 	feeds := []change.Source{&change.MockSource{}, &change.MockSource{}}
@@ -202,7 +200,7 @@ func TestFactoryExternalFlushLoop(t *testing.T) {
 	for _, external := range []bool{false, true} {
 		t.Run(fmt.Sprintf("external=%t", external), func(t *testing.T) {
 			cfg := NewCheckerDefaultConfig()
-			cfg.Algorithm = Lockless
+			cfg.Lockless = true
 			cfg.ExternalFlushLoop = external
 			checker, err := NewChecker([]*sql.DB{{}}, newTestChunker(0), []change.Source{&change.MockSource{}}, cfg)
 			require.NoError(t, err)
@@ -215,7 +213,7 @@ func TestFactoryExternalFlushLoop(t *testing.T) {
 // when the caller did not.
 func TestFactoryBoundsLocklessPasses(t *testing.T) {
 	cfg := NewCheckerDefaultConfig()
-	cfg.Algorithm = Lockless
+	cfg.Lockless = true
 	checker, err := NewChecker([]*sql.DB{{}}, newTestChunker(0), []change.Source{&change.MockSource{}}, cfg)
 	require.NoError(t, err)
 	require.Positive(t, checker.(*LocklessChecker).cfg.MaxPasses)
@@ -232,7 +230,7 @@ func TestFactoryLocklessTopology(t *testing.T) {
 	feeds := []change.Source{&change.MockSource{}, &change.MockSource{}}
 	build := func(sources []*sql.DB, feeds []change.Source, app applier.Applier) (*LocklessChecker, error) {
 		cfg := NewCheckerDefaultConfig()
-		cfg.Algorithm = Lockless
+		cfg.Lockless = true
 		if app != nil {
 			cfg.Applier = app
 		}
@@ -265,7 +263,7 @@ func TestFactoryLocklessTopology(t *testing.T) {
 	require.ErrorContains(t, err, "applier target 0 has no connection")
 
 	cfg := NewCheckerDefaultConfig()
-	cfg.Algorithm = Lockless
+	cfg.Lockless = true
 	cfg.TargetDB = c
 	_, err = NewChecker([]*sql.DB{a, b}, newTestChunker(0), feeds, cfg)
 	require.ErrorContains(t, err, "TargetDB requires exactly one source, got 2")
@@ -288,14 +286,12 @@ func TestFactoryLocklessTopology(t *testing.T) {
 	require.Nil(t, checker.settlingFeed(), "no single feed orders a multi-source range")
 }
 
-// The algorithm is named, not inferred, so an applier no longer selects one.
-// Supplying one to a single-server checker means "repair through this" and
-// nothing else, and an unnamed algorithm is refused rather than silently
-// defaulted.
-func TestFactoryAlgorithmSelection(t *testing.T) {
-	newCfg := func(a Algorithm) *CheckerConfig {
+// Lockless alone selects the checker; an applier does not. Supplying one to a
+// single-server checker means "repair through this" and nothing else.
+func TestFactoryCheckerSelection(t *testing.T) {
+	newCfg := func(lockless bool) *CheckerConfig {
 		cfg := NewCheckerDefaultConfig()
-		cfg.Algorithm = a
+		cfg.Lockless = lockless
 		cfg.Applier = &applier.MockApplier{}
 		return cfg
 	}
@@ -305,23 +301,19 @@ func TestFactoryAlgorithmSelection(t *testing.T) {
 	}
 
 	for _, tc := range []struct {
-		algorithm Algorithm
-		want      Checker
-		name      string
+		lockless bool
+		want     Checker
+		name     string
 	}{
-		{Single, (*SingleChecker)(nil), "single"},
-		{Lockless, (*LocklessChecker)(nil), "lockless"},
+		{false, (*SingleChecker)(nil), "single"},
+		{true, (*LocklessChecker)(nil), "lockless"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			require.Equal(t, tc.name, tc.algorithm.String())
-			checker, err := build(t, newCfg(tc.algorithm))
+			checker, err := build(t, newCfg(tc.lockless))
 			require.NoError(t, err)
 			require.IsType(t, tc.want, checker)
 		})
 	}
-
-	_, err := build(t, newCfg(Algorithm(99)))
-	require.ErrorContains(t, err, "unknown checksum algorithm")
 }
 
 func TestSnapshotResumeWatermarkNotReady(t *testing.T) {
@@ -360,7 +352,7 @@ func TestFactoryResumeWithoutChildWatermarks(t *testing.T) {
 			cfg.Watermark = "{}"
 			cfg.Applier = &applier.MockApplier{}
 			if optimistic {
-				cfg.Algorithm = Lockless
+				cfg.Lockless = true
 			}
 			_, err := NewChecker([]*sql.DB{{}}, chunker, []change.Source{&change.MockSource{}}, cfg)
 			require.NoError(t, err)

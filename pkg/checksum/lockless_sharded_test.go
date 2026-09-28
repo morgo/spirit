@@ -87,7 +87,7 @@ func newShardedFixture(t *testing.T, sourceSQL, targetSQL []string) *shardedFixt
 func (f *shardedFixture) checker(t *testing.T, fix bool) Checker {
 	t.Helper()
 	config := NewCheckerDefaultConfig()
-	config.Algorithm = Lockless
+	config.Lockless = true
 	config.Applier = f.applier
 	config.FixDifferences = fix
 	config.RetryDelay = 10 * time.Millisecond

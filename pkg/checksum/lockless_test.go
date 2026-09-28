@@ -1647,7 +1647,7 @@ func TestFiniteLocklessRetriesTransientFailures(t *testing.T) {
 	newChecker := func(t *testing.T, chunker table.Chunker) Checker {
 		t.Helper()
 		cfg := NewCheckerDefaultConfig()
-		cfg.Algorithm = Lockless
+		cfg.Lockless = true
 		cfg.RetryDelay = time.Millisecond
 		checker, err := NewChecker([]*sql.DB{{}}, chunker, []change.Source{&change.MockSource{}}, cfg)
 		require.NoError(t, err)
@@ -1694,7 +1694,7 @@ func (c *partialProgressChunker) Progress() (uint64, uint64, uint64) {
 func TestFiniteLocklessReportsFullProgressAfterCleanPass(t *testing.T) {
 	chunker := &partialProgressChunker{testChunker: newTestChunker(0), verified: 3, total: 10}
 	cfg := NewCheckerDefaultConfig()
-	cfg.Algorithm = Lockless
+	cfg.Lockless = true
 	cfg.RetryDelay = time.Millisecond
 	checker, err := NewChecker([]*sql.DB{{}}, chunker, []change.Source{&change.MockSource{}}, cfg)
 	require.NoError(t, err)

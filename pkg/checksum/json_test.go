@@ -189,7 +189,7 @@ func TestDistributedJSONChecksumTextImage(t *testing.T) {
 	// FixDifferences is left false (the default): a single pass must find
 	// zero differences, i.e. this passes on the first attempt with no repair.
 	config := NewCheckerDefaultConfig()
-	config.Algorithm = Lockless
+	config.Lockless = true
 	config.Applier = app
 
 	checker, err := NewChecker([]*sql.DB{src}, chunker, []change.Source{feed}, config)

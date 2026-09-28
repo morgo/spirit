@@ -10,6 +10,12 @@ import (
 	"github.com/block/spirit/pkg/utils"
 )
 
+// queryTemplate selects a per-row checksum and PK. The first %s is the column
+// expression list from table.ColumnMapping.ChecksumExprs(), which already
+// interleaves a '#' separator between values so content cannot shift across
+// column boundaries undetected.
+const queryTemplate = "SELECT CRC32(CONCAT(%s)) as row_checksum, CONCAT_WS(',', %s) as pk FROM %s WHERE %s"
+
 // rowQuerier is the subset of *sql.DB / *sql.Tx that inspectDifferences needs.
 // The snapshot checker hands it the REPEATABLE READ transaction the chunk
 // mismatched under; the lockless checker has no snapshot to hand over and uses

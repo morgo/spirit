@@ -38,41 +38,51 @@ The checksum package contains two implementations:
 
 `SingleChecker` takes a brief table lock to establish a consistent `REPEATABLE READ` snapshot; `LocklessChecker` deliberately does not (see [Lockless checksum](#lockless-checksum) below).
 
+### Direction: lockless replaces single
+
+We intend to replace `SingleChecker` with `LocklessChecker`, making lockless the only checksum. Move and sync already use only lockless. Migration still defaults to `SingleChecker`, with lockless behind `--enable-experimental-lockless-checksum`, until lockless has enough production evidence to become the default for migrations as well.
+
+The code is arranged so that removing `SingleChecker` is mostly deletion:
+
+- Everything only `SingleChecker` uses lives in `single*.go`: the checker, its topology check and constructor, the snapshot-resume guard, the chunk-size observer, the CRC/count comparison, the continuous-snapshot loop, and `YieldTimeout` handling.
+- `NewChecker` has one `CheckerConfig.Lockless` branch. Removing single means deleting those files, that branch and the `Lockless` field, plus the "Single-only" section of `CheckerConfig`.
+- Everything else (`Checker`, `CheckerConfig`, the recopiers, autoscaling, row-difference logging) is shared, and is written against the `Checker` contract rather than a concrete type.
+
 Both use **CRC32 with XOR aggregation** for chunk comparison. The lockless checker can additionally drain a bounded per-row PK/CRC32 snapshot for unresolved hot ranges.
 
 ## Checker contract
 
 `NewChecker` returns a `Checker`: its finite `Run` succeeds only after
-verification completes. `CheckerConfig.Algorithm` picks which one, and nothing
+verification completes. `CheckerConfig.Lockless` picks which one, and nothing
 else does:
 
-| `Algorithm` | checker | compares |
+| `Lockless` | checker | compares |
 |---|---|---|
-| `Single` (zero value) | `SingleChecker` | two tables on one server, under a REPEATABLE READ snapshot taken behind a brief table lock |
-| `Lockless` | `LocklessChecker` | N sources against M targets with optimistic READ COMMITTED reads and a delayed-retry queue, taking no locks; each chunk's CRCs are XORed and its counts summed across every server |
+| `false` (zero value) | `SingleChecker` | two tables on one server, under a REPEATABLE READ snapshot taken behind a brief table lock |
+| `true` | `LocklessChecker` | N sources against M targets with optimistic READ COMMITTED reads and a delayed-retry queue, taking no locks; each chunk's CRCs are XORed and its counts summed across every server |
 
-Naming the algorithm is what lets there be one `Applier`: the write path a
-repair goes through is not also the algorithm switch.
+Selecting the checker explicitly is what lets there be one `Applier`: the write
+path a repair goes through is not also the checker switch.
 
-`Single` rejects more than one source or feed rather than using the first and
+`SingleChecker` rejects more than one source or feed rather than using the first and
 ignoring the rest; it would otherwise verify one source and report the whole
 topology clean. A checksum that passes by not looking is the one failure mode
-worth refusing to construct. `Lockless` requires one feed per source and takes
+worth refusing to construct. `LocklessChecker` requires one feed per source and takes
 its targets from, in order: `TargetDB` (one source only), the applier's
 `GetTargets`, or the lone source itself. Several sources with no target named is
 an error for the same reason.
 
-Every algorithm is configured from the one `CheckerConfig`. The fields common to
-all of them (concurrency, autoscaling, throttler, metrics sink, logger,
+Both checkers are configured from the one `CheckerConfig`. The fields common to
+both (concurrency, autoscaling, throttler, metrics sink, logger,
 `MaxRetries`, `Watermark`) apply whichever is selected; the rest are documented
-with the algorithm they belong to, and are ignored by the others. `YieldTimeout`
+in the section for the checker they belong to, and are ignored by the other. `YieldTimeout`
 is snapshot-only — lockless reads are short by construction and hold no snapshot
 to yield — and the retry, splitting and pacing fields are lockless-only.
 
-Repair policy is `FixDifferences`, for every algorithm, so a caller does not
+Repair policy is `FixDifferences`, for both checkers, so a caller does not
 have to know which one it picked to say whether a divergence should be healed or
 should abort. The factory turns it into the `Recopier` the checker repairs
-through, built over the one `Applier` every algorithm shares, and the presence
+through, built over the one `Applier` both share, and the presence
 of that recopier *is* the policy: with one, a confirmed divergence is repaired and
 verification continues; without one, a mismatch is reported as an error
 (`ErrPermanentDivergence` for lockless verification). `MaxRetries` bounds whole-run attempts for both. Migration reuses the factory
@@ -97,7 +107,7 @@ what a migration and a move want.
 
 Callers open the chunker before construction unless supplying a nonempty
 `CheckerConfig.Watermark`. In that case the factory opens it at that watermark,
-for every algorithm: a watermark means the prefix below it was read on both sides
+for both checkers: a watermark means the prefix below it was read on both sides
 and observed equal, which is the same claim whichever checker observed it.
 
 Persist `Checker.ResumeWatermark()`, never the chunker's traversal watermark.

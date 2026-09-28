@@ -89,7 +89,7 @@ func (f *parityFixture) checker(t *testing.T, lockless bool, opts ...func(*Check
 	config.FixDifferences = true
 	config.Applier = applier.NewSingleTargetForTest(t, f.db)
 	if lockless {
-		config.Algorithm = Lockless
+		config.Lockless = true
 		// Repair policy is deliberately not set: the factory derives it from
 		// FixDifferences, which is the whole point of these tests.
 		//
@@ -175,7 +175,7 @@ func TestParityDivergenceWithoutRepair(t *testing.T) {
 			// differ in policy alone.
 			config.Applier = applier.NewSingleTargetForTest(t, f.db)
 			if lockless {
-				config.Algorithm = Lockless
+				config.Lockless = true
 				config.RetryDelay = 100 * time.Millisecond
 			}
 			checker, err := NewChecker([]*sql.DB{f.db}, f.chunker, []change.Source{f.feed}, config)

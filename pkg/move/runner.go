@@ -1872,7 +1872,7 @@ func (r *Runner) postCopyPhase(ctx context.Context) error {
 	}
 	var err error
 	r.checker, err = checksum.NewChecker(sourceDBs, r.checksumChunker, feeds, &checksum.CheckerConfig{
-		Algorithm:      checksum.Lockless,
+		Lockless:       true,
 		Concurrency:    r.move.Threads,
 		DBConfig:       r.dbConfig,
 		Logger:         r.logger,
@@ -2130,7 +2130,7 @@ func (r *Runner) runContinuousChecksum(ctx context.Context) error {
 	checker, err := checksum.NewChecker(sourceDBs, chunker, feeds, &checksum.CheckerConfig{
 		// Keep the fixed-mode single worker; autoscaling can grow it on load feedback.
 		Concurrency: 1,
-		Algorithm:   checksum.Lockless,
+		Lockless:    true,
 		DBConfig:    r.dbConfig,
 		Logger:      r.logger,
 		Applier:     r.applier,

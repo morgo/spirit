@@ -187,7 +187,7 @@ var (
 // LocklessChecker is the optimistic checker. It satisfies the whole Checker
 // contract natively: Run verifies the table once and returns, RunContinuous
 // verifies it forever in the background, and both drive the same pass loop.
-// Construct it through NewChecker with Algorithm set to Lockless, naming a
+// Construct it through NewChecker with CheckerConfig.Lockless set, naming a
 // TargetDB when the copy being verified is on another server.
 //
 // Run and RunContinuous must not overlap; everything else — Stats,
@@ -291,7 +291,7 @@ type LocklessChecker struct {
 }
 
 // newLocklessChecker wires a checker to its dependencies and fills in the
-// defaults that are lockless-only — the cross-algorithm ones are NewChecker's,
+// defaults that are lockless-only — the shared ones are NewChecker's,
 // which is the only caller. It validates nothing, because NewChecker has.
 //
 // sourceDBs and targetDBs are connections to the two copies being compared, and
