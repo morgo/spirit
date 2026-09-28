@@ -228,7 +228,7 @@ func TestHotSplitReadback(t *testing.T) {
 			cfg := fastConfig()
 			cfg.RetryDelay = time.Millisecond
 			applySharedDefaults(&cfg)
-			c := newLocklessChecker(source, target, chunker, nil, nil, &cfg)
+			c := newLocklessChecker([]*sql.DB{source}, []*sql.DB{target}, chunker, nil, nil, &cfg)
 			read := c.readChunk
 			var attempts atomic.Int64
 			c.readChunk = func(ctx context.Context, ch *table.Chunk) (int64, int64, uint64, uint64, error) {

@@ -112,8 +112,8 @@ func TestBasicValidation(t *testing.T) {
 	_, err = NewChecker([]*sql.DB{db}, chunker, []change.Source{feed}, NewCheckerDefaultConfig())
 	require.NoError(t, err)
 
-	// Supplying one does not select a different algorithm — that is what
-	// Algorithm is for. A config that differs from the default only by having
+	// Supplying one does not select a different checker — that is what
+	// Lockless is for. A config that differs from the default only by having
 	// an applier still builds the single-server checker.
 	applierCfg := NewCheckerDefaultConfig()
 	applierCfg.Applier = applier.NewSingleTargetForTest(t, db)

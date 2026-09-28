@@ -34,7 +34,7 @@ func moveAutoscaleBounds(vcpus []int, groups []host.Group, clientCeiling int) (i
 		smallest = min(smallest, n)
 	}
 	readStart, readMax := autoscale.ReadBounds(smallest)
-	// A distributed checksum can query each target concurrently. Schemas
+	// A checksum reads every target concurrently for each chunk. Schemas
 	// sharing a host must share its read budget too.
 	readStart = max(1, readStart/maxShardsPerHost)
 	readMax = max(1, readMax/maxShardsPerHost)

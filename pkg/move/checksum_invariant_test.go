@@ -196,7 +196,8 @@ func TestDumpCheckpointSuppressesWatermarkWithDifferences(t *testing.T) {
 // TestDumpCheckpointSuppressesWatermarkWithContinuousDifferences pins the
 // sentinel-wait half of the invariant in the move runner: the continuous
 // checker is a separate object from r.checker, so DumpCheckpoint must
-// consult it too. Once it has repaired any chunk, checkpoints must stop
+// consult it too. Once it has confirmed any divergence (ConfirmedDifferences,
+// which excludes apply lag; see continuousVerifier), checkpoints must stop
 // carrying a checksum_watermark — even though the initial checker is still
 // clean — or the operator's re-run would resume the checksum at the
 // end-of-initial-pass watermark and never re-verify the repaired range.
@@ -224,8 +225,8 @@ func TestDumpCheckpointSuppressesWatermarkWithContinuousDifferences(t *testing.T
 	require.NotEmpty(t, checksumWM,
 		"checksum_watermark must be persisted while the continuous checker is clean")
 
-	// --- Case 3: continuous checker has repaired a chunk. ---
-	cont.SetDifferencesFound(1)
+	// --- Case 3: continuous checker has confirmed a divergence. ---
+	cont.SetDifferencesFound(1) // MockChecker reports it as ConfirmedDifferences
 	require.NoError(t, r.DumpCheckpoint(ctx))
 	copierWM, checksumWM = latestCheckpointWatermarks(t, r)
 	require.NotEmpty(t, copierWM)
@@ -264,8 +265,8 @@ func TestInvalidateChecksumWatermarkAfterContinuousDivergence(t *testing.T) {
 	require.NotEmpty(t, checksumWM,
 		"invalidate must not touch the watermark while the continuous checker is clean")
 
-	// Continuous checker found (and repaired) a difference: the
-	// already-persisted watermark row must be rewritten to empty.
+	// Continuous checker confirmed a divergence: the already-persisted
+	// watermark row must be rewritten to empty.
 	cont.SetDifferencesFound(1)
 	require.NoError(t, r.invalidateChecksumWatermark(ctx))
 	copierWM, checksumWM := latestCheckpointWatermarks(t, r)

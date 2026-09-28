@@ -1,7 +1,8 @@
-// Package checksum provides online checksum functionality.
-// Two tables on the same MySQL server can be compared with only an initial lock.
-// It is not in the row/ package because it requires a replClient to be passed in,
-// which would cause a circular dependency.
+// SingleChecker compares two tables on the same MySQL server under a
+// REPEATABLE READ snapshot taken behind a brief table lock. It is the default
+// checker (CheckerConfig.Lockless unset), and is expected to be replaced by
+// LocklessChecker. Everything only it uses lives in the single*.go files so
+// that removing it is a matter of deleting them and the branch in NewChecker.
 package checksum
 
 import (
@@ -23,6 +24,25 @@ import (
 	"github.com/block/spirit/pkg/throttler"
 	"github.com/block/spirit/pkg/utils"
 	"golang.org/x/sync/errgroup"
+)
+
+var (
+	// ErrYieldTimeout is returned by runChecksum when the yield timeout expires.
+	// This is distinct from the parent context being canceled, and signals that
+	// the checksum should resume from the current watermark after releasing
+	// long-running transactions to reduce HLL (history list length) growth.
+	ErrYieldTimeout = errors.New("checksum yield timeout")
+
+	// ErrRepairUnverified is returned by RunContinuous when a pass repaired a
+	// mismatch and was cancelled before it could re-verify the rewritten rows.
+	// A repair is not verification, so the target is unproven and cutover must
+	// not proceed on the strength of that pass. It is distinct from an ordinary
+	// cancellation, which a continuous pass filters to nil.
+	ErrRepairUnverified = errors.New("checksum cancelled with a repair unverified")
+
+	// DefaultYieldTimeout is the default maximum duration for a single checksum
+	// pass before yielding to release long-running REPEATABLE READ transactions.
+	DefaultYieldTimeout = 24 * time.Hour
 )
 
 type SingleChecker struct {
@@ -54,7 +74,7 @@ type SingleChecker struct {
 	resume           snapshotResume
 	// recopier is the write path a mismatched chunk is rewritten through, and
 	// its presence is the repair policy: nil means a divergence is an error
-	// rather than something to rewrite. Every algorithm repairs through the same
+	// rather than something to rewrite. Both checkers repair through the same
 	// interface; see newRecopier for how the factory chooses one.
 	recopier        Recopier
 	maxRetries      int
@@ -649,4 +669,142 @@ func (c *SingleChecker) RunContinuous(ctx context.Context) error {
 	return runContinuousSnapshot(ctx, c, []change.Source{c.feed}, &c.resume, func() error {
 		return c.resume.restart(&c.differencesFound, c.chunker.Reset)
 	})
+}
+
+// checkSingleTopology validates the one source and one feed a SingleChecker
+// reads. It would otherwise use sourceDBs[0]/feeds[0] and silently ignore the
+// rest: a caller that meant to aggregate N sources would verify one of them and
+// report the whole topology clean. Rejecting the shape is what keeps such a call
+// site from becoming a checksum that passes by not looking.
+//
+// A TargetDB is rejected for the same reason. The snapshot is taken on the
+// server being read — a table lock and a REPEATABLE READ snapshot cannot span
+// two servers — so a second one would be silently ignored rather than honoured.
+func checkSingleTopology(sourceDBs []*sql.DB, feeds []change.Source, config *CheckerConfig) error {
+	if len(sourceDBs) != 1 || len(feeds) != 1 {
+		return fmt.Errorf("single verification requires one source and one feed, got %d and %d (set Lockless to aggregate across sources)", len(sourceDBs), len(feeds))
+	}
+	if sourceDBs[0] == nil || feeds[0] == nil {
+		return errors.New("single verification requires a non-nil source and feed")
+	}
+	if config.TargetDB != nil {
+		return errors.New("single verification cannot span two servers")
+	}
+	return nil
+}
+
+// newSingleChecker builds a SingleChecker from a validated, shared-defaulted
+// config, applying the defaults only it reads.
+func newSingleChecker(db *sql.DB, chunker table.Chunker, feed change.Source, recopier Recopier, cfg *CheckerConfig) *SingleChecker {
+	if cfg.YieldTimeout == 0 {
+		cfg.YieldTimeout = DefaultYieldTimeout
+	}
+	return &SingleChecker{
+		concurrency:     cfg.Concurrency,
+		maxConcurrency:  cfg.Autoscale.MaxThreads,
+		autoscale:       cfg.Autoscale.Enabled,
+		throttler:       cfg.Throttler,
+		metricsSink:     cfg.MetricsSink,
+		targetChunkTime: cfg.TargetChunkTime,
+		db:              db,
+		feed:            feed,
+		chunker:         chunker,
+		dbConfig:        cfg.DBConfig,
+		logger:          cfg.Logger,
+		recopier:        recopier,
+		maxRetries:      cfg.MaxRetries,
+		yieldTimeout:    cfg.YieldTimeout,
+	}
+}
+
+// chunkMismatch describes why a chunk's source and target disagreed. It is
+// returned by compareChunk so the caller can log a debuggable reason while
+// treating any mismatch (checksum OR row count) identically — same retry,
+// recopy, and differencesFound accounting.
+type chunkMismatch struct {
+	// checksumDiffers is true when the (aggregated) source and target CRC
+	// differ.
+	checksumDiffers bool
+	// countDiffers is true when the (aggregated) source and target row
+	// counts differ. This is the defense-in-depth signal that the CRC alone
+	// can miss: BIT_XOR is pair-cancelling, so a row duplicated across two
+	// sources (violating disjointness) or a row whose CRC32 happens to be 0
+	// contributes nothing to the XOR, yet the count still moves.
+	countDiffers bool
+}
+
+// mismatched reports whether the chunk is divergent for any reason.
+func (m chunkMismatch) mismatched() bool {
+	return m.checksumDiffers || m.countDiffers
+}
+
+// reason returns a human-readable description distinguishing a checksum
+// mismatch from a row-count mismatch (and reporting both when both differ)
+// for log/error debuggability. Only meaningful when mismatched() is true.
+func (m chunkMismatch) reason(srcCount, tgtCount uint64) string {
+	switch {
+	case m.checksumDiffers && m.countDiffers:
+		return fmt.Sprintf("checksum mismatch and row count mismatch (src=%d, target=%d)", srcCount, tgtCount)
+	case m.countDiffers:
+		return fmt.Sprintf("row count mismatch (src=%d, target=%d)", srcCount, tgtCount)
+	default:
+		return "checksum mismatch"
+	}
+}
+
+// compareChunk is the central decision function SingleChecker uses to
+// decide whether a chunk's source and target agree. It compares BOTH the
+// (aggregated) CRC and the (aggregated) row count. Comparing the count is
+// free — the count is already returned alongside the CRC in the same query —
+// and it closes a defense-in-depth gap where the CRC alone is insufficient
+// (see chunkMismatch.countDiffers). A count mismatch is treated exactly like
+// a checksum mismatch by callers.
+func compareChunk(srcCRC, tgtCRC int64, srcCount, tgtCount uint64) chunkMismatch {
+	return chunkMismatch{
+		checksumDiffers: srcCRC != tgtCRC,
+		countDiffers:    srcCount != tgtCount,
+	}
+}
+
+// Flush during pacing, but stop before Run acquires snapshot setup locks.
+// Each finite Run owns flushing after those locks have been released.
+func runContinuousSnapshot(ctx context.Context, checker Checker, feeds []change.Source, resume *snapshotResume, reset func() error) error {
+	var duration time.Duration
+	for {
+		for _, feed := range feeds {
+			feed.StartPeriodicFlush(ctx, change.DefaultFlushInterval)
+		}
+		ready := waitForChecksum(ctx, LocklessMinPassInterval-duration)
+		for _, feed := range feeds {
+			feed.StopPeriodicFlush()
+		}
+		if !ready {
+			return nil
+		}
+		if err := reset(); err != nil {
+			return fmt.Errorf("reset continuous checksum: %w", err)
+		}
+		before := resume.observed.Load()
+		started := time.Now()
+		resume.active.Store(true)
+		err := checker.Run(ctx)
+		resume.active.Store(false)
+		if err != nil {
+			// A retry can reset DifferencesFound even after a repair was interrupted.
+			// Use the monotonic observation count for this entire Run instead.
+			if ctx.Err() != nil && checksumCanceled(err) {
+				if resume.observed.Load() == before {
+					return nil
+				}
+				// A repair is not verification: the rewritten rows were never
+				// observed equal. Cancelling before the pass could re-verify
+				// them leaves the target unproven, so the cancellation is
+				// refused rather than filtered. Say which of the two it is —
+				// a bare "context canceled" reads as the shutdown working.
+				return fmt.Errorf("%w: cancelled after repairing a mismatch and before re-verifying it", ErrRepairUnverified)
+			}
+			return err
+		}
+		duration = time.Since(started)
+	}
 }

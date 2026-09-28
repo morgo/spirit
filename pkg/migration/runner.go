@@ -955,20 +955,18 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context, resumePosi
 		}
 	}
 
-	// Choosing the algorithm is the whole of what the flag does. Everything
+	// Choosing the checker is the whole of what the flag does. Everything
 	// downstream — the repair policy, the resume watermark, pacing, the pool
 	// reserve, the status block, cutover — is written once against the Checker
 	// contract and does not ask which one it got.
-	algorithm := checksum.Single
 	if r.migration.EnableExperimentalLocklessChecksum {
-		algorithm = checksum.Lockless
 		r.logger.Warn("experimental lockless checksum enabled; verification uses optimistic reads, cutover locking is unchanged")
 	}
 	r.checker, err = checksum.NewChecker([]*sql.DB{r.db}, r.checksumChunker, []change.Source{r.replClient}, &checksum.CheckerConfig{
 		// Repair policy is not set here: NewChecker derives it from
 		// FixDifferences below, so both checkers answer a divergence the same
 		// way (repair it, re-verify next pass, fail if it keeps coming back).
-		Algorithm:       algorithm,
+		Lockless:        r.migration.EnableExperimentalLocklessChecksum,
 		Watermark:       checksumWatermark,
 		Concurrency:     r.migration.Threads,
 		TargetChunkTime: table.ChunkerDefaultTarget,

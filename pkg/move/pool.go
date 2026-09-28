@@ -2,7 +2,6 @@ package move
 
 import (
 	"database/sql"
-	"fmt"
 )
 
 // As in migration, reserve checksum repair/prefetch, checkpoint/flush polling,
@@ -16,24 +15,26 @@ func (r *Runner) fitReadThreadsToPools() error {
 	}
 	reserve := minChecksumPhaseReserve + max(0, len(r.sourceTables)-1)
 	// Usually each source/target owns a distinct *sql.DB, even when hosts are
-	// shared. Programmatic callers may reuse a handle across targets, however:
-	// DistributedChecker then pins multiple snapshot pools on that handle.
+	// shared. A checksum worker reads a chunk from every source and every
+	// distinct target handle at once, so a handle that serves as both a source
+	// and a target is held twice by each worker. Targets reusing one handle
+	// count once: the checker reads each distinct target handle once.
 	uses := make(map[*sql.DB]int)
 	for _, source := range r.sources {
 		uses[source.db]++
 	}
+	targetHandles := make(map[*sql.DB]bool)
 	for _, target := range r.targets {
-		uses[target.DB]++
+		if !targetHandles[target.DB] {
+			targetHandles[target.DB] = true
+			uses[target.DB]++
+		}
 	}
 	copies := 1
 	for db, n := range uses {
 		if db != nil {
 			copies = max(copies, n)
 		}
-	}
-	reserve = max(reserve, copies+2) // snapshot creation holds a lock per occurrence
-	if r.move.MaxConnections < 2*copies+1 {
-		return fmt.Errorf("--max-connections (%d) cannot hold %d checksum snapshot pools and their locks on a shared connection pool", r.move.MaxConnections, copies)
 	}
 	// Preserve at least one reader, matching migration; advisory control-plane
 	// queries may queue when the requested budget cannot cover all headroom.
@@ -43,7 +44,7 @@ func (r *Runner) fitReadThreadsToPools() error {
 		r.logger.Info("fitting read threads to the connection pool", "threads", start, "max_connections", r.move.MaxConnections, "reserved", reserve)
 	}
 	// Autoscaling can have a ceiling above its starting count. Checksum
-	// snapshots pin connections for that ceiling, so fit it as well without
+	// workers draw connections up to that ceiling, so fit it as well without
 	// changing the fixed pool budget inherited from --max-connections.
 	if r.autoscale.Enabled {
 		r.autoscale.MaxReadThreads = min(max(r.move.Threads, r.autoscale.MaxReadThreads), available)

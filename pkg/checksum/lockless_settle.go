@@ -52,6 +52,13 @@ import (
 // Rows are settled one at a time. The escalation is rare by construction — a
 // range reaches it only after exhausting MaxHotAttempts — and serializing keeps
 // the feed's park a single piece of state rather than a set of overlapping holds.
+//
+// With several sources (a move), each row is settled on the feed of the source
+// that owns it: the hot snapshot records which source each row was read from,
+// and a key read from two sources never becomes a snapshot at all (see
+// readHotSnapshotRowsAcross). The other feeds keep applying their own changes,
+// which is safe because none of them writes that key. A row the target holds
+// and no source does has no owner, so with several sources it defers.
 const (
 	// settleBudget bounds the whole escalation: every row's wait for its next
 	// change, each flush, and each comparison. Overrunning it is not an error,
@@ -99,23 +106,38 @@ func (v settleVerdict) String() string {
 
 // rowSettler performs the escalation described at the top of this file. It is
 // deliberately a type of its own rather than more methods on LocklessChecker:
-// settling needs the source, the feed, and somewhere to log, and nothing else
-// about a running check.
+// settling needs the sources, their feeds, and somewhere to log, and nothing
+// else about a running check. feeds[i] is the feed of sourceDBs[i].
 type rowSettler struct {
-	sourceDB *sql.DB
-	feed     change.Source
-	logger   *slog.Logger
+	sourceDBs []*sql.DB
+	feeds     []change.Source
+	logger    *slog.Logger
 }
 
 // newRowSettler returns nil when there is no feed. That is not a failure — the
 // feed parking at the watched change is the whole mechanism, and library
 // callers may have none — so a nil settler answers settleUnavailable to
 // everything and the caller defers exactly as it did before settling existed.
-func newRowSettler(sourceDB *sql.DB, feed change.Source, logger *slog.Logger) *rowSettler {
-	if feed == nil {
+func newRowSettler(sourceDBs []*sql.DB, feeds []change.Source, logger *slog.Logger) *rowSettler {
+	if len(feeds) == 0 || len(feeds) != len(sourceDBs) {
 		return nil
 	}
-	return &rowSettler{sourceDB: sourceDB, feed: feed, logger: logger}
+	return &rowSettler{sourceDBs: sourceDBs, feeds: feeds, logger: logger}
+}
+
+// owner returns the source a row is settled against, and its feed: the source
+// the row was read from. A row only the target holds has no owner; with one
+// source that is still the only feed its next change can arrive on, and with
+// several there is no way to know which, so it gets a nil feed (defer).
+func (s *rowSettler) owner(row hotSnapshotRow) (*sql.DB, change.Source) {
+	i := row.source
+	if i < 0 && len(s.feeds) == 1 {
+		i = 0
+	}
+	if i < 0 || i >= len(s.feeds) {
+		return nil, nil
+	}
+	return s.sourceDBs[i], s.feeds[i]
 }
 
 // settle returns settleUnavailable rather than an error for every condition
@@ -157,6 +179,12 @@ func (s *rowSettler) settle(ctx context.Context, snapshot *hotSnapshot) (settleV
 // (defer) from the run being cancelled (propagate).
 func (s *rowSettler) settleRow(ctx, parent context.Context, snapshot *hotSnapshot, row hotSnapshotRow) (settleVerdict, error) {
 	chunk := snapshot.chunk
+	db, feed := s.owner(row)
+	if feed == nil {
+		s.logger.Debug("lockless checksum: watched row has no single owning source; deferring",
+			"chunk", chunk.String())
+		return settleUnavailable, nil
+	}
 	matcher, err := keyMatcher(chunk.Table, chunk.Key, row.key)
 	if err != nil {
 		return settleUnavailable, err
@@ -165,13 +193,13 @@ func (s *rowSettler) settleRow(ctx, parent context.Context, snapshot *hotSnapsho
 	defer cancel()
 
 	var verdict settleVerdict
-	err = s.feed.VerifyRowAtNextChange(rowCtx, change.RowWatch{
+	err = feed.VerifyRowAtNextChange(rowCtx, change.RowWatch{
 		Schema: chunk.Table.SchemaName,
 		Table:  chunk.Table.TableName,
 		Match:  matcher,
 	}, func(ctx context.Context, _, image []any, deleted bool) error {
 		var err error
-		verdict, err = s.compareRowToImage(ctx, snapshot, row, image, deleted)
+		verdict, err = compareRowToImage(ctx, db, snapshot, row, image, deleted)
 		return err
 	})
 	switch {
@@ -207,13 +235,15 @@ func (s *rowSettler) settleRow(ctx, parent context.Context, snapshot *hotSnapsho
 // checker uses against the image itself (see expectedImageCRC), so a type change
 // or a column rename is normalised exactly as it is everywhere else rather than
 // by a second, parallel notion of equality written in Go.
-func (s *rowSettler) compareRowToImage(ctx context.Context, snapshot *hotSnapshot, row hotSnapshotRow, image []any, deleted bool) (settleVerdict, error) {
+//
+// sourceDB is the owning source, used only to evaluate the checksum expressions.
+func compareRowToImage(ctx context.Context, sourceDB *sql.DB, snapshot *hotSnapshot, row hotSnapshotRow, image []any, deleted bool) (settleVerdict, error) {
 	chunk := snapshot.chunk
 	predicate, err := pointPredicate(chunk, row.key)
 	if err != nil {
 		return settleUnavailable, err
 	}
-	actual, _, oversized, err := readHotSnapshotRows(ctx, snapshot.targetDB, chunk, chunk.NewTable, snapshot.targetColumns, predicate, 2)
+	actual, _, oversized, err := readHotSnapshotRowsAcross(ctx, snapshot.targetDBs, chunk, chunk.NewTable, snapshot.targetColumns, predicate, 2)
 	if err != nil {
 		return settleUnavailable, fmt.Errorf("read target row while settling %s: %w", chunk.String(), err)
 	}
@@ -231,7 +261,7 @@ func (s *rowSettler) compareRowToImage(ctx context.Context, snapshot *hotSnapsho
 	if len(actual) == 0 {
 		return settleDiverged, nil // the stream just wrote it; the target has no row
 	}
-	expected, err := s.expectedImageCRC(ctx, chunk, image)
+	expected, err := expectedImageCRC(ctx, sourceDB, chunk, image)
 	if err != nil {
 		return settleUnavailable, err
 	}
@@ -256,7 +286,7 @@ func (s *rowSettler) compareRowToImage(ctx context.Context, snapshot *hotSnapsho
 //
 // The merge is not a substitute for binding the right value, though: see
 // imageValueExpr for the two types where it produces the wrong rendering.
-func (s *rowSettler) expectedImageCRC(ctx context.Context, chunk *table.Chunk, image []any) (uint64, error) {
+func expectedImageCRC(ctx context.Context, sourceDB *sql.DB, chunk *table.Chunk, image []any) (uint64, error) {
 	sourceExprs, _, err := chunk.ColumnMapping.ChecksumExprs()
 	if err != nil {
 		return 0, err
@@ -279,7 +309,7 @@ func (s *rowSettler) expectedImageCRC(ctx context.Context, chunk *table.Chunk, i
 		sourceExprs, table.QuoteColumns(columns), chunk.Table.QuotedTableName,
 		strings.Join(placeholders, ","))
 	var crc uint64
-	if err := s.sourceDB.QueryRowContext(ctx, query, values...).Scan(&crc); err != nil {
+	if err := sourceDB.QueryRowContext(ctx, query, values...).Scan(&crc); err != nil {
 		return 0, fmt.Errorf("evaluate checksum over binlog row image: %w", err)
 	}
 	return crc, nil

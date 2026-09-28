@@ -139,7 +139,7 @@ func newTestChecker(t *testing.T, chunker table.Chunker, cfg CheckerConfig,
 	// snapshot/split hooks) are swapped before Run.
 	srcDB, tgtDB := &sql.DB{}, &sql.DB{}
 	applySharedDefaults(&cfg)
-	c := newLocklessChecker(srcDB, tgtDB, chunker, nil, nil, &cfg)
+	c := newLocklessChecker([]*sql.DB{srcDB}, []*sql.DB{tgtDB}, chunker, nil, nil, &cfg)
 	declineHotSnapshot(c)
 
 	attempts := sync.Map{}
@@ -171,7 +171,7 @@ func newTestCheckerSig(t *testing.T, chunker table.Chunker, cfg CheckerConfig,
 	t.Helper()
 	srcDB, tgtDB := &sql.DB{}, &sql.DB{}
 	applySharedDefaults(&cfg)
-	c := newLocklessChecker(srcDB, tgtDB, chunker, nil, nil, &cfg)
+	c := newLocklessChecker([]*sql.DB{srcDB}, []*sql.DB{tgtDB}, chunker, nil, nil, &cfg)
 	declineHotSnapshot(c)
 
 	attempts := sync.Map{}
@@ -654,7 +654,7 @@ func TestFatalDivergenceReconcilesApplyLag(t *testing.T) {
 			return 100, 99, 1000, nil
 		},
 	)
-	c.feed = feed // attach a feed so the drain-and-confirm path engages
+	c.feeds = []change.Source{feed} // attach a feed so the drain-and-confirm path engages
 
 	stop, _ := runUntil(t, c)
 	select {
@@ -686,7 +686,7 @@ func TestHotChunkDuringFeedDrainIsBounded(t *testing.T) {
 			// must take the post-drain hot-chunk branch.
 			return sourceCRC.Load(), 99, 1000, nil
 		})
-	c.feed = feed
+	c.feeds = []change.Source{feed}
 	stop, _ := runUntil(t, c)
 	t.Cleanup(func() { _ = stop() })
 	require.Eventually(t, func() bool { return c.Stats().PassesCompleted == 1 },
@@ -718,7 +718,7 @@ func TestFatalDivergenceStillAbortsAfterDrain(t *testing.T) {
 			return 100, 99, 1000, nil // stable, real divergence; a drain won't fix it
 		},
 	)
-	c.feed = feed
+	c.feeds = []change.Source{feed}
 
 	err := c.Run(t.Context())
 	require.ErrorIs(t, err, ErrPermanentDivergence,
@@ -1647,7 +1647,7 @@ func TestFiniteLocklessRetriesTransientFailures(t *testing.T) {
 	newChecker := func(t *testing.T, chunker table.Chunker) Checker {
 		t.Helper()
 		cfg := NewCheckerDefaultConfig()
-		cfg.Algorithm = Lockless
+		cfg.Lockless = true
 		cfg.RetryDelay = time.Millisecond
 		checker, err := NewChecker([]*sql.DB{{}}, chunker, []change.Source{&change.MockSource{}}, cfg)
 		require.NoError(t, err)
@@ -1694,7 +1694,7 @@ func (c *partialProgressChunker) Progress() (uint64, uint64, uint64) {
 func TestFiniteLocklessReportsFullProgressAfterCleanPass(t *testing.T) {
 	chunker := &partialProgressChunker{testChunker: newTestChunker(0), verified: 3, total: 10}
 	cfg := NewCheckerDefaultConfig()
-	cfg.Algorithm = Lockless
+	cfg.Lockless = true
 	cfg.RetryDelay = time.Millisecond
 	checker, err := NewChecker([]*sql.DB{{}}, chunker, []change.Source{&change.MockSource{}}, cfg)
 	require.NoError(t, err)
@@ -1702,4 +1702,124 @@ func TestFiniteLocklessReportsFullProgressAfterCleanPass(t *testing.T) {
 	require.Equal(t, status.ChecksumProgress{RowsChecked: 3, RowsTotal: 10}, checker.GetProgress())
 	require.NoError(t, checker.Run(t.Context()))
 	require.Equal(t, status.ChecksumProgress{RowsChecked: 10, RowsTotal: 10}, checker.GetProgress())
+}
+
+// Every source's feed is drained before a stable mismatch is believed. A target
+// that is only behind on the second source's changes is lagging, not diverged.
+func TestLocklessDrainsEveryFeedBeforeADivergenceVerdict(t *testing.T) {
+	var caughtUp atomic.Bool
+	cfg := fastConfig()
+	cfg.RetryDelay = time.Millisecond
+	c := newTestChecker(t, newTestChunker(1), cfg, func(context.Context, *table.Chunk, int) (int64, int64, uint64, error) {
+		if caughtUp.Load() {
+			return 1, 1, 1, nil
+		}
+		return 1, 2, 1, nil // the source is steady; the target is behind
+	})
+	lagging := &change.MockSource{FlushFn: func(context.Context) error {
+		caughtUp.Store(true)
+		return nil
+	}}
+	c.feeds = []change.Source{&change.MockSource{}, lagging}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	defer cancel()
+	require.NoError(t, c.RunUntilClean(ctx), "draining only the first feed judges the second feed's lag as divergence")
+}
+
+// A target that is one read behind and then catches up is apply lag, not
+// divergence. DifferencesFound counts it (it is a first-read mismatch), but
+// ConfirmedDifferences, which a move's checksum-watermark gates read, must not.
+func TestLocklessLagThatReconcilesIsNotAConfirmedDifference(t *testing.T) {
+	cfg := fastConfig()
+	cfg.RetryDelay = time.Millisecond
+	c := newTestChecker(t, newTestChunker(1), cfg, func(_ context.Context, _ *table.Chunk, attempt int) (int64, int64, uint64, error) {
+		if attempt == 1 {
+			return 1, 2, 1, nil // target not yet caught up
+		}
+		return 1, 1, 1, nil
+	})
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	defer cancel()
+	require.NoError(t, c.RunUntilClean(ctx))
+	require.Equal(t, uint64(1), c.DifferencesFound(), "the first-read mismatch is still observed")
+	require.Zero(t, c.ConfirmedDifferences(), "a mismatch that reconciled on retry is lag, not a difference")
+}
+
+// A stable divergence is confirmed before it is repaired, and stays confirmed
+// across later clean passes: a repaired range no longer backs the initial
+// checksum's verdict, so a caller that saw it clean between the two would
+// persist a watermark the repair invalidated.
+func TestLocklessConfirmedDifferencesCountedBeforeRepairAndKept(t *testing.T) {
+	var recopied atomic.Bool
+	var confirmedAtRepair atomic.Uint64
+	var c *LocklessChecker
+	recopier := &fakeRecopier{recopyFn: func(context.Context, *table.Chunk) error {
+		confirmedAtRepair.Store(c.ConfirmedDifferences())
+		recopied.Store(true)
+		return nil
+	}}
+	c = newTestChecker(t, newTestChunker(1), fastConfig(), func(context.Context, *table.Chunk, int) (int64, int64, uint64, error) {
+		if recopied.Load() {
+			return 42, 42, 1000, nil
+		}
+		return 100, 99, 1000, nil // stable: src is always 100
+	})
+	c.recopier = recopier
+
+	stop, _ := runUntil(t, c)
+	require.EventuallyWithT(t, func(collect *assert.CollectT) {
+		assert.GreaterOrEqual(collect, c.Stats().PassesCompleted, uint64(3))
+	}, 5*time.Second, 10*time.Millisecond)
+	err := stop()
+	require.True(t, errors.Is(err, context.Canceled) || err == nil)
+	require.Equal(t, uint64(1), confirmedAtRepair.Load(), "counted before the repair starts")
+	require.Equal(t, uint64(1), c.ConfirmedDifferences(), "later clean passes must not clear it")
+}
+
+// Without a recopier the confirmed divergence is reported, and counted.
+func TestLocklessPermanentDivergenceIsConfirmed(t *testing.T) {
+	c := newTestChecker(t, newTestChunker(1), fastConfig(), func(context.Context, *table.Chunk, int) (int64, int64, uint64, error) {
+		return 100, 99, 1000, nil
+	})
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	require.ErrorIs(t, c.Run(ctx), ErrPermanentDivergence)
+	require.Equal(t, uint64(1), c.ConfirmedDifferences())
+}
+
+// The backlog signal over several feeds sums their residuals and reports the
+// least-advanced flush counter, so a residual is only compared once every feed
+// has flushed again. The last feed here has flushed the most, so taking its
+// counter would claim a round of flushes the first feed has not done.
+func TestLocklessFlushResidualAcrossFeeds(t *testing.T) {
+	first := &change.MockSource{Residual: 3}
+	last := &change.MockSource{Residual: 5}
+	require.NoError(t, first.Flush(t.Context()))
+	for range 3 {
+		require.NoError(t, last.Flush(t.Context()))
+	}
+	c := newTestChecker(t, newTestChunker(1), fastConfig(), nil)
+	c.feeds = []change.Source{first, last}
+	residual, flushes := c.flushResidual()
+	require.Equal(t, 8, residual)
+	require.Equal(t, 1, flushes, "the least-advanced feed's flush count")
+}
+
+// A run that owns the feeds' periodic flush starts and stops it on every feed,
+// not only the first: each source's changes accumulate on its own feed.
+func TestLocklessPeriodicFlushOnEveryFeed(t *testing.T) {
+	c := newTestChecker(t, newTestChunker(1), fastConfig(), func(context.Context, *table.Chunk, int) (int64, int64, uint64, error) {
+		return 1, 1, 1, nil
+	})
+	c.ownsFeedFlush = true
+	feeds := []*change.MockSource{{}, {}}
+	c.feeds = []change.Source{feeds[0], feeds[1]}
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	defer cancel()
+	require.NoError(t, c.RunUntilClean(ctx))
+	for i, feed := range feeds {
+		require.Equal(t, 1, feed.PeriodicFlushStarts(), "feed %d", i)
+		require.Equal(t, 1, feed.PeriodicFlushStops(), "feed %d", i)
+	}
 }

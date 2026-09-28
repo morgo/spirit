@@ -330,7 +330,7 @@ func (s *checksumScaler) observeBacklog() bool {
 // no evidence would walk a healthy pass down to one worker. Utilization-driven
 // shedding is unaffected — that signal has its own freshness handling.
 //
-// For the DistributedChecker this also covers a single stuck feed: the aggregate
+// With several feeds (a move) this also covers a single stuck feed: the aggregate
 // flush counter is the minimum across feeds, so one feed that stops flushing
 // freezes the whole signal — which is now visible rather than silent.
 func (s *checksumScaler) backlogStale() bool {

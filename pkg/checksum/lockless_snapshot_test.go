@@ -38,7 +38,7 @@ func TestHotSnapshotFiniteTail(t *testing.T) {
 	db, chunk := snapshotTestTables(t, "id INT PRIMARY KEY, value INT", []string{"id"})
 	snapshotExec(t, db, "INSERT INTO src VALUES (1,10),(2,20)")
 	snapshotExec(t, db, "INSERT INTO dst VALUES (1,10)")
-	snapshot, err := captureHotSnapshot(t.Context(), db, db, chunk)
+	snapshot, err := captureHotSnapshot(t.Context(), []*sql.DB{db}, []*sql.DB{db}, chunk)
 	require.NoError(t, err)
 	require.NotNil(t, snapshot)
 	passed, err := snapshot.check(t.Context())
@@ -53,7 +53,7 @@ func TestHotSnapshotFiniteTail(t *testing.T) {
 	passed, err = snapshot.check(t.Context())
 	require.NoError(t, err)
 	require.True(t, passed)
-	srcCRC, dstCRC, srcCount, dstCount, err := readChunkCRC(t.Context(), db, db, chunk)
+	srcCRC, dstCRC, srcCount, dstCount, err := readChunkCRC(t.Context(), []*sql.DB{db}, []*sql.DB{db}, chunk)
 	require.NoError(t, err)
 	require.NotEqual(t, chunkSig{srcCRC, srcCount}, chunkSig{dstCRC, dstCount}, "aggregate still races the growing tail")
 }
@@ -62,7 +62,7 @@ func TestHotSnapshotOrphansAndDeletes(t *testing.T) {
 	db, chunk := snapshotTestTables(t, "id INT PRIMARY KEY, value INT", []string{"id"})
 	snapshotExec(t, db, "INSERT INTO src VALUES (1,10)")
 	snapshotExec(t, db, "INSERT INTO dst VALUES (1,10),(99,99)")
-	snapshot, err := captureHotSnapshot(t.Context(), db, db, chunk)
+	snapshot, err := captureHotSnapshot(t.Context(), []*sql.DB{db}, []*sql.DB{db}, chunk)
 	require.NoError(t, err)
 	passed, err := snapshot.check(t.Context())
 	require.NoError(t, err)
@@ -73,7 +73,7 @@ func TestHotSnapshotOrphansAndDeletes(t *testing.T) {
 	require.True(t, passed)
 
 	snapshotExec(t, db, "INSERT INTO src VALUES (2,20)")
-	snapshot, err = captureHotSnapshot(t.Context(), db, db, chunk)
+	snapshot, err = captureHotSnapshot(t.Context(), []*sql.DB{db}, []*sql.DB{db}, chunk)
 	require.NoError(t, err)
 	snapshotExec(t, db, "DELETE FROM src WHERE id=2")
 	passed, err = snapshot.check(t.Context())
@@ -95,7 +95,7 @@ func TestHotSnapshotKeyIdentity(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			db, chunk := snapshotTestTables(t, tc.ddl, tc.keys)
 			snapshotExec(t, db, "INSERT INTO src VALUES "+tc.values)
-			snapshot, err := captureHotSnapshot(t.Context(), db, db, chunk)
+			snapshot, err := captureHotSnapshot(t.Context(), []*sql.DB{db}, []*sql.DB{db}, chunk)
 			require.NoError(t, err)
 			require.Len(t, snapshot.pending, 2)
 			snapshotExec(t, db, "INSERT INTO dst SELECT * FROM src")
@@ -111,7 +111,7 @@ func TestHotSnapshotBoundsAndBudget(t *testing.T) {
 	snapshotExec(t, db, "INSERT INTO src VALUES (1,10),(2,20)")
 	snapshotExec(t, db, "INSERT INTO dst VALUES (1,10),(2,20),(3,30)")
 	chunk.AdditionalConditions = "id < 3"
-	snapshot, err := captureHotSnapshot(t.Context(), db, db, chunk)
+	snapshot, err := captureHotSnapshot(t.Context(), []*sql.DB{db}, []*sql.DB{db}, chunk)
 	require.NoError(t, err)
 	passed, err := snapshot.check(t.Context())
 	require.NoError(t, err)
@@ -122,12 +122,12 @@ func TestHotSnapshotBoundsAndBudget(t *testing.T) {
 		values = append(values, fmt.Sprintf("(%d,%d)", i, i))
 	}
 	snapshotExec(t, db, "INSERT INTO src VALUES "+strings.Join(values, ","))
-	snapshot, err = captureHotSnapshot(t.Context(), db, db, chunk)
+	snapshot, err = captureHotSnapshot(t.Context(), []*sql.DB{db}, []*sql.DB{db}, chunk)
 	require.NoError(t, err)
 	require.Nil(t, snapshot, "row budget overflow cannot truncate verification")
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	_, err = captureHotSnapshot(ctx, db, db, chunk)
+	_, err = captureHotSnapshot(ctx, []*sql.DB{db}, []*sql.DB{db}, chunk)
 	require.ErrorIs(t, err, context.Canceled)
 }
 
@@ -146,7 +146,7 @@ func TestLocklessHotSnapshotGate(t *testing.T) {
 				return int64(attempt), 0, 1, nil // aggregate keeps changing forever
 			})
 			c.snapshotChunk = func(ctx context.Context, chunk *table.Chunk) (*hotSnapshot, error) {
-				snapshot, err := captureHotSnapshot(ctx, db, db, chunk)
+				snapshot, err := captureHotSnapshot(ctx, []*sql.DB{db}, []*sql.DB{db}, chunk)
 				if err == nil && converge {
 					_, err = db.ExecContext(ctx, "INSERT INTO dst SELECT * FROM src")
 				}
@@ -173,7 +173,7 @@ func TestLocklessHotSnapshotGate(t *testing.T) {
 func TestHotSnapshotCollatedOrphanIsNotAbsent(t *testing.T) {
 	db, chunk := snapshotTestTables(t, "id VARCHAR(20) COLLATE utf8mb4_unicode_ci PRIMARY KEY, value INT", []string{"id"})
 	snapshotExec(t, db, "INSERT INTO dst VALUES ('UPPER',1)")
-	snapshot, err := captureHotSnapshot(t.Context(), db, db, chunk)
+	snapshot, err := captureHotSnapshot(t.Context(), []*sql.DB{db}, []*sql.DB{db}, chunk)
 	require.NoError(t, err)
 	snapshotExec(t, db, "UPDATE dst SET id='upper'")
 	passed, err := snapshot.check(t.Context())
@@ -191,7 +191,7 @@ func TestHotSnapshotByteBudget(t *testing.T) {
 		_, err := db.ExecContext(t.Context(), "INSERT INTO src VALUES (?,?)", fmt.Sprintf("%03d%s", i, strings.Repeat("x", 997)), i)
 		require.NoError(t, err)
 	}
-	snapshot, err := captureHotSnapshot(t.Context(), db, db, chunk)
+	snapshot, err := captureHotSnapshot(t.Context(), []*sql.DB{db}, []*sql.DB{db}, chunk)
 	require.NoError(t, err)
 	require.Nil(t, snapshot, "byte overflow cannot truncate verification")
 }
@@ -202,7 +202,7 @@ func TestHotSnapshotColumnMapping(t *testing.T) {
 	require.NoError(t, chunk.NewTable.SetInfo(t.Context()))
 	chunk.ColumnMapping = table.NewColumnMapping(chunk.Table, chunk.NewTable, map[string]string{"value": "renamed"})
 	snapshotExec(t, db, "INSERT INTO src VALUES (1,10),(2,NULL)")
-	snapshot, err := captureHotSnapshot(t.Context(), db, db, chunk)
+	snapshot, err := captureHotSnapshot(t.Context(), []*sql.DB{db}, []*sql.DB{db}, chunk)
 	require.NoError(t, err)
 	snapshotExec(t, db, "INSERT INTO dst SELECT * FROM src")
 	passed, err := snapshot.check(t.Context())
@@ -218,7 +218,7 @@ func TestHotSnapshotTargetCensusOverflow(t *testing.T) {
 		values = append(values, fmt.Sprintf("(%d,%d)", i, i*10))
 	}
 	snapshotExec(t, db, "INSERT INTO dst VALUES "+strings.Join(values, ","))
-	snapshot, err := captureHotSnapshot(t.Context(), db, db, chunk)
+	snapshot, err := captureHotSnapshot(t.Context(), []*sql.DB{db}, []*sql.DB{db}, chunk)
 	require.NoError(t, err)
 	require.Nil(t, snapshot, "a target census over the row budget cannot truncate orphan evidence")
 }
@@ -250,7 +250,7 @@ func TestHotSnapshotTemporalParseTime(t *testing.T) {
 			require.NoError(t, target.SetInfo(t.Context()))
 			chunk := &table.Chunk{Key: []string{"id"}, Table: source, NewTable: target,
 				ColumnMapping: table.NewColumnMapping(source, target, nil)}
-			snapshot, err := captureHotSnapshot(t.Context(), db, db, chunk)
+			snapshot, err := captureHotSnapshot(t.Context(), []*sql.DB{db}, []*sql.DB{db}, chunk)
 			require.NoError(t, err)
 			require.NotNil(t, snapshot)
 			require.Len(t, snapshot.pending, 2)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"maps"
 	"strings"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/utils"
+	"golang.org/x/sync/errgroup"
 )
 
 const hotSnapshotMaxBytes = 64 * 1024
@@ -23,7 +25,7 @@ const hotSnapshotMaxBytes = 64 * 1024
 // One worker owns the snapshot at a time; retries carry it through the queue.
 type hotSnapshot struct {
 	pending       map[string]hotSnapshotRow
-	targetDB      *sql.DB
+	targetDBs     []*sql.DB
 	chunk         *table.Chunk
 	targetColumns string
 	attempts      int
@@ -39,22 +41,27 @@ type hotSnapshotRow struct {
 	key     []table.Datum
 	crc     uint64
 	present bool
+	// source is the index of the server the row was read from, within the set
+	// passed to readHotSnapshotRowsAcross. In a snapshot's pending set that is
+	// the owning source, whose feed carries the row's next change (see
+	// rowSettler.owner), or -1 for a row only the target holds.
+	source int
 }
 
 // captureHotSnapshot reads at most 128 rows from each side. A nil snapshot means
 // the range outgrew the fallback's row/byte budget; ordinary retries still apply.
-func captureHotSnapshot(ctx context.Context, sourceDB, targetDB *sql.DB, chunk *table.Chunk) (*hotSnapshot, error) {
+func captureHotSnapshot(ctx context.Context, sourceDBs, targetDBs []*sql.DB, chunk *table.Chunk) (*hotSnapshot, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	sourceColumns, targetColumns, err := chunk.ColumnMapping.ChecksumExprs()
 	if err != nil {
 		return nil, err
 	}
-	target, size, oversized, err := readHotSnapshotRows(ctx, targetDB, chunk, chunk.NewTable, targetColumns, chunk.String(), int(hotSplitTargetRows))
+	target, size, oversized, err := readHotSnapshotRowsAcross(ctx, targetDBs, chunk, chunk.NewTable, targetColumns, chunk.String(), int(hotSplitTargetRows))
 	if err != nil || oversized {
 		return nil, err
 	}
-	source, sourceSize, oversized, err := readHotSnapshotRows(ctx, sourceDB, chunk, chunk.Table, sourceColumns, chunk.String(), int(hotSplitTargetRows))
+	source, sourceSize, oversized, err := readHotSnapshotRowsAcross(ctx, sourceDBs, chunk, chunk.Table, sourceColumns, chunk.String(), int(hotSplitTargetRows))
 	if err != nil || oversized {
 		return nil, err
 	}
@@ -64,12 +71,13 @@ func captureHotSnapshot(ctx context.Context, sourceDB, targetDB *sql.DB, chunk *
 	pending := make(map[string]hotSnapshotRow, len(target)+len(source))
 	for key, row := range target {
 		row.present = false // not in the source snapshot unless overwritten below
+		row.source = -1
 		pending[key] = row
 	}
 	maps.Copy(pending, source)
 	return &hotSnapshot{
 		pending:       pending,
-		targetDB:      targetDB,
+		targetDBs:     targetDBs,
 		chunk:         chunk,
 		targetColumns: targetColumns,
 	}, nil
@@ -99,7 +107,7 @@ func (s *hotSnapshot) check(ctx context.Context) (bool, error) {
 	if len(s.pending) == 0 {
 		return true, nil
 	}
-	rows, _, oversized, err := readHotSnapshotRows(ctx, s.targetDB, s.chunk, s.chunk.NewTable, s.targetColumns, s.pendingPredicate(), 2*int(hotSplitTargetRows))
+	rows, _, oversized, err := readHotSnapshotRowsAcross(ctx, s.targetDBs, s.chunk, s.chunk.NewTable, s.targetColumns, s.pendingPredicate(), 2*int(hotSplitTargetRows))
 	if err != nil {
 		return false, err
 	}
@@ -124,6 +132,76 @@ func (s *hotSnapshot) check(ctx context.Context) (bool, error) {
 	}
 	return len(s.pending) == 0, nil
 }
+
+// readHotSnapshotRowsAcross is readHotSnapshotRows over the union of several
+// servers holding slices of one side, under the same row and byte budget.
+//
+// The servers are read concurrently, so one caller deadline covers one round
+// trip rather than one per server. Each read is individually bounded by the
+// budget, and the union is checked against it once every read has returned,
+// so what is held in memory is at most one budget per server. A read that
+// overflows cancels the rest.
+//
+// A key read from two servers is reported as oversized, which every caller
+// treats as "no evidence" rather than as a verdict. On the target side that is
+// a row caught mid-move between shards; on the source side it is a
+// disjointness violation, which the aggregate count already refuses to pass.
+// Either way a per-key image cannot say which copy is the row.
+func readHotSnapshotRowsAcross(ctx context.Context, dbs []*sql.DB, chunk *table.Chunk, info *table.TableInfo, columns, predicate string, limit int) (map[string]hotSnapshotRow, int, bool, error) {
+	if len(dbs) == 1 {
+		return readHotSnapshotRows(ctx, dbs[0], chunk, info, columns, predicate, limit)
+	}
+	results := make([]map[string]hotSnapshotRow, len(dbs))
+	sizes := make([]int, len(dbs))
+	g, gctx := errgroup.WithContext(ctx)
+	for i, db := range dbs {
+		g.Go(func() error {
+			rows, size, oversized, err := readHotSnapshotRows(gctx, db, chunk, info, columns, predicate, limit)
+			sizes[i] = size
+			if err != nil {
+				return err
+			}
+			if oversized {
+				return errHotSnapshotOversized
+			}
+			results[i] = rows
+			return nil
+		})
+	}
+	err := g.Wait()
+	total := 0
+	for _, size := range sizes {
+		total += size
+	}
+	if errors.Is(err, errHotSnapshotOversized) {
+		return nil, total, true, nil
+	}
+	if err != nil {
+		return nil, total, false, err
+	}
+	if total > hotSnapshotMaxBytes {
+		return nil, total, true, nil
+	}
+	merged := make(map[string]hotSnapshotRow)
+	for i, rows := range results {
+		for key, row := range rows {
+			if _, dup := merged[key]; dup {
+				return nil, total, true, nil
+			}
+			row.source = i
+			merged[key] = row
+		}
+		if len(merged) > limit {
+			return nil, total, true, nil
+		}
+	}
+	return merged, total, false, nil
+}
+
+// errHotSnapshotOversized is how one read in readHotSnapshotRowsAcross cancels
+// its siblings on overflow. It never leaves this file: the caller reports it as
+// oversized, which is not an error.
+var errHotSnapshotOversized = errors.New("hot snapshot exceeds its budget")
 
 // readHotSnapshotRows preserves tuple identity without delimiter collisions.
 // Temporal keys are cast to their server representation to preserve fractional

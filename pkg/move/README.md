@@ -26,7 +26,7 @@ When a `ShardingProvider` is configured, each source table is annotated with a s
 
 ### Autoscaling
 
-`EnableExperimentalAutoscaling` enables conservative host-aware scaling for both single-target and sharded moves. `pkg/host` groups target connections independently of schema and credentials; the same groups drive index restoration and Aurora monitor ownership. One monitor per host feeds a maximum-utilization multi-throttler. The copier resizes every shard's write pool together, and both distributed checksums consume the same signal. Bounds account for targets sharing a host and the client CPU budget. See [the flag documentation](../../docs/move.md#enable-experimental-autoscaling) for eligibility, fallback and limitations.
+`EnableExperimentalAutoscaling` enables conservative host-aware scaling for both single-target and sharded moves. `pkg/host` groups target connections independently of schema and credentials; the same groups drive index restoration and Aurora monitor ownership. One monitor per host feeds a maximum-utilization multi-throttler. The copier resizes every shard's write pool together, and both checksums consume the same signal. Bounds account for targets sharing a host and the client CPU budget. See [the flag documentation](../../docs/move.md#enable-experimental-autoscaling) for eligibility, fallback and limitations.
 
 ### Deferred Secondary Indexes
 
@@ -49,7 +49,7 @@ A run interrupted *before its first checkpoint dump* leaves the checkpoint table
 
 When `DeferCutOver` is enabled, the runner creates a `_spirit_sentinel` table on the first target (targets[0], alongside the checkpoint) during setup (before the copy starts) and then *blocks before cutover* until it is dropped by an external actor. The wait sits between the initial checksum and the cutover. This provides a coordination point for orchestration systems that need to perform additional steps between copy completion and cutover.
 
-While the sentinel blocks the cutover, the runner re-runs the checksum in a loop (the "continuous checksum") so that the data is re-verified close to the moment of cutover, even if the sentinel sits for hours. The first iteration starts one hour after the initial checksum, and subsequent iterations are capped at one per hour so that small tables do not churn the table lock back-to-back; the wait is interrupted when the sentinel is dropped. One exception: if a pass had already detected a mismatch and is mid-recopy, the in-flight repair runs to completion (bounded by an internal per-chunk timeout) before cutover continues, because the DELETE-from-targets + re-apply-from-sources pair must stay atomic. See [docs/move.md](../../docs/move.md) for the user-facing description.
+While the sentinel blocks the cutover, the runner re-runs the checksum in a loop (the "continuous checksum") so that the data is re-verified close to the moment of cutover, even if the sentinel sits for hours. The first iteration starts one hour after the initial checksum, and subsequent iterations are capped at one per hour; the wait is interrupted when the sentinel is dropped. Both checksums use the lockless checker, aggregating each chunk across every source and every target. The continuous checksum does not repair: a divergence that survives a drain of the change feeds aborts the move, and a resumed move's initial checksum repairs it. See [docs/move.md](../../docs/move.md) for the user-facing description.
 
 ### Cutover Function
 

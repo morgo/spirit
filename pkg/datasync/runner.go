@@ -549,7 +549,7 @@ func (r *Runner) runChecksum(ctx context.Context) error {
 	defer stopScaling()
 
 	built, err := checksum.NewChecker([]*sql.DB{r.source.db}, chunker, []change.Source{r.replClient}, &checksum.CheckerConfig{
-		Algorithm: checksum.Lockless,
+		Lockless: true,
 		// TargetDB is what makes this the cross-server case: the factory builds
 		// a repair path that reads the source and writes the target, rather than
 		// the single-server one that does both on one connection.
@@ -575,7 +575,7 @@ func (r *Runner) runChecksum(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("construct lockless checker: %w", err)
 	}
-	// Algorithm decides the concrete type, so this cannot fail. Sync reads the
+	// Lockless decides the concrete type, so this cannot fail. Sync reads the
 	// lockless-only accessors (Stats, FirstCleanPass), which are not part of
 	// the Checker interface.
 	checker := built.(*checksum.LocklessChecker)

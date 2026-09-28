@@ -58,9 +58,9 @@ func TestSyncProgressAndLogFormat(t *testing.T) {
 	require.Equal(t, status.CopyProgress{RowsCopied: 70, RowsTotal: 300}, r.Progress().Copy) // The copy reading outlives the copy phase.
 	require.Empty(t, r.Progress().Checksum)                                                  // The continuous verifier has no finite initial-checksum phase.
 	checker, err := checksum.NewChecker([]*sql.DB{{}}, table.NewMockChunker("verify", 100), []change.Source{&change.MockSource{}}, &checksum.CheckerConfig{
-		Algorithm: checksum.Lockless,
-		TargetDB:  &sql.DB{},
-		DBConfig:  dbconn.NewDBConfig(),
+		Lockless: true,
+		TargetDB: &sql.DB{},
+		DBConfig: dbconn.NewDBConfig(),
 	})
 	require.NoError(t, err)
 	r.locklessChecker = checker.(*checksum.LocklessChecker)
