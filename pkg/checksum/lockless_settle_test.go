@@ -102,7 +102,7 @@ func settleTestSettler(t *testing.T, db *sql.DB, feed change.Source) *rowSettler
 // than about an empty work set.
 func pendingSnapshot(t *testing.T, db *sql.DB, chunk *table.Chunk, wantPending int) *hotSnapshot {
 	t.Helper()
-	snapshot, err := captureHotSnapshot(t.Context(), db, db, chunk)
+	snapshot, err := captureHotSnapshot(t.Context(), []*sql.DB{db}, []*sql.DB{db}, chunk)
 	require.NoError(t, err)
 	require.NotNil(t, snapshot)
 	passed, err := snapshot.check(t.Context())
@@ -500,7 +500,7 @@ func TestCheckHotSnapshotEscalatesOnlyWhenExhausted(t *testing.T) {
 	feed := &parkingFeed{events: []parkedEvent{{key: []any{int64(2)}, image: []any{int64(2), int64(20)}}}}
 	cfg := CheckerConfig{MaxHotAttempts: 3}
 	applySharedDefaults(&cfg)
-	c := newLocklessChecker(db, db, nil, feed, nil, &cfg)
+	c := newLocklessChecker([]*sql.DB{db}, []*sql.DB{db}, nil, []change.Source{feed}, nil, &cfg)
 
 	res := &workResult{item: &workItem{chunk: chunk}}
 	// snapshot.check already consumed one attempt in pendingSnapshot.
@@ -558,9 +558,9 @@ func TestLocklessSettlesHotChunkEndToEnd(t *testing.T) {
 			c := newTestChecker(t, chunker, cfg, func(_ context.Context, _ *table.Chunk, attempt int) (int64, int64, uint64, error) {
 				return int64(attempt), 0, 1, nil // the source never stops moving
 			})
-			c.sourceDB = db
+			c.sourceDBs = []*sql.DB{db}
 			c.snapshotChunk = func(ctx context.Context, chunk *table.Chunk) (*hotSnapshot, error) {
-				return captureHotSnapshot(ctx, db, db, chunk)
+				return captureHotSnapshot(ctx, []*sql.DB{db}, []*sql.DB{db}, chunk)
 			}
 			// The feed parks at the next change to the outstanding row and
 			// hands over its after-image; flushing carries every change up to
@@ -573,7 +573,7 @@ func TestLocklessSettlesHotChunkEndToEnd(t *testing.T) {
 					return err
 				}
 			}
-			c.feed = feed
+			c.feeds = []change.Source{feed}
 
 			ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
 			defer cancel()
@@ -622,7 +622,7 @@ func TestCompareRowToImageRefusesAmbiguousTargetRead(t *testing.T) {
 	require.NoError(t, target.SetInfo(t.Context()))
 	chunk := &table.Chunk{Key: []string{"k"}, Table: source, NewTable: target, ColumnMapping: table.NewColumnMapping(source, target, nil)}
 
-	snapshot, err := captureHotSnapshot(t.Context(), db, db, chunk)
+	snapshot, err := captureHotSnapshot(t.Context(), []*sql.DB{db}, []*sql.DB{db}, chunk)
 	require.NoError(t, err)
 	require.NotNil(t, snapshot)
 

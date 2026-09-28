@@ -9,6 +9,7 @@ import (
 
 	"github.com/block/mysql"
 	"github.com/block/spirit/pkg/applier"
+	"github.com/block/spirit/pkg/checksum"
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/metrics"
 	"github.com/block/spirit/pkg/sentinel"
@@ -23,6 +24,12 @@ func TestMain(m *testing.M) {
 	status.CheckpointDumpInterval = 100 * time.Millisecond
 	sentinel.CheckInterval = 100 * time.Millisecond
 	sentinel.WaitLimit = 10 * time.Second
+	// Move verifies with the lockless checker, whose production retry delay
+	// (1m) is sized to the change feed's flush interval. Tests that write
+	// during the checksum, or that plant a divergence, would each wait it out
+	// several times. Set once here, as the migration package does, so no
+	// parallel test mutates it.
+	checksum.DefaultLocklessRetryDelay = 1 * time.Second
 	goleak.VerifyTestMain(m)
 }
 

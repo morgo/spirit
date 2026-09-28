@@ -139,7 +139,7 @@ func newTestChecker(t *testing.T, chunker table.Chunker, cfg CheckerConfig,
 	// snapshot/split hooks) are swapped before Run.
 	srcDB, tgtDB := &sql.DB{}, &sql.DB{}
 	applySharedDefaults(&cfg)
-	c := newLocklessChecker(srcDB, tgtDB, chunker, nil, nil, &cfg)
+	c := newLocklessChecker([]*sql.DB{srcDB}, []*sql.DB{tgtDB}, chunker, nil, nil, &cfg)
 	declineHotSnapshot(c)
 
 	attempts := sync.Map{}
@@ -171,7 +171,7 @@ func newTestCheckerSig(t *testing.T, chunker table.Chunker, cfg CheckerConfig,
 	t.Helper()
 	srcDB, tgtDB := &sql.DB{}, &sql.DB{}
 	applySharedDefaults(&cfg)
-	c := newLocklessChecker(srcDB, tgtDB, chunker, nil, nil, &cfg)
+	c := newLocklessChecker([]*sql.DB{srcDB}, []*sql.DB{tgtDB}, chunker, nil, nil, &cfg)
 	declineHotSnapshot(c)
 
 	attempts := sync.Map{}
@@ -654,7 +654,7 @@ func TestFatalDivergenceReconcilesApplyLag(t *testing.T) {
 			return 100, 99, 1000, nil
 		},
 	)
-	c.feed = feed // attach a feed so the drain-and-confirm path engages
+	c.feeds = []change.Source{feed} // attach a feed so the drain-and-confirm path engages
 
 	stop, _ := runUntil(t, c)
 	select {
@@ -686,7 +686,7 @@ func TestHotChunkDuringFeedDrainIsBounded(t *testing.T) {
 			// must take the post-drain hot-chunk branch.
 			return sourceCRC.Load(), 99, 1000, nil
 		})
-	c.feed = feed
+	c.feeds = []change.Source{feed}
 	stop, _ := runUntil(t, c)
 	t.Cleanup(func() { _ = stop() })
 	require.Eventually(t, func() bool { return c.Stats().PassesCompleted == 1 },
@@ -718,7 +718,7 @@ func TestFatalDivergenceStillAbortsAfterDrain(t *testing.T) {
 			return 100, 99, 1000, nil // stable, real divergence; a drain won't fix it
 		},
 	)
-	c.feed = feed
+	c.feeds = []change.Source{feed}
 
 	err := c.Run(t.Context())
 	require.ErrorIs(t, err, ErrPermanentDivergence,

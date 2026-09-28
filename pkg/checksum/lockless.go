@@ -1,9 +1,11 @@
 // Package checksum — lockless (optimistic) checker.
 //
 // LocklessChecker verifies live source/target tables with optimistic reads
-// and retries. Unlike SingleChecker / DistributedChecker, it does not acquire a
-// table lock or hold a long-lived REPEATABLE READ snapshot. All reads are plain
-// READ COMMITTED, issued directly through the source and target connections.
+// and retries. Unlike SingleChecker, it does not acquire a table lock or hold a
+// long-lived REPEATABLE READ snapshot. All reads are plain
+// READ COMMITTED, issued directly through the source and target connections —
+// one or more of each, since a move reads N sources and M targets and
+// aggregates each chunk across them.
 //
 // One checker serves both halves of the Checker contract, over the same pass
 // loop: Run returns once a pass has verified the whole table (retrying the run
@@ -99,6 +101,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -194,10 +197,15 @@ type LocklessChecker struct {
 	cfg        CheckerConfig
 	splitChunk func(context.Context, *table.Chunk, uint64) ([]*table.Chunk, error)
 
-	sourceDB *sql.DB
-	targetDB *sql.DB
-	chunker  table.Chunker
-	feed     change.Source
+	// sourceDBs and targetDBs are every server holding a slice of each side.
+	// A migration has one of each, and it is the same handle; a sync has one
+	// of each on different servers; a move has N sources and M targets, and
+	// every read aggregates across all of them (BIT_XOR is associative, and
+	// counts sum). feeds[i] carries sourceDBs[i]'s changes.
+	sourceDBs []*sql.DB
+	targetDBs []*sql.DB
+	chunker   table.Chunker
+	feeds     []change.Source
 
 	// recopier is the repair path, and its presence *is* the repair policy: a
 	// confirmed divergence is repaired when there is one and returns
@@ -205,7 +213,7 @@ type LocklessChecker struct {
 	// factory chooses one.
 	recopier Recopier
 
-	// ownsFeedFlush makes a run start and stop the feed's periodic flush, the
+	// ownsFeedFlush makes a run start and stop the feeds' periodic flush, the
 	// way the snapshot checkers do. Set by NewChecker. It is off by default
 	// because a caller that constructs the checker itself generally runs its
 	// own flush loop for the whole process (datasync does), and stopping that
@@ -286,15 +294,15 @@ type LocklessChecker struct {
 // defaults that are lockless-only — the cross-algorithm ones are NewChecker's,
 // which is the only caller. It validates nothing, because NewChecker has.
 //
-// sourceDB and targetDB are connections to the two copies being compared, and
-// are the same handle when one server holds both. chunker must be Open before
-// a run; the checker Resets it between passes but does not close it. feed may
-// be nil; it is advisory. recopier may be nil, which is what makes a confirmed
-// divergence fatal rather than repairable.
+// sourceDBs and targetDBs are connections to the two copies being compared, and
+// are the same single handle when one server holds both. chunker must be Open
+// before a run; the checker Resets it between passes but does not close it.
+// feeds may be empty; they are advisory. recopier may be nil, which is what
+// makes a confirmed divergence fatal rather than repairable.
 func newLocklessChecker(
-	sourceDB, targetDB *sql.DB,
+	sourceDBs, targetDBs []*sql.DB,
 	chunker table.Chunker,
-	feed change.Source,
+	feeds []change.Source,
 	recopier Recopier,
 	config *CheckerConfig,
 ) *LocklessChecker {
@@ -320,20 +328,77 @@ func newLocklessChecker(
 	c := &LocklessChecker{
 		cfg:              cfg,
 		recopier:         recopier,
-		sourceDB:         sourceDB,
-		targetDB:         targetDB,
+		sourceDBs:        sourceDBs,
+		targetDBs:        targetDBs,
 		chunker:          chunker,
-		feed:             feed,
+		feeds:            feeds,
 		firstCleanPassCh: make(chan struct{}),
 	}
 	c.snapshotChunk = func(ctx context.Context, chunk *table.Chunk) (*hotSnapshot, error) {
-		return captureHotSnapshot(ctx, sourceDB, targetDB, chunk)
+		return captureHotSnapshot(ctx, sourceDBs, targetDBs, chunk)
 	}
-	c.readChunk = readChunkCRC2(sourceDB, targetDB)
+	c.readChunk = func(ctx context.Context, chunk *table.Chunk) (int64, int64, uint64, uint64, error) {
+		return readChunkCRC(ctx, sourceDBs, targetDBs, chunk)
+	}
+	// Pivots only need to be keys in SQL order, not balanced ones, so they come
+	// from the first source. With several sources that can mean a lopsided
+	// split (or none, if the first holds no rows in the range), which costs
+	// retries rather than correctness: every child is still verified across
+	// every source.
 	c.splitChunk = func(ctx context.Context, chunk *table.Chunk, rows uint64) ([]*table.Chunk, error) {
-		return splitHotChunk(ctx, sourceDB, chunk, rows)
+		return splitHotChunk(ctx, sourceDBs[0], chunk, rows)
 	}
 	return c
+}
+
+// sameServer reports whether one handle holds both copies, which is what the
+// row-level diff inspector needs: it compares both sides inside one session.
+func (c *LocklessChecker) sameServer() bool {
+	return len(c.sourceDBs) == 1 && len(c.targetDBs) == 1 && c.sourceDBs[0] == c.targetDBs[0]
+}
+
+// settlingFeed is the one feed a hot row can be settled against, or nil. With
+// several sources the row's next change could arrive on any of them, and
+// parking all of them to wait for it is not worth its complexity for a
+// terminal escalation, so a multi-source range defers instead (a nil feed
+// makes newRowSettler answer settleUnavailable).
+func (c *LocklessChecker) settlingFeed() change.Source {
+	if len(c.feeds) != 1 {
+		return nil
+	}
+	return c.feeds[0]
+}
+
+// flushFeeds drains every feed, so a target merely behind on applying buffered
+// changes is not judged diverged.
+func (c *LocklessChecker) flushFeeds(ctx context.Context) error {
+	for i, feed := range c.feeds {
+		if err := feed.Flush(ctx); err != nil {
+			return fmt.Errorf("feed %d: %w", i, err)
+		}
+	}
+	return nil
+}
+
+// flushResidual aggregates change.Source.FlushResidual across every feed — the
+// backlog signal the autoscaler sheds on. With N sources the relevant residual
+// is the sum, since any one feed falling behind holds up cut-over.
+//
+// The flush counter is the *minimum* across feeds, so a residual is only
+// compared once every feed has flushed again. Summing the counters instead
+// would advance N times per round of flushes and invite comparing a sum in
+// which only some terms had been refreshed. The cost of the minimum is that one
+// feed which stops flushing freezes the aggregate signal; the scaler detects
+// that as staleness and freezes growth rather than trusting the stale verdict
+// (see checksumScaler.backlogStale).
+func (c *LocklessChecker) flushResidual() (int, int) {
+	total, flushes := 0, math.MaxInt
+	for _, feed := range c.feeds {
+		r, f := feed.FlushResidual()
+		total += r
+		flushes = min(flushes, f)
+	}
+	return total, flushes
 }
 
 // SetThrottler installs pacing before a run. It is called during runner setup,
@@ -473,9 +538,11 @@ func (c *LocklessChecker) run(ctx context.Context, untilClean bool) error {
 		c.statsMu.Unlock()
 	}()
 
-	if c.ownsFeedFlush && c.feed != nil {
-		c.feed.StartPeriodicFlush(ctx, change.DefaultFlushInterval)
-		defer c.feed.StopPeriodicFlush()
+	if c.ownsFeedFlush {
+		for _, feed := range c.feeds {
+			feed.StartPeriodicFlush(ctx, change.DefaultFlushInterval)
+			defer feed.StopPeriodicFlush()
+		}
 	}
 
 	minPassInterval := c.passInterval(continuous)
@@ -574,8 +641,8 @@ func (c *LocklessChecker) runPasses(ctx context.Context, untilClean bool, minPas
 
 	if c.cfg.Autoscale.Enabled {
 		var backlog func() (int, int)
-		if c.feed != nil {
-			backlog = c.feed.FlushResidual
+		if len(c.feeds) != 0 {
+			backlog = c.flushResidual
 		}
 		workerWG.Go(func() {
 			newChecksumScaler(c.cfg.Throttler, limiter, backlog, c.cfg.Concurrency, workers, c.cfg.Logger, c.cfg.MetricsSink).run(workerCtx)
@@ -653,8 +720,7 @@ func (c *LocklessChecker) runPasses(ctx context.Context, untilClean bool, minPas
 		// future binlog event will remove). The repaired chunk's range is
 		// re-read by the next pass's fresh walk, so the signal fires only
 		// once a full pass needs no repairs at all. This mirrors the
-		// differencesFound == 0 follow-up-pass rule in SingleChecker /
-		// DistributedChecker.
+		// differencesFound == 0 follow-up-pass rule in SingleChecker.
 		recopies := c.recopiesThisPass.Load()
 		deferredHot := c.hotChunksDeferredThisPass.Load()
 		if recopies == 0 && deferredHot == 0 {
@@ -1054,7 +1120,7 @@ func (c *LocklessChecker) checkHotSnapshot(ctx context.Context, res *workResult,
 	// settle each outstanding row against the change stream's own image of it —
 	// see lockless_settle.go for why that verdict is trustworthy where a poll's
 	// is not.
-	verdict, err := newRowSettler(c.sourceDB, c.feed, c.cfg.Logger).settle(ctx, snapshot)
+	verdict, err := newRowSettler(c.sourceDBs[0], c.settlingFeed(), c.cfg.Logger).settle(ctx, snapshot)
 	if err != nil {
 		res.err = fmt.Errorf("settle hot range: %w", err)
 		return
@@ -1188,8 +1254,8 @@ func (c *LocklessChecker) executeWork(ctx context.Context, item *workItem) *work
 	// survives a full drain (with the source still unchanged) is acted on at
 	// all. The feed is advisory and may be nil for library callers; with nothing
 	// to drain, the mismatch is taken at face value.
-	if c.feed != nil {
-		if flushErr := c.feed.Flush(ctx); flushErr != nil {
+	if len(c.feeds) != 0 {
+		if flushErr := c.flushFeeds(ctx); flushErr != nil {
 			res.err = fmt.Errorf("drain change feed before divergence verdict for chunk %s: %w", item.chunk.String(), flushErr)
 			return res
 		}
@@ -1269,13 +1335,14 @@ func (c *LocklessChecker) executeWork(ctx context.Context, item *workItem) *work
 // on a path that only runs after a change-feed drain proved the range stable.
 func (c *LocklessChecker) logRowDifferences(ctx context.Context, chunk *table.Chunk, reason string) {
 	c.cfg.Logger.Info("inspecting differences for chunk", "chunk", chunk.String(), "reason", reason)
-	if c.sourceDB != c.targetDB {
-		// Cross-server (`spirit sync`): the inspector compares both sides
-		// within one query session, which does not exist across two servers.
+	if !c.sameServer() {
+		// Cross-server (`spirit sync`, `spirit move`): the inspector compares
+		// both sides within one query session, which does not exist across
+		// servers.
 		// The aggregate mismatch has already been logged by the caller.
 		return
 	}
-	if err := inspectDifferences(ctx, c.sourceDB, chunk, c.cfg.Logger); err != nil {
+	if err := inspectDifferences(ctx, c.sourceDBs[0], chunk, c.cfg.Logger); err != nil {
 		c.cfg.Logger.Warn("failed to inspect row differences", "chunk", chunk.String(), "error", err)
 	}
 }
@@ -1532,15 +1599,22 @@ func (c *LocklessChecker) bucketPassed(item *workItem, recopied bool) {
 	}
 }
 
-// readChunkCRC issues the source and target BIT_XOR(CRC32(...)) queries in
-// parallel against the two databases, returning the CRCs and row counts.
-// Returns the first error from either side.
+// readChunkCRC issues the BIT_XOR(CRC32(...)) query against every source and
+// every target in parallel, and aggregates each side: CRCs XOR together and
+// counts sum, which gives exactly what one query over the union of the servers
+// would. Returns the first error from any server.
 //
-// This is the cross-DB analog of SingleChecker.ChecksumChunk's two queries,
-// without the TrxPool (READ COMMITTED, no snapshot alignment).
+// The count is what keeps the aggregate honest across servers. BIT_XOR is
+// pair-cancelling, so a row present on two sources (a resharding bug that
+// violates disjointness) contributes nothing to the XOR, and a target holding
+// no copy of it would still match on the CRC alone; the summed counts differ.
+//
+// The reads are READ COMMITTED and not aligned with each other, so a row
+// moving between target shards can be counted on both or neither. That is a
+// first-attempt mismatch like any other, and the retry queue absorbs it.
 func readChunkCRC(
 	ctx context.Context,
-	sourceDB, targetDB *sql.DB,
+	sourceDBs, targetDBs []*sql.DB,
 	chunk *table.Chunk,
 ) (srcCRC, tgtCRC int64, srcCount, tgtCount uint64, err error) {
 	sourceCols, targetCols, err := chunk.ColumnMapping.ChecksumExprs()
@@ -1556,27 +1630,35 @@ func readChunkCRC(
 		targetCols, chunk.NewTable.QuotedTableName, chunk.String(),
 	)
 
+	type sig struct {
+		crc   int64
+		count uint64
+	}
+	sources := make([]sig, len(sourceDBs))
+	targets := make([]sig, len(targetDBs))
 	g, gCtx := errgroup.WithContext(ctx)
-	g.Go(func() error {
-		return sourceDB.QueryRowContext(gCtx, sourceQ).Scan(&srcCRC, &srcCount)
-	})
-	g.Go(func() error {
-		return targetDB.QueryRowContext(gCtx, targetQ).Scan(&tgtCRC, &tgtCount)
-	})
+	for i, db := range sourceDBs {
+		g.Go(func() error {
+			return db.QueryRowContext(gCtx, sourceQ).Scan(&sources[i].crc, &sources[i].count)
+		})
+	}
+	for i, db := range targetDBs {
+		g.Go(func() error {
+			return db.QueryRowContext(gCtx, targetQ).Scan(&targets[i].crc, &targets[i].count)
+		})
+	}
 	if err := g.Wait(); err != nil {
 		return 0, 0, 0, 0, err
 	}
-	return srcCRC, tgtCRC, srcCount, tgtCount, nil
-}
-
-// readChunkCRC2 adapts readChunkCRC to the readChunk field signature,
-// returning BOTH row counts so the checker can compare them. (readChunkCRC
-// already computes srcCount; the lockless checker previously discarded it,
-// which is the defense-in-depth gap this closes.)
-func readChunkCRC2(sourceDB, targetDB *sql.DB) func(ctx context.Context, chunk *table.Chunk) (int64, int64, uint64, uint64, error) {
-	return func(ctx context.Context, chunk *table.Chunk) (int64, int64, uint64, uint64, error) {
-		return readChunkCRC(ctx, sourceDB, targetDB, chunk)
+	for _, s := range sources {
+		srcCRC ^= s.crc
+		srcCount += s.count
 	}
+	for _, t := range targets {
+		tgtCRC ^= t.crc
+		tgtCount += t.count
+	}
+	return srcCRC, tgtCRC, srcCount, tgtCount, nil
 }
 
 // signalFirstCleanPass closes firstCleanPassCh on the first call and
@@ -1634,8 +1716,8 @@ func (c *LocklessChecker) Stats() LocklessCheckerStats {
 // so a LocklessChecker can be consumed through the same minimal "has this
 // checker observed any divergence?" view the migration runner uses to gate
 // checkpoint-watermark persistence (DumpCheckpoint / invalidateChecksumWatermark),
-// matching the Checker.DifferencesFound semantics of the SingleChecker /
-// DistributedChecker. A transient mismatch that later reconciles on retry still
+// matching the Checker.DifferencesFound semantics of the SingleChecker. A
+// transient mismatch that later reconciles on retry still
 // counts here, so the gate stays conservative: any hint of divergence blanks the
 // persisted watermark and forces re-verification on resume.
 func (c *LocklessChecker) DifferencesFound() uint64 {

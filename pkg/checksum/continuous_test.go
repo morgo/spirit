@@ -90,15 +90,12 @@ func TestContinuousSnapshotLifecycle(t *testing.T) {
 }
 
 func TestContinuousFactoryDiscardsResumeEvidence(t *testing.T) {
-	for _, mode := range []string{"single", "distributed", "lockless"} {
+	for _, mode := range []string{"single", "lockless"} {
 		t.Run(mode, func(t *testing.T) {
 			chunker := &resumeChunker{testChunker: newTestChunker(0), watermark: "initial-verification"}
 			feed := &change.MockSource{}
 			cfg := NewCheckerDefaultConfig()
 			cfg.Applier = &applier.MockApplier{}
-			if mode == "distributed" {
-				cfg.Algorithm = Sharded
-			}
 			if mode == "lockless" {
 				cfg.Algorithm = Lockless
 			}
@@ -169,38 +166,30 @@ func TestLocklessContinuousReusesCheckerAfterInitialPass(t *testing.T) {
 }
 
 func TestSnapshotContinuousActiveLifecycle(t *testing.T) {
-	for _, distributed := range []bool{false, true} {
-		t.Run(fmt.Sprintf("distributed=%t", distributed), func(t *testing.T) {
-			synctest.Test(t, func(t *testing.T) {
-				entered := make(chan struct{})
-				feed := &change.MockSource{FlushFn: func(ctx context.Context) error {
-					close(entered)
-					<-ctx.Done()
-					return ctx.Err()
-				}}
-				cfg := NewCheckerDefaultConfig()
-				cfg.Applier = &applier.MockApplier{}
-				if distributed {
-					cfg.Algorithm = Sharded
-					cfg.Applier = &applier.MockApplier{}
-				}
-				checker, err := NewChecker([]*sql.DB{{}}, newTestChunker(0), []change.Source{feed}, cfg)
-				require.NoError(t, err)
-				ctx, cancel := context.WithCancel(t.Context())
-				defer cancel()
-				require.False(t, checker.ContinuousActive())
-				done := make(chan error, 1)
-				go func() { done <- checker.RunContinuous(ctx) }()
-				synctest.Wait()
-				require.False(t, checker.ContinuousActive(), "initial pacing is idle")
-				<-entered
-				require.True(t, checker.ContinuousActive(), "snapshot setup is active")
-				cancel()
-				require.NoError(t, <-done)
-				require.False(t, checker.ContinuousActive(), "joined checker is idle")
-			})
-		})
-	}
+	synctest.Test(t, func(t *testing.T) {
+		entered := make(chan struct{})
+		feed := &change.MockSource{FlushFn: func(ctx context.Context) error {
+			close(entered)
+			<-ctx.Done()
+			return ctx.Err()
+		}}
+		cfg := NewCheckerDefaultConfig()
+		cfg.Applier = &applier.MockApplier{}
+		checker, err := NewChecker([]*sql.DB{{}}, newTestChunker(0), []change.Source{feed}, cfg)
+		require.NoError(t, err)
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		require.False(t, checker.ContinuousActive())
+		done := make(chan error, 1)
+		go func() { done <- checker.RunContinuous(ctx) }()
+		synctest.Wait()
+		require.False(t, checker.ContinuousActive(), "initial pacing is idle")
+		<-entered
+		require.True(t, checker.ContinuousActive(), "snapshot setup is active")
+		cancel()
+		require.NoError(t, <-done)
+		require.False(t, checker.ContinuousActive(), "joined checker is idle")
+	})
 }
 
 // The interval before the first continuous pass exists so that background

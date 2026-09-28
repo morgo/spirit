@@ -241,13 +241,13 @@ func StatusSuffix(c Checker) string {
 }
 
 // Algorithm selects how a checker compares source and target. It is the only
-// thing that selects one: before this existed, the distributed checker was
-// chosen by CheckerConfig.Applier being non-nil, which meant the write path a
-// repair goes through doubled as the algorithm switch. That is why there used
-// to be a second applier field — a single-server checker needs a write path
-// too, and setting the first one would have silently turned it into a
-// distributed checker. Naming the algorithm separately lets the two collapse
-// into one Applier.
+// thing that selects one: before this existed, the (since removed) distributed
+// checker was chosen by CheckerConfig.Applier being non-nil, which meant the
+// write path a repair goes through doubled as the algorithm switch. That is
+// why there used to be a second applier field — a single-server checker needs
+// a write path too, and setting the first one would have silently turned it
+// into a distributed checker. Naming the algorithm separately lets the two
+// collapse into one Applier.
 type Algorithm int
 
 const (
@@ -256,14 +256,11 @@ const (
 	// a migration uses.
 	Single Algorithm = iota
 
-	// Sharded compares N sources against M targets, aggregating each chunk
-	// across every source. Used by a move; see DistributedChecker. Requires
-	// an Applier, which is also what routes a repaired row to the shard that
-	// owns it.
-	Sharded
-
 	// Lockless compares two tables with optimistic READ COMMITTED reads and a
-	// delayed-retry queue, taking no locks and holding no snapshot. Everything
+	// delayed-retry queue, taking no locks and holding no snapshot. It is the
+	// only algorithm that spans servers: a sync (TargetDB), and a move, which
+	// reads N sources against the applier's M targets and aggregates each
+	// chunk across all of them. Everything
 	// in the common config section applies to it; the lockless section applies
 	// only to it, and YieldTimeout does not apply at all (there is no snapshot
 	// to yield).
@@ -274,8 +271,6 @@ func (a Algorithm) String() string {
 	switch a {
 	case Single:
 		return "single"
-	case Sharded:
-		return "sharded"
 	case Lockless:
 		return "lockless"
 	default:
@@ -317,11 +312,10 @@ type CheckerConfig struct {
 	// a second here would hide which one a repair actually goes through.
 	//
 	// Required when FixDifferences is set — a checker that cannot repair should
-	// fail to build, not on the first mismatch hours in — and required by
-	// Sharded either way, which needs it to reach its targets at all. The two
-	// algorithms use it differently: Sharded owns its lifecycle for the whole
-	// run (and reads GetTargets from it), while the others start and stop it
-	// around each repair, since repairs are rare and serialized.
+	// fail to build, not on the first mismatch hours in. A repair starts and
+	// stops it around each rewrite, since repairs are rare and serialized.
+	// Lockless also reads GetTargets from it to find the copy being verified
+	// (see resolveLocklessTargets), which is how a move names its M targets.
 	Applier      applier.Applier
 	YieldTimeout time.Duration // maximum duration for a single checksum pass before yielding to release long-running transactions
 	// Throttler paces the checksum. Optional: nil installs a Noop, and callers
@@ -451,16 +445,17 @@ func NewCheckerDefaultConfig() *CheckerConfig {
 // the mismatch is reported as an error, and a non-nil one means the chunk is
 // rewritten and re-verified.
 //
-// Only the shape of the rewrite depends on the topology. Sharded must delete
-// the range on every target and merge the rows from every source. A
-// cross-server target reads from one server and writes to another, and has no
-// ColumnMapping to apply because both sides hold the same logical table. The
-// remaining case — one server holding both copies — is the migration's, where
-// the mapping is exactly what makes a repair correct across a rename or a drop.
+// Only the shape of the rewrite depends on the topology. A cross-server target named by TargetDB reads from one
+// server and writes to another, and has no ColumnMapping to apply because both
+// sides hold the same logical table. Everything else — one server holding both
+// copies (a migration), or a lockless check of N sources routed onto the
+// applier's M targets (a move) — deletes the range on every target and rewrites
+// the merged source rows through the ColumnMapping, which is exactly what makes
+// a migration's repair correct across a rename or a drop.
 //
 // config.DBConfig is the write side's in every case: it configures the DELETE
 // that clears the range on the target before the rows are rewritten.
-func newRecopier(sourceDBs []*sql.DB, targetDB *sql.DB, config *CheckerConfig) (Recopier, error) {
+func newRecopier(sourceDBs, targetDBs []*sql.DB, config *CheckerConfig) (Recopier, error) {
 	if !config.FixDifferences {
 		return nil, nil
 	}
@@ -468,23 +463,57 @@ func newRecopier(sourceDBs []*sql.DB, targetDB *sql.DB, config *CheckerConfig) (
 		return nil, errors.New("applier must be non-nil to repair differences")
 	}
 	switch {
-	case config.Algorithm == Sharded:
-		return newDistributedRepairer(sourceDBs, config.Applier, config.DBConfig, config.Logger), nil
-	case targetDB != sourceDBs[0]:
-		return newMySQLRecopier(sourceDBs[0], targetDB, config.Applier, config.DBConfig, config.Logger)
+	case config.TargetDB != nil:
+		return newMySQLRecopier(sourceDBs[0], config.TargetDB, config.Applier, config.DBConfig, config.Logger)
 	default:
-		return newChunkRepairer(sourceDBs[0], config.Applier, config.DBConfig, config.Logger), nil
+		return newChunkRepairer(sourceDBs, targetDBs, config.Applier, config.DBConfig, config.Logger), nil
 	}
+}
+
+// resolveLocklessTargets decides which servers hold the copy a lockless check
+// verifies. TargetDB wins when set (a sync); otherwise the applier's targets,
+// so the checksum reads back from exactly where the copy and a repair write (a
+// move, or a migration, whose applier targets the source's own handle);
+// otherwise the copy sits beside the one source.
+//
+// Without a TargetDB or applier targets nothing says where N sources' rows
+// went, and guessing sourceDBs[0] would verify one shard's slice and report
+// the whole topology clean, so that shape is refused.
+func resolveLocklessTargets(sourceDBs []*sql.DB, config *CheckerConfig) ([]*sql.DB, error) {
+	if config.TargetDB != nil {
+		if len(sourceDBs) != 1 {
+			return nil, fmt.Errorf("TargetDB requires exactly one source, got %d", len(sourceDBs))
+		}
+		return []*sql.DB{config.TargetDB}, nil
+	}
+	if config.Applier != nil {
+		if targets := config.Applier.GetTargets(); len(targets) != 0 {
+			dbs := make([]*sql.DB, len(targets))
+			for i, target := range targets {
+				if target.DB == nil {
+					return nil, fmt.Errorf("applier target %d has no connection", i)
+				}
+				dbs[i] = target.DB
+			}
+			return dbs, nil
+		}
+	}
+	if len(sourceDBs) != 1 {
+		return nil, fmt.Errorf("lockless verification of %d sources requires an applier to name the targets", len(sourceDBs))
+	}
+	return []*sql.DB{sourceDBs[0]}, nil
 }
 
 // NewChecker creates a new checksum object. CheckerConfig.Algorithm picks which
 // one, and nothing else does; the zero value is Single.
 //
 // sourceDBs contains the source database connections (one for single-source
-// migrations, multiple for N:M moves). Sharded aggregates checksums across all
-// of them; the other two use sourceDBs[0]. The copy being verified lives on
-// sourceDBs[0] too unless CheckerConfig.TargetDB names another server, which is
-// how a sync verifies across two. Open the chunker before construction unless
+// migrations, multiple for N:M moves), each paired with the feed at the same
+// index. Lockless aggregates checksums across all of them; Single
+// uses sourceDBs[0]. For Single the copy being verified lives on sourceDBs[0]
+// too; for Lockless it is wherever resolveLocklessTargets says — TargetDB
+// (how a sync verifies across two servers), else the applier's targets, else
+// sourceDBs[0]. Open the chunker before construction unless
 // supplying Watermark, in which case the factory opens it according to policy.
 func NewChecker(sourceDBs []*sql.DB, chunker table.Chunker, feeds []change.Source, config *CheckerConfig) (Checker, error) {
 	if config == nil {
@@ -503,8 +532,8 @@ func NewChecker(sourceDBs []*sql.DB, chunker table.Chunker, feeds []change.Sourc
 		return nil, errors.New("dbconfig must be non-nil")
 	}
 	switch config.Algorithm {
-	case Single, Lockless:
-		// Both read exactly one source through exactly one feed, and would
+	case Single:
+		// It reads exactly one source through exactly one feed, and would
 		// otherwise use sourceDBs[0]/feeds[0] and silently ignore the rest.
 		// That matters most for a caller written against the old selection
 		// rule, where a non-nil Applier was what made a checker sharded: the
@@ -513,17 +542,21 @@ func NewChecker(sourceDBs []*sql.DB, chunker table.Chunker, feeds []change.Sourc
 		// keeps a stale call site from becoming a checksum that passes by not
 		// looking.
 		if len(sourceDBs) != 1 || len(feeds) != 1 {
-			return nil, fmt.Errorf("%s verification requires one source and one feed, got %d and %d (Algorithm selects the checker; set it to Sharded to aggregate across sources)", config.Algorithm, len(sourceDBs), len(feeds))
+			return nil, fmt.Errorf("%s verification requires one source and one feed, got %d and %d (Algorithm selects the checker; set it to Lockless to aggregate across sources)", config.Algorithm, len(sourceDBs), len(feeds))
 		}
 		if sourceDBs[0] == nil || feeds[0] == nil {
 			return nil, fmt.Errorf("%s verification requires a non-nil source and feed", config.Algorithm)
 		}
-	case Sharded:
-		// The applier is how a sharded checker reaches its targets at all —
-		// it reads them from GetTargets and owns its lifecycle for the run —
-		// so it is required whether or not repairs are.
-		if config.Applier == nil {
-			return nil, errors.New("sharded verification requires an applier")
+	case Lockless:
+		// Every source is read, and each one's feed is what keeps its apply
+		// lag from being judged divergence, so they must pair up.
+		if len(feeds) != len(sourceDBs) {
+			return nil, fmt.Errorf("lockless verification requires one feed per source, got %d sources and %d feeds", len(sourceDBs), len(feeds))
+		}
+		for i := range sourceDBs {
+			if sourceDBs[i] == nil || feeds[i] == nil {
+				return nil, fmt.Errorf("lockless verification requires a non-nil source and feed, source %d has none", i)
+			}
 		}
 	default:
 		return nil, fmt.Errorf("unknown checksum algorithm %d", config.Algorithm)
@@ -532,12 +565,15 @@ func NewChecker(sourceDBs []*sql.DB, chunker table.Chunker, feeds []change.Sourc
 	// the target through a connection to the server they read from — a table
 	// lock and a REPEATABLE READ snapshot cannot span two servers — so naming a
 	// second one for them would be silently ignored rather than honoured.
-	targetDB := sourceDBs[0]
-	if config.TargetDB != nil {
-		if config.Algorithm != Lockless {
-			return nil, fmt.Errorf("%s verification cannot span two servers", config.Algorithm)
+	if config.TargetDB != nil && config.Algorithm != Lockless {
+		return nil, fmt.Errorf("%s verification cannot span two servers", config.Algorithm)
+	}
+	targetDBs := []*sql.DB{sourceDBs[0]}
+	if config.Algorithm == Lockless {
+		var err error
+		if targetDBs, err = resolveLocklessTargets(sourceDBs, config); err != nil {
+			return nil, err
 		}
-		targetDB = config.TargetDB
 	}
 
 	// Everything from here is shared: the same defaults, the same repair
@@ -545,7 +581,7 @@ func NewChecker(sourceDBs []*sql.DB, chunker table.Chunker, feeds []change.Sourc
 	// selects. Work on a copy so none of it is visible to the caller's config.
 	cfg := *config
 	applySharedDefaults(&cfg)
-	recopier, err := newRecopier(sourceDBs, targetDB, &cfg)
+	recopier, err := newRecopier(sourceDBs, targetDBs, &cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -579,27 +615,9 @@ func NewChecker(sourceDBs []*sql.DB, chunker table.Chunker, feeds []change.Sourc
 			yieldTimeout:    cfg.YieldTimeout,
 		}, nil
 	case Lockless:
-		checker := newLocklessChecker(sourceDBs[0], targetDB, chunker, feeds[0], recopier, &cfg)
+		checker := newLocklessChecker(sourceDBs, targetDBs, chunker, feeds, recopier, &cfg)
 		checker.ownsFeedFlush = !cfg.ExternalFlushLoop
 		return checker, nil
-	case Sharded:
-		return &DistributedChecker{
-			concurrency:     cfg.Concurrency,
-			maxConcurrency:  cfg.Autoscale.MaxThreads,
-			autoscale:       cfg.Autoscale.Enabled,
-			throttler:       cfg.Throttler,
-			metricsSink:     cfg.MetricsSink,
-			targetChunkTime: cfg.TargetChunkTime,
-			sourceDBs:       sourceDBs,
-			feeds:           feeds,
-			chunker:         chunker,
-			dbConfig:        cfg.DBConfig,
-			logger:          cfg.Logger,
-			recopier:        recopier,
-			maxRetries:      cfg.MaxRetries,
-			applier:         cfg.Applier,
-			yieldTimeout:    cfg.YieldTimeout,
-		}, nil
 	default:
 		// Unreachable: the validation above rejects an unknown algorithm before
 		// any of the construction work happens.

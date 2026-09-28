@@ -213,7 +213,7 @@ func (s *rowSettler) compareRowToImage(ctx context.Context, snapshot *hotSnapsho
 	if err != nil {
 		return settleUnavailable, err
 	}
-	actual, _, oversized, err := readHotSnapshotRows(ctx, snapshot.targetDB, chunk, chunk.NewTable, snapshot.targetColumns, predicate, 2)
+	actual, _, oversized, err := readHotSnapshotRowsAcross(ctx, snapshot.targetDBs, chunk, chunk.NewTable, snapshot.targetColumns, predicate, 2)
 	if err != nil {
 		return settleUnavailable, fmt.Errorf("read target row while settling %s: %w", chunk.String(), err)
 	}

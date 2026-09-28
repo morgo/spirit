@@ -121,21 +121,18 @@ func TestJSONChecksumFullMantissaTextImage(t *testing.T) {
 	require.Equal(t, uint64(0), singleChecker.differencesFound.Load())
 }
 
-// TestDistributedJSONChecksumTextImage is the distributed (move/sync) twin
-// of TestJSONChecksumFullMantissaTextImage. The DistributedChecker builds
-// its checksum SQL independently of the single-server checker (see
-// ChecksumChunk), so the side-dependent JSON casts need their own
-// end-to-end pin: without it, reverting distributed.go's target side to the
-// source expression leaves every JSON test green. The target table here
-// lives in a separate database and holds exactly the one-text-round-trip
+// TestDistributedJSONChecksumTextImage is the cross-server (move) twin of
+// TestJSONChecksumFullMantissaTextImage: the lockless checker reads the source
+// and target sides by separate queries on separate connections, so the
+// side-dependent JSON casts need their own end-to-end pin. The target table
+// here lives in a separate database and holds exactly the one-text-round-trip
 // image that the move applier's text-mediated writes produce, over the same
 // misparse-affected population (17-significant-digit doubles that never
 // converge under repeated parse/render). The asymmetric checksum — source
 // round-trips, target renders strictly — must pass on the first attempt
 // with zero differences. With symmetric casts the target side's extra
 // re-parse lands the drifting values on yet another neighbor, self-minting
-// mismatches (verified on 8.0.45 by reverting targetChecksumCols to
-// sourceChecksumCols in ChecksumChunk: this test fails on rows 1, 2 and 4).
+// mismatches.
 func TestDistributedJSONChecksumTextImage(t *testing.T) {
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	require.NoError(t, err)
@@ -188,19 +185,17 @@ func TestDistributedJSONChecksumTextImage(t *testing.T) {
 	require.NoError(t, feed.Start(t.Context()))
 	require.NoError(t, chunker.Open())
 
-	// Setting an Applier selects the DistributedChecker. FixDifferences is
-	// left false (the default): a single pass must find zero differences,
-	// i.e. this passes on the first attempt with no repair.
+	// The applier names the target server, as it does for a move.
+	// FixDifferences is left false (the default): a single pass must find
+	// zero differences, i.e. this passes on the first attempt with no repair.
 	config := NewCheckerDefaultConfig()
+	config.Algorithm = Lockless
 	config.Applier = app
-	config.Algorithm = Sharded
 
 	checker, err := NewChecker([]*sql.DB{src}, chunker, []change.Source{feed}, config)
 	require.NoError(t, err)
-	distChecker, ok := checker.(*DistributedChecker)
-	require.True(t, ok, "checker is not of type *DistributedChecker")
 	require.NoError(t, checker.Run(t.Context()))
-	require.Equal(t, uint64(0), distChecker.differencesFound.Load())
+	require.Zero(t, checker.DifferencesFound())
 }
 
 // TestJSONChecksumMisparsedDoubleRepairConverges proves the repair side of

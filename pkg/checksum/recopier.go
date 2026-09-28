@@ -119,11 +119,10 @@ func (r *mysqlRecopier) Recopy(ctx context.Context, chunk *table.Chunk) error {
 	// Step 2: Read source rows for the chunk. We use NonGeneratedColumns
 	// because the applier's write path expects exactly those (it can't
 	// write generated columns). The column ordering matches the applier's
-	// expectation as long as we use the same column-list helper the
-	// distributed checker's recopy uses. JSON columns are deliberately read
-	// bare — the SELECT+applier pair already constitutes the one text
-	// round-trip the checksum's JSON contract expects; see the matching
-	// comment in distributedRepairer.Recopy.
+	// expectation as long as we use the same column-list helper. JSON
+	// columns are deliberately read bare — the SELECT+applier pair already
+	// constitutes the one text round-trip the checksum's JSON contract
+	// expects; see the matching note on chunkRepairer.
 	columnList := table.QuoteColumns(chunk.Table.NonGeneratedColumns)
 	query := fmt.Sprintf("SELECT %s FROM %s WHERE %s",
 		columnList,

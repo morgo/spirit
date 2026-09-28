@@ -983,7 +983,7 @@ func TestShardedApplierUpsertRowsUnderLock(t *testing.T) {
 	ctx := t.Context()
 
 	// Acquire one table lock per shard, on that shard's own connection.
-	// This mirrors what checksum.DistributedChecker.initConnPool does.
+	// This mirrors a feed flush under the cutover's per-target table locks.
 	lock1, err := dbconn.NewTableLock(ctx, target1DB, []*table.TableInfo{target1Table}, dbconn.NewDBConfig(), slog.Default())
 	require.NoError(t, err)
 	lock2, err := dbconn.NewTableLock(ctx, target2DB, []*table.TableInfo{target1Table}, dbconn.NewDBConfig(), slog.Default())

@@ -8,7 +8,7 @@ Checksums validate data consistency between two tables. During schema changes, t
 - **Type normalization**: A `CAST` operation converts columns to a comparable type before comparison. This enables comparisons when data types have changed and their string representations differ (e.g., `TIMESTAMP` vs. `TIMESTAMP(6)`).
 - **Automatic repair**: When inconsistencies are detected, the checksum automatically repairs differences by recopying affected chunks.
 - **Parallel execution**: Checksums process chunks concurrently across multiple threads for efficient handling of large tables. The worker count is resizable while a pass runs — see [Pacing and scaling](#pacing-and-scaling).
-- **Consistent snapshot**: A brief table lock establishes a consistent snapshot before being released. The checksum remains immune to concurrent modifications during execution.
+- **Consistent snapshot or optimistic reads**: `SingleChecker` takes a brief table lock to establish a consistent snapshot, so it is immune to concurrent modifications. `LocklessChecker` takes no lock and re-reads a chunk until it matches (see [Lockless checksum](#lockless-checksum)).
 - **Server-side execution**: The checksum computation is pushed down to MySQL, with each chunk returning only a CRC32 value and row count to Spirit. This minimizes network overhead and is significantly more efficient than approaches that extract all data for client-side comparison.
 
 ## Why Checksums Matter
@@ -31,15 +31,14 @@ There are also some known cases where a checksum failure is not a bug. This incl
 
 ## Implementations
 
-The checksum package contains three implementations:
+The checksum package contains two implementations:
 
-1. **SingleChecker** - Compares two tables on the same MySQL server (for schema changes, or 1:1 moves)
-2. **DistributedChecker** - Compares a source table against multiple distributed target databases (for sharded scenarios)
-3. **LocklessChecker** - An optimistic verifier using ordinary reads and retries. One checker serves both halves of the contract over the same pass loop: `Run` returns once a pass has verified the whole table, and `RunContinuous` keeps passing in the background. Used by `spirit sync`, experimental lockless migrations, and deferred-cutover verification when lockless mode is selected.
+1. **SingleChecker** - Compares two tables on the same MySQL server (the default for schema changes)
+2. **LocklessChecker** - An optimistic verifier using ordinary reads and retries. It compares one or more sources against one or more targets, aggregating each chunk across all of them, so it also serves moves (N sources routed onto M targets) and `spirit sync` (a target on another server). One checker serves both halves of the contract over the same pass loop: `Run` returns once a pass has verified the whole table, and `RunContinuous` keeps passing in the background. Used by `spirit move`, `spirit sync`, and experimental lockless migrations.
 
-`SingleChecker` and `DistributedChecker` take a brief table lock to establish a consistent `REPEATABLE READ` snapshot; `LocklessChecker` deliberately does not (see [Lockless checksum](#lockless-checksum) below).
+`SingleChecker` takes a brief table lock to establish a consistent `REPEATABLE READ` snapshot; `LocklessChecker` deliberately does not (see [Lockless checksum](#lockless-checksum) below).
 
-All three use **CRC32 with XOR aggregation** for chunk comparison. The lockless checker can additionally drain a bounded per-row PK/CRC32 snapshot for unresolved hot ranges.
+Both use **CRC32 with XOR aggregation** for chunk comparison. The lockless checker can additionally drain a bounded per-row PK/CRC32 snapshot for unresolved hot ranges.
 
 ## Checker contract
 
@@ -50,20 +49,18 @@ else does:
 | `Algorithm` | checker | compares |
 |---|---|---|
 | `Single` (zero value) | `SingleChecker` | two tables on one server, under a REPEATABLE READ snapshot taken behind a brief table lock |
-| `Sharded` | `DistributedChecker` | N sources against M targets, aggregating each chunk across every source |
-| `Lockless` | `LocklessChecker` | two tables with optimistic READ COMMITTED reads and a delayed-retry queue, taking no locks |
+| `Lockless` | `LocklessChecker` | N sources against M targets with optimistic READ COMMITTED reads and a delayed-retry queue, taking no locks; each chunk's CRCs are XORed and its counts summed across every server |
 
-Naming the algorithm is what lets there be one `Applier`. It used to be
-inferred: a non-nil `Applier` selected the distributed checker, so the write
-path a repair goes through doubled as the algorithm switch, and a second
-`RepairApplier` field had to exist for the single-server checker to have a write
-path without becoming a distributed one.
+Naming the algorithm is what lets there be one `Applier`: the write path a
+repair goes through is not also the algorithm switch.
 
-Because that rule changed, `Single` and `Lockless` reject more than one source or
-feed rather than using the first and ignoring the rest. A call written against
-the old rule — N sources plus an applier — would otherwise build a single-server
-checker, verify one source, and report the whole topology clean. A checksum that
-passes by not looking is the one failure mode worth refusing to construct.
+`Single` rejects more than one source or feed rather than using the first and
+ignoring the rest; it would otherwise verify one source and report the whole
+topology clean. A checksum that passes by not looking is the one failure mode
+worth refusing to construct. `Lockless` requires one feed per source and takes
+its targets from, in order: `TargetDB` (one source only), the applier's
+`GetTargets`, or the lone source itself. Several sources with no target named is
+an error for the same reason.
 
 Every algorithm is configured from the one `CheckerConfig`. The fields common to
 all of them (concurrency, autoscaling, throttler, metrics sink, logger,
@@ -170,7 +167,7 @@ The read is not synchronized with the change feed: a row deleted on the source a
 
 ## Pacing and scaling
 
-`SingleChecker` and `DistributedChecker` pace themselves against the same throttler the copier uses. Two things are separate here:
+`SingleChecker` paces itself against the same throttler the copier uses. Two things are separate here:
 
 - **The hard stop** is not opt-in, but it reacts only to *load*. Before dispatching each chunk the checker calls `Throttler.BlockWait`, so a checksum pauses when server load says to. Chunks already in flight are never interrupted: the checksum stops *dispatching* rather than abandoning work, because an aborted chunk is wasted I/O that must be redone from the same watermark. Wire the throttler with `Checker.SetThrottler` — runners build the checker before their throttlers are open.
 
@@ -187,7 +184,7 @@ The read is not synchronized with the change feed: a row deleted on the source a
 
     Polling cannot recover this quantity. The pending count is a sawtooth: it climbs on every sample between flushes and drops when one lands, so its slope says nothing about whether the feed is coping (at 5s control tick and 30s flush interval, the rising edge alone is six samples long). Nor do window minima work, which is the subtler trap: a poll lands some offset φ after the flush and therefore reads `residual + writeRate·φ`. Because the flush interval is an exact multiple of the tick, φ is fixed for the whole pass by the arbitrary phase between two independent tickers — so on a busy table the sampling term can exceed the threshold on its own, and a *rising write rate* on a fully-draining feed produces rising apparent residuals indistinguishable from a feed falling behind.
 
-    Because the signal is keyed on the feed's flush counter, silence has to be handled explicitly rather than latched: a flush that keeps erroring returns before recording anything and the periodic flusher logs the error and carries on, so the counter can freeze while the backlog grows without bound (a flush that merely takes minutes freezes it too). After `csStaleFlushTicks` ticks with no new flush the scaler stops trusting the standing verdict and freezes *increases* — growth and recovery alike — logging once per episode. It deliberately does not shed on it: a frozen counter says the signal stopped, not which way it was heading. This also covers the `DistributedChecker`, whose aggregate counter is the minimum across feeds, so one stuck feed freezes the signal for all of them.
+    Because the signal is keyed on the feed's flush counter, silence has to be handled explicitly rather than latched: a flush that keeps erroring returns before recording anything and the periodic flusher logs the error and carries on, so the counter can freeze while the backlog grows without bound (a flush that merely takes minutes freezes it too). After `csStaleFlushTicks` ticks with no new flush the scaler stops trusting the standing verdict and freezes *increases* — growth and recovery alike — logging once per episode. It deliberately does not shed on it: a frozen counter says the signal stopped, not which way it was heading. This also covers a lockless checker with several feeds (a move), whose aggregate counter is the minimum across feeds, so one stuck feed freezes the signal for all of them.
 
     Reading the residual where the feed defines it removes the write rate from the signal entirely. Successive residuals are then compared across distinct flushes, with hysteresis in both directions: `csBacklogHysteresisFlushes` consecutive flushes must agree before the verdict changes. The exit condition matters as much as the entry one, because shedding is one step per flush while growth is one step per two ticks — a single favourable flush clearing the verdict would let the grows outpace the sheds and the controller would drift up while the feed fell further behind. While a verdict holds it suppresses growth as well as driving shedding.
 
@@ -287,8 +284,8 @@ range where it was before settling existed.
 
 When a chunk's source CRC is stable across the retry window but the target still disagrees, that is a **stable divergence**. How the checker reacts is governed by whether it has a `Recopier`:
 
-- **With one**, a stable divergence is *repaired* by recopying that chunk from the source: `DELETE` the key range on the target, re-`SELECT` from the source, and re-apply through the same write path the change feed uses. Both tools ask for this — they set `FixDifferences` — so both self-heal a divergence and give up only when repeated passes keep re-finding one. `chunkRepairer` is the single-server implementation (`spirit migrate`), `mysqlRecopier` the cross-server one (`spirit sync`). Recopies are serialized and run under a cancellation-detached, time-bounded (10 minute) context, so a chunk is never left deleted-but-not-rewritten.
-- **Without one**, a stable divergence is fatal: `Run` returns `ErrPermanentDivergence` and the caller aborts. No production caller selects this today; it is what a caller that wants a divergence surfaced rather than papered over would get by leaving `FixDifferences` unset.
+- **With one**, a stable divergence is *repaired* by recopying that chunk from the source: `DELETE` the key range on the target, re-`SELECT` from the source, and re-apply through the same write path the change feed uses. Migration, move's initial checksum and sync ask for this — they set `FixDifferences` — so each self-heals a divergence and gives up only when repeated passes keep re-finding one. `chunkRepairer` repairs through the applier, deleting the range on every target and reading it from every source (`spirit migrate`, `spirit move`); `mysqlRecopier` is the cross-server one (`spirit sync`). Recopies are serialized and run under a cancellation-detached, time-bounded (10 minute) context, so a chunk is never left deleted-but-not-rewritten.
+- **Without one**, a stable divergence is fatal: `Run` returns `ErrPermanentDivergence` and the caller aborts. Move's continuous checksum selects this: the initial checksum already passed, so a divergence found while waiting on the sentinel is surfaced rather than repaired near cutover. A resumed move's initial checksum repairs it.
 
 Before either policy acts, the change feed is drained and the chunk re-read, so a target that was merely behind on applying buffered changes is not mistaken for a diverged one. On a confirmed divergence the checker logs a line per differing row (mismatched, missing on the target, missing on the source), the same diagnostic the snapshot checker emits.
 

@@ -14,25 +14,27 @@ import (
 	"github.com/block/spirit/pkg/utils"
 )
 
-// chunkRepairer rewrites a diverged chunk on the target from the source, on a
-// single MySQL server. It is the repair path for BOTH single-server checkers:
-// SingleChecker calls it when a chunk mismatches under its snapshot, and the
-// lockless checker is handed one as its Recopier when the caller asked for
-// repairs (CheckerConfig.FixDifferences). Sharing the implementation is what
-// makes the two algorithms repair identically rather than nearly-identically —
-// in particular both go through the caller's ColumnMapping, so a repair is
-// correct for an ALTER that renames or drops columns. (mysqlRecopier, the
-// cross-server implementation used by `spirit sync`, reads
-// NonGeneratedColumns instead: there is no mapping between two copies of the
-// same logical table.)
+// chunkRepairer rewrites a diverged chunk on the targets from the sources. It
+// is the repair path for SingleChecker, which calls it when a chunk mismatches
+// under its snapshot, and for the lockless checker, which is handed one as its
+// Recopier when the caller asked for repairs (CheckerConfig.FixDifferences) —
+// whether one server holds both copies (a migration) or N sources are routed
+// onto M targets (a move). Sharing the implementation is what makes the
+// algorithms repair identically rather than nearly-identically — in particular
+// all go through the caller's ColumnMapping, so a repair is correct for an
+// ALTER that renames or drops columns. (mysqlRecopier, the cross-server
+// implementation used by `spirit sync`, reads NonGeneratedColumns instead:
+// there is no mapping between two copies of the same logical table.)
 //
 // The operation is:
 //
-//  1. DELETE the chunk's key range on the target — this is what removes rows
+//  1. DELETE the chunk's key range on every target — this is what removes rows
 //     the source no longer has, which a pure upsert could never do.
-//  2. SELECT the chunk's rows from the source into Spirit.
+//  2. SELECT the chunk's rows from every source into Spirit. The union is the
+//     chunk's whole logical row set, not one shard's slice of it.
 //  3. Write them back through the applier, the same buffered write path the
-//     copier and the binlog apply use.
+//     copier and the binlog apply use, which also routes each row to the
+//     target shard that owns it.
 //
 // Repairs are serialized on recopyLock, one chunk at a time. Historically,
 // concurrent DELETE + REPLACE on overlapping chunks deadlocked on a UNIQUE
@@ -75,10 +77,11 @@ import (
 // Cut-over requires a pass that finds no differences at all, so sustained
 // delete churn costs attempts, never a bad cut-over.
 type chunkRepairer struct {
-	db       *sql.DB
-	applier  applier.Applier
-	dbConfig *dbconn.DBConfig
-	logger   *slog.Logger
+	sourceDBs []*sql.DB
+	targetDBs []*sql.DB
+	applier   applier.Applier
+	dbConfig  *dbconn.DBConfig
+	logger    *slog.Logger
 
 	// recopyLock serializes Recopy calls. See the type doc for rationale.
 	recopyLock sync.Mutex
@@ -86,17 +89,18 @@ type chunkRepairer struct {
 
 var _ Recopier = (*chunkRepairer)(nil)
 
-// newChunkRepairer builds the single-server repair path. app is the write path
-// repairs go through; it is started and stopped around each repair rather than
-// held for the repairer's lifetime, because repairs are rare and serialized.
-func newChunkRepairer(db *sql.DB, app applier.Applier, dbConfig *dbconn.DBConfig, logger *slog.Logger) *chunkRepairer {
+// newChunkRepairer builds the repair path. app is the write path repairs go
+// through; it is started and stopped around each repair rather than held for
+// the repairer's lifetime, because repairs are rare and serialized. targetDBs
+// must be the servers app writes to.
+func newChunkRepairer(sourceDBs, targetDBs []*sql.DB, app applier.Applier, dbConfig *dbconn.DBConfig, logger *slog.Logger) *chunkRepairer {
 	if dbConfig == nil {
 		dbConfig = dbconn.NewDBConfig()
 	}
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &chunkRepairer{db: db, applier: app, dbConfig: dbConfig, logger: logger}
+	return &chunkRepairer{sourceDBs: sourceDBs, targetDBs: targetDBs, applier: app, dbConfig: dbConfig, logger: logger}
 }
 
 // Recopy rewrites the chunk's rows on the target from the source. See the type
@@ -117,8 +121,10 @@ func (r *chunkRepairer) Recopy(ctx context.Context, chunk *table.Chunk) error {
 
 	fixCtx, fixCancel := context.WithTimeout(context.WithoutCancel(ctx), fixChunkTimeout)
 	defer fixCancel()
-	if _, err := dbconn.RetryableTransaction(fixCtx, r.db, dbconn.ErrorOnDupKey, r.dbConfig, deleteStmt); err != nil {
-		return fmt.Errorf("failed to delete existing rows: %w", err)
+	for i, db := range r.targetDBs {
+		if _, err := dbconn.RetryableTransaction(fixCtx, db, dbconn.ErrorOnDupKey, r.dbConfig, deleteStmt); err != nil {
+			return fmt.Errorf("failed to delete existing rows on target %d: %w", i, err)
+		}
 	}
 
 	// The applier is started per repair rather than for the repairer's
@@ -140,9 +146,8 @@ func (r *chunkRepairer) Recopy(ctx context.Context, chunk *table.Chunk) error {
 	}()
 
 	// Read the source rows for the chunk. This is deliberately a plain,
-	// non-locking consistent read of *current* data — not a read inside any
-	// checksum snapshot: by the time we repair, that snapshot is stale and what
-	// the target needs is the source as it is now.
+	// non-locking consistent read of *current* data: what the target needs is
+	// the source as it is now.
 	//
 	// The column list is the source/target intersection (with renames applied on
 	// the target side), which is exactly what the applier expects: row values are
@@ -159,17 +164,6 @@ func (r *chunkRepairer) Recopy(ctx context.Context, chunk *table.Chunk) error {
 		chunk.Table.QuotedTableName,
 		chunk.String(),
 	)
-	rows, err := r.db.QueryContext(fixCtx, query)
-	if err != nil {
-		return fmt.Errorf("failed to read source chunk: %w", err)
-	}
-	// Closed early on the success path (see below) to hand the connection back
-	// before waiting on the writers; this covers the early returns until then.
-	defer func() {
-		if rows != nil {
-			utils.CloseAndLog(rows)
-		}
-	}()
 
 	// Apply() is asynchronous: it hands the batch to the write workers and
 	// returns, so reads and writes pipeline. Callbacks run on the applier's
@@ -212,36 +206,47 @@ func (r *chunkRepairer) Recopy(ctx context.Context, chunk *table.Chunk) error {
 		batch, batchBytes = nil, 0
 		return nil
 	}
-	for rows.Next() {
-		values := make([]any, len(sourceColumns))
-		valuePtrs := make([]any, len(sourceColumns))
-		for i := range values {
-			valuePtrs[i] = &values[i]
+	// readSource streams one source's slice of the chunk into the applier. The
+	// read connection is returned before the next source is read, and before
+	// the wait on the writers below: they take connections from the same pool
+	// on a single server, so holding it would be headroom given up for nothing.
+	readSource := func(i int, db *sql.DB) error {
+		rows, err := db.QueryContext(fixCtx, query)
+		if err != nil {
+			return fmt.Errorf("failed to read source %d chunk: %w", i, err)
 		}
-		if err := rows.Scan(valuePtrs...); err != nil {
-			return fmt.Errorf("failed to scan source row: %w", err)
-		}
-		batch = append(batch, values)
-		batchBytes += applier.EstimateRowSize(values)
-		sourceRows++
-		if len(batch) >= repairBatchRows || batchBytes >= repairBatchBytes {
-			if err := flush(); err != nil {
-				return err
+		defer utils.CloseAndLog(rows)
+		for rows.Next() {
+			values := make([]any, len(sourceColumns))
+			valuePtrs := make([]any, len(sourceColumns))
+			for i := range values {
+				valuePtrs[i] = &values[i]
+			}
+			if err := rows.Scan(valuePtrs...); err != nil {
+				return fmt.Errorf("failed to scan source %d row: %w", i, err)
+			}
+			batch = append(batch, values)
+			batchBytes += applier.EstimateRowSize(values)
+			sourceRows++
+			if len(batch) >= repairBatchRows || batchBytes >= repairBatchBytes {
+				if err := flush(); err != nil {
+					return err
+				}
 			}
 		}
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("failed to read source %d chunk: %w", i, err)
+		}
+		return nil
 	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("failed to read source chunk: %w", err)
+	for i, db := range r.sourceDBs {
+		if err := readSource(i, db); err != nil {
+			return err
+		}
 	}
 	if err := flush(); err != nil {
 		return err
 	}
-	// Return the read connection before waiting on the writers. They take their
-	// connections from the same pool, so holding this one across the wait would
-	// be one connection of headroom given up for nothing. Nil it out so the
-	// deferred close does not close it a second time.
-	utils.CloseAndLog(rows)
-	rows = nil
 
 	// Wait for every submitted batch to be written and its callback to have run.
 	// Repairs are serialized on recopyLock, so on a private applier there is no
