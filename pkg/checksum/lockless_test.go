@@ -1392,6 +1392,81 @@ func TestRunUntilCleanHonoursMaxPasses(t *testing.T) {
 	require.True(t, c.Stats().FirstCleanPassAt.IsZero())
 }
 
+// A retry waits for the change feed to flush, because until then the target
+// cannot have moved. The chunk here is hot and the target shows the source as
+// of the last flush — the shape of a feed that applies every
+// DefaultFlushInterval. Retried on RetryDelay alone, every re-read would see
+// the same stale target, spend the MaxHotAttempts budget on it, and defer the
+// chunk; gated on the flush, the one retry passes.
+func TestRetryWaitsForFeedFlush(t *testing.T) {
+	var (
+		mu      sync.Mutex
+		reads   int
+		lastSrc int64
+		tgt     int64 // the source as of the last flush
+	)
+	feed := &change.MockSource{FlushFn: func(context.Context) error {
+		mu.Lock()
+		defer mu.Unlock()
+		tgt = lastSrc
+		return nil
+	}}
+	readCount := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return reads
+	}
+	newChecker := func(t *testing.T, flushWait time.Duration) *LocklessChecker {
+		cfg := fastConfig()
+		cfg.RetryDelay = time.Millisecond
+		cfg.RetryFlushWait = flushWait
+		cfg.MaxHotAttempts = 2
+		cfg.MaxPasses = 1
+		c := newTestChecker(t, newTestChunker(1), cfg,
+			func(context.Context, *table.Chunk, int) (int64, int64, uint64, error) {
+				mu.Lock()
+				defer mu.Unlock()
+				reads++
+				lastSrc = int64(reads * 10) // the source moves on every read
+				return lastSrc, tgt, 10, nil
+			})
+		c.feeds = []change.Source{feed}
+		return c
+	}
+
+	t.Run("gated until a flush", func(t *testing.T) {
+		c := newChecker(t, time.Minute)
+		errCh := make(chan error, 1)
+		go func() { errCh <- c.RunUntilClean(t.Context()) }()
+
+		require.Eventually(t, func() bool { return readCount() == 1 }, 5*time.Second, time.Millisecond)
+		time.Sleep(300 * time.Millisecond) // 300 RetryDelays
+		require.Equal(t, 1, readCount(), "no retry before the feed has flushed")
+
+		require.NoError(t, feed.Flush(t.Context()))
+		select {
+		case err := <-errCh:
+			require.NoError(t, err, "the first retry after the flush sees the target caught up")
+		case <-time.After(5 * time.Second):
+			t.Fatal("retry was not released by the flush")
+		}
+		require.Equal(t, 2, readCount())
+	})
+
+	t.Run("deadline releases a feed that never flushes", func(t *testing.T) {
+		mu.Lock()
+		reads, lastSrc, tgt = 0, 0, 0
+		mu.Unlock()
+		c := newChecker(t, 20*time.Millisecond)
+		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+		defer cancel()
+		require.ErrorIs(t, c.RunUntilClean(ctx), ErrVerificationUnresolved,
+			"without a flush the target never catches up; the chunk is deferred, not stuck")
+		require.NoError(t, ctx.Err())
+		require.Equal(t, 2, readCount(), "the retry ran once the flush wait expired")
+	})
+}
+
 // MaxPasses does not apply to continuous verification, which is unbounded by
 // design: Run keeps passing until its caller cancels it.
 func TestRunIgnoresMaxPasses(t *testing.T) {
@@ -1822,4 +1897,168 @@ func TestLocklessPeriodicFlushOnEveryFeed(t *testing.T) {
 		require.Equal(t, 1, feed.PeriodicFlushStarts(), "feed %d", i)
 		require.Equal(t, 1, feed.PeriodicFlushStops(), "feed %d", i)
 	}
+}
+
+// Two feeds whose flush counters have drifted apart (a forced drain re-flushes
+// a busy feed several times). A retry queued now must wait until every feed has
+// flushed since, so a flush of the idle feed alone must not release it.
+func TestRetryGateNeedsEveryFeedToFlush(t *testing.T) {
+	busy, idle := &change.MockSource{}, &change.MockSource{}
+	for range 3 {
+		require.NoError(t, busy.Flush(t.Context()))
+	}
+	c := newTestChecker(t, newTestChunker(1), fastConfig(), nil)
+	c.feeds = []change.Source{busy, idle}
+	c.cfg.RetryFlushWait = time.Hour
+
+	e := &retryEntry{notBefore: time.Now().Add(-time.Second)}
+	c.gateOnFlush(e)
+	due, _ := c.retryDue(e, time.Now())
+	require.False(t, due, "nothing has flushed yet")
+
+	require.NoError(t, idle.Flush(t.Context()))
+	due, _ = c.retryDue(e, time.Now())
+	require.False(t, due, "the busy feed has not flushed since the retry was queued")
+
+	require.NoError(t, busy.Flush(t.Context()))
+	due, _ = c.retryDue(e, time.Now())
+	require.True(t, due, "every feed has now flushed")
+}
+
+// The children of a split hot range are first reads, so they must not wait for
+// the change feed. Here the feed flushes while the parent is being retried and
+// stops for good once the range splits: the children still verify at once.
+func TestSplitChildrenAreNotGatedOnAFlush(t *testing.T) {
+	chunker := newTestChunker(1)
+	parent := chunker.chunks[0]
+	children := []*table.Chunk{newTestChunk(0, 500), newTestChunk(500, 501), newTestChunk(501, 1000)}
+	cfg := fastConfig()
+	cfg.RetryDelay = time.Millisecond
+	cfg.RetryFlushWait = time.Hour
+	cfg.MinPassInterval = time.Hour
+	cfg.MaxHotAttempts = 4
+	c := newTestChecker(t, chunker, cfg, func(_ context.Context, ch *table.Chunk, attempt int) (int64, int64, uint64, error) {
+		if ch == parent {
+			return int64(attempt * 100), -1, 10, nil
+		}
+		return 700, 700, 1, nil
+	})
+	feed := &change.MockSource{}
+	c.feeds = []change.Source{feed}
+
+	var mu sync.Mutex
+	split := false
+	c.splitChunk = func(context.Context, *table.Chunk, uint64) ([]*table.Chunk, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		split = true
+		return children, nil
+	}
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		for {
+			select {
+			case <-done:
+				return
+			case <-time.After(2 * time.Millisecond):
+			}
+			mu.Lock()
+			if !split {
+				assert.NoError(t, feed.Flush(context.Background()))
+			}
+			mu.Unlock()
+		}
+	}()
+
+	stop, _ := runUntil(t, c)
+	defer func() { require.ErrorIs(t, stop(), context.Canceled) }()
+	require.Eventually(t, func() bool { return c.Stats().PassesCompleted == 1 }, 5*time.Second, time.Millisecond,
+		"split children waited for a flush")
+	require.Equal(t, uint64(3), c.Stats().ChunksPassedThisPass)
+}
+
+// Split children go ahead of retries already waiting on a flush. The dispatcher
+// only looks at the head of the queue, so a child queued behind a gated retry
+// would wait for that retry's flush (or its RetryFlushWait cap) before its own
+// first read. Here another chunk's retry is gated for good when the range
+// splits — the feed never flushes again — and the children must still be read.
+func TestSplitChildrenGoAheadOfGatedRetries(t *testing.T) {
+	chunker := newTestChunker(2)
+	hot, lagging := chunker.chunks[0], chunker.chunks[1]
+	children := []*table.Chunk{newTestChunk(0, 500), newTestChunk(500, 501), newTestChunk(501, 1000)}
+	cfg := fastConfig()
+	cfg.RetryDelay = time.Millisecond
+	cfg.RetryFlushWait = time.Hour
+	cfg.MinPassInterval = time.Hour
+	cfg.MaxHotAttempts = 4
+
+	var (
+		mu          sync.Mutex
+		split       bool
+		childReads  int
+		releaseLag  = make(chan struct{})
+		releaseOnce sync.Once
+	)
+	c := newTestChecker(t, chunker, cfg, func(ctx context.Context, ch *table.Chunk, attempt int) (int64, int64, uint64, error) {
+		switch ch {
+		case hot:
+			return int64(attempt * 100), -1, 10, nil // the source never stops moving
+		case lagging:
+			// Held until the feed has stopped flushing, then behind: its retry
+			// is gated on a flush that never comes.
+			select {
+			case <-releaseLag:
+			case <-ctx.Done():
+				return 0, 0, 0, ctx.Err()
+			}
+			return 1, 2, 1, nil
+		}
+		mu.Lock()
+		childReads++
+		mu.Unlock()
+		return 700, 700, 1, nil
+	})
+	feed := &change.MockSource{}
+	c.feeds = []change.Source{feed}
+	c.splitChunk = func(ctx context.Context, _ *table.Chunk, _ uint64) ([]*table.Chunk, error) {
+		mu.Lock()
+		split = true // no flush from here on
+		mu.Unlock()
+		releaseOnce.Do(func() { close(releaseLag) })
+		// Hand the children over only once the lagging chunk's gated retry is
+		// the whole queue (the hot parent is in flight here, not queued).
+		for c.Stats().RetryQueueDepth != 1 {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(time.Millisecond):
+			}
+		}
+		return children, nil
+	}
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		for {
+			select {
+			case <-done:
+				return
+			case <-time.After(2 * time.Millisecond):
+			}
+			mu.Lock()
+			if !split {
+				assert.NoError(t, feed.Flush(context.Background()))
+			}
+			mu.Unlock()
+		}
+	}()
+
+	stop, _ := runUntil(t, c)
+	defer func() { require.ErrorIs(t, stop(), context.Canceled) }()
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return childReads == len(children)
+	}, 5*time.Second, time.Millisecond, "split children queued behind a retry that is waiting on a flush")
 }

@@ -93,11 +93,16 @@ func TestMoveSentinelDropReleasesCutover(t *testing.T) {
 // (docs/move.md); the resumed move must then re-run the initial checksum,
 // repair the range, and complete once the sentinel is dropped.
 //
-// Sequential by design: it shortens the package-level pass interval.
+// Sequential by design: it shortens package-level pass and retry timing.
 func TestMoveContinuousChecksumAbortsThenResumeRepairs(t *testing.T) {
 	prev := continuousChecksumMinInterval
 	continuousChecksumMinInterval = 500 * time.Millisecond
 	t.Cleanup(func() { continuousChecksumMinInterval = prev })
+	// The confirming retry would otherwise wait for a periodic feed flush (30s),
+	// past the test's sentinel wait limit. The gate is not what this covers.
+	prevFlushWait := checksum.DefaultLocklessRetryFlushWait
+	checksum.DefaultLocklessRetryFlushWait = 500 * time.Millisecond
+	t.Cleanup(func() { checksum.DefaultLocklessRetryFlushWait = prevFlushWait })
 
 	const srcDB, dstDB = "contabort_src", "contabort_dst"
 	testutils.RunSQL(t, "DROP DATABASE IF EXISTS "+srcDB)

@@ -249,11 +249,20 @@ type CheckerConfig struct {
 
 	// RetryDelay is the minimum wait between attempts for any given chunk —
 	// measured from the *last* attempt of that chunk, not from the original
-	// failure. Default 1m, because changes are queued in the replication
-	// applier for 30s by default. It is also what paces the re-walk between
-	// finite passes, which is the same "give the target a moment to catch up"
-	// wait.
+	// failure. Default DefaultLocklessRetryDelay (5s). It is also what paces
+	// the re-walk between finite passes.
 	RetryDelay time.Duration
+
+	// RetryFlushWait bounds how long a retry additionally waits for every
+	// change feed to complete a flush since the attempt that queued it. The
+	// target only moves when a feed flushes, so a retry before then re-reads
+	// an image it has already seen. It is an upper bound, not a delay: the
+	// retry runs as soon as every feed has flushed (and RetryDelay has
+	// passed), and without feeds there is no wait at all. Default
+	// DefaultLocklessRetryFlushWait (2 × change.DefaultFlushInterval), which
+	// assumes the default flush interval: a caller whose feeds flush less
+	// often should set it to twice their interval.
+	RetryFlushWait time.Duration
 
 	// MaxQueueSize is the cap on entries in the delayed-retry queue. Reaching
 	// it stalls the walker until retries drain rather than failing the run.

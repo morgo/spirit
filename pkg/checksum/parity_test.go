@@ -93,8 +93,8 @@ func (f *parityFixture) checker(t *testing.T, lockless bool, opts ...func(*Check
 		// Repair policy is deliberately not set: the factory derives it from
 		// FixDifferences, which is the whole point of these tests.
 		//
-		// Production uses DefaultLocklessRetryDelay (1 minute). Shortened here
-		// so a confirmed divergence surfaces within the test budget.
+		// Shorter than DefaultLocklessRetryDelay so a confirmed divergence
+		// surfaces within the test budget.
 		config.RetryDelay = 100 * time.Millisecond
 	}
 	for _, opt := range opts {

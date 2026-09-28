@@ -154,8 +154,8 @@ func TestSyncContinuousChecksumWithBackgroundWrites(t *testing.T) {
 	}()
 
 	// First clean pass must still fire — give it a generous window to
-	// account for the per-chunk retry delay (default 1m, see
-	// checksum.DefaultLocklessRetryDelay).
+	// account for the per-chunk retry wait: checksum.DefaultLocklessRetryDelay
+	// plus a feed flush, capped at twice the flush interval.
 	h.await(runner.FirstCleanPass(), 120*time.Second, "FirstCleanPass")
 	t.Logf("FirstCleanPass fired; stats=%+v", runner.ChecksumStats())
 
@@ -168,4 +168,12 @@ func TestSyncContinuousChecksumWithBackgroundWrites(t *testing.T) {
 
 	stopWriting()
 	h.stop()
+}
+
+// The retry flush wait must scale with the sync's own flush interval: the
+// checksum package's default assumes the default interval, so a longer
+// --flush-interval would expire the wait before a flush could land.
+func TestSyncChecksumRetryFlushWaitFollowsFlushInterval(t *testing.T) {
+	r := &Runner{sync: &Sync{FlushInterval: 5 * time.Minute}}
+	require.Equal(t, 10*time.Minute, r.checksumConfig().RetryFlushWait)
 }

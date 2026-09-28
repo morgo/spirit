@@ -36,6 +36,13 @@ type retryEntry struct {
 	// Set to now + RetryDelay on enqueue and on each re-enqueue.
 	notBefore time.Time
 
+	// flushes and flushDeadline additionally gate a retry on the change feed:
+	// the entry is not due until every feed has completed a flush since it was
+	// queued (flushes[i] is feed i's count seen then), or until flushDeadline
+	// passes. A zero flushDeadline means ungated. See LocklessChecker.retryDue.
+	flushes       []int
+	flushDeadline time.Time
+
 	// consecutiveSrcChanged counts retries on which the source signature
 	// differed from the previous attempt. Surfaced as Stats.HotChunkCount
 	// when >=2.

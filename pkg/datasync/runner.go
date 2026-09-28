@@ -548,30 +548,7 @@ func (r *Runner) runChecksum(ctx context.Context) error {
 	stopScaling := copier.StartWriteAutoscaler(ctx, r.currentLoadSignal(), r.applier, r.autoscale, r.logger, r.metricsSink)
 	defer stopScaling()
 
-	built, err := checksum.NewChecker([]*sql.DB{r.source.db}, chunker, []change.Source{r.replClient}, &checksum.CheckerConfig{
-		Lockless: true,
-		// TargetDB is what makes this the cross-server case: the factory builds
-		// a repair path that reads the source and writes the target, rather than
-		// the single-server one that does both on one connection.
-		TargetDB: r.target.DB,
-		DBConfig: r.targetDBConfig,
-		// Sync verifies a target it keeps converging, so a confirmed divergence
-		// is repaired rather than fatal. Leaving this unset is what would make
-		// it fatal — the checker would abort the sync with
-		// ErrPermanentDivergence on the first one instead.
-		FixDifferences: true,
-		Applier:        r.applier,
-		// The flush loop started in startBackgroundRoutines runs for the whole
-		// process at the configured interval; a verification pass must not stop
-		// it on its way out.
-		ExternalFlushLoop: true,
-		Concurrency:       r.sync.Threads,
-		Throttler:         r.currentLoadSignal(),
-		MetricsSink:       r.metricsSink,
-		Autoscale:         checksum.AutoscaleConfig{Enabled: r.autoscale.Enabled, MaxThreads: r.autoscale.MaxReadThreads},
-		MinPassInterval:   checksum.LocklessMinPassInterval,
-		Logger:            r.logger,
-	})
+	built, err := checksum.NewChecker([]*sql.DB{r.source.db}, chunker, []change.Source{r.replClient}, r.checksumConfig())
 	if err != nil {
 		return fmt.Errorf("construct lockless checker: %w", err)
 	}
@@ -649,6 +626,39 @@ func (r *Runner) FirstCleanPass() <-chan struct{} {
 // post-copy flush have completed and runChecksum has started.
 func (r *Runner) ChecksumReady() <-chan struct{} {
 	return r.locklessReadyCh
+}
+
+// checksumConfig is the lockless checker's configuration, separate from the
+// run so its policy can be pinned without a live source and target.
+func (r *Runner) checksumConfig() *checksum.CheckerConfig {
+	return &checksum.CheckerConfig{
+		Lockless: true,
+		// TargetDB is what makes this the cross-server case: the factory builds
+		// a repair path that reads the source and writes the target, rather than
+		// the single-server one that does both on one connection.
+		TargetDB: r.target.DB,
+		DBConfig: r.targetDBConfig,
+		// Sync verifies a target it keeps converging, so a confirmed divergence
+		// is repaired rather than fatal. Leaving this unset is what would make
+		// it fatal — the checker would abort the sync with
+		// ErrPermanentDivergence on the first one instead.
+		FixDifferences: true,
+		Applier:        r.applier,
+		// The flush loop started in startBackgroundRoutines runs for the whole
+		// process at the configured interval; a verification pass must not stop
+		// it on its way out.
+		ExternalFlushLoop: true,
+		Concurrency:       r.sync.Threads,
+		Throttler:         r.currentLoadSignal(),
+		MetricsSink:       r.metricsSink,
+		Autoscale:         checksum.AutoscaleConfig{Enabled: r.autoscale.Enabled, MaxThreads: r.autoscale.MaxReadThreads},
+		MinPassInterval:   checksum.LocklessMinPassInterval,
+		// A retry waits for the feed to flush, capped at two of *this* feed's
+		// intervals: the default cap assumes the default interval, and a
+		// longer --flush-interval would expire it before a flush could land.
+		RetryFlushWait: 2 * r.sync.FlushInterval,
+		Logger:         r.logger,
+	}
 }
 
 // ChecksumStats returns a point-in-time snapshot of lockless-checksum
