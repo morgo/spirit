@@ -12749,29 +12749,24 @@ StringType:
 		}
 		$$ = tp
 	}
-|	NChar FieldLen OptCharsetWithOptBinary
+|	NChar FieldLen OptBinMod
 	{
+		// The national character set is always utf8mb3, which the charset
+		// registry resolves via its "utf8" alias. As in MySQL, NCHAR takes
+		// only the BINARY modifier: an explicit charset is a syntax error.
 		tp := types.NewFieldType(mysql.TypeString)
 		tp.SetFlen($2.(int))
-		tp.SetCharset($3.(*ast.OptBinary).Charset)
-		if $3.(*ast.OptBinary).Charset == charset.CharsetBin {
-			tp.AddFlag(mysql.BinaryFlag)
-			tp.SetCollate(charset.CollationBin)
-		}
-		if $3.(*ast.OptBinary).IsBinary {
+		tp.SetCharset(charset.CharsetUTF8)
+		if $3.(bool) {
 			tp.AddFlag(mysql.BinaryFlag)
 		}
 		$$ = tp
 	}
-|	NChar OptCharsetWithOptBinary
+|	NChar OptBinMod
 	{
 		tp := types.NewFieldType(mysql.TypeString)
-		tp.SetCharset($2.(*ast.OptBinary).Charset)
-		if $2.(*ast.OptBinary).Charset == charset.CharsetBin {
-			tp.AddFlag(mysql.BinaryFlag)
-			tp.SetCollate(charset.CollationBin)
-		}
-		if $2.(*ast.OptBinary).IsBinary {
+		tp.SetCharset(charset.CharsetUTF8)
+		if $2.(bool) {
 			tp.AddFlag(mysql.BinaryFlag)
 		}
 		$$ = tp
@@ -12790,16 +12785,13 @@ StringType:
 		}
 		$$ = tp
 	}
-|	NVarchar FieldLen OptCharsetWithOptBinary
+|	NVarchar FieldLen OptBinMod
 	{
+		// National character set: see NChar above.
 		tp := types.NewFieldType(mysql.TypeVarchar)
 		tp.SetFlen($2.(int))
-		tp.SetCharset($3.(*ast.OptBinary).Charset)
-		if $3.(*ast.OptBinary).Charset == charset.CharsetBin {
-			tp.AddFlag(mysql.BinaryFlag)
-			tp.SetCollate(charset.CollationBin)
-		}
-		if $3.(*ast.OptBinary).IsBinary {
+		tp.SetCharset(charset.CharsetUTF8)
+		if $3.(bool) {
 			tp.AddFlag(mysql.BinaryFlag)
 		}
 		$$ = tp
@@ -13245,6 +13237,7 @@ Precision:
 	}
 
 OptBinMod:
+	/* EMPTY */ %prec lowerThanParenthese
 	{
 		$$ = false
 	}
