@@ -85,7 +85,7 @@ Passing `--force` changes that recovery behaviour: instead of failing, Move wipe
 - Type: Duration
 - Default value: `100ms`
 
-Throttles the copy when any Aurora target's average commit latency exceeds this threshold, as [migrate's max-commit-latency](migrate.md#max-commit-latency) does for its source. Every Aurora target is monitored whether or not [experimental autoscaling](#enable-experimental-autoscaling) is enabled, alongside the Aurora threads throttler, and any one overloaded target pauses the copy. Targets that are not Aurora are not monitored.
+Throttles the copy when any Aurora target's average commit latency exceeds this threshold, as [migrate's max-commit-latency](migrate.md#max-commit-latency) does for its source. Every Aurora target is monitored whether or not [experimental autoscaling](#enable-experimental-autoscaling) is enabled, alongside the Aurora threads throttler, and any one overloaded target pauses the copy. Targets that are not Aurora, and targets whose Aurora probe fails (for example, `performance_schema` is not readable), are not monitored. A failed probe is logged at debug level only, as in `migrate`, unless autoscaling is enabled, which warns.
 
 The default of `100ms` is intentionally a high upper bound, so it trims only the most extreme tail latencies. Setting `--max-commit-latency=0` disables it, as in `migrate`. That also removes the backstop autoscaling needs to grow write threads above their starting count while a target runs the redo-aware threads signal; in that combination the pools can shed threads but not grow. In the Go API the zero value is also "disabled", so a programmatic caller must set the field to keep the backstop.
 

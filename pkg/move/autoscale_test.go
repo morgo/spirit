@@ -1,9 +1,11 @@
 package move
 
 import (
+	"context"
+	"database/sql"
 	"errors"
-
 	"testing"
+	"time"
 
 	"github.com/block/mysql"
 	"github.com/block/spirit/pkg/applier"
@@ -59,7 +61,7 @@ func TestMoveAutoscaleNonAurora(t *testing.T) {
 func TestMoveAutoscaleDisabled(t *testing.T) {
 	r, err := NewRunner(&Move{Threads: 3, WriteThreads: 5})
 	require.NoError(t, err)
-	// No targets or database config: the disabled path must not probe.
+	// No targets, so there is nothing to probe or throttle.
 	require.NoError(t, r.setupThrottling(t.Context()))
 	require.False(t, r.autoscale.Enabled)
 	require.Equal(t, 3, r.move.Threads)
@@ -175,6 +177,66 @@ func TestMoveThrottlesWithoutAutoscaling(t *testing.T) {
 	require.Zero(t, r.flushConcurrency)
 	require.NoError(t, r.Close())
 	require.Equal(t, 1, signal.closes)
+}
+
+// fakeAurora stands in for the Aurora probes, which CI cannot run: each Build
+// call returns the next result, and every target reports vcpus.
+func fakeAurora(r *Runner, vcpus int, results ...throttler.AuroraResult) {
+	r.buildAurora = func(context.Context, throttler.AuroraSetup) (throttler.AuroraResult, error) {
+		result := results[0]
+		results = results[1:]
+		return result, nil
+	}
+	r.auroraVCPUs = func(context.Context, *sql.DB) (int, error) { return vcpus, nil }
+}
+
+// setupThrottling end to end, from the probe to the source feed's config.
+func TestMoveSetupThrottling(t *testing.T) {
+	config, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	other := *config
+	other.Addr = "other-host:3306"
+	newRunner := func(t *testing.T, m *Move, results ...throttler.AuroraResult) *Runner {
+		r, err := NewRunner(m)
+		require.NoError(t, err)
+		r.targets = []applier.Target{{Config: config}, {Config: &other, KeyRange: "80-"}}
+		r.sources = []sourceInfo{{config: config}}
+		fakeAurora(r, 8, results...)
+		t.Cleanup(func() { require.NoError(t, r.Close()) })
+		return r
+	}
+	aurora := func(redoAware bool) throttler.AuroraResult {
+		return throttler.AuroraResult{Throttlers: []throttler.Throttler{&closeCountingThrottler{}}, RedoAware: redoAware}
+	}
+
+	// Without the flag, every Aurora target still throttles the move.
+	r := newRunner(t, &Move{Threads: 3, WriteThreads: 5, MaxCommitLatency: 100 * time.Millisecond}, aurora(false), aurora(false))
+	require.NoError(t, r.setupThrottling(t.Context()))
+	require.True(t, r.currentThrottler().IsThrottled())
+	require.False(t, r.autoscale.Enabled)
+	require.Equal(t, 3, r.move.Threads)
+	require.Equal(t, 5, r.move.WriteThreads)
+	require.Zero(t, r.replClientConfig(&r.sources[0]).FlushConcurrency)
+
+	// With it, one redo-aware target and no commit-latency throttler hold
+	// write threads at their start, whichever target is redo-aware.
+	for _, results := range [][]throttler.AuroraResult{{aurora(true), aurora(false)}, {aurora(false), aurora(true)}} {
+		r = newRunner(t, &Move{EnableExperimentalAutoscaling: true}, results...)
+		require.NoError(t, r.setupThrottling(t.Context()))
+		require.True(t, r.autoscale.Enabled)
+		require.Equal(t, r.autoscale.StartThreads, r.autoscale.MaxThreads)
+		// The derived flush shape reaches the feed.
+		feed := r.replClientConfig(&r.sources[0])
+		require.Positive(t, r.flushConcurrency)
+		require.Equal(t, r.flushConcurrency, feed.FlushConcurrency)
+		require.Equal(t, r.flushBatchSize, feed.BatchSize)
+	}
+
+	// With no redo-aware target, write threads may grow.
+	r = newRunner(t, &Move{EnableExperimentalAutoscaling: true}, aurora(false), aurora(false))
+	require.NoError(t, r.setupThrottling(t.Context()))
+	require.True(t, r.autoscale.Enabled)
+	require.Greater(t, r.autoscale.MaxThreads, r.autoscale.StartThreads)
 }
 
 // A target whose probe failed or that is not Aurora keeps every other

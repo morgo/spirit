@@ -70,7 +70,7 @@ func (r *Runner) setupThrottling(ctx context.Context) error {
 		}
 		return nil
 	}
-	result, err := (throttler.AuroraSetup{
+	result, err := r.buildAurora(ctx, throttler.AuroraSetup{
 		Source: r.target.DB,
 		OpenMonitor: func() (*sql.DB, error) {
 			cfg := *r.targetDBConfig
@@ -79,7 +79,7 @@ func (r *Runner) setupThrottling(ctx context.Context) error {
 		},
 		CommitLatencyThreshold: r.sync.MaxCommitLatency,
 		Logger:                 r.logger,
-	}).Build(ctx)
+	})
 	if err != nil {
 		return err
 	}
@@ -131,7 +131,7 @@ func (r *Runner) setupAutoscaling(ctx context.Context, result throttler.AuroraRe
 		r.logger.Info("sync autoscaling disabled: target is not Aurora")
 		return nil
 	}
-	vcpus, err := throttler.AuroraVCPUs(ctx, r.target.DB)
+	vcpus, err := r.auroraVCPUs(ctx, r.target.DB)
 	if err != nil {
 		return fmt.Errorf("sync target CPU capacity: %w", err)
 	}

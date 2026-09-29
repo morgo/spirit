@@ -96,7 +96,7 @@ func (r *Runner) setupThrottling(ctx context.Context) error {
 	results := make([]throttler.AuroraResult, len(groups))
 	for i, group := range groups {
 		target := r.targets[group.Indices[0]]
-		result, err := (throttler.AuroraSetup{
+		result, err := r.buildAurora(ctx, throttler.AuroraSetup{
 			Source: target.DB,
 			OpenMonitor: func() (*sql.DB, error) {
 				cfg := *r.dbConfig
@@ -105,7 +105,7 @@ func (r *Runner) setupThrottling(ctx context.Context) error {
 			},
 			CommitLatencyThreshold: r.move.MaxCommitLatency,
 			Logger:                 r.logger.With("target", targetKey(target)),
-		}).Build(ctx)
+		})
 		if err != nil {
 			closeAuroraResults(results[:i])
 			return err
@@ -185,7 +185,7 @@ func (r *Runner) setupAutoscaling(ctx context.Context, groups []host.Group, resu
 	for i, group := range groups {
 		target := r.targets[group.Indices[0]]
 		var err error
-		vcpus[i], err = throttler.AuroraVCPUs(ctx, target.DB)
+		vcpus[i], err = r.auroraVCPUs(ctx, target.DB)
 		if err != nil {
 			return fmt.Errorf("target %s CPU capacity: %w", targetKey(target), err)
 		}

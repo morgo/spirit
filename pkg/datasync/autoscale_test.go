@@ -282,6 +282,56 @@ func TestSyncThrottlesWithoutAutoscaling(t *testing.T) {
 	require.Equal(t, 1, signal.closes)
 }
 
+// fakeAurora stands in for the Aurora probes, which CI cannot run.
+func fakeAurora(r *Runner, vcpus int, result throttler.AuroraResult) {
+	r.buildAurora = func(context.Context, throttler.AuroraSetup) (throttler.AuroraResult, error) { return result, nil }
+	r.auroraVCPUs = func(context.Context, *sql.DB) (int, error) { return vcpus, nil }
+}
+
+// setupThrottling end to end, from the probe to the source feed's config.
+func TestSyncSetupThrottling(t *testing.T) {
+	config, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	newRunner := func(t *testing.T, s *Sync, redoAware bool) *Runner {
+		r, err := NewRunner(s)
+		require.NoError(t, err)
+		r.target = applier.Target{Config: config}
+		r.source = sourceInfo{config: config}
+		signal := &syncOwnedSignal{syncTestLoad: syncTestLoad{loaded: true}}
+		fakeAurora(r, 8, throttler.AuroraResult{Throttlers: []throttler.Throttler{signal}, RedoAware: redoAware})
+		t.Cleanup(func() { require.NoError(t, r.Close()) })
+		return r
+	}
+
+	// Without the flag, an Aurora target still throttles the sync, and the
+	// feed narrows its flush on the same signal.
+	r := newRunner(t, &Sync{Threads: 3, WriteThreads: 5, MaxCommitLatency: 100 * time.Millisecond}, false)
+	require.NoError(t, r.setupThrottling(t.Context()))
+	require.True(t, r.currentLoadSignal().IsThrottled())
+	require.True(t, r.replClientConfig().UnderLoad())
+	require.False(t, r.autoscale.Enabled)
+	require.Equal(t, 3, r.sync.Threads)
+	require.Equal(t, 5, r.sync.WriteThreads)
+	require.Zero(t, r.replClientConfig().FlushConcurrency)
+
+	// With it, a redo-aware target and no commit-latency throttler hold
+	// write threads at their start.
+	r = newRunner(t, &Sync{EnableExperimentalAutoscaling: true, MaxConnections: 1000}, true)
+	require.NoError(t, r.setupThrottling(t.Context()))
+	require.True(t, r.autoscale.Enabled)
+	require.Equal(t, r.autoscale.StartThreads, r.autoscale.MaxThreads)
+	feed := r.replClientConfig()
+	require.Positive(t, r.flushConcurrency)
+	require.Equal(t, r.flushConcurrency, feed.FlushConcurrency)
+	require.Equal(t, r.flushBatchSize, feed.BatchSize)
+
+	// With the commit-latency backstop, they may grow.
+	r = newRunner(t, &Sync{EnableExperimentalAutoscaling: true, MaxConnections: 1000, MaxCommitLatency: 100 * time.Millisecond}, true)
+	require.NoError(t, r.setupThrottling(t.Context()))
+	require.True(t, r.autoscale.Enabled)
+	require.Greater(t, r.autoscale.MaxThreads, r.autoscale.StartThreads)
+}
+
 // A probe that failed disables autoscaling, with a warning, and leaves the
 // configured counts; it never engages scaling against a signal it lacks.
 func TestSyncAutoscaleProbeFailure(t *testing.T) {
