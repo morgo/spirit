@@ -478,6 +478,108 @@ What is missing is not code but evidence: the snapshot checker has years of
 production migrations behind it, and lockless needs enough of the same before
 it becomes the default for `migrate` too. Both are kept until then.
 
+## Compared with other consistency checks
+
+A chunked digest is not the only way to answer "do these two tables agree",
+and it is worth being explicit about where it sits, because the alternatives
+are not worse designs — they are different points on a cost-versus-confidence
+curve, picked for different jobs. The distinguishing question is **how much
+data has to leave the server**:
+
+```
+  mechanism                     what it computes          on the wire
+  ───────────────────────────   ──────────────────────    ──────────────────
+  row counts over a time window COUNT(*) on each side     two integers
+  chunked digest                CRC32 + BIT_XOR per       one row per chunk
+    (Spirit, pt-table-checksum)   chunk, server-side
+  row-by-row comparison         every column of every     the whole table
+    (e.g. Vitess VDiff)           row, in a client
+```
+
+### Row counts over a timestamp window
+
+The cheapest possible check: count rows on both sides within a bounded
+`updated_at` range and compare. Two integers cross the wire, so it can run
+continuously and near-free, which is a genuine and useful property — it is a
+good smoke signal.
+
+What it cannot be is a cut-over gate, for two reasons:
+
+- **It only sees cardinality.** Any modification that preserves the row count
+  is invisible: an in-place `UPDATE`, a charset mangling, a timezone shift, a
+  `NULL` that became an empty string, a truncated `VARCHAR`. Those are most of
+  [the bug classes a checksum exists to catch](#why-checksums-matter). A delete
+  and an insert inside the same window cancel exactly.
+- **It has a schema dependency that is also a correctness dependency.** It
+  needs an indexed timestamp column that every write path maintains. Any code
+  path that modifies a row without advancing `updated_at` is invisible to it,
+  and that is a property of the application, not of the checker — so the check
+  cannot establish its own soundness.
+
+### Row-by-row comparison in a client
+
+Stream both sides in key order and compare column values in application code.
+Vitess's VDiff is the well-known implementation of this shape.
+
+It has two real advantages, and the second is the more interesting one:
+
+- **Discrepancies are already localized.** The comparison knows which row
+  differed and how, with no second step.
+- **It does not depend on both servers rendering a row the same way.** A
+  digest is computed *by the server* over a text rendering of the row, so the
+  two sides must be made to render comparably — which is why Spirit carries a
+  `ColumnMapping` and a pile of `CAST` machinery, and why a mis-specified cast
+  shows up as a false mismatch. A comparator in Go applies its own type-aware
+  rules and sidesteps that class of problem entirely. Spirit has been bitten
+  here: text-mediated comparison inherits the server's rendering semantics,
+  including cases where MySQL's own JSON parser does not round-trip a document
+  bit-for-bit (see the `castExpr` notes in `pkg/table` and
+  [Chunk repair](#chunk-repair) on why JSON is read bare).
+
+The cost is the wire and the deserialization. Every column of every row has to
+be transferred and materialized to be compared, so the work scales with the
+*size of the table* rather than with the number of chunks. For the tables
+Spirit targets — the design goal is a 10 TiB table inside five days, where
+checksumming is budgeted at roughly 10% of copy time — that is not a
+reasonable shape. A server-side digest returns one row per chunk and is the
+only reason the verification cost stays a fraction of the copy.
+
+Two things often cited as VDiff drawbacks are worth separating out honestly:
+
+- **Single-threaded comparison** is an implementation choice in Vitess today,
+  not something the approach requires. It is a fair thing to note about the
+  tool as it exists, and not an argument against row-by-row comparison as
+  such.
+- **"A digest cannot tell you which row is wrong"** is true of a single chunk
+  read and false of the algorithm. Spirit narrows a failing range by
+  subdivision — `splitHotChunk` cuts a mismatching range into up to eleven
+  children and keeps going down toward ~128 rows — and on a confirmed
+  divergence it logs a line per differing row (mismatched, missing on the
+  target, missing on the source). It also drops to genuine per-row comparison
+  when it needs to: `captureHotSnapshot` reads a bounded per-row PK/CRC32
+  image of at most 128 rows per side. So the two approaches are the same
+  spectrum, and the difference is that Spirit pays for row-level detail only
+  on the residue rather than for the whole table.
+
+### Where that leaves the tradeoff
+
+Digest-first with row-level escalation wins when divergence is **rare**, which
+is the case a migration or a move is built around: the copy plus the change
+feed are expected to be correct, and the checksum is a
+[bug detector](#why-checksums-matter) whose usual answer is "no differences".
+Under that assumption, paying per chunk and escalating on the exceptions is
+strictly cheaper than paying per row everywhere.
+
+The ordering reverses if divergence is **common**. If a large fraction of rows
+is expected to differ, the digest's subdivision degenerates — nearly every
+range splits and then needs per-row reads anyway — and comparing row by row
+from the start is both simpler and faster. That is a reconciliation workload
+rather than a verification one, and it is the case where a VDiff-shaped tool
+is the right instrument.
+
+Spirit is built for the first case, and the honest caveat is that this is an
+assumption about the workload rather than a property of the algorithm.
+
 ## Checker contract
 
 `NewChecker` returns a `Checker`: its finite `Run` succeeds only after
