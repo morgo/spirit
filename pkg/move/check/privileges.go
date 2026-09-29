@@ -2,11 +2,9 @@ package check
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
-	"regexp"
 	"slices"
 	"strings"
 
@@ -17,11 +15,6 @@ import (
 func init() {
 	registerCheck("privileges", privilegesCheck, ScopePreflight)
 }
-
-// grantedRolesRegexp matches role grants in SHOW GRANTS output.
-// MySQL outputs role grants as: GRANT `role_name`@`%` TO `user`@`%`
-// There may be multiple roles in a single line, comma-separated.
-var grantedRolesRegexp = regexp.MustCompile("`([^`]+)`@`[^`]+`")
 
 // privilegesCheck checks the privileges of the user running the move operation.
 // Move operations require:
@@ -82,7 +75,7 @@ func checkSourcePrivileges(ctx context.Context, src SourceResource, r Resources,
 		if strings.Contains(grant, `RELOAD`) && strings.Contains(grant, ` ON *.*`) {
 			foundReload = true
 		}
-		if stringContainsAll(grant, `ALTER`, `CREATE`, `DELETE`, `DROP`, `INDEX`, `INSERT`, `LOCK TABLES`, `SELECT`, `TRIGGER`, `UPDATE`, ` ON *.*`) {
+		if utils.StringContainsAll(grant, `ALTER`, `CREATE`, `DELETE`, `DROP`, `INDEX`, `INSERT`, `LOCK TABLES`, `SELECT`, `TRIGGER`, `UPDATE`, ` ON *.*`) {
 			foundDBAll = true
 		}
 		// A database-level grant covers the schema if its database-name pattern
@@ -100,7 +93,7 @@ func checkSourcePrivileges(ctx context.Context, src SourceResource, r Resources,
 		// Collect role names from grant lines like:
 		// GRANT `rds_superuser_role`@`%` TO `user`@`%`
 		if strings.HasPrefix(grant, "GRANT `") && strings.Contains(grant, " TO ") {
-			roles := parseRoleNames(grant)
+			roles := utils.ParseRoleNames(grant)
 			grantedRoles = append(grantedRoles, roles...)
 		}
 	}
@@ -115,7 +108,7 @@ func checkSourcePrivileges(ctx context.Context, src SourceResource, r Resources,
 	// opaque rds_superuser_role. When activate_all_roles_on_login=ON, this role
 	// is automatically active on every connection, so we can skip checking for
 	// those privileges directly.
-	skipRolePrivilegeCheck := hasRole(grantedRoles, "rds_superuser_role") && activateAllRolesOnLogin(ctx, src.DB, logger)
+	skipRolePrivilegeCheck := slices.Contains(grantedRoles, "rds_superuser_role") && dbconn.ActivateAllRolesOnLogin(ctx, src.DB, logger)
 
 	// Move operations always use force-kill (it's enabled by default in DBConfig).
 	// Check the force-kill related privileges.
@@ -148,60 +141,4 @@ func checkSourcePrivileges(ctx context.Context, src SourceResource, r Resources,
 	}
 
 	return fmt.Errorf("insufficient privileges to run a move. Needed: SUPER|REPLICATION CLIENT, RELOAD, REPLICATION SLAVE and ALL on %s.*", schemaName)
-}
-
-// parseRoleNames extracts role names from a SHOW GRANTS line that grants roles.
-// e.g. "GRANT `rds_superuser_role`@`%`,`other_role`@`%` TO `user`@`%`"
-// returns ["rds_superuser_role", "other_role"]
-func parseRoleNames(grant string) []string {
-	// Split on " TO " to get only the roles part (before the target user)
-	parts := strings.SplitN(grant, " TO ", 2)
-	if len(parts) < 2 {
-		return nil
-	}
-	rolesPart := parts[0] // "GRANT `role1`@`%`,`role2`@`%`"
-	matches := grantedRolesRegexp.FindAllStringSubmatch(rolesPart, -1)
-	var roles []string
-	for _, match := range matches {
-		if len(match) >= 2 {
-			roles = append(roles, match[1])
-		}
-	}
-	return roles
-}
-
-// activateAllRolesOnLogin returns true if the server has activate_all_roles_on_login=ON.
-// When this is enabled, all granted roles are automatically activated on login,
-// so role-granted privileges are available without explicit SET ROLE ALL.
-func activateAllRolesOnLogin(ctx context.Context, db *sql.DB, logger *slog.Logger) bool {
-	var value string
-	err := db.QueryRowContext(ctx, "SELECT @@global.activate_all_roles_on_login").Scan(&value)
-	if err != nil {
-		logger.Debug("failed to check activate_all_roles_on_login", "error", err)
-		return false
-	}
-	return value == "1" || strings.EqualFold(value, "ON")
-}
-
-// hasRole returns true if the given role name is present in the list of granted roles.
-func hasRole(grantedRoles []string, roleName string) bool {
-	return slices.Contains(grantedRoles, roleName)
-}
-
-// stringContainsAll returns true if `s` contains all non empty given `substrings`
-// The function returns `false` if no non-empty arguments are given.
-func stringContainsAll(s string, substrings ...string) bool {
-	nonEmptyStringsFound := false
-	for _, substring := range substrings {
-		if substring == "" {
-			continue
-		}
-		if strings.Contains(s, substring) {
-			nonEmptyStringsFound = true
-		} else {
-			// Immediate failure
-			return false
-		}
-	}
-	return nonEmptyStringsFound
 }
