@@ -332,21 +332,27 @@ func TestExpectedImageCRCMatchesRealRow(t *testing.T) {
 // as []byte, so both happen to render correctly — and the real decoding, float32
 // and int64, does not. UNION type merging widens, so the float32 (widened again
 // to float64 by database/sql) merges to DOUBLE and renders every digit of its
-// binary expansion, and the int64 merges to an integer and renders in decimal
-// where the column renders raw bytes. Neither fails the query: they return a CRC
-// that is simply not the row's, so every hot row in such a table would settle to
-// a false divergence.
+// binary expansion, and a BIT(64) with its top bit set decodes to a negative
+// int64 where the column's unsigned cast renders a value above MaxInt64.
+// Neither fails the query: they return a CRC that is simply not the row's, so
+// every hot row in such a table would settle to a false divergence.
 func TestExpectedImageCRCMatchesRealRowForBinlogTypes(t *testing.T) {
 	for _, tc := range []struct {
 		ddl    string
 		insert string
 		image  []any
 	}{
-		// BIT(8)=5 renders as the single byte 0x05, BIT(64)=5 as eight bytes.
+		// BIT casts to unsigned, so BIT(8)=5 and BIT(64)=5 both render as 5.
 		{
 			"id INT PRIMARY KEY, f FLOAT, b8 BIT(8), b64 BIT(64)",
 			"INSERT INTO src VALUES (1, 0.1, b'00000101', 5)",
 			[]any{int32(1), float32(0.1), int64(5), int64(5)},
+		},
+		// An all-ones BIT(64) decodes to int64(-1) but is 2^64-1 as unsigned.
+		{
+			"id INT PRIMARY KEY, b64 BIT(64)",
+			"INSERT INTO src VALUES (1, 18446744073709551615)",
+			[]any{int32(1), int64(-1)},
 		},
 		// A BIT with no declared width is BIT(1), and a negative float has to
 		// survive the round trip back through the column's precision.
@@ -379,32 +385,90 @@ func TestExpectedImageCRCMatchesRealRowForBinlogTypes(t *testing.T) {
 	}
 }
 
+// TestExpectedImageCRCMatchesRealRowAcrossConversions is the same equivalence
+// when the source and target column types differ. The checksum's cast comes
+// from the target (see table.ColumnMapping.ChecksumCastTypes), so it can be a
+// different type family from the source column the image is decoded from, and
+// the binding has to follow the cast rather than the source type: a BIT renders
+// its value under a numeric cast and its raw bytes under any other.
+func TestExpectedImageCRCMatchesRealRowAcrossConversions(t *testing.T) {
+	for _, tc := range []struct {
+		name, src, dst, insert string
+		image                  []any
+	}{
+		// cast to unsigned
+		{"bit widening", "id INT PRIMARY KEY, b BIT(8)", "id INT PRIMARY KEY, b BIT(16)",
+			"INSERT INTO src VALUES (1, b'00000101')", []any{int32(1), int64(5)}},
+		{"bit64 all ones widening", "id INT PRIMARY KEY, b BIT(64)", "id INT PRIMARY KEY, b BIT(64)",
+			"INSERT INTO src VALUES (1, 18446744073709551615)", []any{int32(1), int64(-1)}},
+		// cast to signed and decimal: CAST(x'05' AS signed) would be 0
+		{"bit to int", "id INT PRIMARY KEY, b BIT(8)", "id INT PRIMARY KEY, b INT",
+			"INSERT INTO src VALUES (1, b'00000101')", []any{int32(1), int64(5)}},
+		{"bit to decimal", "id INT PRIMARY KEY, b BIT(8)", "id INT PRIMARY KEY, b DECIMAL(10,2)",
+			"INSERT INTO src VALUES (1, b'00000101')", []any{int32(1), int64(5)}},
+		// cast to char and binary: a uint64 would render "5"
+		{"bit to varchar", "id INT PRIMARY KEY, b BIT(8)", "id INT PRIMARY KEY, b VARCHAR(20)",
+			"INSERT INTO src VALUES (1, b'00000101')", []any{int32(1), int64(5)}},
+		{"bit17 to varbinary", "id INT PRIMARY KEY, b BIT(17)", "id INT PRIMARY KEY, b VARBINARY(20)",
+			"INSERT INTO src VALUES (1, 131071)", []any{int32(1), int64(131071)}},
+		// string source into a BIT target: cast to binary, bound as-is
+		{"varchar to bit", "id INT PRIMARY KEY, b VARCHAR(8)", "id INT PRIMARY KEY, b BIT(8)",
+			"INSERT INTO src VALUES (1, '5')", []any{int32(1), "5"}},
+		// cast to the wider fractional precision, datetime(6)
+		{"datetime narrowing", "id INT PRIMARY KEY, d DATETIME(6)", "id INT PRIMARY KEY, d DATETIME",
+			"INSERT INTO src VALUES (1, '2026-01-01 10:00:00.999999')", []any{int32(1), "2026-01-01 10:00:00.999999"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, chunk := snapshotConversionTables(t, tc.src, tc.dst, []string{"id"})
+			snapshotExec(t, db, tc.insert)
+
+			sourceExprs, _, err := chunk.ColumnMapping.ChecksumExprs()
+			require.NoError(t, err)
+			var want uint64
+			require.NoError(t, db.QueryRowContext(t.Context(),
+				"SELECT CRC32(CONCAT("+sourceExprs+")) FROM src WHERE id=1").Scan(&want))
+
+			got, err := expectedImageCRC(t.Context(), db, chunk, tc.image)
+			require.NoError(t, err)
+			require.Equal(t, want, got)
+		})
+	}
+}
+
 // TestImageValueExpr covers the parts of the rendering that do not need a
-// server: which types are special-cased, and the big-endian byte layout a BIT
-// column's cast produces.
+// server: which types are special-cased, and that a BIT is bound as the value
+// under a numeric cast and as its big-endian bytes under any other.
 func TestImageValueExpr(t *testing.T) {
 	for name, tc := range map[string]struct {
-		tp       string
-		in       any
-		wantExpr string
-		wantVal  any
+		tp, castTp string
+		in         any
+		wantExpr   string
+		wantVal    any
 	}{
-		"int is bound as-is":     {"int", int32(7), "?", int32(7)},
-		"varchar is bound as-is": {"varchar(20)", "x", "?", "x"},
-		"null short-circuits":    {"bit(8)", nil, "?", nil},
-		"float is narrowed":      {"float", float32(0.1), "CAST(? AS FLOAT)", float32(0.1)},
-		"float with width":       {"float(10,2)", float32(1), "CAST(? AS FLOAT)", float32(1)},
-		"float unsigned":         {"float unsigned", float32(1), "CAST(? AS FLOAT)", float32(1)},
-		"double is not":          {"double", float64(0.1), "?", float64(0.1)},
-		"bit(1)":                 {"bit(1)", int64(1), "?", []byte{0x01}},
-		"bit with no width":      {"bit", int64(1), "?", []byte{0x01}},
-		"bit(8)":                 {"bit(8)", int64(5), "?", []byte{0x05}},
-		"bit(9) rounds up":       {"bit(9)", int64(257), "?", []byte{0x01, 0x01}},
-		"bit(64) is big-endian":  {"bit(64)", int64(5), "?", []byte{0, 0, 0, 0, 0, 0, 0, 5}},
-		"bit(64) all ones":       {"bit(64)", int64(-1), "?", []byte{255, 255, 255, 255, 255, 255, 255, 255}},
+		"int is bound as-is":     {"int", "signed", int32(7), "?", int32(7)},
+		"varchar is bound as-is": {"varchar(20)", "char CHARACTER SET utf8mb4", "x", "?", "x"},
+		"null short-circuits":    {"bit(8)", "unsigned", nil, "?", nil},
+		"float is narrowed":      {"float", "char", float32(0.1), "CAST(? AS FLOAT)", float32(0.1)},
+		"float with width":       {"float(10,2)", "char", float32(1), "CAST(? AS FLOAT)", float32(1)},
+		"float unsigned":         {"float unsigned", "char", float32(1), "CAST(? AS FLOAT)", float32(1)},
+		"double is not":          {"double", "char", float64(0.1), "?", float64(0.1)},
+		// Numeric casts bind the value.
+		"bit(1)":                {"bit(1)", "unsigned", int64(1), "?", uint64(1)},
+		"bit with no width":     {"bit", "unsigned", int64(1), "?", uint64(1)},
+		"bit(8)":                {"bit(8)", "unsigned", int64(5), "?", uint64(5)},
+		"bit(64) all ones":      {"bit(64)", "unsigned", int64(-1), "?", uint64(18446744073709551615)},
+		"bit decoded as uint64": {"bit(64)", "unsigned", uint64(7), "?", uint64(7)},
+		"bit to signed":         {"bit(8)", "signed", int64(5), "?", uint64(5)},
+		"bit to decimal":        {"bit(8)", "decimal(10,2)", int64(5), "?", uint64(5)},
+		// Any other cast binds the big-endian bytes at the source width.
+		"bit(8) to char":          {"bit(8)", "char CHARACTER SET utf8mb4", int64(5), "?", []byte{0x05}},
+		"bit with no width, char": {"bit", "char CHARACTER SET utf8mb4", int64(1), "?", []byte{0x01}},
+		"bit(9) rounds up":        {"bit(9)", "char CHARACTER SET utf8mb4", int64(257), "?", []byte{0x01, 0x01}},
+		"bit(64) is big-endian":   {"bit(64)", "binary", int64(5), "?", []byte{0, 0, 0, 0, 0, 0, 0, 5}},
+		"bit(64) all ones, bytes": {"bit(64)", "binary", int64(-1), "?", []byte{255, 255, 255, 255, 255, 255, 255, 255}},
 	} {
 		t.Run(name, func(t *testing.T) {
-			expr, val, err := imageValueExpr(tc.tp, tc.in)
+			expr, val, err := imageValueExpr(tc.tp, tc.castTp, tc.in)
 			require.NoError(t, err)
 			require.Equal(t, tc.wantExpr, expr)
 			require.Equal(t, tc.wantVal, val)
@@ -414,10 +478,10 @@ func TestImageValueExpr(t *testing.T) {
 	// A BIT column the stream did not decode to an integer is a mismatch
 	// between what we believe the schema is and what arrived. Guessing would
 	// mint a false divergence, so it is an error.
-	_, _, err := imageValueExpr("bit(8)", "5")
+	_, _, err := imageValueExpr("bit(8)", "unsigned", "5")
 	require.ErrorContains(t, err, "want an integer")
 
-	_, _, err = imageValueExpr("bit(0)", int64(1))
+	_, _, err = imageValueExpr("bit(0)", "char CHARACTER SET utf8mb4", int64(1))
 	require.ErrorContains(t, err, "malformed bit type")
 }
 

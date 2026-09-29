@@ -120,29 +120,48 @@ const checksumSeparator = ", '#', "
 // ChecksumExprs returns two checksum column expressions (argument lists for
 // CONCAT()) for source and target, wrapping each column in IFNULL(), ISNULL()
 // and CAST, with a '#' separator literal between every value (see
-// checksumSeparator). The CAST type always comes from the target table's type
-// definition, but the cast itself is side-dependent for JSON columns (see
-// castExpr), so the two expressions can differ even without renames.
+// checksumSeparator). Both sides are cast to the same type, which comes from
+// the target table's type definition, widened for DATETIME/TIMESTAMP to the
+// source's fractional-second precision (see checksumCastTp). The cast itself
+// is side-dependent for JSON columns (see castExpr), so the two expressions
+// can differ even without renames.
 func (m *ColumnMapping) ChecksumExprs() (source, target string, err error) {
+	castTps, err := m.ChecksumCastTypes()
+	if err != nil {
+		return "", "", err
+	}
 	sourceExprs := make([]string, len(m.sourceColumns))
 	targetExprs := make([]string, len(m.targetColumns))
 	for i := range m.sourceColumns {
-		// CAST type comes from the target table for both source and target
-		// so that type conversions (e.g. INT→BIGINT) are applied consistently.
-		// For source: SQL references the old column name, type from target's new column name.
-		// For target: both SQL reference and type lookup use the new column name.
-		srcCast, err := m.targetTable.wrapCastTypeAs(m.sourceColumns[i], m.targetColumns[i], castSource)
-		if err != nil {
-			return "", "", err
-		}
-		tgtCast, err := m.targetTable.wrapCastType(m.targetColumns[i], castTarget)
-		if err != nil {
-			return "", "", err
-		}
+		// The source SQL references the old column name, the target SQL the
+		// new one; both are cast to the same type.
+		srcCast := castExpr(m.sourceColumns[i], castTps[i], castSource)
+		tgtCast := castExpr(m.targetColumns[i], castTps[i], castTarget)
 		sourceExprs[i] = "IFNULL(" + srcCast + ",'')" + checksumSeparator + "ISNULL(`" + m.sourceColumns[i] + "`)"
 		targetExprs[i] = "IFNULL(" + tgtCast + ",'')" + checksumSeparator + "ISNULL(`" + m.targetColumns[i] + "`)"
 	}
 	return strings.Join(sourceExprs, checksumSeparator), strings.Join(targetExprs, checksumSeparator), nil
+}
+
+// ChecksumCastTypes returns the type each mapped column is CAST to by
+// ChecksumExprs, parallel to ColumnsSlice. The type is shared by both sides so
+// that type conversions (e.g. INT→BIGINT) are applied consistently; see
+// checksumCastTp for how it is chosen. Each column's type is looked up in its
+// own table under that table's column name, so renames are honoured.
+func (m *ColumnMapping) ChecksumCastTypes() ([]string, error) {
+	castTps := make([]string, len(m.sourceColumns))
+	for i := range m.sourceColumns {
+		srcTp, err := m.sourceTable.columnMySQLTp(m.sourceColumns[i])
+		if err != nil {
+			return nil, err
+		}
+		tgtTp, err := m.targetTable.columnMySQLTp(m.targetColumns[i])
+		if err != nil {
+			return nil, err
+		}
+		castTps[i] = checksumCastTp(srcTp, tgtTp)
+	}
+	return castTps, nil
 }
 
 // SourceColumnIndices returns the indices into sourceTable.NonGeneratedColumns

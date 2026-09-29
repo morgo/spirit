@@ -90,12 +90,14 @@ func TestDiscovery(t *testing.T) {
 
 	// normalize for mysql 5.7 and 8.0
 	require.Equal(t, "int", removeWidth(t1.columnsMySQLTps["id"]))
-	castID, err := t1.wrapCastType("id", castSource)
+	idTp, err := t1.columnMySQLTp("id")
 	require.NoError(t, err)
-	require.Equal(t, "CAST(`id` AS signed)", castID)
-	castName, err := t1.wrapCastType("name", castTarget)
+	require.Equal(t, "CAST(`id` AS signed)", castExpr("id", castableTp(idTp), castSource))
+	nameTp, err := t1.columnMySQLTp("name")
 	require.NoError(t, err)
-	require.Equal(t, "CAST(`name` AS char CHARACTER SET utf8mb4)", castName)
+	require.Equal(t, "CAST(`name` AS char CHARACTER SET utf8mb4)", castExpr("name", castableTp(nameTp), castTarget))
+	_, err = t1.columnMySQLTp("nonexistent")
+	require.Error(t, err)
 
 	require.Equal(t, "1", t1.minValue.String())
 	require.Equal(t, "3", t1.maxValue.String())
