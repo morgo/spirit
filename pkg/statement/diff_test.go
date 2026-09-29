@@ -789,6 +789,49 @@ func TestDiff(t *testing.T) {
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, name NVARCHAR(100) COLLATE utf8mb3_bin) DEFAULT CHARSET=utf8mb4",
 			expected: "",
 		},
+		// BINARY and COLLATE together: with an explicit column charset (which
+		// every national type has) MySQL keeps the COLLATE; without one, BINARY
+		// wins. Sources are the live forms from MySQL 8.0.43.
+		{
+			name:     "NationalCharsetBinaryCollateNoTableDefault",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c char(5) CHARACTER SET utf8mb3 COLLATE utf8mb3_unicode_ci DEFAULT NULL)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c NCHAR(5) BINARY COLLATE utf8mb3_unicode_ci)",
+			expected: "",
+		},
+		{
+			name:     "NationalCharsetBinaryCollateUtf8mb4",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c char(5) CHARACTER SET utf8mb3 COLLATE utf8mb3_unicode_ci DEFAULT NULL) DEFAULT CHARSET=utf8mb4",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c NCHAR(5) BINARY COLLATE utf8mb3_unicode_ci) DEFAULT CHARSET=utf8mb4",
+			expected: "",
+		},
+		{
+			name:     "NationalCharsetBinaryCollateLatin1",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c char(5) CHARACTER SET utf8mb3 COLLATE utf8mb3_unicode_ci DEFAULT NULL) DEFAULT CHARSET=latin1",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c NCHAR(5) BINARY COLLATE utf8mb3_unicode_ci) DEFAULT CHARSET=latin1",
+			expected: "",
+		},
+		{
+			name:     "ExplicitCharsetBinaryCollate",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c varchar(10) CHARACTER SET latin1 COLLATE latin1_general_ci DEFAULT NULL) DEFAULT CHARSET=utf8mb4",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c varchar(10) CHARACTER SET latin1 BINARY COLLATE latin1_general_ci) DEFAULT CHARSET=utf8mb4",
+			expected: "",
+		},
+		{
+			name:     "BinaryWinsOverCollateWithoutCharset",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c varchar(10) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL) DEFAULT CHARSET=utf8mb4",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c varchar(10) BINARY COLLATE utf8mb4_general_ci) DEFAULT CHARSET=utf8mb4",
+			expected: "",
+		},
+		{
+			// A utf8mb3 table default written without COLLATE means
+			// utf8mb3_general_ci, so it no longer matches a live table with a
+			// different utf8mb3 collation: the table and its inheriting
+			// columns are re-collated, as creating the file on MySQL would.
+			name:     "Utf8mb3TableDefaultCollation",
+			source:   "CREATE TABLE s2 (id int NOT NULL, c varchar(10) DEFAULT NULL, u varchar(10) DEFAULT NULL, UNIQUE KEY u (u), PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb3 COLLATE=utf8mb3_unicode_ci",
+			target:   "CREATE TABLE s2 (id int NOT NULL, c varchar(10), u varchar(10), UNIQUE KEY u (u), PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb3",
+			expected: "ALTER TABLE `s2` MODIFY COLUMN `c` varchar(10) NULL, MODIFY COLUMN `u` varchar(10) NULL, COLLATE=utf8_general_ci",
+		},
 		{
 			// Declaring utf8mb3 explicitly, directly or through NVARCHAR,
 			// matches a column that inherits a utf8mb3 table default.

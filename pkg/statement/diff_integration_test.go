@@ -902,6 +902,7 @@ func TestDiffIntegrationNationalCharset(t *testing.T) {
 	for _, tc := range []struct{ name, ddl string }{
 		{"diff_nchar_mb4", "CREATE TABLE diff_nchar_mb4 (id int NOT NULL, a NVARCHAR(10), b NCHAR(3), c NCHAR, d NATIONAL VARCHAR(5) BINARY, e NCHAR VARYING(4) COLLATE utf8mb3_bin, PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci"},
 		{"diff_nchar_mb3", "CREATE TABLE diff_nchar_mb3 (id int NOT NULL, a NVARCHAR(10), b NCHAR(3) BINARY, c varchar(3) CHARACTER SET utf8mb3, d varchar(3), PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb3"},
+		{"diff_nchar_latin1", "CREATE TABLE diff_nchar_latin1 (id int NOT NULL, a NCHAR(5) BINARY COLLATE utf8mb3_unicode_ci, b varchar(10) CHARACTER SET latin1 BINARY COLLATE latin1_general_ci, c varchar(10) BINARY, PRIMARY KEY (id)) DEFAULT CHARSET=latin1"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tt := testutils.NewTestTable(t, tc.name, tc.ddl)

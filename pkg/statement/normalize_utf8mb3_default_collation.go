@@ -1,13 +1,11 @@
 package statement
 
-import "github.com/block/spirit/pkg/parser/charset"
+import (
+	"github.com/block/spirit/pkg/parser/charset"
+	"github.com/block/spirit/pkg/parser/mysql"
+)
 
 func init() { registerNormalizer(utf8mb3DefaultCollationNormalizer{}) }
-
-// utf8mb3DefaultCollation is the collation MySQL applies to utf8mb3 when no
-// COLLATE is written, in the parser's legacy "utf8" spelling (which is how it
-// parses both utf8mb3_general_ci and utf8_general_ci).
-const utf8mb3DefaultCollation = charset.CharsetUTF8 + "_general_ci"
 
 // utf8mb3DefaultCollationNormalizer fills in utf8mb3's default collation,
 // utf8mb3_general_ci, on a column or table that declares the utf8mb3 charset
@@ -29,20 +27,36 @@ const utf8mb3DefaultCollation = charset.CharsetUTF8 + "_general_ci"
 // The table default is filled in as well, so that a column which inherits a
 // utf8mb3 table default and a column which declares utf8mb3 explicitly
 // resolve to the same collation and still compare equal.
+//
+// A column with the BINARY attribute is left to binaryAttributeNormalizer,
+// which selects utf8mb3_bin for it. Filling in the default here would make a
+// collation this rule invented indistinguishable from a written COLLATE,
+// which that rule keeps.
 type utf8mb3DefaultCollationNormalizer struct{}
 
 func (utf8mb3DefaultCollationNormalizer) Name() string { return "utf8mb3-default-collation" }
 
 func (utf8mb3DefaultCollationNormalizer) Normalize(ct *CreateTable) *CreateTable {
+	// MySQLDefaultCollation, not GetDefaultCollation: the latter returns the
+	// parser upstream's utf8_bin. The result is in the parser's legacy "utf8"
+	// spelling, which is how it parses both utf8mb3_* and utf8_* names.
+	def, ok := charset.MySQLDefaultCollation(charset.CharsetUTF8)
+	if !ok {
+		return ct
+	}
 	for i := range ct.Columns {
 		col := &ct.Columns[i]
-		if col.Charset != nil && *col.Charset == charset.CharsetUTF8 && col.Collation == nil {
-			collation := utf8mb3DefaultCollation
-			col.Collation = &collation
+		if col.Charset == nil || *col.Charset != charset.CharsetUTF8 || col.Collation != nil {
+			continue
 		}
+		if col.Raw != nil && mysql.HasBinaryFlag(col.Raw.Tp.GetFlag()) {
+			continue
+		}
+		collation := def
+		col.Collation = &collation
 	}
 	if opts := ct.TableOptions; opts != nil && opts.Charset != nil && *opts.Charset == charset.CharsetUTF8 && opts.Collation == nil {
-		collation := utf8mb3DefaultCollation
+		collation := def
 		opts.Collation = &collation
 	}
 	return ct

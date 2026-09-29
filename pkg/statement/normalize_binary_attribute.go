@@ -22,12 +22,21 @@ func init() { registerNormalizer(binaryAttributeNormalizer{}) }
 // against a desired file written with the BINARY attribute would emit a
 // destructive MODIFY to varbinary.
 //
-// MySQL lets BINARY win over an explicit COLLATE in the same column
-// definition (varchar(100) BINARY COLLATE utf8mb4_general_ci resolves to
-// utf8mb4_bin), so any parsed collation is overridden here. If neither the
-// column nor the table declares a charset the attribute cannot be resolved
-// (the effective charset is a server default only known at runtime); the
-// column keeps its character type and no collation is invented.
+// When the column declares no charset of its own, MySQL lets BINARY win over
+// an explicit COLLATE in the same column definition (varchar(100) BINARY
+// COLLATE utf8mb4_general_ci resolves to utf8mb4_bin), so the parsed
+// collation is overridden. When the column does declare a charset, the
+// COLLATE wins instead, and is kept. NCHAR/NVARCHAR always declare one
+// (utf8mb3). Verified against MySQL 8.0.43:
+//
+//	c varchar(100) CHARACTER SET latin1 BINARY COLLATE latin1_general_ci
+//	  -> varchar(100) CHARACTER SET latin1 COLLATE latin1_general_ci
+//	c NCHAR(5) BINARY COLLATE utf8mb3_unicode_ci
+//	  -> char(5) CHARACTER SET utf8mb3 COLLATE utf8mb3_unicode_ci
+//
+// If neither the column nor the table declares a charset the attribute
+// cannot be resolved (the effective charset is a server default only known at
+// runtime); the column keeps its character type and no collation is invented.
 type binaryAttributeNormalizer struct{}
 
 func (binaryAttributeNormalizer) Name() string { return "binary-attribute" }
@@ -40,6 +49,9 @@ func (binaryAttributeNormalizer) Normalize(ct *CreateTable) *CreateTable {
 		}
 		if col.Raw.Tp.GetCharset() == "binary" {
 			continue // true binary type (VARBINARY et al.), converted in parseColumn
+		}
+		if col.Charset != nil && col.Collation != nil {
+			continue // an explicit charset lets the COLLATE win over BINARY
 		}
 		// Resolve the effective charset: explicit column charset first,
 		// then the table default charset.
