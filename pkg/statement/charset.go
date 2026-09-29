@@ -56,7 +56,7 @@ func (c *Column) EffectiveCharsetCollation(table *CreateTable) (cs, collation st
 			collation = strings.ToLower(def)
 		}
 	}
-	return normalizeCharsetName(cs), normalizeCollationName(collation)
+	return NormalizeCharsetName(cs), normalizeCollationName(collation)
 }
 
 // DefaultCollationForCharset returns the charset and the collation MySQL
@@ -70,19 +70,24 @@ func DefaultCollationForCharset(name string) (cs, collation string, ok bool) {
 	if !ok {
 		return "", "", false
 	}
-	return normalizeCharsetName(strings.ToLower(name)), normalizeCollationName(strings.ToLower(def)), true
+	return NormalizeCharsetName(name), normalizeCollationName(strings.ToLower(def)), true
 }
 
-// normalizeCharsetName folds the legacy "utf8" spelling of the 3-byte UTF-8
-// charset onto MySQL 8.0's "utf8mb3".
-func normalizeCharsetName(cs string) string {
+// NormalizeCharsetName returns a charset name in the spelling
+// EffectiveCharsetCollation uses: lower case, with the legacy "utf8" spelling
+// of the 3-byte UTF-8 charset folded onto MySQL 8.0's "utf8mb3". The parser
+// keeps the legacy spelling, so a column or table written CHARACTER SET
+// utf8mb3 (or declared NCHAR/NVARCHAR) reports "utf8"; compare names through
+// this function so the two spellings match.
+func NormalizeCharsetName(cs string) string {
+	cs = strings.ToLower(cs)
 	if cs == charset.CharsetUTF8 {
 		return charset.CharsetUTF8MB3
 	}
 	return cs
 }
 
-// normalizeCollationName is normalizeCharsetName for collation names, which
+// normalizeCollationName is NormalizeCharsetName for collation names, which
 // are their charset's name plus a suffix.
 func normalizeCollationName(collation string) string {
 	if rest, ok := strings.CutPrefix(collation, charset.CharsetUTF8+"_"); ok {
@@ -100,7 +105,7 @@ func normalizeCollationName(collation string) string {
 // linter does not.
 func (c *Column) determinedCharsetCollation(table *CreateTable) (cs, collation string) {
 	cs, collation = resolvedCharsetCollation(c, table)
-	cs = normalizeCharsetName(cs)
+	cs = NormalizeCharsetName(cs)
 	if collation != "" {
 		return cs, normalizeCollationName(collation)
 	}

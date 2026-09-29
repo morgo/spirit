@@ -18,7 +18,7 @@ type CharsetCollation struct {
 // collation belongs to one charset, which its name leads with.
 func (c CharsetCollation) normalized() CharsetCollation {
 	collation := normalizeCollationName(strings.ToLower(c.Collation))
-	charset := normalizeCharsetName(strings.ToLower(c.Charset))
+	charset := NormalizeCharsetName(c.Charset)
 	if charset == "" {
 		charset = charsetOfCollation(collation)
 	}
