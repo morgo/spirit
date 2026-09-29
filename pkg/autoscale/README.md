@@ -43,7 +43,7 @@ The shape is "gentle in the normal regime, abrupt only in emergencies". The full
 
   `MaxFlushConcurrency` is not an independent judgement: it is exactly `FlushRowsInFlight / MinFlushBatchSize`, the widest flush that can still hold the invariant. `MinFlushConcurrency` is the historical `change.DefaultFlushConcurrency`, so every instance below `4xlarge` receives precisely the pre-derivation pair and this mechanism is a no-op there. Deriving *downwards* was never the goal — the contention controller already narrows a flush that is actually colliding, and it does so from evidence rather than from a core count.
 
-  `migrate` and `sync` use the pair as returned, capped by `ClientCeiling`. `move` divides the width by (sources × most target shards on one host), because every flush fans out to every shard, and floors the result at `MinFlushConcurrency`. The floor keeps the rule above: the derivation never narrows a flush below the historical default.
+  `migrate` and `sync` use the pair as returned, capped by `ClientCeiling`. `move` divides the width by (sources × most target shards on one host), because every flush fans out to every shard, caps it at `ClientCeiling` ÷ sources, and floors the result at `MinFlushConcurrency`. The floor applies after the cap and keeps the rule above: the derivation never narrows a flush below the historical default.
 
   `FlushRowsInFlight` is a bare `8000` because this package cannot name `change.DefaultFlushConcurrency × change.DefaultBatchSize` (`pkg/change` imports this one). `TestFlushBoundsPreservesChangeDefaults` in `pkg/migration` — which can see both — pins the agreement.
 

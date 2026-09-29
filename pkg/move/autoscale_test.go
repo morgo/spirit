@@ -130,16 +130,20 @@ func TestMoveFlushBounds(t *testing.T) {
 	require.Equal(t, smallWidth, a)
 
 	// Never narrower than the default every move used before, so the
-	// derivation cannot slow a drain down...
+	// derivation cannot slow a drain down — not by dividing across sources
+	// and shards...
 	for _, sources := range []int{1, 2, 8, 64} {
 		width, batch = moveFlushBounds([]int{16}, colocated, sources, 1024)
 		require.Equal(t, autoscale.MinFlushConcurrency, width)
 		require.Equal(t, autoscale.FlushBatchSize(width), batch)
 	}
-	// ...except when this host cannot render that many statements at once.
+	// ...and not by the client ceiling either.
 	width, batch = moveFlushBounds([]int{64}, one, 2, 4)
-	require.Equal(t, 2, width)
-	require.Equal(t, autoscale.FlushBatchSize(2), batch)
+	require.Equal(t, autoscale.MinFlushConcurrency, width)
+	require.Equal(t, autoscale.FlushBatchSize(width), batch)
+	// Above the floor, the client ceiling still caps the width.
+	width, _ = moveFlushBounds([]int{64}, one, 1, 10)
+	require.Equal(t, 10, width)
 
 	// Below MinVCPUs nothing is derived and the change package defaults apply.
 	width, batch = moveFlushBounds([]int{64, 2}, separate, 1, 1024)

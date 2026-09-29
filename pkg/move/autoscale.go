@@ -51,7 +51,8 @@ func moveAutoscaleBounds(vcpus []int, groups []host.Group, clientCeiling int, re
 // the change package's default width, which every move used before this, so the
 // derivation only ever widens a flush; the batch size is re-paired so rows in
 // flight per feed stay at autoscale.FlushRowsInFlight. The client ceiling caps
-// the statements all feeds render at once.
+// the statements all feeds render at once, but never below that floor: a small
+// client split across many sources keeps the width every move had before.
 func moveFlushBounds(vcpus []int, groups []host.Group, sources, clientCeiling int) (concurrency, batchSize int) {
 	smallest, maxShardsPerHost, ok := moveCapacity(vcpus, groups)
 	if !ok {
@@ -59,8 +60,8 @@ func moveFlushBounds(vcpus []int, groups []host.Group, sources, clientCeiling in
 	}
 	sources = max(1, sources)
 	width, _ := autoscale.FlushBounds(smallest)
-	width = max(autoscale.MinFlushConcurrency, width/(sources*maxShardsPerHost))
-	width = min(width, max(1, clientCeiling/sources))
+	width = min(width/(sources*maxShardsPerHost), clientCeiling/sources)
+	width = max(autoscale.MinFlushConcurrency, width)
 	return width, autoscale.FlushBatchSize(width)
 }
 

@@ -91,11 +91,15 @@ type AuroraResult struct {
 //   - Threads_running from global_status otherwise — the more conservative
 //     fallback, which needs no grant beyond what IsAurora already exercised.
 //
-// Returns a zero AuroraResult (nil throttlers, nil monitor DB, nil error) when
-// the source is not Aurora — either the IsAurora probe failed (non-Aurora
-// source, or perf_schema not readable; logged at Debug so the common case
-// stays quiet) or it returned false. In those cases the monitor pool is never
-// opened.
+// Returns an AuroraResult with no throttlers, a nil monitor DB, and a nil
+// error when the source is not Aurora, and the monitor pool is never opened.
+// That covers two cases:
+//   - the IsAurora probe returned false: the result is zero;
+//   - the probe failed (non-Aurora source, or perf_schema not readable;
+//     logged at Debug so the common case stays quiet): the result is zero
+//     except ProbeErr, which holds the probe's error. Callers that only
+//     throttle can ignore it; callers that were asked to autoscale should
+//     warn, since they cannot tell whether the source is Aurora.
 //
 // Returns a non-nil error only for setup failures the caller almost
 // certainly wants to surface: nil required fields, OpenMonitor failing, or
