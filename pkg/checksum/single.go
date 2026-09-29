@@ -677,9 +677,14 @@ func (c *SingleChecker) RunContinuous(ctx context.Context) error {
 // report the whole topology clean. Rejecting the shape is what keeps such a call
 // site from becoming a checksum that passes by not looking.
 //
-// A TargetDB is rejected for the same reason. The snapshot is taken on the
-// server being read — a table lock and a REPEATABLE READ snapshot cannot span
-// two servers — so a second one would be silently ignored rather than honoured.
+// A TargetDB is rejected for the same reason. This checker locks and snapshots
+// exactly one server — the one it reads — so a second one would be silently
+// ignored rather than honoured. That is a property of this implementation, not
+// a claim that a cross-server snapshot is impossible: the removed
+// DistributedChecker manufactured one by locking every server, draining every
+// feed under those locks, and opening a transaction per server inside that
+// window. block/spirit#1281 replaced it with lockless aggregation because the
+// cost scales with the topology, not because it could not be done.
 func checkSingleTopology(sourceDBs []*sql.DB, feeds []change.Source, config *CheckerConfig) error {
 	if len(sourceDBs) != 1 || len(feeds) != 1 {
 		return fmt.Errorf("single verification requires one source and one feed, got %d and %d (set Lockless to aggregate across sources)", len(sourceDBs), len(feeds))

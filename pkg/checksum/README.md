@@ -13,7 +13,7 @@ Checksums validate data consistency between two tables. During schema changes, t
 
 ## Why Checksums Matter
 
-Checksums are a **defensive feature against bugs**. While Spirit is designed to correctly copy and apply data changes, subtle data corruption can occur during online operations in many ways.
+Checksums are a **defensive feature against bugs** — and, for two specific copy-phase optimizations, a load-bearing part of the copy algorithm rather than a check on it (see [Not only bugs](#not-only-bugs-two-copy-phase-optimizations-are-unsafe-by-design) below). While Spirit is designed to correctly copy and apply data changes, subtle data corruption can occur during online operations in many ways.
 
 Naive implementations that only compare row counts fail to catch most of these problems—validating the actual data is essential. Common issues include:
 
@@ -28,6 +28,138 @@ Naive implementations that only compare row counts fail to catch most of these p
 While we do our best to prevent such bugs, we also want to be pedantic when it comes to data integrity. In most cases we have observed that the checksum process takes about 10% of the time as the copy-rows stage, which makes it an easy cost to justify.
 
 There are also some known cases where a checksum failure is not a bug. This includes adding a unique index on non-unique data, or a lossy data type conversion (e.g., `VARCHAR(100)` → `VARCHAR(10)` when records exist requiring more than 10 characters). Both are important cases to handle, and prevent a cutover operation from executing.
+
+### Not only bugs: two copy-phase optimizations are unsafe by design
+
+Everything above is about catching mistakes. There is a second reason the
+checksum exists, and it is a stronger one: **two optimizations in the copy
+phase are known not to be correct on their own, and a repairing checksum is
+what makes them safe.** They are not latent bugs awaiting a fix — they are
+positions taken deliberately, because the airtight alternative costs more than
+the repair does. Automatic repair (`FixDifferences`) is in the checksum *for
+this reason*, and the initial checksum before cutover is therefore a
+*component of the copy algorithm* rather than an audit of it. Which of the two
+checkers runs makes no difference; both repair.
+
+**Two properties make that arrangement sound, and they are worth stating before
+the cases themselves:**
+
+1. **Every one of these optimizations is switched off before the checksum
+   runs.** Copy → `SetWatermarkOptimization(ctx, false)` → drain → checksum, in
+   that order, and the same call also moves a non-memory-comparable key's
+   subscription onto its safe (FIFO) path. So the checksum verifies a *closed*
+   window rather than chasing a feed that is still allowed to drop events, and
+   a chunk it repairs cannot be re-broken behind it.
+2. **Repair is scoped to the initial checksum.** It exists to absorb exactly
+   this copy-phase exposure. The continuous checksum that runs during a
+   deferred cutover is a different question — by then nothing should be
+   diverging, so on `move` repair is deliberately *off* there
+   (`FixDifferences: false` in `continuousCheckerConfig`) and a divergence that
+   survives a full feed drain returns `ErrPermanentDivergence` and aborts:
+   visibility is preferred over a silent recopy while cutover may be imminent.
+   Migration currently reuses its one repairing checker for both its initial
+   and continuous passes, so its continuous pass does still repair — see
+   [Who repairs, and when](#who-repairs-and-when).
+
+Three mechanisms are involved, all in `pkg/change` (see [that package's
+README](../change/README.md#watermark-optimization)):
+
+- **`KeyAboveHighWatermark`** — at ingest, **discard** a change for a key the
+  copier has not reached yet, on the grounds that the copier's own later
+  `SELECT` will read the row in its current state anyway.
+- **`KeyBelowLowWatermark` / `KeyNotYetDispatched`** — at flush time, defer a
+  change only while a chunk read covering its key is genuinely in flight.
+- **The buffered map** keys pending changes by `utils.HashKey` and keeps one
+  row image per key, so a row updated ten times is applied once.
+
+#### 1. Keys that are not memory-comparable
+
+All three compare or hash the key **in Go**, and for keys that are not memory
+comparable Go's answer is not MySQL's. `Datum.compare` falls through to
+lexicographic byte comparison for `unknownType` — which is every `VARCHAR`,
+`CHAR`, `TEXT`, `JSON`, temporal and `FLOAT`/`DOUBLE`/`DECIMAL` key — and
+`HashKey` is Go string equality:
+
+- `'aa'` and `'AA'` are the **same row** under `utf8mb4_0900_ai_ci`, and two
+  different Go map keys.
+- `"ch"` sorts **after** `"h"` under `utf8mb4_czech_ci`, and before it in Go.
+
+So a watermark decision can be wrong in either direction — a change discarded
+that should have been buffered, or buffered that could have been discarded —
+and two collation-equal keys occupy two map slots while resolving to one MySQL
+row, which lets the map's non-deterministic iteration order apply their events
+in the wrong order. Reimplementing MySQL's collation semantics in Go exactly is
+not practical, so Spirit does not try.
+[Issue #479](https://github.com/block/spirit/issues/479) records the position
+in as many words — "checksum will fix any discrepancies" — and
+`TableInfo.PrimaryKeyIsMemoryComparable` is the predicate that identifies these
+keys.
+
+**The unsafety is confined to the copy phase, which is what makes it
+repairable.** The `SetWatermarkOptimization(ctx, false)` call that runs
+immediately after row copy does double duty for these keys: it stops the
+watermark filtering, and it drains the buffered map and switches the
+subscription into **FIFO queue mode**, which replays events in binlog order and
+lets the target's own collation-aware uniqueness collapse them onto the right
+row. Every change from that point on is applied safely, so the checksum is
+establishing that the rows copied *up to that point* are correct — and
+repairing the ones that are not.
+
+#### 2. The binlog visibility window
+
+The second one applies to **every** key type, memory-comparable or not, and it
+is the reason the above-watermark discard cannot be made safe by fixing
+collations alone. MySQL delivers a transaction's row events to subscribers at
+the binlog **sync** stage — *before* the engine-commit stage makes its rows
+visible to readers. `binlog_order_commits=ON` (required by preflight) fixes the
+*order* of engine commits; it does not close that window. So:
+
+```
+                   binlog sync                engine commit
+                   (feed sees T)              (rows readable)
+ time  ─────────────────●───────────────────────────●──────────────►
+                        │                       t_visible
+ feed                   └─ key is above the high watermark → DISCARDED
+ copier                         ├─ SELECT of the chunk covering that key
+                                └─ its snapshot opens before t_visible, so the
+                                   pre-T row is what gets copied
+ position                       the next flush publishes a GTID/offset that
+                                already contains T — no resume refetches it
+```
+
+End state: the change exists on the source, is absent from the target, is in no
+buffer, and no resume coordinate will bring it back. An `INSERT` leaves a
+missing row, an `UPDATE` a stale one, a discarded `DELETE` a phantom. The
+window is sub-millisecond on a healthy primary, but it widens to the semi-sync
+ACK round trip (the whole point of "lossless" semi-sync is that data reaches
+replicas *before* it is locally visible), to Aurora's commit latency under
+load, or to the full replication lag when the feed and the copier read from a
+replica.
+
+`migrate` and `move` gate cutover on a mandatory repairing checksum, so this
+never reaches trusted data — the visible cost is a `differencesFound > 0` and a
+chunk recopy. `sync` repairs lazily, so its target can serve a
+missing/stale/phantom row until a later pass covers that chunk. A consumer of
+`pkg/copier` + `pkg/change` that runs no checksum at all has no backstop.
+
+The field signature of a run that hit this is `keys_dropped_above_high > 0` in
+the watermark-toggle log line **together with** non-zero checksum differences.
+The full analysis, the four candidate fixes, and a deterministic repro
+(`TestKeyAboveWatermarkVisibilityWindow`) are in
+[pkg/change/README.md](../change/README.md#above-watermark-discard-vs-binlog-visibility).
+
+#### What this means when you read a result
+
+A checksum that reports differences is not automatically a bug report. On a
+table with a collated string key, or on a source with a wide commit-visibility
+window, some rate of repaired chunks is the design working as intended. What
+*is* a signal is differences that **do not resolve**: repeated passes
+re-finding a divergence in the same range is the case both checkers escalate
+and ultimately refuse to pass (see [Chunk repair](#chunk-repair)).
+
+It also means the checksum is not a 10% tax that a sufficiently confident
+operator could skip. For these two paths it is the only thing standing between
+an accepted optimization and silent data loss.
 
 ## Implementations
 
@@ -49,6 +181,606 @@ The code is arranged so that removing `SingleChecker` is mostly deletion:
 - Everything else (`Checker`, `CheckerConfig`, the recopiers, autoscaling, row-difference logging) is shared, and is written against the `Checker` contract rather than a concrete type.
 
 Both use **CRC32 with XOR aggregation** for chunk comparison. The lockless checker can additionally drain a bounded per-row PK/CRC32 snapshot for unresolved hot ranges.
+
+## Comparing the two algorithms
+
+The two checkers are not a fast one and a careful one. They prove **different
+statements**, and neither statement implies the other. This section is the
+argument for why, what each one costs, and where each one is blind.
+
+### The premise: Spirit owns the target
+
+Everything below rests on one fact about the topology, and it is easy to read
+past: **Spirit is the only writer to the target table.** The `_new` table, or
+the destination of a move or a sync, is created by Spirit and written only by
+the copier, the change feed(s), and the checksum's own chunk repairs. No
+application touches it.
+
+That asymmetry is why "lockless" is possible at all. The source cannot be held
+still without a lock, but the *target* can: it only moves when Spirit writes to
+it. Three consequences run through the whole algorithm:
+
+- **A target read is a read of something Spirit put there.** No write to the
+  target arrives from outside, which is why a retry waits for a feed flush
+  (`RetryFlushWait`) instead of just a delay — re-reading before one lands
+  could only return the image it already saw.
+- **An old source image stays a valid comparison point.** The retry rule
+  "target now equals a source CRC we witnessed earlier" is sound only because
+  nothing else writes the target: the target's state is a function of the
+  source's history as delivered by the feed, so reaching a witnessed image
+  means the pipeline carried that image faithfully. If a third party could
+  write the target, matching a stale source image would prove nothing.
+- **Parking a feed's reader freezes the rows that feed owns.** This is what
+  [settling](#continuously-updated-hot-rows) exploits. It cannot stop writes to
+  the source, so it stops them to the target instead, and compares against the
+  after-image the change stream carries — which, with
+  `binlog_row_image=FULL`, *is* the source's value at that position.
+
+  The freeze is **per row, not table-wide**, and that is all the algorithm
+  needs. A park stops one feed's reader; on a multi-source move the other
+  feeds keep applying, and a `chunkRepairer` repair for some other chunk can
+  be writing the target at the same time. What makes the comparison sound is
+  that nothing else writes *this* key: a row is settled on the feed of the
+  source that owns it, a key seen on two sources never becomes a snapshot at
+  all, and a row no source holds has no owner and defers
+  (`readHotSnapshotRowsAcross`, and the note at the top of
+  `lockless_settle.go`).
+
+The third point is the one worth holding onto: for the rows where it matters,
+lockless does not weaken the consistency claim, it **recovers a genuine
+point-in-time comparison** — by freezing that row on the side it is allowed to
+freeze rather than the side it is not. What it gives up is not the guarantee;
+it is the guarantee holding at *one instant table-wide*.
+
+### The algorithms, side by side
+
+```
+ SingleChecker (snapshot)             LocklessChecker (optimistic)
+ ───────────────────────────────      ───────────────────────────────────────
+ 1. flush the change feed             1. read the chunk from source and
+ 2. LOCK TABLES                          target, no lock, no transaction
+ 3. flush again, under the lock       2. CRCs equal?      -> chunk verified
+ 4. assert the feed is empty          3. not equal? re-read after RetryDelay
+ 5. open N REPEATABLE READ trx           (5s) and one feed flush
+    (all see the same instant)        4. target caught up to a source image
+ 6. UNLOCK TABLES                        we have witnessed? -> verified
+ 7. read every chunk inside           5. source changed again? -> "hot":
+    those transactions                   split the range and recurse, down
+ 8. release the transactions              to ~128 rows
+    at the end of the pass           6. source stable, target still wrong?
+                                         -> drain the feed and re-read;
+                                            repair the chunk, or fail
+                                     7. source never holds still, 10 times
+                                         over? -> settle each row against
+                                            the change stream itself
+```
+
+Step 7 of the lockless column is the interesting one and has its own section
+([Continuously updated hot rows](#continuously-updated-hot-rows)). Everything
+above it is retry and subdivision; it is what makes the algorithm terminate at
+all on a row that is written continuously.
+
+### What each one proves
+
+**Snapshot.** Every chunk is read inside a transaction whose read view was
+taken at one instant, `T0`, behind the table lock. The reads are spread over
+the wall clock — hours, on a large table — but they all observe `T0`:
+
+```
+                 T0 = the lock instant
+                  │
+  app writes ─────┼─────────────────────────────────────────────────►
+                  │
+                  │   all reads below see the table as it was at T0
+                  ▼
+   chunk A        ├─read─┤
+   chunk B        │      ├─read─┤
+   chunk C        │             ├─read─┤
+   chunk …        │                    ├──  …  ──┤
+                  │                              │           │
+                  └─────── one pass (hours) ─────┘           │
+                                                 └───────────┘
+                                                  not covered by
+                                                  the claim
+```
+
+> **Claim:** at instant `T0`, source and target were equal — everywhere, at
+> once. (Per *yield segment* — see below.)
+
+The weakness is *which* instant. `T0` is where the pass **begins**, so by the
+time the pass ends the claim can be many hours old, and the gap between `T0`
+and cut-over is entirely uncovered.
+
+**One snapshot per segment, not per pass.** Holding a `REPEATABLE READ` view
+open pins undo, so `YieldTimeout` (24h by default, and
+`--checksum-yield-timeout` lets an operator set it much lower) caps how long
+one snapshot may live. When it fires, `runChecksumWithYield` takes the
+chunker's low watermark, reopens there, and loops back into `runChecksum` —
+which takes a **new** table lock and a **new** transaction pool. So a pass
+that yields is not one instant; it is one instant per segment:
+
+```
+   ├──── snapshot 1 ─────┤──── snapshot 2 ─────┤──── snapshot 3 ─────┤──►
+   T0                    T1                    T2
+     chunks A–F            chunks G–M            chunks N–Z
+                         │                     │
+                         └─ yield: release the transactions, reopen the chunker at
+                            the low watermark, take a new lock, snapshot again
+```
+
+**A yield is not the only thing that starts a new segment.** `Run` retries a
+failed attempt up to `MaxRetries` times, and an attempt that errored *without
+finding a difference* — killed pool connections, for instance — resumes at the
+low watermark rather than discarding the chunks already verified. That path
+also re-enters `runChecksum`, so it also takes a new lock and a new pool. The
+segment boundary is the same shape as a yield's; it just has nothing to do
+with `YieldTimeout`.
+
+Every claim about `T0` below should be read as a claim about *one segment*.
+With the 24h default and no errors, most passes are a single segment, so the
+distinction is usually theoretical — but the hours-long pass on a large table
+is exactly the one that yields, so it is not a corner case.
+
+**Lockless.** Each chunk is read whenever a worker gets to it, and re-read
+until the target agrees with a source image the checker has **witnessed**.
+That is a weaker statement than "they were equal at some instant", and the
+difference matters — see below:
+
+```
+  app writes ─────────────────────────────────────────────────────────►
+  source        v1 ──────────► v2 ──────────► v3 ──────────────────────►
+
+   chunk A      ├r┤✗ ··wait·· ├r┤✓
+                                 └─ target reached v1; source is on v2 now
+   chunk B           ├r┤✓
+   chunk C              ├r┤✗ ··· ├r┤✗ ··· ├r┤✗ ··· ├─settle─┤✓
+                                                             └─ frozen target
+                                                                vs the event's
+                                                                own after-image
+   chunk D                   ├r┤✓
+
+   ✓ = "the target reached a source state we witnessed", not
+       "both held it at the same moment". After the last ✓ and
+       before cut-over: not covered.
+```
+
+> **Claim:** for every chunk, the target reached a state the source is known
+> to have held. **Not** that source and target held it simultaneously.
+
+The retry rule is what makes this precise: a chunk passes when the target's
+CRC equals *either* the source CRC read a moment ago *or* the one read at the
+start of the retry window (`lockless.go`, the `newTgt == item.originalSrc ||
+newTgt == newSrc` test). So the source may already have moved from `v1` to
+`v2` by the time the target reaches `v1`, and there was never an instant at
+which both held `v1`. What is established is **lineage, not simultaneity**:
+the target's state is a function of the source's history as delivered by the
+feed, so reaching a witnessed image is evidence the pipeline carried that
+image faithfully. That is exactly the property
+[the premise](#the-premise-spirit-owns-the-target) buys, and it is the right
+thing to check for a bug in the pipeline.
+
+The weakness, then, is not just that the claim is per-chunk rather than
+table-wide — it is that it is a claim about *delivery*, not about a common
+point in time. The strength is that the evidence is far fresher: the last
+chunk is verified minutes before cut-over rather than hours after the
+snapshot that vouched for it.
+
+One exception runs the other way. A row resolved by
+[settling](#continuously-updated-hot-rows) gets a **stronger** guarantee than
+a retried chunk, not a weaker one: the owning feed's reader is parked, so
+nothing can write that row, and the comparison is against the after-image of a
+specific event at a specific position. That is a genuine point-in-time
+equality — the only place in the lockless algorithm where simultaneity is
+actually established. It holds for that row, not for the table: see [the
+premise](#the-premise-spirit-owns-the-target) on what a park does and does not
+stop.
+
+**Neither claim reaches cut-over.** Both diagrams end with an uncovered
+window, and both windows are the same kind of gap: a divergence introduced
+after a chunk was verified is caught by neither. This is the load-bearing
+point about what a checksum is for — see
+[Why checksums matter](#why-checksums-matter). It is a **bug detector**, not a
+serialization point. Cut-over is safe because the change feed is correct; the
+checksum exists to catch the case where it is not.
+
+### Cross-chunk sampling: a different shape of coverage
+
+Lockless reads different ranges at different times, so a row whose **primary
+key changes** can migrate out of a range that has not been read yet and into
+one that already has — and be absent from both readings:
+
+```
+  the row:   id=900  ─────────────►  id=7
+             (UPDATE t SET id=7 WHERE id=900)
+  ranges:    900 ∈ chunk C           7 ∈ chunk A
+
+  ──────────────────────┬───────────────────┬────────────────────────►
+                        │                   │
+   chunk A read ────────┘                   │
+     source: no id=7 yet                    │
+     target: no id=7 yet     ✓ equal        │
+                                            │
+                 the move happens ──────────┤
+                 feed applies delete(900), loses insert(7)
+                                            │
+   chunk C read ────────────────────────────┘
+     source: id=900 gone (moved out)
+     target: id=900 gone (deleted)  ✓ equal
+
+           → every chunk reported equal, and id=7 appeared in
+             neither side of any reading
+```
+
+Chunks are walked in key order, so "low range first, high range later" is the
+normal order, not a contrived one.
+
+**This does not, however, make a lockless pass blinder than a snapshot pass
+over the same window.** A snapshot's `T0` is established at the *start* of the
+pass, before any chunk is read, so the move above is after `T0` too: the
+snapshot reads both ranges in their pre-move state, finds them equal, and
+reports clean as well. The loss falls in the post-`T0` window it already does
+not cover.
+
+That argument generalises, and it is worth saying what would falsify it. For
+this hole to hide a divergence, the divergence has to be *created by* the
+move — the feed dropping one half of a delete/insert pair — which puts it
+mid-pass, hence post-`T0`. A divergence that existed *before* the pass is
+caught by both: the snapshot mismatches at `T0`, and lockless mismatches
+whichever range holds the row when it reads it. On a moved row it is often
+repaired without either checker's help, because the binlog carries the insert
+half as a full after-image and applying it overwrites whatever the target
+held.
+
+So: cross-chunk sampling changes the *shape* of the coverage — a lockless pass
+can report every chunk equal without having examined a given row at all —
+without widening the set of divergences that survive a single pass. What
+bounds it:
+
+- The exposure per row is the interval between the two chunk reads, not the
+  length of the pass. More workers narrows it.
+- `RunContinuous` re-walks from the start, and the next pass reads both
+  ranges after the move.
+
+**And a snapshot pass is not categorically free of this either.** A pass that
+[re-snapshots at the watermark](#what-each-one-proves) — on a yield, or on a
+retry after an attempt errored clean — misses a row that moves from a
+not-yet-read range into an already-read range across that boundary, for exactly
+the same reason. The difference between the two checkers is therefore
+**quantitative, not categorical**: both re-establish their reference point
+periodically and acquire this exposure at every boundary. Lockless does it per
+chunk read; a snapshot pass does it per segment — rarely, rather than never.
+
+### Cost and operational profile
+
+| | `SingleChecker` (snapshot) | `LocklessChecker` (optimistic) |
+| --- | --- | --- |
+| Proves | equality at one instant, across every chunk in a segment | per chunk, that the target reached a *witnessed* source state — lineage, not simultaneity (settled rows excepted: those are point-in-time) |
+| Reference point re-established | once per segment — a `YieldTimeout` (24h default) or a retry that resumes at the watermark | on every chunk read |
+| Evidence dates from | the start of the current segment | each chunk's own last read, so as late as that chunk got to |
+| Read isolation | `REPEATABLE READ`, pinned pool | `READ COMMITTED`, ordinary reads |
+| Locks | brief `LOCK TABLES` on every table | none |
+| InnoDB history list | grows for the whole pass (read views pin undo); `YieldTimeout` (24h default) exists only to bound this | no growth |
+| Query stalls | every query queues behind the metadata lock, and connection pools fill head-of-line while it is held | none |
+| Concurrency ceiling | fixed at construction — the pool cannot grow once the lock is released, and the ceiling lengthens the lock window in proportion | resizable mid-pass |
+| Busy table | one pass, regardless of write rate | extra reads: retries, subdivision, settling |
+| Temporally blind to | anything after the segment's `T0`, and — across a segment boundary — a row that migrates into an already-read range | anything after each chunk's last read, and a row that migrates between two chunk reads (see [above](#cross-chunk-sampling-a-different-shape-of-coverage)) |
+| Cross-server / N sources | not supported by `SingleChecker`; achievable with locks, at a cost that scales with the topology (see below) | native — each chunk is read from every source and target and aggregated |
+| Implementation | simple | substantially more complex |
+| Used by | `spirit migrate` (default) | `spirit move`, `spirit sync`, `spirit migrate --enable-experimental-lockless-checksum` |
+
+None of those rows is a claim about the digest. Both checkers compare a 32-bit
+`CRC32` aggregated with `BIT_XOR`, plus a row count, so "equal" means *equal
+digest and equal count* — two different chunk contents can in principle
+collide. That caveat is identical for both, and identical to
+[pt-table-checksum](#checksum-algorithm)'s, so it is not part of what
+distinguishes them; "temporally blind to" above is scoped to time on purpose.
+
+Two rows are worth dwelling on, because both are about cost growing where
+lockless's does not:
+
+- **A cross-server serialization point must be built, not borrowed — and
+  building it is what costs.** One MySQL `REPEATABLE READ` view is per-server,
+  so there is no single snapshot spanning servers to take. But the equivalent
+  can be *manufactured*, and Spirit used to: lock the tables on every source
+  **and** every target, drain every change feed to empty under those locks,
+  open a `REPEATABLE READ` transaction on each server inside that quiesced
+  window, then release. The resulting snapshots are independent but mutually
+  consistent, because nothing could write between them. This is what the
+  `DistributedChecker` did, and it worked.
+
+  What removed it (block/spirit#1281) is that the price scales with the
+  topology while the guarantee does not improve. Every server is frozen
+  simultaneously rather than one at a time; the lock window grows with the
+  number of servers, since locks and then transaction pools are established
+  serially across all of them; any single server failing to lock fails the
+  whole pass; and all of it sits on the critical path of a move. Lockless
+  covers the same topologies by reading each chunk from every source and every
+  target and aggregating the CRCs and counts — no window, nothing frozen.
+  A source fronted by a Vitess vtgate is the case where the locking route is
+  genuinely unavailable rather than merely expensive.
+- **The lock is brief; the stall it causes is not.** `LOCK TABLES` waits for
+  in-flight statements and then blocks new ones behind a metadata lock. Every
+  blocked query holds its connection, so an application's pool drains
+  head-of-line, and recovery outlasts the lock itself. This is the cost that
+  the bullet above multiplies by the number of servers.
+
+### Hot rows, and the lag question
+
+The honest concern about lockless on a continuously written table is a
+feedback loop: settling a hot row parks the change-feed reader, parking raises
+apply lag, more apply lag means more chunks read stale and mismatching, and
+more mismatches mean more hot ranges to settle.
+
+The shape is real, and the cost is real: settling deliberately stalls apply in
+order to freeze the target (see
+[the premise](#the-premise-spirit-owns-the-target)). What keeps it from
+running away is that the **settling work per pass is bounded**, from two
+different directions depending on the table.
+
+On a **large** table the bound is throughput. A row is hot because it is
+rewritten inside the retry window faster than the checksum can read it; for a
+*range* to stay hot it has to change every window, and subdivision has
+already cut it toward ~128 rows. So N simultaneously hot ranges demand write
+throughput proportional to N, against N distinct key ranges, on one server:
+
+```
+  write throughput on the source
+        │
+        ├──► bounds how many distinct ranges can change every ~5s
+        │          = bounds the number of hot ranges at once
+        │
+        └──► is also what the change feed has to apply
+                   = a rate high enough to make a large table's ranges
+                     mostly hot never lets the feed drain, so the
+                     migration cannot reach cut-over — settling was
+                     never the binding constraint
+```
+
+Note the failure mode there is a **stall, not an error**. `Flush` loops until
+the buffered change count falls below a trivial threshold, treating a
+`BlockWait` timeout as a warning and retrying; it returns early only on an
+apply error from the inner flush, or on context cancellation. Neither is a
+backlog signal, so a write rate the feed cannot absorb holds the migration
+short of cut-over indefinitely rather than failing it — something to watch for
+in the feed's own progress metrics, not an error an operator should expect to
+see surfaced.
+
+On a **small** table that argument does not apply — a single continuously
+updated row can make a one-chunk table entirely hot while the feed keeps up
+without effort. The bound there is simply absolute size: "entirely hot" is a
+handful of ranges, so the settling work is a handful of `settleBudget`
+windows, not a growing tax.
+
+Note what is *not* claimed: settling is **not** one-off work per row. Each
+continuous pass calls `chunker.Reset()` and re-walks from the start, so a row
+that stays hot can be settled again on every pass. What stops that from being
+continuous is pacing, not convergence — `MinPassInterval`
+(`LocklessMinPassInterval`, 1 hour in production) puts an hour between passes,
+so a permanently hot row costs one bounded escalation per hour. The finite
+pre-cut-over gate is the case with no such gap, and it is bounded by
+`MaxPasses` instead.
+
+What bounds it within a pass:
+
+- Settling is the **last** resort, not the first. A range reaches it only
+  after `MaxHotAttempts` (10) observations of a moving source, and only after
+  subdivision has already cut it toward ~128 rows.
+- The whole escalation for a range is bounded at `settleBudget` (5 seconds),
+  rows are settled one at a time, and a row that produces no event inside its
+  budget is deferred rather than waited on.
+- Parking terminates **faster the hotter the row is** — it ends at that row's
+  next change. The rows that defeat read-and-compare are the ones this
+  resolves quickest.
+- Within a pass, a row that has passed is not re-parked, so the apply lag a
+  settle incurs is repaid before the pass ends rather than compounding
+  through it.
+
+What to watch, in that order: `HotChunksSettledThisPass` rising while
+`HotChunksDeferredThisPass` falls is the mechanism working. **Both** rising,
+pass over pass, is the loop above, and the lever is fewer checksum workers —
+which the backlog signal already pulls by itself when autoscaling is enabled
+(see [Pacing and scaling](#pacing-and-scaling)).
+
+And a non-converging table ends as an error rather than an unbounded wait:
+the finite gate stops after `MaxPasses` (10) with
+`ErrVerificationUnresolved`.
+
+### Prior art, and what is new here
+
+The lockless checksum is a hybrid of two established ideas plus one that does
+not appear to have published prior art.
+
+**Borrowed: the chunk digest.** CRC32 with `BIT_XOR` aggregation, pushed down
+to the server so a chunk costs one row on the wire, is
+[pt-table-checksum](#checksum-algorithm)'s. Both checkers use it unchanged.
+
+**Borrowed: the stream is the arbiter, and you pause the consumer, not the
+producer.** This is the
+[DBLog](https://netflixtechblog.com/dblog-a-generic-change-data-capture-framework-69351fb9099b)
+family — Netflix's watermark-based CDC framework, and Debezium's *incremental
+snapshots* built on it. Spirit's copier is already modelled on DBLog's
+buffered producer/consumer pipeline (see [pkg/copier](../copier/README.md)).
+DBLog's chunk-selection trick is the relevant part here: rather than locking
+the table, it writes a **low watermark** row, runs the chunk `SELECT`, writes a
+**high watermark** row, then watches its own change log for those two markers
+and reconciles the chunk against whatever events landed between them. Its brief
+pause of *log processing* — not of the application's writes — is the same shape
+as parking the feed's reader.
+
+**What differs, and why.** The resolution rule is the fork in the road:
+
+```
+  DBLog / Debezium incremental snapshot      Spirit lockless checksum
+  ────────────────────────────────────       ─────────────────────────────
+  goal: PRODUCE one correct stream           goal: VERIFY two copies that
+        from a snapshot + a log                    another pipeline maintains
+
+  row changed inside the window?             chunk disagrees?
+    → drop it from the chunk;                  → re-read after a delay and a
+      the log event wins                         feed flush; accept any source
+                                                 image we have witnessed
+                                             → still hot? subdivide toward
+                                               ~128 rows
+                                             → still hot? settle it against
+                                               the stream's own after-image
+
+  needs a writable marker table on           writes NOTHING to the source;
+  the source, so markers land in-band        ordering evidence is out-of-band
+                                             (flush completion, park position)
+
+  no target — it emits                       owns the target, so it can
+                                             freeze that side instead
+```
+
+Three consequences worth stating plainly:
+
+- **DBLog's rule cannot produce a verdict.** "The row changed inside the
+  window, so drop it from the chunk and let the log carry it" is exactly right
+  when you are emitting a stream, and useless when you are checking one: it
+  would systematically decline to verify the hot rows — the only rows where a
+  lost update is hard to catch. A verifier has to do the opposite of dropping
+  them.
+- **No markers means no write access to the source.** Spirit's verification
+  path writes nothing at all (only a *repair* writes, and only to the target).
+  So there is no in-band low/high watermark to reconcile against, and the
+  ordering facts come from elsewhere: `RetryFlushWait` (the target cannot have
+  moved until a feed flush landed) and, for settling, the reader's park
+  position.
+- **Spirit has a target to freeze; DBLog does not.** DBLog reconciles a
+  snapshot against a log because it has nothing it owns. Spirit owns the
+  target ([the premise](#the-premise-spirit-owns-the-target)), which is what
+  makes stopping the consumer a real serialization point rather than just a
+  pause.
+
+**New: settling a row against its own next change.**
+[`VerifyRowAtNextChange`](#continuously-updated-hot-rows) has no analogue in
+either. The watermark bracket bounds a *read*; it offers nothing for a row
+being rewritten continuously, which is precisely the case that defeats
+read-and-compare. Waiting for that row's next event, parking the reader on it,
+draining, and comparing the target against the event's after-image inverts the
+difficulty: the hotter the row, the sooner its verdict arrives.
+
+> **On lineage:** this section compares algorithms, which is checkable from
+> both. It deliberately does not claim the design was derived from DBLog or
+> Debezium — the repo records DBLog as the *copier's* inspiration and
+> pt-table-checksum as the digest's, and nothing more than that.
+
+### Which to use
+
+Today: the defaults. `spirit migrate` uses `SingleChecker`; `spirit move` and
+`spirit sync` use `LocklessChecker` because no snapshot checker spans servers
+today — not because a cross-server snapshot is impossible, but because its cost
+scales with the topology (see [What each one
+proves](#what-each-one-proves)). `--enable-experimental-lockless-checksum` opts
+a migration into lockless.
+
+The intended end state is lockless everywhere and `SingleChecker` deleted
+(see [Direction: lockless replaces single](#direction-lockless-replaces-single)).
+What is missing is not code but evidence: the snapshot checker has years of
+production migrations behind it, and lockless needs enough of the same before
+it becomes the default for `migrate` too. Both are kept until then.
+
+## Compared with other consistency checks
+
+A chunked digest is not the only way to answer "do these two tables agree",
+and it is worth being explicit about where it sits, because the alternatives
+are not worse designs — they are different points on a cost-versus-confidence
+curve, picked for different jobs. The distinguishing question is **how much
+data has to leave the server**:
+
+```
+  mechanism                     what it computes          on the wire
+  ───────────────────────────   ──────────────────────    ──────────────────
+  row counts over a time window COUNT(*) on each side     two integers
+  chunked digest                CRC32 + BIT_XOR per       one row per chunk
+    (Spirit, pt-table-checksum)   chunk, server-side
+  row-by-row comparison         every column of every     the whole table
+    (e.g. Vitess VDiff)           row, in a client
+```
+
+### Row counts over a timestamp window
+
+The cheapest possible check: count rows on both sides within a bounded
+`updated_at` range and compare. Two integers cross the wire, so it can run
+continuously and near-free, which is a genuine and useful property — it is a
+good smoke signal.
+
+What it cannot be is a cut-over gate, for two reasons:
+
+- **It only sees cardinality.** Any modification that preserves the row count
+  is invisible: an in-place `UPDATE`, a charset mangling, a timezone shift, a
+  `NULL` that became an empty string, a truncated `VARCHAR`. Those are most of
+  [the bug classes a checksum exists to catch](#why-checksums-matter). A delete
+  and an insert inside the same window cancel exactly.
+- **It has a schema dependency that is also a correctness dependency.** It
+  needs an indexed timestamp column that every write path maintains. Any code
+  path that modifies a row without advancing `updated_at` is invisible to it,
+  and that is a property of the application, not of the checker — so the check
+  cannot establish its own soundness.
+
+### Row-by-row comparison in a client
+
+Stream both sides in key order and compare column values in application code.
+Vitess's VDiff is the well-known implementation of this shape.
+
+It has two real advantages, and the second is the more interesting one:
+
+- **Discrepancies are already localized.** The comparison knows which row
+  differed and how, with no second step.
+- **It does not depend on both servers rendering a row the same way.** A
+  digest is computed *by the server* over a text rendering of the row, so the
+  two sides must be made to render comparably — which is why Spirit carries a
+  `ColumnMapping` and a pile of `CAST` machinery, and why a mis-specified cast
+  shows up as a false mismatch. A comparator in Go applies its own type-aware
+  rules and sidesteps that class of problem entirely. Spirit has been bitten
+  here: text-mediated comparison inherits the server's rendering semantics,
+  including cases where MySQL's own JSON parser does not round-trip a document
+  bit-for-bit (see the `castExpr` notes in `pkg/table` and
+  [Chunk repair](#chunk-repair) on why JSON is read bare).
+
+The cost is the wire and the deserialization. Every column of every row has to
+be transferred and materialized to be compared, so the work scales with the
+*size of the table* rather than with the number of chunks. For the tables
+Spirit targets — the design goal is a 10 TiB table inside five days, and
+checksumming has been *observed* to take roughly 10% of copy time (it is not a
+budget anything enforces) — that is not a reasonable shape. A server-side digest returns one row per chunk and is the
+only reason the verification cost stays a fraction of the copy.
+
+Two things often cited as VDiff drawbacks are worth separating out honestly:
+
+- **Single-threaded comparison** is an implementation choice in Vitess today,
+  not something the approach requires. It is a fair thing to note about the
+  tool as it exists, and not an argument against row-by-row comparison as
+  such.
+- **"A digest cannot tell you which row is wrong"** is true of a single chunk
+  read and false of the algorithm. Spirit narrows a failing range by
+  subdivision — `splitHotChunk` cuts a mismatching range into up to eleven
+  children and keeps going down toward ~128 rows — and on a confirmed
+  divergence it logs a line per differing row (mismatched, missing on the
+  target, missing on the source). It also drops to genuine per-row comparison
+  when it needs to: `captureHotSnapshot` reads a bounded per-row PK/CRC32
+  image of at most 128 rows per side. So the two approaches are the same
+  spectrum, and the difference is that Spirit pays for row-level detail only
+  on the residue rather than for the whole table.
+
+### Where that leaves the tradeoff
+
+Digest-first with row-level escalation wins when divergence is **rare**, which
+is the case a migration or a move is built around: the copy plus the change
+feed are expected to be correct, and the checksum is a
+[bug detector](#why-checksums-matter) whose usual answer is "no differences".
+Under that assumption, paying per chunk and escalating on the exceptions is
+strictly cheaper than paying per row everywhere.
+
+The ordering reverses if divergence is **common**. If a large fraction of rows
+is expected to differ, the digest's subdivision degenerates — nearly every
+range splits and then needs per-row reads anyway — and comparing row by row
+from the start is both simpler and faster. That is a reconciliation workload
+rather than a verification one, and it is the case where a VDiff-shaped tool
+is the right instrument.
+
+Spirit is built for the first case, and the honest caveat is that this is an
+assumption about the workload rather than a property of the algorithm.
 
 ## Checker contract
 
@@ -102,8 +834,10 @@ or a cleared per-pass mismatch counter as resume evidence.
 Cross-server callers such as datasync go through the same factory. Naming a
 `TargetDB` says the copy being verified is on another server, which is what
 makes the factory build a repair path that reads one server and writes the
-other; it is lockless-only, because a table lock and a `REPEATABLE READ`
-snapshot cannot span two servers. Such a caller typically runs the feed's
+other; it is lockless-only, because `SingleChecker` locks and snapshots exactly
+one server (a cross-server serialization point can be built, but the checker
+that did it was removed — see
+[Cost and operational profile](#cost-and-operational-profile)). Such a caller typically runs the feed's
 periodic flush itself for the whole process rather than per run, and says so
 with `ExternalFlushLoop` — otherwise every run starts and stops it, which is
 what a migration and a move want.
@@ -182,6 +916,18 @@ Two consequences of the applier being the write path:
 - JSON columns are read **bare**, with no round-trip cast. The read/write pair is already text-mediated (the `SELECT` renders each document to text; the applier writes it back as a literal the target re-parses), so a repaired row lands as exactly the one-text-round-trip image the checksum's source side predicts. Casting on top would apply `parse∘render` twice, which does not converge for the doubles MySQL's JSON text parser misrounds — see `castExpr` in `pkg/table`.
 
 The read is not synchronized with the change feed: a row deleted on the source after the repair reads it is written back if the feed has already applied that `DELETE` to the target. The chunk stays diverged and the next attempt repairs it again, converging once the churn on that key range stops. Cut-over requires a pass that finds no differences at all, so sustained delete churn on one chunk costs attempts, never a bad cut-over.
+
+### Who repairs, and when
+
+`FixDifferences` is a per-run policy, not a property of a checker, and the runners do not all set it:
+
+| Run | `FixDifferences` | A divergence means |
+|---|---|---|
+| Initial checksum — `migrate`, `move`, `sync` | `true` | Repair the chunk, re-verify it on a later pass, fail only if it keeps coming back |
+| `move` continuous checksum (sentinel wait) | `false` | `ErrPermanentDivergence`; the move aborts |
+| `migrate` continuous checksum (sentinel wait) | `true` (same checker object as its initial pass) | Repaired, as in the initial pass |
+
+The reason repair exists at all is the [copy-phase exposure](#not-only-bugs-two-copy-phase-optimizations-are-unsafe-by-design) the initial checksum stands behind: the row copy runs with optimizations that are only correct *given* a repairing check afterwards. A continuous pass is in a different position. It runs after that check has already passed and after the optimizations were disabled, so nothing should be diverging any more — and while a cut-over may be moments away, a loud failure is worth more than a quiet recopy. That is why `move` turns repair off there; a resumed move blanks the checksum watermark and its initial checksum repairs the chunk. Migration has not been split this way: it builds one checker with `FixDifferences: true` and reuses it for `RunContinuous`.
 
 ## Pacing and scaling
 
