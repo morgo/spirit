@@ -5,10 +5,12 @@ import (
 	"database/sql"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
 	_ "github.com/block/mysql"
+	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
 	"github.com/stretchr/testify/require"
 )
@@ -174,4 +176,57 @@ func TestReplica_UpdateLagWrapsCause(t *testing.T) {
 	require.Error(t, err)
 	require.ErrorIs(t, err, context.Canceled, "UpdateLag must wrap the underlying cause, not replace it")
 	require.ErrorContains(t, err, "could not check replication lag")
+}
+
+// TestMySQL8LagQueryClampsAtZero runs MySQL8LagQuery against stand-in tables
+// for the two performance_schema tables it reads, so the arithmetic can be
+// checked on the primary without depending on the state of a live replica.
+// A commit timestamp that is ahead of the replica's NOW(6) (clock skew, or a
+// lower-precision NOW() truncating the current second) must report 0, not a
+// negative lag. See https://github.com/block/spirit/issues/1326.
+func TestMySQL8LagQueryClampsAtZero(t *testing.T) {
+	worker := testutils.NewTestTable(t, "lagq_worker",
+		`CREATE TABLE lagq_worker (
+			channel_name VARCHAR(64) NOT NULL PRIMARY KEY,
+			APPLYING_TRANSACTION_IMMEDIATE_COMMIT_TIMESTAMP DATETIME(6) NOT NULL,
+			LAST_APPLIED_TRANSACTION VARCHAR(64) NOT NULL,
+			LAST_APPLIED_TRANSACTION_IMMEDIATE_COMMIT_TIMESTAMP DATETIME(6) NOT NULL
+		)`)
+	testutils.NewTestTable(t, "lagq_conn",
+		`CREATE TABLE lagq_conn (
+			channel_name VARCHAR(64) NOT NULL PRIMARY KEY,
+			LAST_QUEUED_TRANSACTION VARCHAR(64) NOT NULL,
+			LAST_QUEUED_TRANSACTION_ORIGINAL_COMMIT_TIMESTAMP DATETIME(6) NOT NULL
+		)`)
+	query := strings.ReplaceAll(MySQL8LagQuery, "performance_schema.replication_applier_status_by_worker", "lagq_worker")
+	query = strings.ReplaceAll(query, "performance_schema.replication_connection_status", "lagq_conn")
+	require.NotContains(t, query, "performance_schema")
+
+	// setCommitOffset places both commit timestamps offsetMs from the server's
+	// NOW(6), with a queued transaction not yet applied so the queue branch
+	// computes a latency instead of returning 0.
+	setCommitOffset := func(offsetMs int) {
+		t.Helper()
+		ctx := t.Context()
+		_, err := worker.DB.ExecContext(ctx, "REPLACE INTO lagq_worker VALUES ('', NOW(6) + INTERVAL ? MICROSECOND, 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:5', NOW(6) + INTERVAL ? MICROSECOND)", offsetMs*1000, offsetMs*1000)
+		require.NoError(t, err)
+		_, err = worker.DB.ExecContext(ctx, "REPLACE INTO lagq_conn VALUES ('', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:10', NOW(6))")
+		require.NoError(t, err)
+	}
+	lagMs := func() int64 {
+		t.Helper()
+		var lag int64
+		require.NoError(t, worker.DB.QueryRowContext(t.Context(), query).Scan(&lag))
+		return lag
+	}
+
+	// Committed in the future relative to the replica clock: clamped to 0.
+	setCommitOffset(500)
+	require.Equal(t, int64(0), lagMs())
+
+	// Committed 5s ago: the lag is reported, so the clamp does not hide it.
+	setCommitOffset(-5000)
+	lag := lagMs()
+	require.GreaterOrEqual(t, lag, int64(5000))
+	require.Less(t, lag, int64(10000))
 }
