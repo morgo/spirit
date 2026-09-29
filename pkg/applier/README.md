@@ -26,7 +26,11 @@ Sources and targets are both lists, which is what lets `pkg/move` do Vitess-styl
 
 The data flow is **one reader per source, then a fan-out**. Spirit reads each source once, with multi-threaded copying and one change feed, and routes every row to the target that owns it. Each target has its own pool of write workers.
 
-Vitess's built-in reshard workflows work the other way round: each target shard streams from every source shard and keeps only the rows in its own key range. That is in theory more scalable, because the work spreads across the targets. But every source serves M streams, so the load on the sources grows with the number of targets. Spirit's design is kind to the source: each source serves one reader, however many targets there are.
+Vitess's built-in reshard workflows work the other way round: each target shard streams from every source shard and keeps only the rows in its own key range. That is in theory more scalable, because the work spreads across the targets. But every source serves M streams, so the load on the sources grows with the number of targets.
+
+Spirit prefers to be kind to the source: each source serves one reader, however many targets there are. This matters most on Aurora. There, Spirit has to read from the source's writer instance: Aurora read replicas have no binlog, so they cannot serve a change feed or report a binlog position to resume from. Every stream a design adds therefore lands on the one instance that is also serving production writes. Spirit keeps that to one stream per source.
+
+Reading from the writer is also simpler, because it takes replicas out of the topology. A replica can lag or break replication, and a design that reads from replicas has to detect and handle both. Where a design can be kind to the source, it should be.
 
 ### Verifying a move: the checksum uses the same targets
 
