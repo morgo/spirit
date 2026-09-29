@@ -193,33 +193,44 @@ argument for why, what each one costs, and where each one is blind.
 Everything below rests on one fact about the topology, and it is easy to read
 past: **Spirit is the only writer to the target table.** The `_new` table, or
 the destination of a move or a sync, is created by Spirit and written only by
-the copier and the change feed. No application touches it.
+the copier, the change feed(s), and the checksum's own chunk repairs. No
+application touches it.
 
 That asymmetry is why "lockless" is possible at all. The source cannot be held
-still without a lock, but the *target* can: it only moves when Spirit flushes.
-Three consequences run through the whole algorithm:
+still without a lock, but the *target* can: it only moves when Spirit writes to
+it. Three consequences run through the whole algorithm:
 
-- **A target read is a read of something Spirit put there.** Between flushes
-  the target literally cannot change, which is why a retry waits for a feed
-  flush (`RetryFlushWait`) instead of just a delay — re-reading before one
-  lands could only return the image it already saw.
+- **A target read is a read of something Spirit put there.** No write to the
+  target arrives from outside, which is why a retry waits for a feed flush
+  (`RetryFlushWait`) instead of just a delay — re-reading before one lands
+  could only return the image it already saw.
 - **An old source image stays a valid comparison point.** The retry rule
   "target now equals a source CRC we witnessed earlier" is sound only because
   nothing else writes the target: the target's state is a function of the
   source's history as delivered by the feed, so reaching a witnessed image
   means the pipeline carried that image faithfully. If a third party could
   write the target, matching a stale source image would prove nothing.
-- **Parking the feed's reader freezes the target completely.** This is what
+- **Parking a feed's reader freezes the rows that feed owns.** This is what
   [settling](#continuously-updated-hot-rows) exploits. It cannot stop writes to
   the source, so it stops them to the target instead, and compares against the
   after-image the change stream carries — which, with
   `binlog_row_image=FULL`, *is* the source's value at that position.
 
+  The freeze is **per row, not table-wide**, and that is all the algorithm
+  needs. A park stops one feed's reader; on a multi-source move the other
+  feeds keep applying, and a `chunkRepairer` repair for some other chunk can
+  be writing the target at the same time. What makes the comparison sound is
+  that nothing else writes *this* key: a row is settled on the feed of the
+  source that owns it, a key seen on two sources never becomes a snapshot at
+  all, and a row no source holds has no owner and defers
+  (`readHotSnapshotRowsAcross`, and the note at the top of
+  `lockless_settle.go`).
+
 The third point is the one worth holding onto: for the rows where it matters,
 lockless does not weaken the consistency claim, it **recovers a genuine
-point-in-time comparison** — by freezing the side it is allowed to freeze
-rather than the side it is not. What it gives up is not the guarantee; it is
-the guarantee holding at *one instant table-wide*.
+point-in-time comparison** — by freezing that row on the side it is allowed to
+freeze rather than the side it is not. What it gives up is not the guarantee;
+it is the guarantee holding at *one instant table-wide*.
 
 ### The algorithms, side by side
 
@@ -280,7 +291,7 @@ The weakness is *which* instant. `T0` is where the pass **begins**, so by the
 time the pass ends the claim can be many hours old, and the gap between `T0`
 and cut-over is entirely uncovered.
 
-**One snapshot per yield, not per pass.** Holding a `REPEATABLE READ` view
+**One snapshot per segment, not per pass.** Holding a `REPEATABLE READ` view
 open pins undo, so `YieldTimeout` (24h by default, and
 `--checksum-yield-timeout` lets an operator set it much lower) caps how long
 one snapshot may live. When it fires, `runChecksumWithYield` takes the
@@ -297,10 +308,18 @@ that yields is not one instant; it is one instant per segment:
                             the low watermark, take a new lock, snapshot again
 ```
 
+**A yield is not the only thing that starts a new segment.** `Run` retries a
+failed attempt up to `MaxRetries` times, and an attempt that errored *without
+finding a difference* — killed pool connections, for instance — resumes at the
+low watermark rather than discarding the chunks already verified. That path
+also re-enters `runChecksum`, so it also takes a new lock and a new pool. The
+segment boundary is the same shape as a yield's; it just has nothing to do
+with `YieldTimeout`.
+
 Every claim about `T0` below should be read as a claim about *one segment*.
-With the 24h default most passes are a single segment, so the distinction is
-usually theoretical — but the hours-long pass on a large table is exactly the
-one that yields, so it is not a corner case.
+With the 24h default and no errors, most passes are a single segment, so the
+distinction is usually theoretical — but the hours-long pass on a large table
+is exactly the one that yields, so it is not a corner case.
 
 **Lockless.** Each chunk is read whenever a worker gets to it, and re-read
 until the target agrees with a source image the checker has **witnessed**.
@@ -348,10 +367,13 @@ snapshot that vouched for it.
 
 One exception runs the other way. A row resolved by
 [settling](#continuously-updated-hot-rows) gets a **stronger** guarantee than
-a retried chunk, not a weaker one: the reader is parked, so the target is
-frozen, and the comparison is against the after-image of a specific event at a
-specific position. That is a genuine point-in-time equality — the only place
-in the lockless algorithm where simultaneity is actually established.
+a retried chunk, not a weaker one: the owning feed's reader is parked, so
+nothing can write that row, and the comparison is against the after-image of a
+specific event at a specific position. That is a genuine point-in-time
+equality — the only place in the lockless algorithm where simultaneity is
+actually established. It holds for that row, not for the table: see [the
+premise](#the-premise-spirit-owns-the-target) on what a park does and does not
+stop.
 
 **Neither claim reaches cut-over.** Both diagrams end with an uncovered
 window, and both windows are the same kind of gap: a divergence introduced
@@ -420,28 +442,28 @@ bounds it:
   ranges after the move.
 
 **And a snapshot pass is not categorically free of this either.** A pass that
-[yields](#what-each-one-proves) re-snapshots at the watermark, so a row that
-moves from a not-yet-read range into an already-read range between `T0` and
-`T1` is missed there for exactly the same reason. The difference between the
-two checkers is therefore **quantitative, not categorical**: both re-establish
-their reference point periodically and acquire this exposure at every
-boundary. Lockless does it per chunk read; a snapshot pass does it per yield —
-which is once every `YieldTimeout` rather than never.
+[re-snapshots at the watermark](#what-each-one-proves) — on a yield, or on a
+retry after an attempt errored clean — misses a row that moves from a
+not-yet-read range into an already-read range across that boundary, for exactly
+the same reason. The difference between the two checkers is therefore
+**quantitative, not categorical**: both re-establish their reference point
+periodically and acquire this exposure at every boundary. Lockless does it per
+chunk read; a snapshot pass does it per segment — rarely, rather than never.
 
 ### Cost and operational profile
 
 | | `SingleChecker` (snapshot) | `LocklessChecker` (optimistic) |
 | --- | --- | --- |
-| Proves | equality at one instant, across every chunk in a yield segment | per chunk, that the target reached a *witnessed* source state — lineage, not simultaneity (settled rows excepted: those are point-in-time) |
-| Reference point re-established | once per yield (`YieldTimeout`, 24h default) | on every chunk read |
-| Evidence dates from | the start of the current yield segment | each chunk's own last read, so as late as that chunk got to |
+| Proves | equality at one instant, across every chunk in a segment | per chunk, that the target reached a *witnessed* source state — lineage, not simultaneity (settled rows excepted: those are point-in-time) |
+| Reference point re-established | once per segment — a `YieldTimeout` (24h default) or a retry that resumes at the watermark | on every chunk read |
+| Evidence dates from | the start of the current segment | each chunk's own last read, so as late as that chunk got to |
 | Read isolation | `REPEATABLE READ`, pinned pool | `READ COMMITTED`, ordinary reads |
 | Locks | brief `LOCK TABLES` on every table | none |
 | InnoDB history list | grows for the whole pass (read views pin undo); `YieldTimeout` (24h default) exists only to bound this | no growth |
 | Query stalls | every query queues behind the metadata lock, and connection pools fill head-of-line while it is held | none |
 | Concurrency ceiling | fixed at construction — the pool cannot grow once the lock is released, and the ceiling lengthens the lock window in proportion | resizable mid-pass |
 | Busy table | one pass, regardless of write rate | extra reads: retries, subdivision, settling |
-| Temporally blind to | anything after the segment's `T0`, and — across a yield boundary — a row that migrates into an already-read range | anything after each chunk's last read, and a row that migrates between two chunk reads (see [above](#cross-chunk-sampling-a-different-shape-of-coverage)) |
+| Temporally blind to | anything after the segment's `T0`, and — across a segment boundary — a row that migrates into an already-read range | anything after each chunk's last read, and a row that migrates between two chunk reads (see [above](#cross-chunk-sampling-a-different-shape-of-coverage)) |
 | Cross-server / N sources | not supported by `SingleChecker`; achievable with locks, at a cost that scales with the topology (see below) | native — each chunk is read from every source and target and aggregated |
 | Implementation | simple | substantially more complex |
 | Used by | `spirit migrate` (default) | `spirit move`, `spirit sync`, `spirit migrate --enable-experimental-lockless-checksum` |
@@ -516,11 +538,12 @@ throughput proportional to N, against N distinct key ranges, on one server:
 
 Note the failure mode there is a **stall, not an error**. `Flush` loops until
 the buffered change count falls below a trivial threshold, treating a
-`BlockWait` timeout as a warning and retrying; it returns early only on
-context cancellation. A write rate the feed cannot absorb therefore holds the
-migration short of cut-over indefinitely rather than failing it, so this is
-something to watch for in the feed's own progress metrics — not an error an
-operator should expect to see surfaced.
+`BlockWait` timeout as a warning and retrying; it returns early only on an
+apply error from the inner flush, or on context cancellation. Neither is a
+backlog signal, so a write rate the feed cannot absorb holds the migration
+short of cut-over indefinitely rather than failing it — something to watch for
+in the feed's own progress metrics, not an error an operator should expect to
+see surfaced.
 
 On a **small** table that argument does not apply — a single continuously
 updated row can make a one-chunk table entirely hot while the feed keeps up
@@ -644,10 +667,12 @@ difficulty: the hotter the row, the sooner its verdict arrives.
 
 ### Which to use
 
-Today: the defaults. `spirit migrate` uses `SingleChecker`;
-`spirit move` and `spirit sync` use `LocklessChecker` because no snapshot is
-available to them. `--enable-experimental-lockless-checksum` opts a migration
-into lockless.
+Today: the defaults. `spirit migrate` uses `SingleChecker`; `spirit move` and
+`spirit sync` use `LocklessChecker` because no snapshot checker spans servers
+today — not because a cross-server snapshot is impossible, but because its cost
+scales with the topology (see [What each one
+proves](#what-each-one-proves)). `--enable-experimental-lockless-checksum` opts
+a migration into lockless.
 
 The intended end state is lockless everywhere and `SingleChecker` deleted
 (see [Direction: lockless replaces single](#direction-lockless-replaces-single)).
@@ -716,9 +741,9 @@ It has two real advantages, and the second is the more interesting one:
 The cost is the wire and the deserialization. Every column of every row has to
 be transferred and materialized to be compared, so the work scales with the
 *size of the table* rather than with the number of chunks. For the tables
-Spirit targets — the design goal is a 10 TiB table inside five days, where
-checksumming is budgeted at roughly 10% of copy time — that is not a
-reasonable shape. A server-side digest returns one row per chunk and is the
+Spirit targets — the design goal is a 10 TiB table inside five days, and
+checksumming has been *observed* to take roughly 10% of copy time (it is not a
+budget anything enforces) — that is not a reasonable shape. A server-side digest returns one row per chunk and is the
 only reason the verification cost stays a fraction of the copy.
 
 Two things often cited as VDiff drawbacks are worth separating out honestly:

@@ -132,8 +132,10 @@ func TestFactoryDerivesRepairPolicy(t *testing.T) {
 // TargetDB is the only thing that says "the copy being verified is on another
 // server", and it decides both halves of that: which handle the reads compare
 // against, and which repair implementation is built. It is lockless-only,
-// because the snapshot algorithms reach their target through a table lock and a
-// REPEATABLE READ snapshot, neither of which spans two servers.
+// because the snapshot algorithm locks and snapshots exactly one server — the
+// one it reads — and would silently ignore a second. (Manufacturing a
+// cross-server snapshot is possible, as the removed DistributedChecker did; it
+// is the cost that ruled it out, not the mechanism.)
 func TestFactoryCrossServerTarget(t *testing.T) {
 	source, target := &sql.DB{}, &sql.DB{}
 	newCfg := func() *CheckerConfig {
