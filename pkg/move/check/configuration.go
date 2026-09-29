@@ -7,11 +7,8 @@ import (
 	"log/slog"
 
 	"github.com/block/mysql"
+	parsermysql "github.com/block/spirit/pkg/parser/mysql"
 )
-
-// erUnknownSystemVariable is MySQL error 1193 (ER_UNKNOWN_SYSTEM_VARIABLE),
-// returned when selecting a system variable the server predates.
-const erUnknownSystemVariable = 1193
 
 func init() {
 	registerCheck("configuration", configurationCheck, ScopePreflight)
@@ -66,7 +63,7 @@ func configurationCheck(ctx context.Context, r Resources, logger *slog.Logger) e
 		var binlogTransactionCompression string
 		err = src.DB.QueryRowContext(ctx, `SELECT @@global.binlog_transaction_compression`).Scan(&binlogTransactionCompression)
 		if err != nil {
-			if myErr, ok := errors.AsType[*mysql.MySQLError](err); !ok || myErr.Number != erUnknownSystemVariable {
+			if myErr, ok := errors.AsType[*mysql.MySQLError](err); !ok || myErr.Number != parsermysql.ErrUnknownSystemVariable {
 				return fmt.Errorf("source %d: %w", i, err)
 			}
 		} else if binlogTransactionCompression != "0" {
