@@ -468,6 +468,10 @@ func (a *SingleTargetApplier) writeChunklet(ctx context.Context, chunkletData ch
 		return 0, time.Since(buildStart), err
 	}
 
+	// Bound the write, retries included — see chunkTaskTimeout.
+	ctx, cancel := context.WithTimeout(ctx, chunkTaskTimeout)
+	defer cancel()
+
 	// The intersected source and target column lists are parallel — row.values[i]
 	// is a value for source column sourceColumnNames[i], which corresponds to
 	// target column at the same ordinal in targetColumnList. With column renames
