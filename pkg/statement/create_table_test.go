@@ -1672,11 +1672,12 @@ func TestCharsetCollationExtraction(t *testing.T) {
 			expectedCollation: new("utf8mb4_unicode_ci"),
 		},
 		{
-			name:              "TEXT with CHARACTER SET",
-			sql:               "CREATE TABLE test (description TEXT CHARACTER SET utf8);",
-			columnName:        "description",
-			expectedCharset:   new("utf8"),
-			expectedCollation: nil,
+			name:            "TEXT with CHARACTER SET",
+			sql:             "CREATE TABLE test (description TEXT CHARACTER SET utf8);",
+			columnName:      "description",
+			expectedCharset: new("utf8"),
+			// utf8mb3DefaultCollationNormalizer fills in the default.
+			expectedCollation: new("utf8_general_ci"),
 		},
 		{
 			name:              "Column without charset/collation",
@@ -1690,7 +1691,7 @@ func TestCharsetCollationExtraction(t *testing.T) {
 			sql:               "CREATE TABLE test (name1 VARCHAR(100) CHARACTER SET utf8, name2 VARCHAR(100) CHARACTER SET latin1);",
 			columnName:        "name1",
 			expectedCharset:   new("utf8"),
-			expectedCollation: nil,
+			expectedCollation: new("utf8_general_ci"),
 		},
 	}
 

@@ -649,3 +649,22 @@ func TestEmptyCharsetsList(t *testing.T) {
 	// With empty allowed list, any charset should violate
 	require.Len(t, violations, 1)
 }
+
+// TestNationalCharacterSetColumn: NCHAR/NVARCHAR always use the national
+// character set (utf8mb3, which the parser spells "utf8"), so the column is
+// checked against the allow list like one declared CHARACTER SET utf8mb3.
+func TestNationalCharacterSetColumn(t *testing.T) {
+	sql := `CREATE TABLE t1 (
+		id INT PRIMARY KEY,
+		name NVARCHAR(255)
+	) CHARACTER SET utf8mb4`
+	stmts, err := statement.New(sql)
+	require.NoError(t, err)
+
+	violations := (&AllowCharset{charsets: []string{"utf8mb4"}}).Lint(nil, stmts)
+	require.Len(t, violations, 1)
+	require.Contains(t, violations[0].Message, `Column "name" has unsupported character set: "utf8"`)
+
+	violations = (&AllowCharset{charsets: []string{"utf8mb4", "utf8"}}).Lint(nil, stmts)
+	require.Empty(t, violations)
+}

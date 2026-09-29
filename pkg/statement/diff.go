@@ -838,7 +838,9 @@ func charsetOfCollation(collation string) string {
 // the statement alone is returned as "": a column or table with a charset
 // but no collation uses that charset's *default* collation, and a table with
 // neither option uses the server defaults — both depend on server version
-// and configuration.
+// and configuration. The exception is utf8mb3, whose default collation is
+// fixed: utf8mb3DefaultCollationNormalizer fills it in before the diff runs,
+// so a utf8mb3 charset always arrives here with its collation.
 func resolvedCharsetCollation(col *Column, table *CreateTable) (charset, collation string) {
 	switch {
 	case col.Collation != nil:
