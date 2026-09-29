@@ -234,7 +234,7 @@ remain portable across servers, subject to the normal GTID resume checks.
 
 Throttles the sync when the Aurora target's average commit latency exceeds this threshold, as [migrate's max-commit-latency](migrate.md#max-commit-latency) does for its source. The target is monitored whether or not [autoscaling](#autoscaling) is enabled, alongside the Aurora threads throttler: the initial copy pauses and replication flushes narrow while it is overloaded. A target that is not Aurora, or a custom applier that writes somewhere other than the target, is not monitored.
 
-A negative value disables the commit-latency throttler. That also removes the backstop autoscaling needs to grow write threads above their starting count while the target runs the redo-aware threads signal; in that combination the pool can shed threads but not grow. In the Go API, zero selects the default.
+The default of `100ms` is intentionally a high upper bound, so it trims only the most extreme tail latencies. Setting `--max-commit-latency=0` disables it, as in `migrate`. That also removes the backstop autoscaling needs to grow write threads above their starting count while the target runs the redo-aware threads signal; in that combination the pool can shed threads but not grow. In the Go API the zero value is also "disabled", so a programmatic caller must set the field to keep the backstop.
 
 ### max-connections
 

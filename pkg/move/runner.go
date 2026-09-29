@@ -236,9 +236,6 @@ func NewRunner(m *Move) (*Runner, error) {
 	if m.TargetChunkSize == 0 {
 		m.TargetChunkSize = table.DefaultTargetChunkBytes
 	}
-	if m.MaxCommitLatency == 0 {
-		m.MaxCommitLatency = throttler.DefaultMaxCommitLatency
-	}
 	// WriteThreads has no "0 means auto" meaning any more, so fill in the Kong
 	// default for programmatic callers as well. Warn on
 	// an explicit 0, which used to mean "size from the instance" and would

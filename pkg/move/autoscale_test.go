@@ -195,11 +195,10 @@ func TestMoveAutoscaleNeedsEveryTarget(t *testing.T) {
 	}
 }
 
-func TestMoveMaxCommitLatencyDefault(t *testing.T) {
+// --max-commit-latency matches migrate: the Go-API zero value is not
+// replaced with the CLI default, so zero disables the throttler here too.
+func TestMoveMaxCommitLatencyZero(t *testing.T) {
 	r, err := NewRunner(&Move{})
 	require.NoError(t, err)
-	require.Equal(t, throttler.DefaultMaxCommitLatency, r.move.MaxCommitLatency)
-	r, err = NewRunner(&Move{MaxCommitLatency: -1})
-	require.NoError(t, err)
-	require.Negative(t, r.move.MaxCommitLatency) // Explicitly disabled, not defaulted.
+	require.Zero(t, r.move.MaxCommitLatency)
 }

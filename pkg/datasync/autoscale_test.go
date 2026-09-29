@@ -297,11 +297,10 @@ func TestSyncAutoscaleProbeFailure(t *testing.T) {
 	require.False(t, r.TargetUnderLoad())
 }
 
-func TestSyncMaxCommitLatencyDefault(t *testing.T) {
+// --max-commit-latency matches migrate: the Go-API zero value is not
+// replaced with the CLI default, so zero disables the throttler here too.
+func TestSyncMaxCommitLatencyZero(t *testing.T) {
 	r, err := NewRunner(&Sync{})
 	require.NoError(t, err)
-	require.Equal(t, throttler.DefaultMaxCommitLatency, r.sync.MaxCommitLatency)
-	r, err = NewRunner(&Sync{MaxCommitLatency: -1})
-	require.NoError(t, err)
-	require.Negative(t, r.sync.MaxCommitLatency) // Explicitly disabled, not defaulted.
+	require.Zero(t, r.sync.MaxCommitLatency)
 }

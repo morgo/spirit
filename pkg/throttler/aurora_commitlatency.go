@@ -37,13 +37,6 @@ const (
 	WHERE VARIABLE_NAME IN ('` + auroraCommitsStatusVar + `', '` + auroraCommitLatencyStatusVar + `')`
 )
 
-// DefaultMaxCommitLatency is the commit-latency threshold every command uses
-// unless configured otherwise (migrate's --max-commit-latency default). It is
-// intentionally a high upper bound that only cuts extreme tail latencies.
-// Commands that are also built programmatically (move, sync) substitute it for
-// a zero value, so an embedder that never heard of the option keeps the backstop.
-const DefaultMaxCommitLatency = 100 * time.Millisecond
-
 // commitLatencyPollInterval controls how often the background loop samples
 // commit metrics. Matches the replica throttler's 5s loopInterval — over a
 // 5s window an Aurora cluster sees plenty of commits, so the single Δ is a

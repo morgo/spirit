@@ -183,9 +183,6 @@ func NewRunner(s *Sync) (*Runner, error) {
 	if s.FlushInterval <= 0 {
 		s.FlushInterval = change.DefaultFlushInterval
 	}
-	if s.MaxCommitLatency == 0 {
-		s.MaxCommitLatency = throttler.DefaultMaxCommitLatency
-	}
 	r := &Runner{
 		sync:             s,
 		logger:           slog.Default(),
