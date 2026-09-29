@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strconv"
 	"strings"
 	"time"
 
@@ -328,10 +327,11 @@ func expectedImageCRC(ctx context.Context, sourceDB *sql.DB, chunk *table.Chunk,
 //     CAST(... AS char) renders 0.1 as "0.10000000149011612" where the real row
 //     gives "0.1". Casting the parameter back to FLOAT restores the column's
 //     precision, so the merge is FLOAT with FLOAT.
-//   - BIT is decoded as an int64, which merges to an integer and renders in
-//     decimal ("5"), where casting the real column yields its raw big-endian
-//     bytes — ceil(N/8) of them, so 0x05 for BIT(8) and 0x0000000000000005 for
-//     BIT(64). Binding those bytes reproduces it exactly.
+//   - BIT is decoded as an int64, and the checksum casts a BIT column to
+//     unsigned. A BIT(64) with the top bit set decodes negative, so binding the
+//     int64 as-is would render -1 where the real row renders
+//     18446744073709551615. Binding it reinterpreted as a uint64 renders the
+//     column's value for every width.
 //
 // Both are silent: the query succeeds and returns a CRC that simply is not the
 // row's, so every hot row in a table with a FLOAT or BIT column settles to a
@@ -346,25 +346,14 @@ func imageValueExpr(tp string, v any) (string, any, error) {
 	case "float", "float unsigned":
 		return "CAST(? AS FLOAT)", v, nil
 	case "bit":
-		bits, err := bitWidth(tp)
-		if err != nil {
-			return "", nil, err
-		}
-		var u uint64
 		switch n := v.(type) {
 		case int64:
-			u = uint64(n)
+			return "?", uint64(n), nil
 		case uint64:
-			u = n
+			return "?", n, nil
 		default:
 			return "", nil, fmt.Errorf("binlog decoded a %s column as %T, want an integer", tp, v)
 		}
-		raw := make([]byte, (bits+7)/8)
-		for i := len(raw) - 1; i >= 0; i-- {
-			raw[i] = byte(u)
-			u >>= 8
-		}
-		return "?", raw, nil
 	}
 	return "?", v, nil
 }
@@ -379,24 +368,6 @@ func baseColumnType(tp string) string {
 		return tp
 	}
 	return strings.TrimSpace(tp[:open] + " " + strings.TrimSpace(tp[closing+1:]))
-}
-
-// bitWidth reads N out of "bit(N)". A BIT column with no width is BIT(1).
-func bitWidth(tp string) (int, error) {
-	tp = strings.ToLower(strings.TrimSpace(tp))
-	open := strings.IndexByte(tp, '(')
-	closing := strings.IndexByte(tp, ')')
-	if open < 0 {
-		return 1, nil
-	}
-	if closing < open {
-		return 0, fmt.Errorf("malformed bit type %q", tp)
-	}
-	bits, err := strconv.Atoi(strings.TrimSpace(tp[open+1 : closing]))
-	if err != nil || bits < 1 || bits > 64 {
-		return 0, fmt.Errorf("malformed bit type %q", tp)
-	}
-	return bits, nil
 }
 
 // keyMatcher decides whether a binlog event's key is the row being waited for.

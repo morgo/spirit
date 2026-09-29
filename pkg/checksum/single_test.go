@@ -1014,3 +1014,81 @@ func TestChecksumCancelledMidAttempt(t *testing.T) {
 		})
 	}
 }
+
+// TestChecksumTypeConversions checks that the checksum sees through
+// value-preserving type conversions and still detects lossy ones. The target
+// is populated with INSERT ... SELECT from the source, so it holds exactly
+// what MySQL stores for the source value under the target's type (unless
+// targetValue overrides it to simulate a divergence).
+//
+// The widening cases used to fall through castableTp's default branch and fail
+// forever: an UNSIGNED DECIMAL never reached the "decimal" case (169.09 vs
+// 169.0900), and BIT(N) was cast to char, which compares the raw bytes at
+// each side's own width (0x01 vs 0x0001). The temporal cases used to be cast
+// to a bare datetime, which rounds to the second: a TIMESTAMP(6) -> TIMESTAMP
+// narrowing (which MySQL rounds without a warning) and a sub-second divergence
+// both checksummed clean.
+func TestChecksumTypeConversions(t *testing.T) {
+	for _, tc := range []struct {
+		name, srcType, tgtType, value, targetValue string
+		wantMismatch                               bool
+	}{
+		{name: "decimal_unsigned_scale", srcType: "DECIMAL(10,2) UNSIGNED", tgtType: "DECIMAL(12,4) UNSIGNED", value: "169.09"},
+		{name: "decimal_zerofill_scale", srcType: "DECIMAL(10,2) ZEROFILL", tgtType: "DECIMAL(12,4) ZEROFILL", value: "169.09"},
+		{name: "bit_width", srcType: "BIT(8)", tgtType: "BIT(16)", value: "b'00000001'"},
+		{name: "timestamp_widening", srcType: "TIMESTAMP", tgtType: "TIMESTAMP(6)", value: "'2026-01-01 10:00:00'"},
+		{name: "datetime_partial_widening", srcType: "DATETIME(3)", tgtType: "DATETIME(6)", value: "'2026-01-01 10:00:00.123'"},
+		// Narrowing with no fractional data loses nothing, so it must pass.
+		{name: "timestamp_narrowing_no_fraction", srcType: "TIMESTAMP(6)", tgtType: "TIMESTAMP", value: "'2026-01-01 10:00:00.000000'"},
+		// MySQL rounds .999999 up to 10:00:01 with no warning.
+		{name: "timestamp_narrowing_lossy", srcType: "TIMESTAMP(6)", tgtType: "TIMESTAMP", value: "'2026-01-01 10:00:00.999999'", wantMismatch: true},
+		{name: "datetime_partial_narrowing_lossy", srcType: "DATETIME(6)", tgtType: "DATETIME(3)", value: "'2026-01-01 10:00:00.123456'", wantMismatch: true},
+		{name: "datetime_subsecond_divergence", srcType: "DATETIME(6)", tgtType: "DATETIME(6)", value: "'2026-01-01 10:00:00.200000'", targetValue: "'2026-01-01 10:00:00.100000'", wantMismatch: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			src, tgt := "chkconv_"+tc.name, "_chkconv_"+tc.name+"_new"
+			testutils.RunSQL(t, "DROP TABLE IF EXISTS "+src+", "+tgt+", _"+src+"_chkpnt")
+			testutils.RunSQL(t, "CREATE TABLE "+src+" (a INT NOT NULL PRIMARY KEY, v "+tc.srcType+" NOT NULL)")
+			testutils.RunSQL(t, "CREATE TABLE "+tgt+" (a INT NOT NULL PRIMARY KEY, v "+tc.tgtType+" NOT NULL)")
+			testutils.RunSQL(t, "CREATE TABLE _"+src+"_chkpnt (a INT)") // for binlog advancement
+			testutils.RunSQL(t, "INSERT INTO "+src+" VALUES (1, "+tc.value+")")
+			if tc.targetValue != "" {
+				testutils.RunSQL(t, "INSERT INTO "+tgt+" VALUES (1, "+tc.targetValue+")")
+			} else {
+				testutils.RunSQL(t, "INSERT INTO "+tgt+" SELECT a, v FROM "+src)
+			}
+			t.Cleanup(func() {
+				testutils.RunSQL(t, "DROP TABLE IF EXISTS "+src+", "+tgt+", _"+src+"_chkpnt")
+			})
+
+			db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+			require.NoError(t, err)
+			defer utils.CloseAndLog(db)
+			t1 := table.NewTableInfo(db, "test", src)
+			require.NoError(t, t1.SetInfo(t.Context()))
+			t2 := table.NewTableInfo(db, "test", tgt)
+			require.NoError(t, t2.SetInfo(t.Context()))
+
+			cfg, err := mysql.ParseDSN(testutils.DSN())
+			require.NoError(t, err)
+			feed := change.NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), change.NewClientDefaultConfig())
+			defer feed.Close()
+			chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
+			require.NoError(t, err)
+			require.NoError(t, feed.AddSubscription(t1, t2, chunker))
+			require.NoError(t, feed.Start(t.Context()))
+			require.NoError(t, chunker.Open())
+
+			checker, err := NewChecker([]*sql.DB{db}, chunker, []change.Source{feed}, newTestCheckerConfig(t, db))
+			require.NoError(t, err)
+			single, ok := checker.(*SingleChecker)
+			require.True(t, ok)
+			err = single.runChecksum(t.Context())
+			if tc.wantMismatch {
+				require.ErrorContains(t, err, "checksum mismatch")
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}

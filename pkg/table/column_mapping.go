@@ -120,25 +120,30 @@ const checksumSeparator = ", '#', "
 // ChecksumExprs returns two checksum column expressions (argument lists for
 // CONCAT()) for source and target, wrapping each column in IFNULL(), ISNULL()
 // and CAST, with a '#' separator literal between every value (see
-// checksumSeparator). The CAST type always comes from the target table's type
-// definition, but the cast itself is side-dependent for JSON columns (see
-// castExpr), so the two expressions can differ even without renames.
+// checksumSeparator). Both sides are cast to the same type, which comes from
+// the target table's type definition, widened for DATETIME/TIMESTAMP to the
+// source's fractional-second precision (see checksumCastTp). The cast itself
+// is side-dependent for JSON columns (see castExpr), so the two expressions
+// can differ even without renames.
 func (m *ColumnMapping) ChecksumExprs() (source, target string, err error) {
 	sourceExprs := make([]string, len(m.sourceColumns))
 	targetExprs := make([]string, len(m.targetColumns))
 	for i := range m.sourceColumns {
-		// CAST type comes from the target table for both source and target
-		// so that type conversions (e.g. INT→BIGINT) are applied consistently.
-		// For source: SQL references the old column name, type from target's new column name.
-		// For target: both SQL reference and type lookup use the new column name.
-		srcCast, err := m.targetTable.wrapCastTypeAs(m.sourceColumns[i], m.targetColumns[i], castSource)
+		// The CAST type is shared by both sides so that type conversions
+		// (e.g. INT→BIGINT) are applied consistently. The source SQL
+		// references the old column name; each type is looked up in its own
+		// table under that table's column name.
+		srcTp, err := m.sourceTable.columnMySQLTp(m.sourceColumns[i])
 		if err != nil {
 			return "", "", err
 		}
-		tgtCast, err := m.targetTable.wrapCastType(m.targetColumns[i], castTarget)
+		tgtTp, err := m.targetTable.columnMySQLTp(m.targetColumns[i])
 		if err != nil {
 			return "", "", err
 		}
+		castTp := checksumCastTp(srcTp, tgtTp)
+		srcCast := castExpr(m.sourceColumns[i], castTp, castSource)
+		tgtCast := castExpr(m.targetColumns[i], castTp, castTarget)
 		sourceExprs[i] = "IFNULL(" + srcCast + ",'')" + checksumSeparator + "ISNULL(`" + m.sourceColumns[i] + "`)"
 		targetExprs[i] = "IFNULL(" + tgtCast + ",'')" + checksumSeparator + "ISNULL(`" + m.targetColumns[i] + "`)"
 	}

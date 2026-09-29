@@ -45,6 +45,15 @@ func castableTp(tp string) string {
 	case "tinyint unsigned", "smallint unsigned", "mediumint unsigned", "int unsigned", "bigint unsigned":
 		return "unsigned"
 	case "timestamp", "datetime":
+		// The fractional-second precision must be kept: CAST(… AS datetime)
+		// rounds to the second, which would make any sub-second divergence
+		// invisible. Precision here is the column's own; for a source/target
+		// pair checksumCastTp widens it to the larger of the two, so that a
+		// TIMESTAMP(6) -> TIMESTAMP narrowing (rounded by MySQL without a
+		// warning) is detected rather than rounded identically on both sides.
+		if fsp := temporalFsp(tp); fsp > 0 {
+			return fmt.Sprintf("datetime(%d)", fsp)
+		}
 		return "datetime"
 	case "tinyblob", "blob", "mediumblob", "longblob", "varbinary":
 		return "binary"
@@ -75,14 +84,74 @@ func castableTp(tp string) string {
 		// castExpr casts json differently depending on which side of the
 		// comparison it is building; see the comment there.
 		return "json"
-	case "decimal":
-		return tp
+	case "decimal", "decimal unsigned":
+		// The scale must be kept so that a DECIMAL(10,2) -> DECIMAL(12,4)
+		// widening renders 169.0900 on both sides. CAST accepts decimal(M,D)
+		// but rejects an UNSIGNED modifier (error 1064), and ZEROFILL (which
+		// implies UNSIGNED) is not a cast type at all, so both are dropped.
+		// An unsigned value always fits the signed decimal of the same M,D.
+		return strings.TrimSuffix(removeZerofill(tp), " unsigned")
+	case "bit":
+		// CAST(bit AS char) returns the stored bytes at the column's own
+		// width, so a BIT(8) -> BIT(16) widening would compare 0x01 against
+		// 0x0001. Casting to unsigned compares the value, independent of
+		// width; BIT(64) is the maximum and fits in an unsigned bigint.
+		return "unsigned"
 	default:
 		// For cases like varchar, enum, set, text, mediumtext, longtext
 		// We return char, but because the new table could also change charset we explicitly
 		// convert to utf8mb4 which should be the superset, and can do all comparisons.
 		return "char CHARACTER SET utf8mb4"
 	}
+}
+
+// checksumCastTp returns the type the checksum casts a column to, given the
+// source and target column types. The cast type comes from the target (see
+// ColumnMapping.ChecksumExprs) with one exception: DATETIME/TIMESTAMP are
+// cast to the wider of the two columns' fractional-second precisions.
+//
+// The wider precision is the only choice that is correct in all cases:
+//
+//   - Widening (TIMESTAMP -> TIMESTAMP(6)): both sides render the same
+//     instant at (6), the source padded with .000000, so a perfect copy
+//     checksums clean.
+//   - Narrowing (TIMESTAMP(6) -> TIMESTAMP): MySQL rounds .999999 up to the
+//     next second on write without a warning, so the copy cannot catch it.
+//     Casting to (6) compares the source's fraction against the target's
+//     rounded value and reports the loss. Casting both sides to the narrower
+//     precision would round them identically and hide it.
+//   - Same precision: the cast is the column's own, so sub-second
+//     divergence is visible.
+//
+// The source type only widens a temporal target cast when the source is
+// itself DATETIME/TIMESTAMP; for any other source type (e.g. VARCHAR ->
+// DATETIME) the target's own cast is used, as before.
+func checksumCastTp(sourceTp, targetTp string) string {
+	castTp := castableTp(targetTp)
+	if !isDatetimeOrTimestamp(targetTp) || !isDatetimeOrTimestamp(sourceTp) {
+		return castTp
+	}
+	if srcFsp := temporalFsp(sourceTp); srcFsp > temporalFsp(targetTp) {
+		return fmt.Sprintf("datetime(%d)", srcFsp)
+	}
+	return castTp
+}
+
+// isDatetimeOrTimestamp reports whether tp (an information_schema
+// column_type, e.g. "timestamp(6)") is a DATETIME or TIMESTAMP column.
+func isDatetimeOrTimestamp(tp string) bool {
+	base := removeWidth(tp)
+	return base == "datetime" || base == "timestamp"
+}
+
+// temporalFsp returns the fractional-second precision declared in tp, e.g. 6
+// for "datetime(6)". It returns 0 when tp declares none.
+func temporalFsp(tp string) int {
+	m := fspRegex.FindStringSubmatch(tp)
+	if m == nil {
+		return 0
+	}
+	return int(m[1][0] - '0')
 }
 
 // castSide identifies which side of a source/target comparison a cast
@@ -97,7 +166,7 @@ const (
 
 // castExpr builds the CAST expression that the checksum uses for a single
 // column (see ColumnMapping.ChecksumExprs). col is the column referenced in
-// SQL (escaped here); tp is the MySQL column type the cast is derived from;
+// SQL (escaped here); castTp is the resolved cast type (see checksumCastTp);
 // side says whether the expression reads the source or the target table.
 //
 // JSON columns are checksummed asymmetrically:
@@ -148,9 +217,8 @@ const (
 // applier for the target to re-parse, which is one round-trip exactly. See the
 // Recopier implementations in pkg/checksum, which explain why they must not
 // add a round-trip cast on top of that.
-func castExpr(col, tp string, side castSide) string {
+func castExpr(col, castTp string, side castSide) string {
 	quotedCol := sqlescape.EscapeIdentifier(col)
-	castTp := castableTp(tp)
 	if castTp == "json" {
 		if side == castSource {
 			return textRoundTripCast(quotedCol)
@@ -175,6 +243,9 @@ func textRoundTripCast(quotedCol string) string {
 var (
 	widthRegex        = regexp.MustCompile(`\([0-9]+\)`)
 	decimalWidthRegex = regexp.MustCompile(`\([0-9]+,[0-9]+\)`)
+	// fspRegex matches the fractional-second precision of a DATETIME or
+	// TIMESTAMP column type. MySQL limits it to 0-6, so it is one digit.
+	fspRegex = regexp.MustCompile(`^(?:datetime|timestamp)\(([0-6])\)`)
 )
 
 func removeWidth(s string) string {

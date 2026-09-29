@@ -41,7 +41,11 @@ func TestCastableTp(t *testing.T) {
 		{"int unsigned", "unsigned"},
 		{"bigint unsigned", "unsigned"},
 		{"timestamp", "datetime"},
-		{"timestamp(6)", "datetime"},
+		// DATETIME/TIMESTAMP keep their fractional-second precision:
+		// CAST(… AS datetime) rounds to the second, hiding sub-second
+		// divergence (see checksumCastTp for the source/target widening).
+		{"timestamp(6)", "datetime(6)"},
+		{"timestamp(3)", "datetime(3)"},
 		{"varchar(100)", "char CHARACTER SET utf8mb4"},
 		{"text", "char CHARACTER SET utf8mb4"},
 		{"mediumtext", "char CHARACTER SET utf8mb4"},
@@ -60,7 +64,8 @@ func TestCastableTp(t *testing.T) {
 		{"binary(16)", "binary(16)"},
 		{"binary(1)", "binary(1)"},
 		{"datetime", "datetime"},
-		{"datetime(6)", "datetime"},
+		{"datetime(6)", "datetime(6)"},
+		{"datetime(1)", "datetime(1)"},
 		{"year", "char CHARACTER SET utf8mb4"},
 		{"float", "char"},
 		{"double", "char"},
@@ -72,6 +77,16 @@ func TestCastableTp(t *testing.T) {
 		{"enum('a', 'b', 'c')", "char CHARACTER SET utf8mb4"},
 		{"set('a', 'b', 'c')", "char CHARACTER SET utf8mb4"},
 		{"decimal(6,2)", "decimal(6,2)"},
+		// CAST rejects decimal(M,D) UNSIGNED (1064), but the scale must be
+		// kept so a scale widening does not compare 169.09 with 169.0900.
+		// ZEROFILL implies UNSIGNED, so it is reported with both.
+		{"decimal(12,4) unsigned", "decimal(12,4)"},
+		{"decimal(12,4) unsigned zerofill", "decimal(12,4)"},
+		// CAST(bit AS char) returns the raw bytes at the column's own width,
+		// so BIT(8) -> BIT(16) would compare 0x01 with 0x0001.
+		{"bit(1)", "unsigned"},
+		{"bit(8)", "unsigned"},
+		{"bit(64)", "unsigned"},
 		// VECTOR (MySQL 9.7+) has no char cast at all — the server rejects
 		// CAST(v AS char) with ER_WRONG_ARGUMENTS, which would fail the
 		// checksum query for any table holding one. Binary is exact, and
@@ -91,14 +106,47 @@ func TestCastExpr(t *testing.T) {
 	// the source side is normalized through a text round-trip — predicting
 	// the text-degraded form the copier/applier writes — while the target
 	// side renders the stored document strictly, so it is never re-parsed.
-	// Everything else is a single CAST to castableTp on both sides.
+	// Everything else is a single CAST to the resolved type on both sides.
 	require.Equal(t, "CAST(CAST(`j` AS char CHARACTER SET utf8mb4) AS json)", castExpr("j", "json", castSource))
 	require.Equal(t, "CAST(`j` AS json)", castExpr("j", "json", castTarget))
-	require.Equal(t, "CAST(`id` AS signed)", castExpr("id", "int(11)", castSource))
-	require.Equal(t, "CAST(`id` AS signed)", castExpr("id", "int(11)", castTarget))
-	require.Equal(t, "CAST(`name` AS char CHARACTER SET utf8mb4)", castExpr("name", "varchar(100)", castSource))
+	require.Equal(t, "CAST(`id` AS signed)", castExpr("id", "signed", castSource))
+	require.Equal(t, "CAST(`id` AS signed)", castExpr("id", "signed", castTarget))
+	require.Equal(t, "CAST(`name` AS char CHARACTER SET utf8mb4)", castExpr("name", "char CHARACTER SET utf8mb4", castSource))
 	require.Equal(t, "CAST(`b` AS binary(16))", castExpr("b", "binary(16)", castTarget))
 	require.Equal(t, "CAST(`d` AS decimal(6,2))", castExpr("d", "decimal(6,2)", castSource))
+	require.Equal(t, "CAST(`ts` AS datetime(6))", castExpr("ts", "datetime(6)", castTarget))
+}
+
+func TestChecksumCastTp(t *testing.T) {
+	for _, tc := range []struct {
+		sourceTp, targetTp, expected string
+	}{
+		// DATETIME/TIMESTAMP cast to the wider of the two precisions.
+		{"timestamp", "timestamp(6)", "datetime(6)"},    // widening
+		{"timestamp(6)", "timestamp", "datetime(6)"},    // narrowing: must detect the lost fraction
+		{"datetime(6)", "datetime(3)", "datetime(6)"},   // partial narrowing
+		{"datetime(3)", "datetime(6)", "datetime(6)"},   // partial widening
+		{"timestamp(6)", "timestamp(6)", "datetime(6)"}, // same precision
+		{"timestamp", "timestamp", "datetime"},          // no precision on either side
+		{"timestamp(6)", "datetime", "datetime(6)"},     // cross-type
+		{"datetime(4)", "timestamp(2)", "datetime(4)"},  // cross-type
+		// Only a temporal source widens a temporal target cast; any other
+		// source keeps the target's own cast.
+		{"varchar(100)", "datetime", "datetime"},
+		{"varchar(100)", "datetime(3)", "datetime(3)"},
+		{"date", "datetime", "datetime"},
+		{"time(6)", "datetime", "datetime"},
+		// A temporal source never changes a non-temporal target cast.
+		{"datetime(6)", "varchar(100)", "char CHARACTER SET utf8mb4"},
+		{"timestamp(6)", "date", "char CHARACTER SET utf8mb4"},
+		// Everything else is castableTp of the target.
+		{"int", "bigint", "signed"},
+		{"decimal(10,2) unsigned", "decimal(12,4) unsigned", "decimal(12,4)"},
+		{"bit(8)", "bit(16)", "unsigned"},
+		{"binary(50)", "binary(100)", "binary(100)"},
+	} {
+		require.Equal(t, tc.expected, checksumCastTp(tc.sourceTp, tc.targetTp), "source: %s, target: %s", tc.sourceTp, tc.targetTp)
+	}
 }
 
 func TestQuoteCols(t *testing.T) {
