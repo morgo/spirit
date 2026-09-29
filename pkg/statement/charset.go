@@ -105,7 +105,7 @@ func normalizeCollationName(collation string) string {
 // linter does not.
 func (c *Column) determinedCharsetCollation(table *CreateTable) (cs, collation string) {
 	cs, collation = resolvedCharsetCollation(c, table)
-	cs = normalizeCharsetName(cs)
+	cs = NormalizeCharsetName(cs)
 	if collation != "" {
 		return cs, normalizeCollationName(collation)
 	}
