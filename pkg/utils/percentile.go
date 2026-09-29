@@ -8,7 +8,9 @@ import (
 // Percentile returns the p-th percentile (0 < p <= 100) of values, which may
 // be in any order. It uses the nearest-rank method: the smallest value with at
 // least p% of the samples at or below it, i.e. sorted[ceil(n*p/100) - 1]. It
-// returns the zero value for an empty slice.
+// returns the zero value for an empty slice. A p outside (0, 100] is clamped:
+// p <= 0 returns the smallest value and p > 100 the largest, so a bad p
+// cannot panic.
 //
 // values is not modified: Percentile sorts a copy, so callers can pass a live
 // history (such as a ring buffer) without it being reordered. The rank is

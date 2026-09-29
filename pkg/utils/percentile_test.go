@@ -42,9 +42,15 @@ func TestPercentileRankIndex(t *testing.T) {
 		{10, 50, 4}, {10, 90, 8},
 		{100, 50, 49}, {100, 90, 89},
 		{7, 50, 3}, {7, 90, 6},
-		// n*p/100 below 1 must still name a real sample rather than underflowing.
+		// The smallest and largest in-contract p name the first and last sample.
 		{5, 1, 0},
 		{5, 100, 4},
+		// Out-of-contract p is clamped rather than indexing out of range:
+		// p <= 0 rounds to rank 0 (pins the max(rank, 1) guard) and p > 100
+		// to a rank past the end (pins the min(rank, n) guard).
+		{5, 0, 0},
+		{5, -10, 0},
+		{5, 150, 4},
 	} {
 		sorted := make([]uint64, c.n)
 		for i := range sorted {
