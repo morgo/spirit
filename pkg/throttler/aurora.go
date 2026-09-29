@@ -63,6 +63,19 @@ type AuroraSetup struct {
 type AuroraResult struct {
 	Throttlers []Throttler
 	MonitorDB  *sql.DB
+
+	// ProbeErr is the IsAurora probe's error, when it failed. Throttlers is
+	// then empty. Build treats a failed probe as "not Aurora" so throttling
+	// stays quiet on community MySQL, but an autoscaling caller wants to warn:
+	// it was asked to scale and cannot tell whether it should.
+	ProbeErr error
+
+	// RedoAware reports whether the threads throttler runs the redo-aware
+	// perf_schema signal rather than the Threads_running fallback. That signal
+	// ignores redo-log waiters, so it cannot see write threads oversubscribing
+	// the log; ResolveMaxWriteThreads takes it to decide whether growth needs
+	// the commit-latency backstop. False when Throttlers is empty.
+	RedoAware bool
 }
 
 // Build probes the source for Aurora and assembles the Aurora throttlers.
@@ -78,11 +91,15 @@ type AuroraResult struct {
 //   - Threads_running from global_status otherwise — the more conservative
 //     fallback, which needs no grant beyond what IsAurora already exercised.
 //
-// Returns a zero AuroraResult (nil throttlers, nil monitor DB, nil error) when
-// the source is not Aurora — either the IsAurora probe failed (non-Aurora
-// source, or perf_schema not readable; logged at Debug so the common case
-// stays quiet) or it returned false. In those cases the monitor pool is never
-// opened.
+// Returns an AuroraResult with no throttlers, a nil monitor DB, and a nil
+// error when the source is not Aurora, and the monitor pool is never opened.
+// That covers two cases:
+//   - the IsAurora probe returned false: the result is zero;
+//   - the probe failed (non-Aurora source, or perf_schema not readable;
+//     logged at Debug so the common case stays quiet): the result is zero
+//     except ProbeErr, which holds the probe's error. Callers that only
+//     throttle can ignore it; callers that were asked to autoscale should
+//     warn, since they cannot tell whether the source is Aurora.
 //
 // Returns a non-nil error only for setup failures the caller almost
 // certainly wants to surface: nil required fields, OpenMonitor failing, or
@@ -107,7 +124,7 @@ func (s AuroraSetup) Build(ctx context.Context) (AuroraResult, error) {
 		// Non-Aurora MySQL with locked-down perf_schema lands here too;
 		// keep it at Debug so the common case isn't noisy.
 		s.Logger.Debug("Aurora probe failed, skipping Aurora throttlers", "error", err)
-		return AuroraResult{}, nil
+		return AuroraResult{ProbeErr: err}, nil
 	case !isAurora:
 		return AuroraResult{}, nil
 	}
@@ -147,7 +164,7 @@ func (s AuroraSetup) Build(ctx context.Context) (AuroraResult, error) {
 	}
 	throttlers = append(throttlers, tr)
 
-	return AuroraResult{Throttlers: throttlers, MonitorDB: monitorDB}, nil
+	return AuroraResult{Throttlers: throttlers, MonitorDB: monitorDB, RedoAware: mode == redoAwareMode}, nil
 }
 
 // selectThreadsMode picks the redo-aware signal when the user can read the

@@ -39,6 +39,10 @@ func TestAuroraSetup_NonAuroraReturnsEmpty(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, res.Throttlers)
 	require.Nil(t, res.MonitorDB)
+	// A clean "not Aurora" answer is not a probe failure: autoscaling callers
+	// warn on ProbeErr and stay quiet here.
+	require.NoError(t, res.ProbeErr)
+	require.False(t, res.RedoAware)
 	require.False(t, openCalled, "OpenMonitor must not be called on a non-Aurora source")
 }
 
@@ -110,5 +114,7 @@ func TestAuroraSetup_IsAuroraProbeFailureIsNonFatal(t *testing.T) {
 	require.NoError(t, err, "probe failure should be non-fatal")
 	require.Nil(t, res.Throttlers)
 	require.Nil(t, res.MonitorDB)
+	// Reported rather than swallowed, so an autoscaling caller can warn.
+	require.ErrorContains(t, res.ProbeErr, "database is closed")
 	require.False(t, openCalled, "OpenMonitor must not be called when the probe fails")
 }

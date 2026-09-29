@@ -46,6 +46,11 @@ type Sync struct {
 	// from the Aurora target and adapts it to target load throughout the sync.
 	EnableExperimentalAutoscaling bool `name:"enable-experimental-autoscaling" help:"EXPERIMENTAL: scale copy, write and checksum concurrency using Aurora target load. Overrides --threads and --write-threads when the target qualifies." default:"false"`
 
+	// MaxCommitLatency throttles when the target's average commit latency
+	// exceeds this threshold. Same semantics as migrate's --max-commit-latency:
+	// auto-enabled only on Aurora targets, and zero disables it. See issue #468.
+	MaxCommitLatency time.Duration `name:"max-commit-latency" help:"Throttle when the target's average commit latency exceeds this threshold (currently only auto-enabled on Aurora)" optional:"" default:"100ms"`
+
 	// MaxConnections limits each SQL pool; worker counts do not expand it.
 	MaxConnections int    `name:"max-connections" help:"Size of each source and target SQL connection pool. Workers share the pool and contend for connections." default:"128"`
 	SourceDSN      string `name:"source-dsn" help:"Where to sync the tables from." default:"spirit:spirit@tcp(127.0.0.1:3306)/src"`
