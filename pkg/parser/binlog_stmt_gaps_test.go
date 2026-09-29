@@ -1197,6 +1197,31 @@ func TestCastNChar(t *testing.T) {
 	RunTest(t, table, false)
 }
 
+// TestColumnNChar covers NCHAR/NVARCHAR column types and their NATIONAL
+// aliases, which, like the CAST form, always use the national character set.
+// MySQL accepts only the BINARY modifier after them: an explicit character
+// set (or ASCII/UNICODE/BYTE) is a syntax error (1064).
+func TestColumnNChar(t *testing.T) {
+	table := []testCase{
+		{"CREATE TABLE t (a NCHAR(3))", true, "CREATE TABLE `t` (`a` CHAR(3) CHARACTER SET UTF8)"},
+		{"CREATE TABLE t (a NCHAR)", true, "CREATE TABLE `t` (`a` CHAR CHARACTER SET UTF8)"},
+		{"CREATE TABLE t (a NATIONAL CHARACTER(3))", true, "CREATE TABLE `t` (`a` CHAR(3) CHARACTER SET UTF8)"},
+		{"CREATE TABLE t (a NVARCHAR(3))", true, "CREATE TABLE `t` (`a` VARCHAR(3) CHARACTER SET UTF8)"},
+		{"CREATE TABLE t (a NCHAR VARYING(3))", true, "CREATE TABLE `t` (`a` VARCHAR(3) CHARACTER SET UTF8)"},
+		{"CREATE TABLE t (a NATIONAL VARCHAR(3) COLLATE utf8mb3_bin)", true, "CREATE TABLE `t` (`a` VARCHAR(3) CHARACTER SET UTF8 COLLATE utf8_bin)"},
+		{"CREATE TABLE t (a NCHAR(3) BINARY)", true, "CREATE TABLE `t` (`a` CHAR(3) BINARY CHARACTER SET UTF8)"},
+		{"CREATE TABLE t (a NCHAR BINARY)", true, "CREATE TABLE `t` (`a` CHAR BINARY CHARACTER SET UTF8)"},
+		{"CREATE TABLE t (a NVARCHAR(3) BINARY)", true, "CREATE TABLE `t` (`a` VARCHAR(3) BINARY CHARACTER SET UTF8)"},
+		{"CREATE TABLE t (a NCHAR(3) CHARACTER SET latin1)", false, ""},
+		{"CREATE TABLE t (a NCHAR CHARSET utf8mb4)", false, ""},
+		{"CREATE TABLE t (a NVARCHAR(3) CHARACTER SET latin1)", false, ""},
+		{"CREATE TABLE t (a NCHAR(3) ASCII)", false, ""},
+		{"CREATE TABLE t (a NCHAR(3) UNICODE)", false, ""},
+		{"CREATE TABLE t (a NCHAR(3) BYTE)", false, ""},
+	}
+	RunTest(t, table, false)
+}
+
 // TestStructuredSystemVariable covers @@scope.instance.component system
 // variables whose component after the dot is quoted separately; the fully
 // unquoted spelling lexes as a single token and restores identically.

@@ -892,3 +892,50 @@ func TestDiffIntegrationPrimaryKeyImplicitNotNull(t *testing.T) {
 		})
 	}
 }
+
+// TestDiffIntegrationNationalCharset verifies that NCHAR/NVARCHAR columns,
+// which always use the national character set (utf8mb3), diff to nothing
+// against the table MySQL creates from the same definition, in both a
+// utf8mb4 and a utf8mb3 table. A utf8mb3 table default and an explicit
+// utf8mb3 column must also still match a live column that inherits it.
+func TestDiffIntegrationNationalCharset(t *testing.T) {
+	for _, tc := range []struct{ name, ddl string }{
+		{"diff_nchar_mb4", "CREATE TABLE diff_nchar_mb4 (id int NOT NULL, a NVARCHAR(10), b NCHAR(3), c NCHAR, d NATIONAL VARCHAR(5) BINARY, e NCHAR VARYING(4) COLLATE utf8mb3_bin, PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci"},
+		{"diff_nchar_mb3", "CREATE TABLE diff_nchar_mb3 (id int NOT NULL, a NVARCHAR(10), b NCHAR(3) BINARY, c varchar(3) CHARACTER SET utf8mb3, d varchar(3), PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb3"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tt := testutils.NewTestTable(t, tc.name, tc.ddl)
+			desired, err := ParseCreateTable(tc.ddl)
+			require.NoError(t, err)
+			live, err := ParseCreateTable(showCreateTable(t, tt.DB, tt.Name))
+			require.NoError(t, err)
+			stmts, err := live.Diff(desired, nil)
+			require.NoError(t, err)
+			require.Nil(t, stmts, "national charset columns must match their live form")
+		})
+	}
+}
+
+// TestDiffIntegrationNationalCharsetConverges verifies that converting a
+// utf8mb4 column to NVARCHAR emits a MODIFY that MySQL applies, after which a
+// re-diff converges to nil.
+func TestDiffIntegrationNationalCharsetConverges(t *testing.T) {
+	tt := testutils.NewTestTable(t, "diff_nchar_converge",
+		"CREATE TABLE diff_nchar_converge (id int NOT NULL, a varchar(10), PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci")
+	desired, err := ParseCreateTable(
+		"CREATE TABLE diff_nchar_converge (id int NOT NULL, a NVARCHAR(10), PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci")
+	require.NoError(t, err)
+
+	live, err := ParseCreateTable(showCreateTable(t, tt.DB, tt.Name))
+	require.NoError(t, err)
+	stmts, err := live.Diff(desired, nil)
+	require.NoError(t, err)
+	require.Len(t, stmts, 1)
+	testutils.RunSQL(t, stmts[0].Statement)
+
+	live, err = ParseCreateTable(showCreateTable(t, tt.DB, tt.Name))
+	require.NoError(t, err)
+	stmts, err = live.Diff(desired, nil)
+	require.NoError(t, err)
+	require.Nil(t, stmts, "re-diff after applying the MODIFY must converge")
+}
