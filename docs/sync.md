@@ -67,7 +67,9 @@ runs without a change stream.
 for Aurora targets with at least four vCPUs. Eligible targets override
 `--threads` and `--write-threads`; other targets retain those configured counts.
 The target's load and commit latency are sampled through a separate two-connection
-monitor pool. Source load is not measured.
+monitor pool. That monitoring, and the throttling it drives, runs without this
+flag too (see [max-commit-latency](#max-commit-latency)); the flag only adds
+thread-count scaling on top of it. Source load is not measured.
 
 During the initial copy, the shared copier controller adjusts read and write
 workers using target load and the applier queue. After copying, the continuous
@@ -99,6 +101,8 @@ observe its load but do not share a single worker budget.
 - [threads](#threads)
 - [write-threads](#write-threads)
 - [flush-interval](#flush-interval)
+- [max-commit-latency](#max-commit-latency)
+- [max-connections](#max-connections)
 - [defer-secondary-indexes](#defer-secondary-indexes)
 - [force](#force)
 
@@ -150,6 +154,21 @@ How many concurrent write threads to use on the target.
 
 How often buffered changes are applied to the target during continuous sync —
 the replication-latency vs. batching trade-off.
+
+### max-commit-latency
+
+- Type: Duration
+- Default value: `100ms`
+
+Throttles the sync when the Aurora target's average commit latency exceeds this threshold, as [migrate's max-commit-latency](migrate.md#max-commit-latency) does for its source. The target is monitored whether or not [autoscaling](#autoscaling) is enabled, alongside the Aurora threads throttler: the initial copy pauses and replication flushes narrow while it is overloaded. A target that is not Aurora, a target whose Aurora probe fails (for example, `performance_schema` is not readable), and a custom applier that writes somewhere other than the target are not monitored. A failed probe is logged at debug level only, as in `migrate`, unless autoscaling is enabled, which warns.
+
+The default of `100ms` is intentionally a high upper bound, so it trims only the most extreme tail latencies. Setting `--max-commit-latency=0` disables it, as in `migrate`. That also removes the backstop autoscaling needs to grow write threads above their starting count while the target runs the redo-aware threads signal; in that combination the pool can shed threads but not grow. In the Go API the zero value is also "disabled", so a programmatic caller must set the field to keep the backstop.
+
+### max-connections
+
+`--max-connections` sets the fixed size of each source and target SQL pool (default `128`, matching `migrate` and `move`). With autoscaling disabled, worker counts may exceed the budget and wait for connections. Autoscaling partitions the target pool between checksum reads and repair writes, reserving the derived replication flush width plus six connections for checkpoints and metadata. Pools too small for that reservation keep configured concurrency. It also applies to a supplied target handle; additional connections owned by a custom applier are outside this limit. Zero in the Go API selects the default; negative values are rejected.
+
+Sync’s continuous checker uses ordinary reads rather than pinned snapshot pools, and sync has no cutover. It therefore does not require move’s checksum/cutover headroom or lower configured read concurrency to fit that headroom.
 
 ### defer-secondary-indexes
 
@@ -223,12 +242,6 @@ File+offset checkpoints also record the source's `@@server_uuid`. Resume refuses
 coordinates from a different server or an older checkpoint without identity;
 use `--force` to discard the partial copy and start fresh. GTID checkpoints
 remain portable across servers, subject to the normal GTID resume checks.
-
-### max-connections
-
-`--max-connections` sets the fixed size of each source and target SQL pool (default `128`, matching `migrate` and `move`). With autoscaling disabled, worker counts may exceed the budget and wait for connections. Autoscaling partitions the target pool between checksum reads and repair writes, reserving the derived replication flush width plus six connections for checkpoints and metadata. Pools too small for that reservation keep configured concurrency. It also applies to a supplied target handle; additional connections owned by a custom applier are outside this limit. Zero in the Go API selects the default; negative values are rejected.
-
-Sync’s continuous checker uses ordinary reads rather than pinned snapshot pools, and sync has no cutover. It therefore does not require move’s checksum/cutover headroom or lower configured read concurrency to fit that headroom.
 
 ## Verification of hot ranges
 
