@@ -808,11 +808,6 @@ func (a *ShardedApplier) DeleteKeys(ctx context.Context, sourceTable, targetTabl
 	if err != nil {
 		return 0, err
 	}
-	// Create a context with timeout for the entire operation
-	// This prevents hanging indefinitely if shards are unresponsive
-	ctx, cancel := context.WithTimeout(ctx, chunkTaskTimeout)
-	defer cancel()
-
 	// Render the key tuples into the IN(...) element list via table.Datum,
 	// the same type-aware path UpsertRows uses (see deleteKeysInClause).
 	inClause, err := deleteKeysInClause(sourceTable, keys)
@@ -927,10 +922,6 @@ func (a *ShardedApplier) UpsertRows(ctx context.Context, mapping *table.ColumnMa
 	if err != nil {
 		return 0, err
 	}
-
-	// Create a context with timeout for the entire operation
-	ctx, cancel := context.WithTimeout(ctx, chunkTaskTimeout)
-	defer cancel()
 
 	sourceTable := mapping.SourceTable()
 	if sourceTable.ShardingColumn == "" {

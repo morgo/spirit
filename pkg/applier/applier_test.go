@@ -1,11 +1,18 @@
 package applier
 
 import (
+	"context"
+	"database/sql"
 	"math"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/block/mysql"
+	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/table"
+	"github.com/block/spirit/pkg/testutils"
+	"github.com/block/spirit/pkg/utils"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -483,5 +490,116 @@ func TestEstimateRowSizeUnderestimateStaysSafe(t *testing.T) {
 	// which would let splitRowsIntoChunklets build an unbounded statement.
 	for _, v := range worst {
 		assert.Positive(t, estimateValueSize(v), "value %v estimated non-positively", v)
+	}
+}
+
+// TestApplierTimeoutScope pins which writes chunkTaskTimeout bounds, for both
+// appliers. Every write blocks on a row lock held by another transaction.
+//
+//   - Apply (the copy path) must end with context.DeadlineExceeded.
+//   - DeleteKeys and UpsertRows (the change feed's flushes) must not: they must
+//     wait out innodb_lock_wait_timeout and fail with 1205, because pkg/change
+//     defers a contended batch only when it sees a lock-contention error. A
+//     spirit-owned deadline there would fail the whole drain instead.
+func TestApplierTimeoutScope(t *testing.T) {
+	defer func(d time.Duration) { chunkTaskTimeout = d }(chunkTaskTimeout)
+	chunkTaskTimeout = 500 * time.Millisecond
+
+	tt := testutils.NewTestTable(t, "applier_timeout_scope",
+		`CREATE TABLE applier_timeout_scope (id INT PRIMARY KEY, name VARCHAR(100))`)
+	ctx := t.Context()
+	_, err := tt.DB.ExecContext(ctx, "INSERT INTO applier_timeout_scope VALUES (1, 'Alice')")
+	require.NoError(t, err)
+	tbl := table.NewTableInfo(tt.DB, "test", "applier_timeout_scope")
+	require.NoError(t, tbl.SetInfo(ctx))
+	// Sharded routing needs these; the single-target applier ignores them.
+	tbl.ShardingColumn = "id"
+	tbl.HashFunc = testutils.EvenOddHasher
+	mapping := table.NewColumnMapping(tbl, tbl, nil)
+
+	// The appliers write through a 1s innodb_lock_wait_timeout, so lock
+	// contention surfaces as 1205 after RetryableTransaction's few attempts.
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	if cfg.Params == nil {
+		cfg.Params = map[string]string{}
+	}
+	cfg.Params["innodb_lock_wait_timeout"] = "1"
+	targetDB, err := sql.Open("block-mysql", cfg.FormatDSN())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(targetDB)
+
+	// Hold an exclusive lock on id=1 for the duration of the test.
+	blocker, err := tt.DB.BeginTx(ctx, nil)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, blocker.Rollback()) }()
+	_, err = blocker.ExecContext(ctx, "SELECT * FROM applier_timeout_scope WHERE id = 1 FOR UPDATE")
+	require.NoError(t, err)
+
+	// within runs write and returns its error, failing the test if it takes
+	// longer than bound. The bound stops a regression from hanging the test.
+	within := func(t *testing.T, bound time.Duration, write func() error) error {
+		t.Helper()
+		done := make(chan error, 1)
+		go func() { done <- write() }()
+		select {
+		case err := <-done:
+			return err
+		case <-time.After(bound):
+			t.Fatalf("write did not return within %s", bound)
+			return nil
+		}
+	}
+
+	appliers := []struct {
+		name string
+		new  func() (Applier, error)
+	}{
+		{"single", func() (Applier, error) {
+			return NewSingleTargetApplier(Target{DB: targetDB}, NewApplierDefaultConfig())
+		}},
+		{"sharded", func() (Applier, error) {
+			return NewShardedApplier([]Target{{DB: targetDB, KeyRange: "-"}}, NewApplierDefaultConfig())
+		}},
+	}
+	for _, tc := range appliers {
+		t.Run(tc.name, func(t *testing.T) {
+			applier, err := tc.new()
+			require.NoError(t, err)
+			require.NoError(t, applier.Start(ctx))
+			defer func() { require.NoError(t, applier.Stop()) }()
+
+			t.Run("Apply is bounded", func(t *testing.T) {
+				chunk := &table.Chunk{Table: tbl, NewTable: tbl, ColumnMapping: mapping}
+				err := within(t, 10*time.Second, func() error {
+					callbackErr := make(chan error, 1)
+					if err := applier.Apply(ctx, chunk, [][]any{{int64(1), "Bob"}}, func(_ int64, err error) {
+						callbackErr <- err
+					}); err != nil {
+						return err
+					}
+					return <-callbackErr
+				})
+				require.ErrorIs(t, err, context.DeadlineExceeded)
+			})
+
+			t.Run("UpsertRows is not bounded", func(t *testing.T) {
+				err := within(t, 30*time.Second, func() error {
+					_, err := applier.UpsertRows(ctx, mapping, []LogicalRow{{RowImage: []any{int64(1), "Bob"}}}, nil)
+					return err
+				})
+				require.NotErrorIs(t, err, context.DeadlineExceeded)
+				require.True(t, dbconn.IsLockContentionError(err), "want lock contention (1205), got: %v", err)
+			})
+
+			t.Run("DeleteKeys is not bounded", func(t *testing.T) {
+				err := within(t, 30*time.Second, func() error {
+					_, err := applier.DeleteKeys(ctx, tbl, tbl, [][]any{{int64(1)}}, nil)
+					return err
+				})
+				require.NotErrorIs(t, err, context.DeadlineExceeded)
+				require.True(t, dbconn.IsLockContentionError(err), "want lock contention (1205), got: %v", err)
+			})
+		})
 	}
 }

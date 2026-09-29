@@ -657,9 +657,6 @@ func (a *SingleTargetApplier) DeleteKeys(ctx context.Context, sourceTable, targe
 	if err != nil {
 		return 0, err
 	}
-	// Bound the delete, retries included — see chunkTaskTimeout.
-	ctx, cancel := context.WithTimeout(ctx, chunkTaskTimeout)
-	defer cancel()
 	// For move operations, targetTable may be nil - use sourceTable for both
 	if targetTable == nil {
 		targetTable = sourceTable
@@ -746,9 +743,6 @@ func (a *SingleTargetApplier) UpsertRows(ctx context.Context, mapping *table.Col
 	if err != nil {
 		return 0, err
 	}
-	// Bound the upsert, retries included — see chunkTaskTimeout.
-	ctx, cancel := context.WithTimeout(ctx, chunkTaskTimeout)
-	defer cancel()
 	_, targetColumnList := mapping.Columns()
 	sourceColumnNames, _ := mapping.ColumnsSlice()
 	// RowImage from the binlog contains ALL columns, including STORED
