@@ -49,40 +49,64 @@ func init() { registerNormalizer(binaryCharsetNormalizer{}) }
 // The table default is canonicalized to the form SHOW CREATE TABLE reports,
 // DEFAULT CHARSET=binary with no COLLATE, so that DEFAULT COLLATE=binary and
 // DEFAULT CHARSET=binary COLLATE=binary do not diff against it.
+//
+// booleanKeywordDefaultNormalizer folds a TRUE/FALSE default by column type,
+// and treats char and binary differently, so it reads the type through
+// storedColumnType to stay independent of the order the two rules run in.
 type binaryCharsetNormalizer struct{}
 
 func (binaryCharsetNormalizer) Name() string { return "binary-charset" }
 
 func (binaryCharsetNormalizer) Normalize(ct *CreateTable) *CreateTable {
-	tableBinary := tableDefaultIsBinary(ct.TableOptions)
 	for i := range ct.Columns {
 		col := &ct.Columns[i]
-		var colBinary bool
-		switch {
-		case col.Charset != nil:
-			continue // the parser has already converted an explicit binary charset
-		case col.Collation != nil:
-			colBinary = strings.EqualFold(*col.Collation, charset.CollationBin)
-		default:
-			colBinary = tableBinary
-		}
-		if !colBinary {
-			continue
-		}
-		binType, ok := binaryTypeOf(col.Type)
+		binType, ok := resolvedBinaryType(col, ct)
 		if !ok {
-			continue // enum and set keep their type
+			continue
 		}
 		col.Type = binType
 		cs, coll := charset.CharsetBin, charset.CollationBin
 		col.Charset, col.Collation = &cs, &coll
 	}
-	if tableBinary {
+	if tableDefaultIsBinary(ct.TableOptions) {
 		cs := charset.CharsetBin
 		ct.TableOptions.Charset = &cs
 		ct.TableOptions.Collation = nil
 	}
 	return ct
+}
+
+// storedColumnType returns the type MySQL stores col as: its binary type when
+// binaryCharsetNormalizer rewrites it, and its written type otherwise. A rule
+// whose outcome depends on the column type reads it through this, so that it
+// sees the same type whether it runs before or after binaryCharsetNormalizer.
+func storedColumnType(col *Column, ct *CreateTable) string {
+	if binType, ok := resolvedBinaryType(col, ct); ok {
+		return binType
+	}
+	return col.Type
+}
+
+// resolvedBinaryType returns the binary type of a character column whose
+// charset resolves to binary through the table default or its own COLLATE
+// binary, and false for every other column. A column that declares a charset
+// is false: the parser has already converted an explicit binary charset, and
+// a column this rule has rewritten declares one too, which keeps the rule
+// idempotent.
+func resolvedBinaryType(col *Column, ct *CreateTable) (string, bool) {
+	var binary bool
+	switch {
+	case col.Charset != nil:
+		return "", false
+	case col.Collation != nil:
+		binary = strings.EqualFold(*col.Collation, charset.CollationBin)
+	default:
+		binary = tableDefaultIsBinary(ct.TableOptions)
+	}
+	if !binary {
+		return "", false
+	}
+	return binaryTypeOf(col.Type) // enum and set keep their type
 }
 
 // tableDefaultIsBinary reports whether the table's default charset is binary.
