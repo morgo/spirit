@@ -653,7 +653,7 @@ func TestDiff(t *testing.T) {
 			name:     "ChangeCharset",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY) CHARSET=utf8mb4",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY) CHARSET=latin1",
-			expected: "ALTER TABLE `t1` DEFAULT CHARSET=latin1",
+			expected: "ALTER TABLE `t1` DEFAULT CHARSET=latin1, COLLATE=latin1_swedish_ci",
 		},
 		{
 			name:     "ChangeCollation",
@@ -754,7 +754,7 @@ func TestDiff(t *testing.T) {
 			name:     "ColumnCharsetDiffers",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, name VARCHAR(100)) CHARSET=utf8mb4",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, name VARCHAR(100) CHARSET latin1) CHARSET utf8mb4",
-			expected: "ALTER TABLE `t1` MODIFY COLUMN `name` varchar(100) CHARACTER SET latin1 NULL",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `name` varchar(100) CHARACTER SET latin1 COLLATE latin1_swedish_ci NULL",
 		},
 		{
 			name:     "ColumnCollation",
@@ -845,6 +845,58 @@ func TestDiff(t *testing.T) {
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, name varchar(100) DEFAULT NULL) DEFAULT CHARSET=utf8mb4",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, name NVARCHAR(100)) DEFAULT CHARSET=utf8mb4",
 			expected: "ALTER TABLE `t1` MODIFY COLUMN `name` varchar(100) CHARACTER SET utf8 COLLATE utf8_general_ci NULL",
+		},
+		// Every charset other than utf8mb4 has a fixed default collation,
+		// which SHOW CREATE TABLE writes out on a column that declares the
+		// charset. Sources are the live forms from MySQL 8.0.
+		{
+			name:     "ExplicitCharsetDefaultCollation",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, a varchar(3) CHARACTER SET latin1 COLLATE latin1_swedish_ci DEFAULT NULL, b varchar(3) CHARACTER SET ascii COLLATE ascii_general_ci DEFAULT NULL, c varchar(3) CHARACTER SET koi8r COLLATE koi8r_general_ci DEFAULT NULL, d text CHARACTER SET utf16 COLLATE utf16_general_ci) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, a varchar(3) CHARACTER SET latin1, b varchar(3) CHARACTER SET ascii, c varchar(3) CHARACTER SET koi8r, d text CHARACTER SET utf16) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
+			expected: "",
+		},
+		{
+			// MySQL 8.0.28 spells utf8mb3 as utf8 on the column and as
+			// utf8mb3 on the table.
+			name:     "ExplicitCharsetDefaultCollation_8028Utf8Spelling",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, a varchar(3) CHARACTER SET utf8 COLLATE utf8_general_ci DEFAULT NULL, b varchar(3) DEFAULT NULL) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, a varchar(3) CHARACTER SET utf8mb3, b varchar(3)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
+			expected: "",
+		},
+		{
+			name:     "ExplicitCharsetNonDefaultCollationDiffers",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, a varchar(3) CHARACTER SET latin1 COLLATE latin1_bin DEFAULT NULL) DEFAULT CHARSET=utf8mb4",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, a varchar(3) CHARACTER SET latin1) DEFAULT CHARSET=utf8mb4",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `a` varchar(3) CHARACTER SET latin1 COLLATE latin1_swedish_ci NULL",
+		},
+		{
+			// A column declaring the table's charset explicitly matches one
+			// that inherits it, whichever side each is on. MySQL writes the
+			// explicit one out as CHARACTER SET latin1 COLLATE
+			// latin1_swedish_ci and the inherited one bare.
+			name:     "ExplicitCharsetInheritedFromTable",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, a varchar(3) DEFAULT NULL, b varchar(3) CHARACTER SET latin1 COLLATE latin1_swedish_ci DEFAULT NULL) DEFAULT CHARSET=latin1",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, a varchar(3) CHARACTER SET latin1, b varchar(3)) DEFAULT CHARSET=latin1",
+			expected: "",
+		},
+		{
+			// DEFAULT CHARSET=latin1 means latin1_swedish_ci, so a table on
+			// another latin1 collation is converged onto it. Before the
+			// default was filled in, this emitted nothing and left the table
+			// on latin1_bin.
+			name:     "TableCharsetWithoutCollationSelectsDefault",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, a varchar(3) COLLATE latin1_bin DEFAULT NULL) DEFAULT CHARSET=latin1 COLLATE=latin1_bin",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, a varchar(3)) DEFAULT CHARSET=latin1",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `a` varchar(3) NULL, COLLATE=latin1_swedish_ci",
+		},
+		{
+			// utf8mb4's default collation depends on the server, so a
+			// DEFAULT CHARSET=utf8mb4 without a COLLATE still matches any
+			// utf8mb4 collation.
+			name:     "Utf8mb4WithoutCollationStaysUnderdetermined",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, a varchar(3) COLLATE utf8mb4_bin DEFAULT NULL, b varchar(3) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, a varchar(3), b varchar(3) CHARACTER SET utf8mb4) DEFAULT CHARSET=utf8mb4",
+			expected: "",
 		},
 		// A table-level DEFAULT CHARSET/COLLATE change only affects columns
 		// added later, so when the table defaults differ, a column that
@@ -1697,7 +1749,7 @@ func TestDiff_DiffOptions(t *testing.T) {
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY) CHARSET=utf8mb4",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY) CHARSET=latin1",
 			opts:     nil,
-			expected: "ALTER TABLE `t1` DEFAULT CHARSET=latin1",
+			expected: "ALTER TABLE `t1` DEFAULT CHARSET=latin1, COLLATE=latin1_swedish_ci",
 		},
 		{
 			name:     "DefaultDetectsCollation",

@@ -209,10 +209,10 @@ func (c *Column) CarriesCharset() bool {
 //
 // The diff does not use this: it deliberately treats an unwritten collation as
 // a match (see charsetCollationEqual) so it never emits a MODIFY it cannot
-// prove converged. utf8mb3 is the exception, because its default collation is
-// fixed: utf8mb3DefaultCollationNormalizer writes it in at parse time, so the
-// diff never sees a utf8mb3 charset without one. A linter has the opposite bias — it reports a difference it
-// can prove, and stays silent otherwise.
+// prove converged. Only utf8mb4 reaches it that way: every other charset's
+// default collation is fixed, and defaultCollationNormalizer writes it in at
+// parse time. A linter has the opposite bias — it reports a difference it can
+// prove, and stays silent otherwise.
 func (c *Column) EffectiveCharsetCollation(table *CreateTable) (cs, collation string) {
 	cs, collation = resolvedCharsetCollation(c, table)
 	if collation == "" && cs != "" {
