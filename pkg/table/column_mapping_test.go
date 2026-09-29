@@ -201,6 +201,7 @@ func TestColumnMappingChecksumExprsJSONAsymmetric(t *testing.T) {
 	t1 := NewTableInfo(nil, "test", "t1")
 	t1new := NewTableInfo(nil, "test", "t1_new")
 	t1.NonGeneratedColumns = []string{"id", "j"}
+	t1.columnsMySQLTps = map[string]string{"id": "int", "j": "json", "old_j": "json"}
 	t1new.NonGeneratedColumns = []string{"id", "j"}
 	t1new.columnsMySQLTps = map[string]string{"id": "int", "j": "json"}
 
@@ -222,4 +223,31 @@ func TestColumnMappingChecksumExprsJSONAsymmetric(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, src, "CAST(CAST(`old_j` AS char CHARACTER SET utf8mb4) AS json)")
 	require.Contains(t, tgt, "CAST(`j` AS json)")
+}
+
+func TestColumnMappingChecksumExprsTemporalPrecision(t *testing.T) {
+	// DATETIME/TIMESTAMP are cast to the wider of the source and target
+	// fractional-second precisions (see checksumCastTp), and both sides use
+	// the same cast. The source's precision is looked up under the source's
+	// own column name, so it also applies across a rename.
+	t1 := NewTableInfo(nil, "test", "t1")
+	t1new := NewTableInfo(nil, "test", "t1_new")
+	t1.NonGeneratedColumns = []string{"id", "narrowed", "old_widened"}
+	t1.columnsMySQLTps = map[string]string{"id": "int", "narrowed": "timestamp(6)", "old_widened": "datetime"}
+	t1new.NonGeneratedColumns = []string{"id", "narrowed", "widened"}
+	t1new.columnsMySQLTps = map[string]string{"id": "int", "narrowed": "timestamp", "widened": "datetime(3)"}
+
+	m := NewColumnMapping(t1, t1new, map[string]string{"old_widened": "widened"})
+	src, tgt, err := m.ChecksumExprs()
+	require.NoError(t, err)
+	require.Contains(t, src, "CAST(`narrowed` AS datetime(6))")
+	require.Contains(t, tgt, "CAST(`narrowed` AS datetime(6))")
+	require.Contains(t, src, "CAST(`old_widened` AS datetime(3))")
+	require.Contains(t, tgt, "CAST(`widened` AS datetime(3))")
+
+	// A source column missing from the source's type map is an error, not a
+	// silent fallback to the target's precision.
+	delete(t1.columnsMySQLTps, "narrowed")
+	_, _, err = m.ChecksumExprs()
+	require.Error(t, err)
 }
