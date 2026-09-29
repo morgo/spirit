@@ -1102,6 +1102,12 @@ func TestDiffIntegrationBinaryCharsetConverges(t *testing.T) {
 	require.Nil(t, stmts, "re-diff after applying the ALTER must converge")
 }
 
+// binaryDefaultHexReason is why the binary-default tests that read back a
+// non-utf8mb3 default skip before MySQL 8.0.33: earlier servers' SHOW CREATE
+// TABLE replaces each such byte with '?' instead of reporting the default as a
+// hex literal (MySQL Bug #104840).
+const binaryDefaultHexReason = "SHOW CREATE TABLE reports a non-utf8mb3 binary default as '?' rather than hex"
+
 // TestDiffIntegrationBinaryDefaultPadding verifies that a literal default on a
 // binary(N) column matches its live form, which MySQL stores NUL-padded to the
 // column width (binary(3) DEFAULT 'a' is reported as DEFAULT 'a\0\0'), or as a
@@ -1111,12 +1117,12 @@ func TestDiffIntegrationBinaryCharsetConverges(t *testing.T) {
 //
 // The hex form is only reported from MySQL 8.0.33. Before that, SHOW CREATE
 // TABLE replaces each byte that is not valid utf8mb3 with '?', so the stored
-// default cannot be read back and the column cannot converge (block/spirit#1319).
-// Those cases skip when the server gives the lossy reading in lossyLive.
+// default cannot be read back and the column cannot converge. The cases in
+// needsHexReporting skip on those servers.
 func TestDiffIntegrationBinaryDefaultPadding(t *testing.T) {
-	lossyLive := map[string]string{
-		"diff_binpad_hex_not_utf8": "`b` binary(3) DEFAULT '?\\0\\0'",
-		"diff_binpad_4byte_char":   "`b` binary(5) DEFAULT '????\\0'",
+	needsHexReporting := map[string]bool{
+		"diff_binpad_hex_not_utf8": true,
+		"diff_binpad_4byte_char":   true,
 	}
 	for _, tc := range []struct{ name, ddl, live string }{
 		{"diff_binpad_string", "CREATE TABLE diff_binpad_string (id int NOT NULL, b binary(3) DEFAULT 'a', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` binary(3) DEFAULT 'a\\0\\0'"},
@@ -1137,11 +1143,11 @@ func TestDiffIntegrationBinaryDefaultPadding(t *testing.T) {
 		{"diff_binpad_char_collate_binary", "CREATE TABLE diff_binpad_char_collate_binary (id int NOT NULL, b char(3) COLLATE binary DEFAULT 'a', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` binary(3) DEFAULT 'a\\0\\0'"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			if needsHexReporting[tc.name] {
+				testutils.SkipBeforeMySQLVersion(t, "8.0.33", binaryDefaultHexReason)
+			}
 			tt := testutils.NewTestTable(t, tc.name, tc.ddl)
 			liveSQL := showCreateTable(t, tt.DB, tt.Name)
-			if lossy, ok := lossyLive[tc.name]; ok && strings.Contains(liveSQL, lossy) {
-				t.Skip("this server reports the default lossily (MySQL < 8.0.33), see block/spirit#1319")
-			}
 			require.Contains(t, liveSQL, tc.live, "the reading this case pins")
 			desired, err := ParseCreateTable(tc.ddl)
 			require.NoError(t, err)
@@ -1190,10 +1196,10 @@ func TestDiffIntegrationBinaryDefaultPaddingConverges(t *testing.T) {
 
 // TestDiffIntegrationBinaryDefaultPaddingHexConverges verifies that a padded
 // default that is not valid utf8mb3 is emitted as a bare hex literal MySQL
-// stores unchanged, after which a re-diff converges to nil. It skips on a server
-// that reports the stored default lossily (MySQL < 8.0.33, block/spirit#1319),
-// where the column cannot converge.
+// stores unchanged, after which a re-diff converges to nil. It needs MySQL
+// 8.0.33+, which reports such a default as hex (see binaryDefaultHexReason).
 func TestDiffIntegrationBinaryDefaultPaddingHexConverges(t *testing.T) {
+	testutils.SkipBeforeMySQLVersion(t, "8.0.33", binaryDefaultHexReason)
 	tt := testutils.NewTestTable(t, "diff_binpad_hex_converge",
 		"CREATE TABLE diff_binpad_hex_converge (id int NOT NULL, h binary(3), PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci")
 	desired, err := ParseCreateTable(
@@ -1208,17 +1214,12 @@ func TestDiffIntegrationBinaryDefaultPaddingHexConverges(t *testing.T) {
 	require.Contains(t, stmts[0].Statement, "DEFAULT x'ff0000'")
 	testutils.RunSQL(t, stmts[0].Statement)
 
-	// What MySQL stored is read directly, since that does not depend on how
-	// SHOW CREATE TABLE reports it.
 	var stored string
 	testutils.RunSQL(t, "INSERT INTO diff_binpad_hex_converge (id) VALUES (1)")
 	require.NoError(t, tt.DB.QueryRowContext(t.Context(), "SELECT HEX(h) FROM diff_binpad_hex_converge WHERE id = 1").Scan(&stored))
 	require.Equal(t, "FF0000", stored)
 
 	liveSQL := showCreateTable(t, tt.DB, tt.Name)
-	if strings.Contains(liveSQL, "`h` binary(3) DEFAULT '?\\0\\0'") {
-		t.Skip("this server reports the default lossily (MySQL < 8.0.33), see block/spirit#1319")
-	}
 	require.Contains(t, liveSQL, "`h` binary(3) DEFAULT 0xFF0000")
 	live, err = ParseCreateTable(liveSQL)
 	require.NoError(t, err)

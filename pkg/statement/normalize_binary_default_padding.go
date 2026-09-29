@@ -41,7 +41,7 @@ func init() { registerNormalizer(binaryDefaultPaddingNormalizer{}) }
 // [DefaultKindHexLiteral], so the two sides compare equal. The hex form is
 // reported from MySQL 8.0.33. Before that, SHOW CREATE TABLE replaces each such
 // byte with '?', so the stored default cannot be read back from it and a column
-// with one cannot converge (block/spirit#1319).
+// with one cannot converge there.
 //
 // The rule reads the column's type through [storedColumnType], so it covers a
 // char column that binaryCharsetNormalizer rewrites to binary because its
