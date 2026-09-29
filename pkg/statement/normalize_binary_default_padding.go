@@ -4,9 +4,9 @@ import (
 	"encoding/hex"
 	"strconv"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/block/spirit/pkg/parser/ast"
+	"github.com/block/spirit/pkg/utils"
 )
 
 func init() { registerNormalizer(binaryDefaultPaddingNormalizer{}) }
@@ -38,7 +38,10 @@ func init() { registerNormalizer(binaryDefaultPaddingNormalizer{}) }
 // whatever the connection's charset: x'c3a9' (é) is reported as a string, and
 // x'f09f9880' (a 4-byte character) and x'80' as hex. The padded value is
 // recorded in whichever form MySQL reports, as a [DefaultKindString] or a
-// [DefaultKindHexLiteral], so the two sides compare equal.
+// [DefaultKindHexLiteral], so the two sides compare equal. The hex form is
+// reported from MySQL 8.0.33. Before that, SHOW CREATE TABLE replaces each such
+// byte with '?', so the stored default cannot be read back from it and a column
+// with one cannot converge (block/spirit#1319).
 //
 // The rule reads the column's type through [storedColumnType], so it covers a
 // char column that binaryCharsetNormalizer rewrites to binary because its
@@ -74,7 +77,7 @@ func (binaryDefaultPaddingNormalizer) Normalize(ct *CreateTable) *CreateTable {
 			continue
 		}
 		padded := value + strings.Repeat("\x00", *c.Length-len(value))
-		if validUTF8MB3(padded) {
+		if utils.ValidUTF8MB3(padded) {
 			c.Default, c.DefaultKind = &padded, DefaultKindString
 		} else {
 			hexLiteral := "x'" + hex.EncodeToString([]byte(padded)) + "'"
@@ -147,19 +150,4 @@ func bitLiteralDefault(c *Column) (string, bool) {
 		}
 	}
 	return value, found
-}
-
-// validUTF8MB3 reports whether s is valid utf8mb3: valid UTF-8 with no
-// character outside the Basic Multilingual Plane. It is the test MySQL applies
-// when choosing between reporting a binary default as a string or as hex.
-func validUTF8MB3(s string) bool {
-	if !utf8.ValidString(s) {
-		return false
-	}
-	for _, r := range s {
-		if r > 0xFFFF {
-			return false
-		}
-	}
-	return true
 }
