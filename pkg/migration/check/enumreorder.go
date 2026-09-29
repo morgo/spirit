@@ -6,6 +6,7 @@ import (
 	"log/slog"
 
 	"github.com/block/spirit/pkg/parser/mysql"
+	"github.com/block/spirit/pkg/utils"
 )
 
 func init() {
@@ -57,11 +58,11 @@ func enumReorderCheck(ctx context.Context, r Resources, logger *slog.Logger) err
 		// also an ENUM. If the existing column is a different type (e.g.,
 		// VARCHAR → ENUM or SET → ENUM), the reorder check is not applicable.
 		// Cross-type conversions like SET → ENUM are caught by enumSetRemovalCheck.
-		if !isEnumType(existingType) {
+		if !utils.IsEnumType(existingType) {
 			continue
 		}
 
-		existingElems, err := parseEnumSetValues(existingType)
+		existingElems, err := utils.ParseEnumSetElements(existingType)
 		if err != nil {
 			return cannotClassify("unable to validate ENUM change for column %q: %w", col.LookupName, err)
 		}

@@ -102,6 +102,24 @@ func EscapeIdentifier(identifier string) string {
 	return string(appendEscapedIdentifier(make([]byte, 0, len(identifier)+2), identifier))
 }
 
+// EscapeIdentifierList quotes each identifier with EscapeIdentifier and joins
+// them with ", ", e.g. []string{"a", "b"} -> "`a`, `b`". It is the form a
+// column list takes in a SELECT, ORDER BY, index or key definition.
+func EscapeIdentifierList(identifiers []string) string {
+	size := 0
+	for _, identifier := range identifiers {
+		size += len(identifier) + 4 // two backticks plus the ", " separator
+	}
+	buf := make([]byte, 0, size)
+	for i, identifier := range identifiers {
+		if i > 0 {
+			buf = append(buf, ", "...)
+		}
+		buf = appendEscapedIdentifier(buf, identifier)
+	}
+	return string(buf)
+}
+
 // RawSQL marks a string as trusted raw SQL for the %r verb. Converting a
 // value to RawSQL is an explicit assertion that it is safe to execute
 // verbatim (e.g. the operator's own --statement text): %r performs

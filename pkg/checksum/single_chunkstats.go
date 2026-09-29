@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/block/spirit/pkg/table"
+	"github.com/block/spirit/pkg/utils"
 )
 
 // chunkObserver accumulates per-chunk timings and row counts for one checksum
@@ -56,41 +57,15 @@ func (o *chunkObserver) summary(target time.Duration) string {
 	if len(o.durations) == 0 {
 		return ""
 	}
-	durs := slices.Clone(o.durations)
-	slices.Sort(durs)
-	rows := slices.Clone(o.rows)
-	slices.Sort(rows)
 	return fmt.Sprintf("chunks=%d target=%v duration-p50=%v duration-p90=%v duration-max=%v rows-p50=%d rows-max=%d row-capped=%d/%d",
-		len(durs),
+		len(o.durations),
 		target,
-		percentileDuration(durs, 0.50).Round(time.Millisecond),
-		percentileDuration(durs, 0.90).Round(time.Millisecond),
-		durs[len(durs)-1].Round(time.Millisecond),
-		percentileRows(rows, 0.50),
-		rows[len(rows)-1],
+		utils.Percentile(o.durations, 50).Round(time.Millisecond),
+		utils.Percentile(o.durations, 90).Round(time.Millisecond),
+		slices.Max(o.durations).Round(time.Millisecond),
+		utils.Percentile(o.rows, 50),
+		slices.Max(o.rows),
 		o.rowCapped,
-		len(durs),
+		len(o.durations),
 	)
-}
-
-// percentileDuration returns the p-th percentile of a sorted slice using
-// nearest-rank, matching how the applier's Stats percentiles are computed.
-func percentileDuration(sorted []time.Duration, p float64) time.Duration {
-	return sorted[percentileIndex(len(sorted), p)]
-}
-
-func percentileRows(sorted []uint64, p float64) uint64 {
-	return sorted[percentileIndex(len(sorted), p)]
-}
-
-// percentileIndex maps a percentile onto an index in a sorted slice of length
-// n (n must be > 0), clamped to the last element.
-func percentileIndex(n int, p float64) int {
-	x := float64(n) * p
-	rank := int(x)
-	if float64(rank) < x {
-		rank++
-	}
-	rank = max(rank, 1)
-	return min(rank-1, n-1)
 }

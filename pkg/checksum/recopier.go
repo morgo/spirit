@@ -11,6 +11,7 @@ import (
 
 	"github.com/block/spirit/pkg/applier"
 	"github.com/block/spirit/pkg/dbconn"
+	"github.com/block/spirit/pkg/dbconn/sqlescape"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/utils"
 )
@@ -123,7 +124,7 @@ func (r *mysqlRecopier) Recopy(ctx context.Context, chunk *table.Chunk) error {
 	// columns are deliberately read bare — the SELECT+applier pair already
 	// constitutes the one text round-trip the checksum's JSON contract
 	// expects; see the matching note on chunkRepairer.
-	columnList := table.QuoteColumns(chunk.Table.NonGeneratedColumns)
+	columnList := sqlescape.EscapeIdentifierList(chunk.Table.NonGeneratedColumns)
 	query := fmt.Sprintf("SELECT %s FROM %s WHERE %s",
 		columnList,
 		chunk.Table.QuotedTableName,

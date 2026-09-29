@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/block/spirit/pkg/change"
+	"github.com/block/spirit/pkg/dbconn/sqlescape"
 	"github.com/block/spirit/pkg/table"
 )
 
@@ -310,7 +311,7 @@ func expectedImageCRC(ctx context.Context, sourceDB *sql.DB, chunk *table.Chunk,
 		}
 	}
 	query := fmt.Sprintf("SELECT CRC32(CONCAT(%s)) FROM (SELECT %s FROM %s WHERE 1=0 UNION ALL SELECT %s) AS img",
-		sourceExprs, table.QuoteColumns(columns), chunk.Table.QuotedTableName,
+		sourceExprs, sqlescape.EscapeIdentifierList(columns), chunk.Table.QuotedTableName,
 		strings.Join(placeholders, ","))
 	var crc uint64
 	if err := sourceDB.QueryRowContext(ctx, query, values...).Scan(&crc); err != nil {

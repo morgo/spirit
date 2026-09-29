@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/block/spirit/pkg/dbconn/sqlescape"
 	"github.com/block/spirit/pkg/table"
 )
 
@@ -71,11 +72,11 @@ func splitHotChunkAt(ctx context.Context, db *sql.DB, parent *table.Chunk, rows,
 	// budget; earlier OFFSET scans do not consume later pivots' time allowance.
 	ctx, cancel := context.WithTimeout(ctx, hotSplitQueryTimeout)
 	defer cancel()
-	keys := table.QuoteColumns(parent.Key)
+	keys := sqlescape.EscapeIdentifierList(parent.Key)
 	if descending {
 		order := make([]string, len(parent.Key))
 		for i, name := range parent.Key {
-			order[i] = table.QuoteColumns([]string{name}) + " DESC"
+			order[i] = sqlescape.EscapeIdentifier(name) + " DESC"
 		}
 		keys = strings.Join(order, ",")
 	}
@@ -83,7 +84,7 @@ func splitHotChunkAt(ctx context.Context, db *sql.DB, parent *table.Chunk, rows,
 	// including fractional seconds and zero dates. Ordering remains on native keys.
 	projections := make([]string, len(parent.Key))
 	for i, name := range parent.Key {
-		projections[i] = table.QuoteColumns([]string{name})
+		projections[i] = sqlescape.EscapeIdentifier(name)
 		tp, ok := parent.Table.GetColumnMySQLType(name)
 		if !ok {
 			return nil, fmt.Errorf("missing split key type for %s", name)

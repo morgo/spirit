@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/block/spirit/pkg/dbconn/sqlescape"
+	"github.com/block/spirit/pkg/utils"
 )
 
 const (
@@ -287,8 +288,8 @@ func (t *TableInfo) addColumn(name, mysqlType string, generated bool) error {
 		t.NonGeneratedColumns = append(t.NonGeneratedColumns, name)
 	}
 	ordinal := len(t.Columns) - 1
-	if isEnumColumnType(mysqlType) || isSetColumnType(mysqlType) {
-		elements, err := parseEnumSetElements(mysqlType)
+	if utils.IsEnumOrSetType(mysqlType) {
+		elements, err := utils.ParseEnumSetElements(mysqlType)
 		if err != nil {
 			return fmt.Errorf("parsing ENUM/SET elements for %s.%s.%s: %w", t.SchemaName, t.TableName, name, err)
 		}
@@ -516,7 +517,7 @@ func (t *TableInfo) setMinMax(ctx context.Context) error {
 	if isBITType(t.keyColumnsMySQLTp[0]) {
 		return nil
 	}
-	quotedKey := QuoteColumns(t.KeyColumns[:1])
+	quotedKey := sqlescape.EscapeIdentifier(t.KeyColumns[0])
 	query := fmt.Sprintf("SELECT IFNULL(min(%s),'0'), IFNULL(max(%s),'0') FROM %s", quotedKey, quotedKey, t.QuotedTableName)
 	var minimum, maximum string
 	err := t.db.QueryRowContext(ctx, query).Scan(&minimum, &maximum)
@@ -710,7 +711,7 @@ func (t *TableInfo) DecodeBinlogRow(row []any) error {
 		mysqlType := t.columnsMySQLTps[colName]
 		var decoded string
 		var derr error
-		if isSetColumnType(mysqlType) {
+		if utils.IsSetType(mysqlType) {
 			decoded, derr = decodeSetBitmask(intVal, elements)
 		} else {
 			decoded, derr = decodeEnumOrdinal(intVal, elements)

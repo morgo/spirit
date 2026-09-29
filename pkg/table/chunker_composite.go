@@ -11,6 +11,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/block/spirit/pkg/dbconn/sqlescape"
 )
 
 type chunkerComposite struct {
@@ -88,8 +90,8 @@ func (t *chunkerComposite) next() (*Chunk, error) {
 	// Start prefetching the next chunk
 	// First assume it's the first chunk, we can overwrite this
 	// just below.
-	quotedChunkKeys := QuoteColumns(t.chunkKeys)
-	quotedKeyName := QuoteColumns([]string{t.keyName})
+	quotedChunkKeys := sqlescape.EscapeIdentifierList(t.chunkKeys)
+	quotedKeyName := sqlescape.EscapeIdentifier(t.keyName)
 	query := fmt.Sprintf("SELECT %s FROM %s FORCE INDEX (%s) %s ORDER BY %s LIMIT 1 OFFSET %d",
 		quotedChunkKeys,
 		t.Ti.QuotedTableName,

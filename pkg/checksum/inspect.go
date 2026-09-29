@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 
+	"github.com/block/spirit/pkg/dbconn/sqlescape"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/utils"
 )
@@ -43,7 +44,7 @@ func inspectDifferences(ctx context.Context, q rowQuerier, chunk *table.Chunk, l
 	}
 	sourceRows, err := q.QueryContext(ctx, fmt.Sprintf(queryTemplate,
 		sourceChecksumCols,
-		table.QuoteColumns(chunk.Table.KeyColumns),
+		sqlescape.EscapeIdentifierList(chunk.Table.KeyColumns),
 		chunk.Table.QuotedTableName,
 		chunk.String(),
 	))
@@ -67,7 +68,7 @@ func inspectDifferences(ctx context.Context, q rowQuerier, chunk *table.Chunk, l
 
 	targetRows, err := q.QueryContext(ctx, fmt.Sprintf(queryTemplate,
 		targetChecksumCols,
-		table.QuoteColumns(chunk.NewTable.KeyColumns),
+		sqlescape.EscapeIdentifierList(chunk.NewTable.KeyColumns),
 		chunk.NewTable.QuotedTableName,
 		chunk.String(),
 	))

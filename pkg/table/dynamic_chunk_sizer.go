@@ -3,6 +3,8 @@ package table
 import (
 	"log/slog"
 	"time"
+
+	"github.com/block/spirit/pkg/utils"
 )
 
 // dynamicChunkSizer holds the time-based chunk-sizing state shared by the
@@ -151,7 +153,7 @@ func (d *dynamicChunkSizer) feedbackBytes(logger *slog.Logger, bytes uint64, bef
 // ceiling the >MaxDynamicRowSize signal lets the optimistic chunker's prefetch
 // switch fire.
 func (d *dynamicChunkSizer) calculateNewTargetChunkBytes() (newTargetRows uint64, p90 uint64) {
-	p90 = lazyFindP90Uint64(d.chunkByteInfo)
+	p90 = utils.Percentile(d.chunkByteInfo, 90)
 	if p90 == 0 {
 		return MaxDynamicRowSize + 1, 0
 	}
@@ -251,7 +253,7 @@ func (d *dynamicChunkSizer) boundaryCheckTargetChunkSize(newTarget uint64) uint6
 // the p90 to decide whether to switch to prefetch mode). Caller must
 // hold the chunker's mutex.
 func (d *dynamicChunkSizer) calculateNewTargetChunkSize() (newTargetRows uint64, p90 time.Duration) {
-	p90 = LazyFindP90(d.chunkTimingInfo)
+	p90 = utils.Percentile(d.chunkTimingInfo, 90)
 	target := float64(d.ChunkerTarget)
 	rows := float64(d.chunkSize) * (target / float64(p90))
 	return uint64(rows), p90
