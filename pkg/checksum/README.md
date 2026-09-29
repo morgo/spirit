@@ -27,7 +27,9 @@ Naive implementations that only compare row counts fail to catch most of these p
 
 While we do our best to prevent such bugs, we also want to be pedantic when it comes to data integrity. In most cases we have observed that the checksum process takes about 10% of the time as the copy-rows stage, which makes it an easy cost to justify.
 
-There are also some known cases where a checksum failure is not a bug. This includes adding a unique index on non-unique data, or a lossy data type conversion (e.g., `VARCHAR(100)` → `VARCHAR(10)` when records exist requiring more than 10 characters). Both are important cases to handle, and prevent a cutover operation from executing.
+There are also some known cases where a checksum failure is not a bug. The canonical one is adding a unique index to non-unique data: the duplicate rows are silently skipped during the copy, and the digest is what notices. Preventing the cut-over is the correct outcome, not a malfunction.
+
+A lossy data type conversion (e.g., `VARCHAR(100)` → `VARCHAR(10)` when records exist requiring more than 10 characters) is also refused, but usually *earlier* than the checksum — MySQL warns on the truncating write and the copy aborts. See [Type conversions](#type-conversions) for which gate catches what, and for the one conversion neither gate catches.
 
 ### Not only bugs: two copy-phase optimizations are unsafe by design
 
@@ -891,9 +893,235 @@ This approach:
 
 The actual implementation includes additional handling:
 - **NULL normalization**: Uses `IFNULL()` and `ISNULL()` to ensure NULLs are consistently represented
-- **Type casting**: Applies `CAST` operations to convert columns to the target table's type for comparable string representations
+- **Type casting**: Applies `CAST` operations to convert columns to the target table's type for comparable string representations (see [Type conversions](#type-conversions))
 
 The CRC32 + XOR aggregate technique for table checksumming was pioneered by **pt-table-checksum** from Percona Toolkit, which established this as a reliable method for verifying data consistency in MySQL. This same approach has since been adopted by other database tools, including TiDB's data migration and verification utilities, demonstrating its effectiveness for distributed database scenarios.
+
+## Type conversions
+
+A schema change usually changes how a value is *stored*, not what the value is.
+Some of those changes also change the text MySQL renders for the value:
+`TIMESTAMP` → `TIMESTAMP(6)` adds `.000000`, `DECIMAL(10,2)` →
+`DECIMAL(12,4)` adds trailing zeros, dropping `ZEROFILL` drops the leading
+ones, widening a `BINARY(N)` changes how far the value is zero-padded. The
+digest is built out of `CONCAT()`, which is a *string* operation, so for those
+a raw comparison would report a difference on every row while the copy is
+perfect.
+
+Plenty of conversions render identically and need no help — `INT` → `BIGINT`
+still prints `42` on both sides. The cast is applied uniformly anyway, so that
+the comparison never depends on which of the two a given `ALTER` turns out to
+be.
+
+The rule is one line: **both sides are `CAST` to the target column's type, and
+only then hashed.** `ColumnMapping.ChecksumExprs` builds the two expression
+lists, and the cast type always comes from the **target** table — including for
+the source-side query. Where the `ALTER` renamed a column, the source SQL
+references the old name but takes its cast type from the new column. Each
+column contributes two things to each side:
+
+```sql
+IFNULL(CAST(`col` AS <target type>),'') , '#' , ISNULL(`col`)
+```
+
+— the cast value, and a separate NULL flag so that `NULL` and `''` cannot hash
+alike. The `'#'` separators keep content from shifting across a column boundary
+undetected.
+
+### Why the cast is load-bearing
+
+The fractional second makes it concrete. Widening `TIMESTAMP` →
+`TIMESTAMP(6)` leaves the instant untouched but makes the target render
+`.000000`, and that is enough to change the hash (real `CRC32` values, MySQL
+8.0.43 — the same instant stored on both sides):
+
+```
+ source column: ts TIMESTAMP        target column: ts TIMESTAMP(6)
+ source value:  2026-01-01 10:00:00 target value:  2026-01-01 10:00:00.000000
+
+ raw:   CRC32(CONCAT(ts))                     3432137608  vs   788709475   MISMATCH
+ cast:  CRC32(CONCAT(CAST(ts AS datetime)))   3432137608  vs  3432137608   equal
+```
+
+Nothing is wrong with the copy in that example — the source cannot hold a
+fraction, the target renders one, and only the cast makes the two comparable.
+The same shape appears for scale and padding:
+
+```
+ DECIMAL(10,2) -> DECIMAL(12,4)    "169.09"  vs  "169.0900"
+   raw                             1865833143  vs  2558327555   MISMATCH
+   cast to decimal(12,4)           2558327555  vs  2558327555   equal
+
+ INT(5) ZEROFILL -> INT            "00042"   vs  "42"
+   raw                             3233738973  vs   841265288   MISMATCH
+   cast to signed                   841265288  vs   841265288   equal
+
+ BINARY(2) -> BINARY(8)            0x6162    vs  0x6162000000000000
+   cast to the target's binary(8) pads both sides to the same length
+```
+
+### What each type casts to
+
+`castableTp` (`pkg/table/utils.go`) maps a column type to the SQL-standard type
+`CAST` accepts. The width is stripped for most types and deliberately kept for
+two:
+
+| Column type | Cast to | What that normalizes away |
+| --- | --- | --- |
+| `TINYINT` … `BIGINT` | `signed` | display width, `ZEROFILL` padding |
+| the `UNSIGNED` forms | `unsigned` | as above |
+| `TIMESTAMP`, `DATETIME` | `datetime` | fractional-second precision — see the blind spot below |
+| `DECIMAL(M,D)` | the target's **full** `decimal(M,D)` | trailing-zero scale — but not for the `UNSIGNED` form, see below |
+| `FLOAT`, `DOUBLE` | `char` | |
+| `VARCHAR`, `CHAR`, `TEXT`, `ENUM`, `SET` | `char CHARACTER SET utf8mb4` | charset and collation changes; `utf8mb4` is the superset every other charset can be compared in |
+| `BINARY(N)` | the target's **full** `binary(N)` | zero padding on a widening. A plain `CAST(… AS binary)` does not pad, and `binary(0)` would truncate every value to nothing |
+| `VARBINARY`, the `BLOB`s | `binary` | |
+| `VECTOR` (MySQL 9.7+) | `binary` | `CAST(… AS char)` is rejected outright by the server (`ER_WRONG_ARGUMENTS`) |
+| `JSON` | asymmetric, see below | |
+| **everything else** — `DATE`, `TIME(N)`, `YEAR`, `BIT(N)`, … | `char CHARACTER SET utf8mb4` | the `default` branch, so an unlisted type is compared as the bytes `CAST(… AS char)` returns for it — usually its rendered text, but see the gaps below |
+
+The fallback matters for one case in particular: `TIME(N)` is **not** in the
+`datetime` row, so it takes the default branch and renders its fraction in
+full (`CAST(TIME'10:00:00.100000' AS char)` → `10:00:00.100000`, CRC32
+`4947716`). `TIME` columns therefore do not share the fractional-second blind
+spot described below — only `DATETIME` and `TIMESTAMP` do.
+
+**Two known gaps in the fallback.** `castableTp` switches on the type string
+*after* the width, `ZEROFILL` and decimal width have been stripped, and two
+shapes reach the `default` branch that should not:
+
+- `DECIMAL(M,D) UNSIGNED` reduces to `decimal unsigned`, which matches no case
+  (`case "decimal"` is spelled exactly), so the scale is never normalized.
+  `DECIMAL(10,2) UNSIGNED` → `DECIMAL(12,4) UNSIGNED` compares `169.09`
+  against `169.0900` — CRC32 `1865833143` vs `2558327555`. The signed form is
+  fine.
+- `BIT(N)` takes the default branch too, and `CAST(bit AS char)` returns the
+  raw stored bytes at each column's *own* width rather than a rendered
+  number: `BIT(8)` → `BIT(16)` holding `b'00000001'` compares `0x01` against
+  `0x0001` — CRC32 `2768625435` vs `920527465`. (`CAST(bit AS unsigned)`
+  yields `2212294583` on both sides.)
+
+Both are value-preserving widenings, so a **perfect** copy fails the digest,
+the repair cannot converge, and the cut-over is refused. That is fail-closed —
+no data is at risk — but the migration is unusable. Both are pre-existing gaps
+in `castableTp` rather than intended behaviour, tracked in block/spirit#1291.
+
+`ENUM` and `SET` are compared as their **string** value, not their stored
+ordinal, so appending values to the end of an `ENUM` list is invisible to the
+digest — correctly, since no row's value changed. (Reordering and
+middle-insertion are refused in preflight for an unrelated reason: the binlog
+replay path receives ordinals and decodes them against the source's element
+list.)
+
+`JSON` is the one type cast differently on the two sides: the source renders to
+text and re-parses, the target renders what is stored. That asymmetry asserts
+the text-image contract every JSON write path in Spirit actually delivers, and
+is *not* a normalization — the reasoning, and the MySQL parser bug behind it,
+are in the `castExpr` comment in `pkg/table`.
+
+### Lossy conversions, and which gate catches them
+
+Spirit only supports conversions that preserve the data. A few conversions are
+refused in preflight by their *shape* — `enumSetRemoval`
+(`pkg/migration/check/`) rejects `ENUM`/`SET` → numeric and `SET` → `ENUM`
+outright — but **no preflight check measures your data against the narrower
+type**, so for the general case nothing has looked at a single row by the time
+the copy starts. Two different mechanisms catch it afterwards, and it is worth
+knowing which, because they fail at different times and look nothing alike.
+
+**Most lossy conversions abort during the copy.** Spirit connects with a
+non-strict `sql_mode` (`NO_AUTO_VALUE_ON_ZERO` and nothing else,
+`pkg/dbconn/conn.go`) and the copy writes with `INSERT IGNORE`, so MySQL
+*downgrades* what would otherwise be an error into a warning and stores a
+coerced value. Spirit does not let that pass: the row-copy and change-feed
+writes go through `dbconn.RetryableTransaction`, which runs `SHOW WARNINGS`
+after each statement and promotes any warning it finds to a fatal
+`UnsafeWarningError`. The one exemption is the duplicate-key warning,
+deliberately ignored under `IgnoreDupKeyWarnings`; everything else is fatal,
+including the range-optimizer capacity warning (3170), which gets its own
+message but is equally terminal. A `VARCHAR(100)` → `VARCHAR(10)` migration
+therefore fails on the first chunk containing a too-long value:
+
+```
+ INSERT IGNORE INTO _new (…) VALUES ('a-very-long-value-indeed')
+ SHOW WARNINGS  ->  Warning  1265  Data truncated for column 'v' at row 1
+                    => UnsafeWarningError, copy aborts
+```
+
+Reducing a `DECIMAL`'s scale behaves the same way, via `Note 1265` — the
+warning *level* is not consulted, only its code.
+
+One write path is **not** covered by that gate: the final change-feed flush
+performed under the cut-over table lock goes through
+`dbconn.TableLock.ExecUnderLock`, which executes the statement directly and
+does not run `SHOW WARNINGS`. It is a narrow window — the backlog at that point
+is whatever arrived since the last flush, and any value that would truncate has
+almost certainly been seen by an earlier, gated flush already — but a
+truncation that appears *only* in that last batch is applied without the
+warning being inspected.
+
+**What reaches the checksum is what MySQL does not warn about.** The canonical
+case is adding a `UNIQUE` index to non-unique data: the duplicate row is
+skipped by `INSERT IGNORE` with a 1062 that Spirit is deliberately ignoring, so
+the copy completes with rows missing and the digest is what notices. The
+checksum then repairs the chunk, re-copies, skips the same row again, finds the
+same difference, and exhausts its retries into a hard error — cut-over refused.
+That is the designed outcome: the failure *is* the safety mechanism working,
+which is why it is listed under [cases where a checksum failure is not a
+bug](#why-checksums-matter).
+
+### Blind spot: fractional seconds
+
+There is one conversion that neither gate catches. Because the width is
+stripped, a `DATETIME(6)`/`TIMESTAMP(6)` column is compared as plain
+`datetime`, and `CAST` **rounds** to the second rather than truncating
+(`10:00:00.999999` → `10:00:01`).
+
+For the *widening* case that is exactly right — the source has nothing below a
+second to lose. But where **both** sides can hold a fraction (a `move` or
+`sync`, where the types match, or any `ALTER` on a table that already has a
+fractional temporal column) a divergence below a second is invisible:
+
+```
+ source holds  2026-01-01 10:00:00.200000
+ target holds  2026-01-01 10:00:00.100000
+
+   raw               CRC32(CONCAT(ts))               1657430376  vs  3831370694
+   cast to datetime  CRC32(CONCAT(CAST(ts AS dt)))   3432137608  vs  3432137608
+```
+
+And the *narrowing* case, `TIMESTAMP(6)` → `TIMESTAMP`, slips past the copy
+gate as well: MySQL rounds a fractional value into a second-resolution column
+**without any warning at all**, so there is nothing for `SHOW WARNINGS` to
+promote, and the digest casts both sides down to `datetime` and rounds them the
+same way. A migration that drops sub-second precision therefore completes and
+checksums clean while the fraction is genuinely gone:
+
+```
+ source ts TIMESTAMP(6) = 2026-01-01 10:00:00.999999
+ target ts TIMESTAMP    = 2026-01-01 10:00:01          (rounded, no warning)
+   digest, both sides cast to datetime   3147133726  vs  3147133726   equal
+```
+
+Neither of these is configurable. The shape that closes both is to cast each
+side to the **wider** of the two columns' precisions — `datetime(max(Ns, Nt))`
+— rather than to a stripped `datetime`. Casting to the *narrower* precision
+looks equally plausible and does not work: for `TIMESTAMP(6)` → `TIMESTAMP`
+the narrower is `datetime(0)`, both sides round to `10:00:01`, and the lost
+fraction stays invisible. Measured on MySQL 8.0.43:
+
+| case | cast to the **wider** | cast to the **narrower** |
+| --- | --- | --- |
+| widening, `TIMESTAMP` → `TIMESTAMP(6)`<br>nothing below a second to lose, so this must *not* fire | `788709475` vs `788709475`<br>equal ✓ | `3432137608` vs `3432137608`<br>equal ✓ |
+| narrowing, `TIMESTAMP(6)` → `TIMESTAMP`<br>source `.999999`, target rounded to `10:00:01` — the fraction really is gone | `3755639858` vs `3819487485`<br>MISMATCH ✓ | `3147133726` vs `3147133726`<br>equal ✗ — gap stays open |
+| both sides fractional, values diverge<br>`.200000` vs `.100000` | `1657430376` vs `3831370694`<br>MISMATCH ✓ | same as wider — both columns are `(6)`, so the two agree |
+
+Widening stays clean either way, because a second-resolution source cast up to
+`datetime(6)` renders the same `.000000` the target stores. Only the wider
+precision *also* makes the two real divergences fail the digest. Note that
+adopting it would make `TIMESTAMP(6)` → `TIMESTAMP` migrations start failing
+their checksum — which is the point, since that conversion is lossy and
+unsupported, but it is a behaviour change rather than a pure bug fix.
 
 ## Chunk repair
 
