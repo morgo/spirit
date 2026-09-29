@@ -580,7 +580,7 @@ func (s *bufferedMap) Tables() []*table.TableInfo {
 // from the source table's ShardingColumn on each call rather than stored,
 // so a zero-value bufferedMap (tests build these directly) cannot
 // accidentally declare column 0 immutable. The same derivation is used by
-// the sharded applier when routing rows (see ShardedApplier.UpsertRows);
+// the sharded applier when routing rows (see MySQLApplier.UpsertRows);
 // NewBufferedSubscription validates at setup time that a configured column
 // resolves, so -1 here always means "not sharded". TableInfo.Columns and
 // ShardingColumn are fixed after setup, so no lock is required.
