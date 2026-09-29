@@ -41,3 +41,12 @@ func normalizeCollationName(collation string) string {
 	}
 	return collation
 }
+
+// charsetDefaultCollationIsFixed reports whether a charset named without a
+// collation takes the same collation on every server. utf8mb4's is the
+// server's default_collation_for_utf8mb4, which a server can set to
+// utf8mb4_general_ci, so naming utf8mb4 alone does not decide its collation.
+// An empty charset is one the definition does not name.
+func charsetDefaultCollationIsFixed(cs string) bool {
+	return cs != "" && !strings.EqualFold(cs, charset.CharsetUTF8MB4)
+}

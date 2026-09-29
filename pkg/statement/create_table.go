@@ -187,12 +187,15 @@ func (c *Column) CarriesCharset() bool {
 // column's own clauses against the table defaults exactly as MySQL does (see
 // resolvedCharsetCollation), and then fills in the charset's *default*
 // collation when no COLLATE was written anywhere. That last step matters
-// because SHOW CREATE TABLE omits COLLATE whenever it is the charset default,
-// so on MySQL 8.0 a table spelled `DEFAULT CHARSET=utf8mb4` really means
-// utf8mb4_0900_ai_ci and must compare unequal to one that spells
-// `COLLATE=utf8mb4_general_ci`. This is decidable without a server: a charset
-// used without a collation takes that charset's default collation —
-// collation_server does not enter into it.
+// because SHOW CREATE TABLE can omit COLLATE when it is the charset default, so
+// a table spelled `DEFAULT CHARSET=latin1` means latin1_swedish_ci and must
+// compare unequal to one that spells `COLLATE=latin1_bin`.
+//
+// For utf8mb4 that default is an assumption. A server resolves utf8mb4 named
+// without a collation to its default_collation_for_utf8mb4, which can be
+// utf8mb4_general_ci, while this always answers utf8mb4_0900_ai_ci, MySQL 8.0's
+// default. A caller that refuses a statement on the strength of the answer
+// must not rely on that guess, and uses determinedCharsetCollation instead.
 //
 // Either return value is "" when the statement does not determine it: a table
 // with no DEFAULT CHARSET at all (only reachable from hand-written DDL, since
@@ -218,6 +221,28 @@ func (c *Column) EffectiveCharsetCollation(table *CreateTable) (cs, collation st
 		}
 	}
 	return normalizeCharsetName(cs), normalizeCollationName(collation)
+}
+
+// determinedCharsetCollation returns the charset and collation the column
+// compares under, each "" when the definition does not decide it. It differs
+// from EffectiveCharsetCollation in one respect: where the definition names
+// only a charset, it supplies that charset's default collation only when every
+// server agrees on it (see charsetDefaultCollationIsFixed). A caller that
+// refuses a statement on the strength of the answer needs that certainty; a
+// linter does not.
+func (c *Column) determinedCharsetCollation(table *CreateTable) (cs, collation string) {
+	cs, collation = resolvedCharsetCollation(c, table)
+	cs = normalizeCharsetName(cs)
+	if collation != "" {
+		return cs, normalizeCollationName(collation)
+	}
+	if !charsetDefaultCollationIsFixed(cs) {
+		return cs, ""
+	}
+	if _, def, ok := DefaultCollationForCharset(cs); ok {
+		return cs, def
+	}
+	return cs, ""
 }
 
 // declaresNull reports whether the column definition explicitly permits NULL,
@@ -480,7 +505,8 @@ func (ct *CreateTable) getPrimaryKeyIndex() *Index {
 }
 
 // ToTableInfo builds a connection-less table.TableInfo from the parsed CREATE
-// TABLE, carrying the column types and primary key columns that Spirit's
+// TABLE, carrying the column types, charsets and collations, the table's
+// default charset and collation, and the primary key columns that Spirit's
 // checks read from table metadata. schemaName names the schema the table lives
 // in; it is only used for error messages and by checks that query MySQL, which
 // cannot run against the returned TableInfo anyway (see
@@ -492,16 +518,23 @@ func (ct *CreateTable) ToTableInfo(schemaName string) (*table.TableInfo, error) 
 	columns := make([]table.ColumnMeta, 0, len(ct.Columns))
 	for i := range ct.Columns {
 		col := &ct.Columns[i]
-		columns = append(columns, table.ColumnMeta{
+		meta := table.ColumnMeta{
 			Name:      col.Name,
 			MySQLType: formatColumnTypeAsMetadata(col),
 			Generated: col.GeneratedExpr != nil,
-		})
+		}
+		if col.CarriesCharset() {
+			meta.Charset, meta.Collation = col.determinedCharsetCollation(ct)
+			meta.CollationUnknown = meta.Collation == ""
+		}
+		columns = append(columns, meta)
 	}
 	ti, err := table.NewTableInfoFromMeta(schemaName, ct.TableName, columns, ct.primaryKeyColumns())
 	if err != nil {
 		return nil, fmt.Errorf("build table metadata for %q: %w", ct.TableName, err)
 	}
+	defaults := ct.TableDefault()
+	ti.DefaultCharset, ti.DefaultCollation = defaults.Charset, defaults.Collation
 	return ti, nil
 }
 
