@@ -27,7 +27,9 @@ Naive implementations that only compare row counts fail to catch most of these p
 
 While we do our best to prevent such bugs, we also want to be pedantic when it comes to data integrity. In most cases we have observed that the checksum process takes about 10% of the time as the copy-rows stage, which makes it an easy cost to justify.
 
-There are also some known cases where a checksum failure is not a bug. This includes adding a unique index on non-unique data, or a lossy data type conversion (e.g., `VARCHAR(100)` → `VARCHAR(10)` when records exist requiring more than 10 characters). Both are important cases to handle, and prevent a cutover operation from executing.
+There are also some known cases where a checksum failure is not a bug. The canonical one is adding a unique index to non-unique data: the duplicate rows are silently skipped during the copy, and the digest is what notices. Preventing the cut-over is the correct outcome, not a malfunction.
+
+A lossy data type conversion (e.g., `VARCHAR(100)` → `VARCHAR(10)` when records exist requiring more than 10 characters) is also refused, but usually *earlier* than the checksum — MySQL warns on the truncating write and the copy aborts. See [Type conversions](#type-conversions) for which gate catches what, and for the one conversion neither gate catches.
 
 ### Not only bugs: two copy-phase optimizations are unsafe by design
 
@@ -969,7 +971,7 @@ two:
 | `TINYINT` … `BIGINT` | `signed` | display width, `ZEROFILL` padding |
 | the `UNSIGNED` forms | `unsigned` | as above |
 | `TIMESTAMP`, `DATETIME` | `datetime` | fractional-second precision — see the blind spot below |
-| `DECIMAL(M,D)` | the target's **full** `decimal(M,D)` | trailing-zero scale |
+| `DECIMAL(M,D)` | the target's **full** `decimal(M,D)` | trailing-zero scale — but not for the `UNSIGNED` form, see below |
 | `FLOAT`, `DOUBLE` | `char` | |
 | `VARCHAR`, `CHAR`, `TEXT`, `ENUM`, `SET` | `char CHARACTER SET utf8mb4` | charset and collation changes; `utf8mb4` is the superset every other charset can be compared in |
 | `BINARY(N)` | the target's **full** `binary(N)` | zero padding on a widening. A plain `CAST(… AS binary)` does not pad, and `binary(0)` would truncate every value to nothing |
@@ -983,6 +985,15 @@ The fallback matters for one case in particular: `TIME(N)` is **not** in the
 full (`CAST(TIME'10:00:00.100000' AS char)` → `10:00:00.100000`, CRC32
 `4947716`). `TIME` columns therefore do not share the fractional-second blind
 spot described below — only `DATETIME` and `TIMESTAMP` do.
+
+The fallback also swallows one type the table above implies is handled.
+`castableTp` matches on the type string after the width is stripped, and the
+`decimal` case is spelled exactly — so `DECIMAL(12,4) UNSIGNED` reduces to
+`decimal unsigned`, matches nothing, and is compared as rendered text. The
+scale is then *not* normalized, which means an `ALTER` that widens the scale of
+an unsigned `DECIMAL` compares `169.09` against `169.0900` and reports a
+difference on every row of the column. This is a gap in the cast table rather
+than a documented behaviour; the signed form is unaffected.
 
 `ENUM` and `SET` are compared as their **string** value, not their stored
 ordinal, so appending values to the end of an `ENUM` list is invisible to the
@@ -1009,13 +1020,14 @@ alike.
 non-strict `sql_mode` (`NO_AUTO_VALUE_ON_ZERO` and nothing else,
 `pkg/dbconn/conn.go`) and the copy writes with `INSERT IGNORE`, so MySQL
 *downgrades* what would otherwise be an error into a warning and stores a
-coerced value. Spirit does not let that pass: every write goes through
-`dbconn.RetryableTransaction`, which runs `SHOW WARNINGS` after the statement
-and promotes anything it finds to a fatal `UnsafeWarningError` — the only
-exemptions are duplicate-key warnings (deliberately ignored under
-`IgnoreDupKeyWarnings`) and the range-optimizer capacity warning. A
-`VARCHAR(100)` → `VARCHAR(10)` migration therefore fails on the first chunk
-containing a too-long value:
+coerced value. Spirit does not let that pass: the row-copy and change-feed
+writes go through `dbconn.RetryableTransaction`, which runs `SHOW WARNINGS`
+after each statement and promotes any warning it finds to a fatal
+`UnsafeWarningError`. The one exemption is the duplicate-key warning,
+deliberately ignored under `IgnoreDupKeyWarnings`; everything else is fatal,
+including the range-optimizer capacity warning (3170), which gets its own
+message but is equally terminal. A `VARCHAR(100)` → `VARCHAR(10)` migration
+therefore fails on the first chunk containing a too-long value:
 
 ```
  INSERT IGNORE INTO _new (…) VALUES ('a-very-long-value-indeed')
@@ -1026,15 +1038,24 @@ containing a too-long value:
 Reducing a `DECIMAL`'s scale behaves the same way, via `Note 1265` — the
 warning *level* is not consulted, only its code.
 
+One write path is **not** covered by that gate: the final change-feed flush
+performed under the cut-over table lock goes through
+`dbconn.TableLock.ExecUnderLock`, which executes the statement directly and
+does not run `SHOW WARNINGS`. It is a narrow window — the backlog at that point
+is whatever arrived since the last flush, and any value that would truncate has
+almost certainly been seen by an earlier, gated flush already — but a
+truncation that appears *only* in that last batch is applied without the
+warning being inspected.
+
 **What reaches the checksum is what MySQL does not warn about.** The canonical
 case is adding a `UNIQUE` index to non-unique data: the duplicate row is
 skipped by `INSERT IGNORE` with a 1062 that Spirit is deliberately ignoring, so
 the copy completes with rows missing and the digest is what notices. The
 checksum then repairs the chunk, re-copies, skips the same row again, finds the
 same difference, and exhausts its retries into a hard error — cut-over refused.
-That is the designed outcome, and it is why the [known cases where a checksum
-failure is not a bug](#why-checksums-matter) list includes lossy changes: the
-failure *is* the safety mechanism working.
+That is the designed outcome: the failure *is* the safety mechanism working,
+which is why it is listed under [cases where a checksum failure is not a
+bug](#why-checksums-matter).
 
 ### Blind spot: fractional seconds
 
@@ -1069,12 +1090,25 @@ checksums clean while the fraction is genuinely gone:
    digest, both sides cast to datetime   3147133726  vs  3147133726   equal
 ```
 
-Neither of these is configurable. Casting to the target's full `datetime(N)`
-would close the first gap, but on its own it would re-introduce the
-`TIMESTAMP` → `TIMESTAMP(6)` mismatch the stripped width exists to avoid; the
-shape that closes both is to cast each side to the **narrower** of the two
-columns' precisions, which also makes the narrowing case fail the digest as it
-should.
+Neither of these is configurable. The shape that closes both is to cast each
+side to the **wider** of the two columns' precisions — `datetime(max(Ns, Nt))`
+— rather than to a stripped `datetime`. Casting to the *narrower* precision
+looks equally plausible and does not work: for `TIMESTAMP(6)` → `TIMESTAMP`
+the narrower is `datetime(0)`, both sides round to `10:00:01`, and the lost
+fraction stays invisible. Measured on MySQL 8.0.43:
+
+| case | cast to the **wider** | cast to the **narrower** |
+| --- | --- | --- |
+| widening, `TIMESTAMP` → `TIMESTAMP(6)`<br>nothing below a second to lose, so this must *not* fire | `788709475` vs `788709475`<br>equal ✓ | `3432137608` vs `3432137608`<br>equal ✓ |
+| narrowing, `TIMESTAMP(6)` → `TIMESTAMP`<br>source `.999999`, target rounded to `10:00:01` — the fraction really is gone | `3755639858` vs `3819487485`<br>MISMATCH ✓ | `3147133726` vs `3147133726`<br>equal ✗ — gap stays open |
+| both sides fractional, values diverge<br>`.200000` vs `.100000` | `1657430376` vs `3831370694`<br>MISMATCH ✓ | same as wider — both columns are `(6)`, so the two agree |
+
+Widening stays clean either way, because a second-resolution source cast up to
+`datetime(6)` renders the same `.000000` the target stores. Only the wider
+precision *also* makes the two real divergences fail the digest. Note that
+adopting it would make `TIMESTAMP(6)` → `TIMESTAMP` migrations start failing
+their checksum — which is the point, since that conversion is lossy and
+unsupported, but it is a behaviour change rather than a pure bug fix.
 
 ## Chunk repair
 
