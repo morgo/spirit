@@ -940,3 +940,103 @@ func TestDiffIntegrationNationalCharsetConverges(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, stmts, "re-diff after applying the MODIFY must converge")
 }
+
+// TestDiffIntegrationDefaultCollation verifies, for every charset the server
+// knows other than utf8mb4 and binary, that a column or table declaring the
+// charset without a COLLATE matches its live form, which writes the default
+// collation out. The charsets come from the server rather than the parser, so a
+// default the parser's registry gets wrong fails here.
+func TestDiffIntegrationDefaultCollation(t *testing.T) {
+	db, err := sql.Open("block-mysql", testutils.DSN())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	rows, err := db.QueryContext(t.Context(),
+		"SELECT character_set_name FROM information_schema.character_sets WHERE character_set_name NOT IN ('utf8mb4', 'binary') ORDER BY 1")
+	require.NoError(t, err)
+	var charsets []string
+	for rows.Next() {
+		var cs string
+		require.NoError(t, rows.Scan(&cs))
+		charsets = append(charsets, cs)
+	}
+	require.NoError(t, rows.Err())
+	require.NoError(t, rows.Close())
+	require.NotEmpty(t, charsets)
+
+	for _, cs := range charsets {
+		t.Run(cs, func(t *testing.T) {
+			for _, ddl := range []string{
+				// A column that declares the charset in a utf8mb4 table.
+				fmt.Sprintf("CREATE TABLE diff_default_collation (id int NOT NULL, a varchar(3) CHARACTER SET %s, b text CHARACTER SET %s, PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", cs, cs),
+				// A table default, with one column inheriting it and one
+				// declaring it.
+				fmt.Sprintf("CREATE TABLE diff_default_collation (id int NOT NULL, a varchar(3), b varchar(3) CHARACTER SET %s, PRIMARY KEY (id)) DEFAULT CHARSET=%s", cs, cs),
+			} {
+				tt := testutils.NewTestTable(t, "diff_default_collation", ddl)
+				desired, err := ParseCreateTable(ddl)
+				require.NoError(t, err)
+				live, err := ParseCreateTable(showCreateTable(t, tt.DB, tt.Name))
+				require.NoError(t, err)
+				stmts, err := live.Diff(desired, nil)
+				require.NoError(t, err)
+				require.Nil(t, stmts, "a charset without a COLLATE must match its live form: %s", ddl)
+			}
+		})
+	}
+}
+
+// TestDiffIntegrationTableCharsetSelectsDefaultCollation verifies that a
+// desired DEFAULT CHARSET=latin1 converges a latin1_bin table, including the
+// column that inherits the table default, onto latin1_swedish_ci in one ALTER.
+func TestDiffIntegrationTableCharsetSelectsDefaultCollation(t *testing.T) {
+	tt := testutils.NewTestTable(t, "diff_table_default_collation",
+		"CREATE TABLE diff_table_default_collation (id int NOT NULL, a varchar(3), PRIMARY KEY (id)) DEFAULT CHARSET=latin1 COLLATE=latin1_bin")
+	desired, err := ParseCreateTable(
+		"CREATE TABLE diff_table_default_collation (id int NOT NULL, a varchar(3), PRIMARY KEY (id)) DEFAULT CHARSET=latin1")
+	require.NoError(t, err)
+
+	live, err := ParseCreateTable(showCreateTable(t, tt.DB, tt.Name))
+	require.NoError(t, err)
+	stmts, err := live.Diff(desired, nil)
+	require.NoError(t, err)
+	require.Len(t, stmts, 1)
+	testutils.RunSQL(t, stmts[0].Statement)
+
+	var tableCollation, columnCollation string
+	require.NoError(t, tt.DB.QueryRowContext(t.Context(),
+		"SELECT table_collation FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ?", tt.Name).Scan(&tableCollation))
+	require.NoError(t, tt.DB.QueryRowContext(t.Context(),
+		"SELECT collation_name FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? AND column_name = 'a'", tt.Name).Scan(&columnCollation))
+	require.Equal(t, "latin1_swedish_ci", tableCollation)
+	require.Equal(t, "latin1_swedish_ci", columnCollation)
+
+	live, err = ParseCreateTable(showCreateTable(t, tt.DB, tt.Name))
+	require.NoError(t, err)
+	stmts, err = live.Diff(desired, nil)
+	require.NoError(t, err)
+	require.Nil(t, stmts, "re-diff after applying the ALTER must converge")
+}
+
+// TestDiffIntegrationColumnCharsetConverges verifies that converting a utf8mb4
+// column to CHARACTER SET latin1 emits a MODIFY that MySQL applies, after which
+// a re-diff converges to nil.
+func TestDiffIntegrationColumnCharsetConverges(t *testing.T) {
+	tt := testutils.NewTestTable(t, "diff_column_charset_converge",
+		"CREATE TABLE diff_column_charset_converge (id int NOT NULL, a varchar(3), PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci")
+	desired, err := ParseCreateTable(
+		"CREATE TABLE diff_column_charset_converge (id int NOT NULL, a varchar(3) CHARACTER SET latin1, PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci")
+	require.NoError(t, err)
+
+	live, err := ParseCreateTable(showCreateTable(t, tt.DB, tt.Name))
+	require.NoError(t, err)
+	stmts, err := live.Diff(desired, nil)
+	require.NoError(t, err)
+	require.Len(t, stmts, 1)
+	testutils.RunSQL(t, stmts[0].Statement)
+
+	live, err = ParseCreateTable(showCreateTable(t, tt.DB, tt.Name))
+	require.NoError(t, err)
+	stmts, err = live.Diff(desired, nil)
+	require.NoError(t, err)
+	require.Nil(t, stmts, "re-diff after applying the MODIFY must converge")
+}

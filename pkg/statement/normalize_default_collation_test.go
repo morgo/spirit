@@ -7,14 +7,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestUtf8mb3DefaultCollationOrderIndependent: this rule and
+// TestDefaultCollationOrderIndependent: this rule and
 // binaryAttributeNormalizer both write a column's collation, and normalizers
 // must not depend on registration order. Each case is parsed with the
 // registry in its normal order and reversed, and must resolve the same way.
-// In particular a BINARY national column must get utf8mb3_bin either way: if
-// this rule filled in utf8mb3_general_ci first, the binary rule would read it
+// In particular a BINARY column with a declared charset must get that
+// charset's _bin collation either way: if this rule filled in the default
+// (utf8mb3_general_ci, latin1_swedish_ci) first, the binary rule would read it
 // as a written COLLATE and keep it.
-func TestUtf8mb3DefaultCollationOrderIndependent(t *testing.T) {
+func TestDefaultCollationOrderIndependent(t *testing.T) {
 	registered := normalizers
 	t.Cleanup(func() { normalizers = registered })
 
@@ -26,6 +27,10 @@ func TestUtf8mb3DefaultCollationOrderIndependent(t *testing.T) {
 		{"CREATE TABLE t (c NCHAR(3) BINARY COLLATE utf8mb3_unicode_ci) DEFAULT CHARSET=utf8mb4", "utf8_unicode_ci"},
 		{"CREATE TABLE t (c varchar(3) CHARACTER SET utf8mb3 BINARY) DEFAULT CHARSET=latin1", "utf8_bin"},
 		{"CREATE TABLE t (c varchar(3) BINARY) DEFAULT CHARSET=utf8mb3", "utf8_bin"},
+		{"CREATE TABLE t (c varchar(3) CHARACTER SET latin1 BINARY) DEFAULT CHARSET=utf8mb4", "latin1_bin"},
+		{"CREATE TABLE t (c varchar(3) CHARACTER SET latin1) DEFAULT CHARSET=utf8mb4", "latin1_swedish_ci"},
+		{"CREATE TABLE t (c varchar(3) CHARACTER SET latin1 BINARY COLLATE latin1_general_ci) DEFAULT CHARSET=utf8mb4", "latin1_general_ci"},
+		{"CREATE TABLE t (c varchar(3) BINARY) DEFAULT CHARSET=ascii", "ascii_bin"},
 	} {
 		t.Run(tc.sql, func(t *testing.T) {
 			for _, order := range [][]Normalizer{registered, reversed(registered)} {

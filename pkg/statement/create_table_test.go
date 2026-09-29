@@ -1651,11 +1651,21 @@ func TestCharsetCollationExtraction(t *testing.T) {
 		expectedCollation *string
 	}{
 		{
-			name:              "VARCHAR with CHARACTER SET",
-			sql:               "CREATE TABLE test (name VARCHAR(100) CHARACTER SET utf8mb4);",
-			columnName:        "name",
-			expectedCharset:   new("utf8mb4"),
+			name:            "VARCHAR with CHARACTER SET",
+			sql:             "CREATE TABLE test (name VARCHAR(100) CHARACTER SET utf8mb4);",
+			columnName:      "name",
+			expectedCharset: new("utf8mb4"),
+			// utf8mb4's default collation depends on the server, so
+			// defaultCollationNormalizer leaves it unset.
 			expectedCollation: nil,
+		},
+		{
+			name:            "VARCHAR with a fixed-default CHARACTER SET",
+			sql:             "CREATE TABLE test (name VARCHAR(100) CHARACTER SET latin1);",
+			columnName:      "name",
+			expectedCharset: new("latin1"),
+			// defaultCollationNormalizer fills in the default.
+			expectedCollation: new("latin1_swedish_ci"),
 		},
 		{
 			name:              "CHAR with COLLATE",
@@ -1676,7 +1686,7 @@ func TestCharsetCollationExtraction(t *testing.T) {
 			sql:             "CREATE TABLE test (description TEXT CHARACTER SET utf8);",
 			columnName:      "description",
 			expectedCharset: new("utf8"),
-			// utf8mb3DefaultCollationNormalizer fills in the default.
+			// defaultCollationNormalizer fills in the default.
 			expectedCollation: new("utf8_general_ci"),
 		},
 		{
@@ -1692,6 +1702,13 @@ func TestCharsetCollationExtraction(t *testing.T) {
 			columnName:        "name1",
 			expectedCharset:   new("utf8"),
 			expectedCollation: new("utf8_general_ci"),
+		},
+		{
+			name:              "Multiple columns with different charsets (second)",
+			sql:               "CREATE TABLE test (name1 VARCHAR(100) CHARACTER SET utf8, name2 VARCHAR(100) CHARACTER SET latin1);",
+			columnName:        "name2",
+			expectedCharset:   new("latin1"),
+			expectedCollation: new("latin1_swedish_ci"),
 		},
 	}
 
