@@ -142,11 +142,33 @@ the wall clock — hours, on a large table — but they all observe `T0`:
 ```
 
 > **Claim:** at instant `T0`, source and target were equal — everywhere, at
-> once.
+> once. (Per *yield segment* — see below.)
 
 The weakness is *which* instant. `T0` is where the pass **begins**, so by the
 time the pass ends the claim can be many hours old, and the gap between `T0`
 and cut-over is entirely uncovered.
+
+**One snapshot per yield, not per pass.** Holding a `REPEATABLE READ` view
+open pins undo, so `YieldTimeout` (24h by default, and
+`--checksum-yield-timeout` lets an operator set it much lower) caps how long
+one snapshot may live. When it fires, `runChecksumWithYield` takes the
+chunker's low watermark, reopens there, and loops back into `runChecksum` —
+which takes a **new** table lock and a **new** transaction pool. So a pass
+that yields is not one instant; it is one instant per segment:
+
+```
+   ├──── snapshot 1 ─────┤──── snapshot 2 ─────┤──── snapshot 3 ─────┤──►
+   T0                    T1                    T2
+     chunks A–F            chunks G–M            chunks N–Z
+                         │                     │
+                         └─ yield: release the transactions, reopen the chunker at
+                            the low watermark, take a new lock, snapshot again
+```
+
+Every claim about `T0` below should be read as a claim about *one segment*.
+With the 24h default most passes are a single segment, so the distinction is
+usually theoretical — but the hours-long pass on a large table is exactly the
+one that yields, so it is not a corner case.
 
 **Lockless.** Each chunk is read whenever a worker gets to it, and re-read
 until the target agrees with a source image the checker has **witnessed**.
@@ -154,17 +176,21 @@ That is a weaker statement than "they were equal at some instant", and the
 difference matters — see below:
 
 ```
-  app writes ────────────────────────────────────────────────────────►
-             src v1        src v2               src v3
-   chunk A    ├r┤✗ ···wait··· ├r┤✓ tgt caught up to v1
-   chunk B         ├r┤✓
-   chunk C            ├r┤✗ ··· ├r┤✗ ··· ├r┤✗ ··· ├─settle─┤✓
-   chunk D                 ├r┤✓
-                                  ▲                  ▲      │      │
-                     a ✓ means "the target reached a        │      │
-                     source state we saw" — not that both   │      │
-                     held it at the same moment      └──────┴──────┘
-                                                        not covered
+  app writes ─────────────────────────────────────────────────────────►
+  source        v1 ──────────► v2 ──────────► v3 ──────────────────────►
+
+   chunk A      ├r┤✗ ··wait·· ├r┤✓
+                                 └─ target reached v1; source is on v2 now
+   chunk B           ├r┤✓
+   chunk C              ├r┤✗ ··· ├r┤✗ ··· ├r┤✗ ··· ├─settle─┤✓
+                                                             └─ frozen target
+                                                                vs the event's
+                                                                own after-image
+   chunk D                   ├r┤✓
+
+   ✓ = "the target reached a source state we witnessed", not
+       "both held it at the same moment". After the last ✓ and
+       before cut-over: not covered.
 ```
 
 > **Claim:** for every chunk, the target reached a state the source is known
@@ -252,28 +278,38 @@ half as a full after-image and applying it overwrites whatever the target
 held.
 
 So: cross-chunk sampling changes the *shape* of the coverage — a lockless pass
-can report every chunk equal without having examined a given row at all,
-which a snapshot pass structurally cannot — without widening the set of
-divergences that survive a single pass. What bounds it:
+can report every chunk equal without having examined a given row at all —
+without widening the set of divergences that survive a single pass. What
+bounds it:
 
 - The exposure per row is the interval between the two chunk reads, not the
   length of the pass. More workers narrows it.
 - `RunContinuous` re-walks from the start, and the next pass reads both
   ranges after the move.
 
+**And a snapshot pass is not categorically free of this either.** A pass that
+[yields](#what-each-one-proves) re-snapshots at the watermark, so a row that
+moves from a not-yet-read range into an already-read range between `T0` and
+`T1` is missed there for exactly the same reason. The difference between the
+two checkers is therefore **quantitative, not categorical**: both re-establish
+their reference point periodically and acquire this exposure at every
+boundary. Lockless does it per chunk read; a snapshot pass does it per yield —
+which is once every `YieldTimeout` rather than never.
+
 ### Cost and operational profile
 
 | | `SingleChecker` (snapshot) | `LocklessChecker` (optimistic) |
 | --- | --- | --- |
-| Proves | equality at one instant, whole table | per chunk, that the target reached a *witnessed* source state — lineage, not simultaneity (settled rows excepted: those are point-in-time) |
-| Evidence dates from | the *start* of the pass | each chunk's own last read, so as late as that chunk got to |
+| Proves | equality at one instant, across every chunk in a yield segment | per chunk, that the target reached a *witnessed* source state — lineage, not simultaneity (settled rows excepted: those are point-in-time) |
+| Reference point re-established | once per yield (`YieldTimeout`, 24h default) | on every chunk read |
+| Evidence dates from | the start of the current yield segment | each chunk's own last read, so as late as that chunk got to |
 | Read isolation | `REPEATABLE READ`, pinned pool | `READ COMMITTED`, ordinary reads |
 | Locks | brief `LOCK TABLES` on every table | none |
 | InnoDB history list | grows for the whole pass (read views pin undo); `YieldTimeout` (24h default) exists only to bound this | no growth |
 | Query stalls | every query queues behind the metadata lock, and connection pools fill head-of-line while it is held | none |
 | Concurrency ceiling | fixed at construction — the pool cannot grow once the lock is released, and the ceiling lengthens the lock window in proportion | resizable mid-pass |
 | Busy table | one pass, regardless of write rate | extra reads: retries, subdivision, settling |
-| Temporally blind to | anything after `T0` | anything after each chunk's last read, and a row that migrates between two chunk reads (which is inside the pass, but see [above](#cross-chunk-sampling-a-different-shape-of-coverage)) |
+| Temporally blind to | anything after the segment's `T0`, and — across a yield boundary — a row that migrates into an already-read range | anything after each chunk's last read, and a row that migrates between two chunk reads (see [above](#cross-chunk-sampling-a-different-shape-of-coverage)) |
 | Cross-server / N sources | not supported by `SingleChecker`; achievable with locks, at a cost that scales with the topology (see below) | native — each chunk is read from every source and target and aggregated |
 | Implementation | simple | substantially more complex |
 | Used by | `spirit migrate` (default) | `spirit move`, `spirit sync`, `spirit migrate --enable-experimental-lockless-checksum` |
@@ -341,9 +377,18 @@ throughput proportional to N, against N distinct key ranges, on one server:
         │
         └──► is also what the change feed has to apply
                    = a rate high enough to make a large table's ranges
-                     mostly hot fails the migration on feed lag first,
-                     long before it fails on settling
+                     mostly hot never lets the feed drain, so the
+                     migration cannot reach cut-over — settling was
+                     never the binding constraint
 ```
+
+Note the failure mode there is a **stall, not an error**. `Flush` loops until
+the buffered change count falls below a trivial threshold, treating a
+`BlockWait` timeout as a warning and retrying; it returns early only on
+context cancellation. A write rate the feed cannot absorb therefore holds the
+migration short of cut-over indefinitely rather than failing it, so this is
+something to watch for in the feed's own progress metrics — not an error an
+operator should expect to see surfaced.
 
 On a **small** table that argument does not apply — a single continuously
 updated row can make a one-chunk table entirely hot while the feed keeps up
