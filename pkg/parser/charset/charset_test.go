@@ -198,6 +198,8 @@ func TestMySQLDefaultCollation(t *testing.T) {
 		{"utf8mb3", "utf8_general_ci", true},
 		{"binary", "binary", true},
 		{"utf16", "utf16_general_ci", true},
+		{"koi8r", "koi8r_general_ci", true},
+		{"koi8u", "koi8u_general_ci", true},
 		{"invalid_cs", "", false},
 		{"", "", false},
 	}
@@ -205,5 +207,20 @@ func TestMySQLDefaultCollation(t *testing.T) {
 		co, ok := MySQLDefaultCollation(tt.cs)
 		require.Equal(t, tt.ok, ok, "charset %q", tt.cs)
 		require.Equal(t, tt.co, co, "charset %q", tt.cs)
+	}
+}
+
+// TestMySQLDefaultCollationBelongsToCharset checks every charset's default
+// against the collation registry: the default must be a collation of that same
+// charset. (IsDefault is not checked: the collation registry keeps the legacy
+// *_bin defaults, e.g. utf8_bin, that MySQLDefaultCollation deliberately
+// bypasses.)
+func TestMySQLDefaultCollationBelongsToCharset(t *testing.T) {
+	for name := range charsets {
+		co, ok := MySQLDefaultCollation(name)
+		require.True(t, ok, "charset %q", name)
+		collation, err := GetCollationByName(co)
+		require.NoError(t, err, "charset %q default %q", name, co)
+		require.Equal(t, name, collation.CharsetName, "charset %q default %q", name, co)
 	}
 }
