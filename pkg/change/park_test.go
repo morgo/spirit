@@ -223,6 +223,11 @@ func TestVerifyRowAtNextChangeFailures(t *testing.T) {
 				func(h *verifyHarness) { h.dispatch([]any{int64(1)}, []any{int64(1), "first"}, false) },
 				func(h *verifyHarness) { h.dispatch([]any{int64(1)}, []any{int64(1), "second"}, false) },
 			},
+			// The rewrite must be caught before the target is read, so the
+			// verifier must never run.
+			verifyFn: func(context.Context, []any, []any, bool) error {
+				return errors.New("the verifier ran against a target the rewrite had moved")
+			},
 			wantErr: ErrRowRewritten,
 		},
 		"flush fails": {
@@ -242,10 +247,13 @@ func TestVerifyRowAtNextChangeFailures(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			h := newVerifyHarness()
-			// The dispatches are the rows of one event, so they all land
-			// before the parked flush finishes. Without this wait the first
-			// Release can wake Verify, which then flushes, verifies and reads
-			// the rewrite count before the second row has been observed.
+			// These cases pin the ordering where every row of the event is
+			// observed before the parked flush completes. The harness chooses
+			// it, because nothing in the parker forces it: the gate stops the
+			// next event, not the rest of this one. Without this wait the
+			// first Release can wake Verify, which then flushes, verifies and
+			// reads the rewrite count before the second row is observed. A
+			// second row that lands after the verdict correctly yields nil.
 			dispatched := make(chan struct{})
 			h.flushFn = func(ctx context.Context) error {
 				select {
