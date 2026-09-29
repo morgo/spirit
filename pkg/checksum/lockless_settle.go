@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 
@@ -290,6 +291,10 @@ func expectedImageCRC(ctx context.Context, sourceDB *sql.DB, chunk *table.Chunk,
 	if err != nil {
 		return 0, err
 	}
+	castTps, err := chunk.ColumnMapping.ChecksumCastTypes()
+	if err != nil {
+		return 0, err
+	}
 	columns, _ := chunk.ColumnMapping.ColumnsSlice()
 	ordinals := chunk.ColumnMapping.SourceOrdinalIndices()
 	values := make([]any, len(ordinals))
@@ -299,7 +304,7 @@ func expectedImageCRC(ctx context.Context, sourceDB *sql.DB, chunk *table.Chunk,
 			return 0, fmt.Errorf("binlog row image has %d columns, need ordinal %d", len(image), ordinal)
 		}
 		tp, _ := chunk.Table.GetColumnMySQLType(columns[i])
-		placeholders[i], values[i], err = imageValueExpr(tp, image[ordinal])
+		placeholders[i], values[i], err = imageValueExpr(tp, castTps[i], image[ordinal])
 		if err != nil {
 			return 0, fmt.Errorf("render column %s of the binlog row image: %w", columns[i], err)
 		}
@@ -316,6 +321,9 @@ func expectedImageCRC(ctx context.Context, sourceDB *sql.DB, chunk *table.Chunk,
 
 // imageValueExpr renders one column of a binlog row image into the value branch
 // of expectedImageCRC's derived table, as an expression and the value to bind.
+// tp is the source column's type; castTp is the type the checksum casts the
+// column to (see ColumnMapping.ChecksumCastTypes), which comes from the target
+// and so can be a different type family from tp.
 //
 // A bare "?" is right for most types and wrong for two, because UNION type
 // merging *widens*: a value whose Go type is wider than the column takes the
@@ -327,18 +335,24 @@ func expectedImageCRC(ctx context.Context, sourceDB *sql.DB, chunk *table.Chunk,
 //     CAST(... AS char) renders 0.1 as "0.10000000149011612" where the real row
 //     gives "0.1". Casting the parameter back to FLOAT restores the column's
 //     precision, so the merge is FLOAT with FLOAT.
-//   - BIT is decoded as an int64, and the checksum casts a BIT column to
-//     unsigned. A BIT(64) with the top bit set decodes negative, so binding the
-//     int64 as-is would render -1 where the real row renders
-//     18446744073709551615. Binding it reinterpreted as a uint64 renders the
-//     column's value for every width.
+//   - BIT is decoded as an int64, and what the real column renders depends on
+//     the cast. A numeric cast (BIT -> BIT is cast to unsigned, BIT -> INT to
+//     signed) renders its value, so the image binds it as a uint64: a BIT(64)
+//     with the top bit set decodes negative, and binding the int64 as-is would
+//     render -1 where the real row renders 18446744073709551615. Any other
+//     cast (BIT -> VARCHAR is cast to char, BIT -> VARBINARY to binary)
+//     renders the column's raw big-endian bytes — ceil(N/8) of them, at the
+//     source column's width, so 0x05 for BIT(8) and 0x0000000000000005 for
+//     BIT(64) — and the image binds those bytes. Either binding under the
+//     other cast is wrong: CAST(x'05' AS signed) is 0, and a uint64 cast to
+//     char renders "5".
 //
 // Both are silent: the query succeeds and returns a CRC that simply is not the
 // row's, so every hot row in a table with a FLOAT or BIT column settles to a
 // false divergence. Every other type the checksum handles renders the same
 // either way — TestExpectedImageCRCMatchesRealRow pins that over the ones where
 // storage and text differ.
-func imageValueExpr(tp string, v any) (string, any, error) {
+func imageValueExpr(tp, castTp string, v any) (string, any, error) {
 	if v == nil {
 		return "?", nil, nil // NULL renders as NULL under every cast
 	}
@@ -346,14 +360,28 @@ func imageValueExpr(tp string, v any) (string, any, error) {
 	case "float", "float unsigned":
 		return "CAST(? AS FLOAT)", v, nil
 	case "bit":
+		var u uint64
 		switch n := v.(type) {
 		case int64:
-			return "?", uint64(n), nil
+			u = uint64(n)
 		case uint64:
-			return "?", n, nil
+			u = n
 		default:
 			return "", nil, fmt.Errorf("binlog decoded a %s column as %T, want an integer", tp, v)
 		}
+		if isNumericCast(castTp) {
+			return "?", u, nil
+		}
+		bits, err := bitWidth(tp)
+		if err != nil {
+			return "", nil, err
+		}
+		raw := make([]byte, (bits+7)/8)
+		for i := len(raw) - 1; i >= 0; i-- {
+			raw[i] = byte(u)
+			u >>= 8
+		}
+		return "?", raw, nil
 	}
 	return "?", v, nil
 }
@@ -368,6 +396,30 @@ func baseColumnType(tp string) string {
 		return tp
 	}
 	return strings.TrimSpace(tp[:open] + " " + strings.TrimSpace(tp[closing+1:]))
+}
+
+// isNumericCast reports whether a checksum cast type (see
+// table.ColumnMapping.ChecksumCastTypes) renders a number rather than bytes.
+func isNumericCast(castTp string) bool {
+	return castTp == "signed" || castTp == "unsigned" || strings.HasPrefix(castTp, "decimal")
+}
+
+// bitWidth reads N out of "bit(N)". A BIT column with no width is BIT(1).
+func bitWidth(tp string) (int, error) {
+	tp = strings.ToLower(strings.TrimSpace(tp))
+	open := strings.IndexByte(tp, '(')
+	closing := strings.IndexByte(tp, ')')
+	if open < 0 {
+		return 1, nil
+	}
+	if closing < open {
+		return 0, fmt.Errorf("malformed bit type %q", tp)
+	}
+	bits, err := strconv.Atoi(strings.TrimSpace(tp[open+1 : closing]))
+	if err != nil || bits < 1 || bits > 64 {
+		return 0, fmt.Errorf("malformed bit type %q", tp)
+	}
+	return bits, nil
 }
 
 // keyMatcher decides whether a binlog event's key is the row being waited for.

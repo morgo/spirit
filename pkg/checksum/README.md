@@ -29,7 +29,7 @@ While we do our best to prevent such bugs, we also want to be pedantic when it c
 
 There are also some known cases where a checksum failure is not a bug. The canonical one is adding a unique index to non-unique data: the duplicate rows are silently skipped during the copy, and the digest is what notices. Preventing the cut-over is the correct outcome, not a malfunction.
 
-A lossy data type conversion (e.g., `VARCHAR(100)` → `VARCHAR(10)` when records exist requiring more than 10 characters) is also refused, but usually *earlier* than the checksum — MySQL warns on the truncating write and the copy aborts. See [Type conversions](#type-conversions) for which gate catches what, and for the one conversion neither gate catches.
+A lossy data type conversion (e.g., `VARCHAR(100)` → `VARCHAR(10)` when records exist requiring more than 10 characters) is also refused, but usually *earlier* than the checksum — MySQL warns on the truncating write and the copy aborts. See [Type conversions](#type-conversions) for which gate catches what. The exception is reducing a `DATETIME`/`TIMESTAMP` precision, which MySQL rounds without a warning, so the checksum is what refuses it (see [Fractional seconds](#fractional-seconds)).
 
 ### Not only bugs: two copy-phase optimizations are unsafe by design
 
@@ -913,15 +913,19 @@ still prints `42` on both sides. The cast is applied uniformly anyway, so that
 the comparison never depends on which of the two a given `ALTER` turns out to
 be.
 
-The rule is one line: **both sides are `CAST` to the target column's type, and
-only then hashed.** `ColumnMapping.ChecksumExprs` builds the two expression
-lists, and the cast type always comes from the **target** table — including for
-the source-side query. Where the `ALTER` renamed a column, the source SQL
-references the old name but takes its cast type from the new column. Each
-column contributes two things to each side:
+The rule is one line: **both sides are `CAST` to the same type, derived from
+the target column's type, and only then hashed.** `ColumnMapping.ChecksumExprs`
+builds the two expression lists, and the cast type comes from the **target**
+table — including for the source-side query — with one exception:
+`DATETIME`/`TIMESTAMP` take the *wider* of the two columns' fractional-second
+precisions (see [Fractional seconds](#fractional-seconds)), which is the only
+place the source column's type is consulted. Where the `ALTER` renamed a
+column, the source SQL references the old name, and each side's type is looked
+up under that side's column name. Each column contributes two things to each
+side:
 
 ```sql
-IFNULL(CAST(`col` AS <target type>),'') , '#' , ISNULL(`col`)
+IFNULL(CAST(`col` AS <cast type>),'') , '#' , ISNULL(`col`)
 ```
 
 — the cast value, and a separate NULL flag so that `NULL` and `''` cannot hash
@@ -939,8 +943,8 @@ The fractional second makes it concrete. Widening `TIMESTAMP` →
  source column: ts TIMESTAMP        target column: ts TIMESTAMP(6)
  source value:  2026-01-01 10:00:00 target value:  2026-01-01 10:00:00.000000
 
- raw:   CRC32(CONCAT(ts))                     3432137608  vs   788709475   MISMATCH
- cast:  CRC32(CONCAT(CAST(ts AS datetime)))   3432137608  vs  3432137608   equal
+ raw:   CRC32(CONCAT(ts))                        3432137608  vs  788709475   MISMATCH
+ cast:  CRC32(CONCAT(CAST(ts AS datetime(6))))   788709475  vs  788709475   equal
 ```
 
 Nothing is wrong with the copy in that example — the source cannot hold a
@@ -951,6 +955,10 @@ The same shape appears for scale and padding:
  DECIMAL(10,2) -> DECIMAL(12,4)    "169.09"  vs  "169.0900"
    raw                             1865833143  vs  2558327555   MISMATCH
    cast to decimal(12,4)           2558327555  vs  2558327555   equal
+
+ BIT(8) -> BIT(16)                 0x01      vs  0x0001
+   CAST(v AS char)                 2768625435  vs   920527465   MISMATCH
+   cast to unsigned                2212294583  vs  2212294583   equal
 
  INT(5) ZEROFILL -> INT            "00042"   vs  "42"
    raw                             3233738973  vs   841265288   MISMATCH
@@ -963,48 +971,36 @@ The same shape appears for scale and padding:
 ### What each type casts to
 
 `castableTp` (`pkg/table/utils.go`) maps a column type to the SQL-standard type
-`CAST` accepts. The width is stripped for most types and deliberately kept for
-two:
+`CAST` accepts, and `checksumCastTp` applies it to a source/target pair. The
+width is stripped for most types and deliberately kept for three:
 
 | Column type | Cast to | What that normalizes away |
 | --- | --- | --- |
 | `TINYINT` … `BIGINT` | `signed` | display width, `ZEROFILL` padding |
 | the `UNSIGNED` forms | `unsigned` | as above |
-| `TIMESTAMP`, `DATETIME` | `datetime` | fractional-second precision — see the blind spot below |
-| `DECIMAL(M,D)` | the target's **full** `decimal(M,D)` | trailing-zero scale — but not for the `UNSIGNED` form, see below |
+| `TIMESTAMP(N)`, `DATETIME(N)` | `datetime(N)`, at the **wider** of the source's and target's `N` | fractional-second padding on a widening, without hiding a lost fraction — see [Fractional seconds](#fractional-seconds) |
+| `DECIMAL(M,D)`, including `UNSIGNED`/`ZEROFILL` | the target's `decimal(M,D)`, without `UNSIGNED`/`ZEROFILL` | trailing-zero scale. `CAST` rejects an `UNSIGNED` modifier (1064), and an unsigned value always fits the signed `decimal` of the same `M,D` |
+| `BIT(N)` | `unsigned` | the width. `CAST(bit AS char)` returns the raw stored bytes at the column's *own* width (`0x01` vs `0x0001` above); `unsigned` compares the value, and `BIT(64)` fits |
 | `FLOAT`, `DOUBLE` | `char` | |
 | `VARCHAR`, `CHAR`, `TEXT`, `ENUM`, `SET` | `char CHARACTER SET utf8mb4` | charset and collation changes; `utf8mb4` is the superset every other charset can be compared in |
 | `BINARY(N)` | the target's **full** `binary(N)` | zero padding on a widening. A plain `CAST(… AS binary)` does not pad, and `binary(0)` would truncate every value to nothing |
 | `VARBINARY`, the `BLOB`s | `binary` | |
 | `VECTOR` (MySQL 9.7+) | `binary` | `CAST(… AS char)` is rejected outright by the server (`ER_WRONG_ARGUMENTS`) |
 | `JSON` | asymmetric, see below | |
-| **everything else** — `DATE`, `TIME(N)`, `YEAR`, `BIT(N)`, … | `char CHARACTER SET utf8mb4` | the `default` branch, so an unlisted type is compared as the bytes `CAST(… AS char)` returns for it — usually its rendered text, but see the gaps below |
+| **everything else** — `DATE`, `TIME(N)`, `YEAR`, … | `char CHARACTER SET utf8mb4` | the `default` branch, so an unlisted type is compared as the bytes `CAST(… AS char)` returns for it — its rendered text |
 
 The fallback matters for one case in particular: `TIME(N)` is **not** in the
 `datetime` row, so it takes the default branch and renders its fraction in
 full (`CAST(TIME'10:00:00.100000' AS char)` → `10:00:00.100000`, CRC32
-`4947716`). `TIME` columns therefore do not share the fractional-second blind
-spot described below — only `DATETIME` and `TIMESTAMP` do.
+`4947716`). A sub-second divergence in a `TIME` column is therefore visible
+without the precision handling `DATETIME`/`TIMESTAMP` need.
 
-**Two known gaps in the fallback.** `castableTp` switches on the type string
-*after* the width, `ZEROFILL` and decimal width have been stripped, and two
-shapes reach the `default` branch that should not:
-
-- `DECIMAL(M,D) UNSIGNED` reduces to `decimal unsigned`, which matches no case
-  (`case "decimal"` is spelled exactly), so the scale is never normalized.
-  `DECIMAL(10,2) UNSIGNED` → `DECIMAL(12,4) UNSIGNED` compares `169.09`
-  against `169.0900` — CRC32 `1865833143` vs `2558327555`. The signed form is
-  fine.
-- `BIT(N)` takes the default branch too, and `CAST(bit AS char)` returns the
-  raw stored bytes at each column's *own* width rather than a rendered
-  number: `BIT(8)` → `BIT(16)` holding `b'00000001'` compares `0x01` against
-  `0x0001` — CRC32 `2768625435` vs `920527465`. (`CAST(bit AS unsigned)`
-  yields `2212294583` on both sides.)
-
-Both are value-preserving widenings, so a **perfect** copy fails the digest,
-the repair cannot converge, and the cut-over is refused. That is fail-closed —
-no data is at risk — but the migration is unusable. Both are pre-existing gaps
-in `castableTp` rather than intended behaviour, tracked in block/spirit#1291.
+A type that falls to the `default` branch when it should not is fail-closed
+for a value-preserving widening — a **perfect** copy fails the digest on every
+row, the repair cannot converge, and the cut-over is refused — so a missing
+case shows up as an unusable migration rather than as data loss.
+`DECIMAL(M,D) UNSIGNED` and `BIT(N)` were both such cases until
+block/spirit#1291.
 
 `ENUM` and `SET` are compared as their **string** value, not their stored
 ordinal, so appending values to the end of an `ENUM` list is invisible to the
@@ -1068,60 +1064,51 @@ checksum then repairs the chunk, re-copies, skips the same row again, finds the
 same difference, and exhausts its retries into a hard error — cut-over refused.
 That is the designed outcome: the failure *is* the safety mechanism working,
 which is why it is listed under [cases where a checksum failure is not a
-bug](#why-checksums-matter).
+bug](#why-checksums-matter). Reducing a `DATETIME`/`TIMESTAMP` precision is the
+other one, described next.
 
-### Blind spot: fractional seconds
+### Fractional seconds
 
-There is one conversion that neither gate catches. Because the width is
-stripped, a `DATETIME(6)`/`TIMESTAMP(6)` column is compared as plain
-`datetime`, and `CAST` **rounds** to the second rather than truncating
-(`10:00:00.999999` → `10:00:01`).
+`CAST(… AS datetime)` **rounds** to the second rather than truncating
+(`10:00:00.999999` → `10:00:01`), so the precision a temporal column is cast to
+decides what the digest can see. A single precision cannot serve every case:
 
-For the *widening* case that is exactly right — the source has nothing below a
-second to lose. But where **both** sides can hold a fraction (a `move` or
-`sync`, where the types match, or any `ALTER` on a table that already has a
-fractional temporal column) a divergence below a second is invisible:
+- **Widening**, `TIMESTAMP` → `TIMESTAMP(6)`: the target renders `.000000` and
+  the source renders nothing, so the precision must be high enough that both
+  render the same instant the same way.
+- **Both sides fractional** (a `move` or `sync`, where the types match, or any
+  `ALTER` on a table that already has a fractional temporal column): a
+  divergence below a second must be visible, so the fraction must not be
+  rounded away.
+- **Narrowing**, `TIMESTAMP(6)` → `TIMESTAMP`: MySQL rounds a fractional value
+  into a second-resolution column **without any warning at all**, so there is
+  nothing for `SHOW WARNINGS` to promote and the copy gate cannot catch it. The
+  digest is the only gate left, and it must compare the source's fraction
+  against the target's rounded value.
 
-```
- source holds  2026-01-01 10:00:00.200000
- target holds  2026-01-01 10:00:00.100000
-
-   raw               CRC32(CONCAT(ts))               1657430376  vs  3831370694
-   cast to datetime  CRC32(CONCAT(CAST(ts AS dt)))   3432137608  vs  3432137608
-```
-
-And the *narrowing* case, `TIMESTAMP(6)` → `TIMESTAMP`, slips past the copy
-gate as well: MySQL rounds a fractional value into a second-resolution column
-**without any warning at all**, so there is nothing for `SHOW WARNINGS` to
-promote, and the digest casts both sides down to `datetime` and rounds them the
-same way. A migration that drops sub-second precision therefore completes and
-checksums clean while the fraction is genuinely gone:
-
-```
- source ts TIMESTAMP(6) = 2026-01-01 10:00:00.999999
- target ts TIMESTAMP    = 2026-01-01 10:00:01          (rounded, no warning)
-   digest, both sides cast to datetime   3147133726  vs  3147133726   equal
-```
-
-Neither of these is configurable. The shape that closes both is to cast each
-side to the **wider** of the two columns' precisions — `datetime(max(Ns, Nt))`
-— rather than to a stripped `datetime`. Casting to the *narrower* precision
-looks equally plausible and does not work: for `TIMESTAMP(6)` → `TIMESTAMP`
-the narrower is `datetime(0)`, both sides round to `10:00:01`, and the lost
-fraction stays invisible. Measured on MySQL 8.0.43:
+`checksumCastTp` therefore casts **both** sides to `datetime(max(Ns, Nt))` —
+the wider of the two columns' precisions. The narrower precision looks equally
+plausible and does not work: for `TIMESTAMP(6)` → `TIMESTAMP` it is
+`datetime(0)`, both sides round to `10:00:01`, and the lost fraction is
+invisible. Measured on MySQL 8.0.43:
 
 | case | cast to the **wider** | cast to the **narrower** |
 | --- | --- | --- |
 | widening, `TIMESTAMP` → `TIMESTAMP(6)`<br>nothing below a second to lose, so this must *not* fire | `788709475` vs `788709475`<br>equal ✓ | `3432137608` vs `3432137608`<br>equal ✓ |
-| narrowing, `TIMESTAMP(6)` → `TIMESTAMP`<br>source `.999999`, target rounded to `10:00:01` — the fraction really is gone | `3755639858` vs `3819487485`<br>MISMATCH ✓ | `3147133726` vs `3147133726`<br>equal ✗ — gap stays open |
+| narrowing, `TIMESTAMP(6)` → `TIMESTAMP`<br>source `.999999`, target rounded to `10:00:01` — the fraction really is gone | `3755639858` vs `3819487485`<br>MISMATCH ✓ | `3147133726` vs `3147133726`<br>equal ✗ — the loss is hidden |
 | both sides fractional, values diverge<br>`.200000` vs `.100000` | `1657430376` vs `3831370694`<br>MISMATCH ✓ | same as wider — both columns are `(6)`, so the two agree |
 
-Widening stays clean either way, because a second-resolution source cast up to
-`datetime(6)` renders the same `.000000` the target stores. Only the wider
-precision *also* makes the two real divergences fail the digest. Note that
-adopting it would make `TIMESTAMP(6)` → `TIMESTAMP` migrations start failing
-their checksum — which is the point, since that conversion is lossy and
-unsupported, but it is a behaviour change rather than a pure bug fix.
+The widening stays clean because a second-resolution source cast up to
+`datetime(6)` renders the same `.000000` the target stores.
+
+The consequence for a precision-reducing `ALTER` is that it is judged by the
+**data**, not by its shape: if no row holds a fraction the narrowing loses,
+both sides render identically and the migration succeeds; if any row does, that
+chunk mismatches, the repair re-copies it into the same rounded value, and the
+checksum exhausts its retries — cut-over refused, after the copy. The widening
+precision is only taken from the source when the source is itself a
+`DATETIME`/`TIMESTAMP`; for any other source type (e.g. `VARCHAR` →
+`DATETIME`) the target's own precision is used.
 
 ## Chunk repair
 

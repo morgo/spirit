@@ -126,28 +126,42 @@ const checksumSeparator = ", '#', "
 // is side-dependent for JSON columns (see castExpr), so the two expressions
 // can differ even without renames.
 func (m *ColumnMapping) ChecksumExprs() (source, target string, err error) {
+	castTps, err := m.ChecksumCastTypes()
+	if err != nil {
+		return "", "", err
+	}
 	sourceExprs := make([]string, len(m.sourceColumns))
 	targetExprs := make([]string, len(m.targetColumns))
 	for i := range m.sourceColumns {
-		// The CAST type is shared by both sides so that type conversions
-		// (e.g. INT→BIGINT) are applied consistently. The source SQL
-		// references the old column name; each type is looked up in its own
-		// table under that table's column name.
-		srcTp, err := m.sourceTable.columnMySQLTp(m.sourceColumns[i])
-		if err != nil {
-			return "", "", err
-		}
-		tgtTp, err := m.targetTable.columnMySQLTp(m.targetColumns[i])
-		if err != nil {
-			return "", "", err
-		}
-		castTp := checksumCastTp(srcTp, tgtTp)
-		srcCast := castExpr(m.sourceColumns[i], castTp, castSource)
-		tgtCast := castExpr(m.targetColumns[i], castTp, castTarget)
+		// The source SQL references the old column name, the target SQL the
+		// new one; both are cast to the same type.
+		srcCast := castExpr(m.sourceColumns[i], castTps[i], castSource)
+		tgtCast := castExpr(m.targetColumns[i], castTps[i], castTarget)
 		sourceExprs[i] = "IFNULL(" + srcCast + ",'')" + checksumSeparator + "ISNULL(`" + m.sourceColumns[i] + "`)"
 		targetExprs[i] = "IFNULL(" + tgtCast + ",'')" + checksumSeparator + "ISNULL(`" + m.targetColumns[i] + "`)"
 	}
 	return strings.Join(sourceExprs, checksumSeparator), strings.Join(targetExprs, checksumSeparator), nil
+}
+
+// ChecksumCastTypes returns the type each mapped column is CAST to by
+// ChecksumExprs, parallel to ColumnsSlice. The type is shared by both sides so
+// that type conversions (e.g. INT→BIGINT) are applied consistently; see
+// checksumCastTp for how it is chosen. Each column's type is looked up in its
+// own table under that table's column name, so renames are honoured.
+func (m *ColumnMapping) ChecksumCastTypes() ([]string, error) {
+	castTps := make([]string, len(m.sourceColumns))
+	for i := range m.sourceColumns {
+		srcTp, err := m.sourceTable.columnMySQLTp(m.sourceColumns[i])
+		if err != nil {
+			return nil, err
+		}
+		tgtTp, err := m.targetTable.columnMySQLTp(m.targetColumns[i])
+		if err != nil {
+			return nil, err
+		}
+		castTps[i] = checksumCastTp(srcTp, tgtTp)
+	}
+	return castTps, nil
 }
 
 // SourceColumnIndices returns the indices into sourceTable.NonGeneratedColumns

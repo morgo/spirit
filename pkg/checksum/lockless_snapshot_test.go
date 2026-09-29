@@ -17,8 +17,15 @@ import (
 
 func snapshotTestTables(t *testing.T, ddl string, keys []string) (*sql.DB, *table.Chunk) {
 	t.Helper()
+	return snapshotConversionTables(t, ddl, ddl, keys)
+}
+
+// snapshotConversionTables is snapshotTestTables with a different column
+// definition on each side, for a checksum across a type conversion.
+func snapshotConversionTables(t *testing.T, srcDDL, dstDDL string, keys []string) (*sql.DB, *table.Chunk) {
+	t.Helper()
 	schema, db := testutils.CreateUniqueTestDatabase(t)
-	for _, name := range []string{"src", "dst"} {
+	for name, ddl := range map[string]string{"src": srcDDL, "dst": dstDDL} {
 		_, err := db.ExecContext(t.Context(), "CREATE TABLE "+name+" ("+ddl+")")
 		require.NoError(t, err)
 	}
