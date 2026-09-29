@@ -39,10 +39,21 @@ const (
 	// row count and this bound is much looser.)
 	MaxStatementSizeBytes = 1024 * 1024
 
-	defaultBufferSize   = 128              // Size of the shared buffer channel for chunklets
-	defaultWriteWorkers = 2                // Number of write workers, default low for tests, but in practice we can use 40+
-	chunkTaskTimeout    = time.Second * 60 // Timeout for any task (copy chunk, delete keys, upsert rows)
+	defaultBufferSize   = 128 // Size of the shared buffer channel for chunklets
+	defaultWriteWorkers = 2   // Number of write workers, default low for tests, but in practice we can use 40+
 )
+
+// chunkTaskTimeout bounds one copy-path write (a chunklet INSERT), retries
+// included, in both appliers. A var only so tests can shorten it.
+//
+// It deliberately does not bound DeleteKeys or UpsertRows. Those run the
+// change feed's flushes, and pkg/change relies on no spirit-owned deadline
+// ever killing a flush statement: a healthy but slow REPLACE must finish, and
+// lock contention must surface as 1205/1213 so the batch is deferred rather
+// than failing the drain (see retryContendedBatches). Each flush attempt is
+// already bounded by RetryableTransaction: MaxRetries tries, each capped by
+// innodb_lock_wait_timeout.
+var chunkTaskTimeout = time.Second * 60
 
 // Target represents a shard target with its database connection, configuration, and key range.
 // Key ranges are expressed as Vitess-style strings (e.g., "-80", "80-", "80-c0").
