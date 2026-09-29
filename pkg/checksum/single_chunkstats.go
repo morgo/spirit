@@ -57,19 +57,15 @@ func (o *chunkObserver) summary(target time.Duration) string {
 	if len(o.durations) == 0 {
 		return ""
 	}
-	durs := slices.Clone(o.durations)
-	slices.Sort(durs)
-	rows := slices.Clone(o.rows)
-	slices.Sort(rows)
 	return fmt.Sprintf("chunks=%d target=%v duration-p50=%v duration-p90=%v duration-max=%v rows-p50=%d rows-max=%d row-capped=%d/%d",
-		len(durs),
+		len(o.durations),
 		target,
-		utils.Percentile(durs, 50).Round(time.Millisecond),
-		utils.Percentile(durs, 90).Round(time.Millisecond),
-		durs[len(durs)-1].Round(time.Millisecond),
-		utils.Percentile(rows, 50),
-		rows[len(rows)-1],
+		utils.Percentile(o.durations, 50).Round(time.Millisecond),
+		utils.Percentile(o.durations, 90).Round(time.Millisecond),
+		slices.Max(o.durations).Round(time.Millisecond),
+		utils.Percentile(o.rows, 50),
+		slices.Max(o.rows),
 		o.rowCapped,
-		len(durs),
+		len(o.durations),
 	)
 }

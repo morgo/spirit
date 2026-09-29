@@ -2,7 +2,6 @@ package applier
 
 import (
 	"fmt"
-	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -272,8 +271,7 @@ func (r *timingRing) percentiles() timingPercentiles {
 	return p
 }
 
-// p50p90 sorts s in place and returns its 50th and 90th percentiles.
+// p50p90 returns the 50th and 90th percentiles of s.
 func p50p90(s []time.Duration) (p50, p90 time.Duration) {
-	slices.Sort(s)
 	return utils.Percentile(s, 50), utils.Percentile(s, 90)
 }

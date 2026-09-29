@@ -1,19 +1,26 @@
 package utils
 
-import "cmp"
+import (
+	"cmp"
+	"slices"
+)
 
-// Percentile returns the p-th percentile (0 < p <= 100) of sorted, which must
-// already be in ascending order. It uses the nearest-rank method: the smallest
-// value with at least p% of the samples at or below it, i.e.
-// sorted[ceil(n*p/100) - 1]. It returns the zero value for an empty slice.
+// Percentile returns the p-th percentile (0 < p <= 100) of values, which may
+// be in any order. It uses the nearest-rank method: the smallest value with at
+// least p% of the samples at or below it, i.e. sorted[ceil(n*p/100) - 1]. It
+// returns the zero value for an empty slice.
 //
-// The rank is computed in integer arithmetic so float rounding of n*p can
-// never move it by one.
-func Percentile[T cmp.Ordered](sorted []T, p int) T {
-	if len(sorted) == 0 {
+// values is not modified: Percentile sorts a copy, so callers can pass a live
+// history (such as a ring buffer) without it being reordered. The rank is
+// computed in integer arithmetic so float rounding of n*p can never move it
+// by one.
+func Percentile[T cmp.Ordered](values []T, p int) T {
+	if len(values) == 0 {
 		var zero T
 		return zero
 	}
+	sorted := slices.Clone(values)
+	slices.Sort(sorted)
 	rank := max((len(sorted)*p+99)/100, 1)
 	return sorted[min(rank, len(sorted))-1]
 }

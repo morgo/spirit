@@ -64,10 +64,12 @@ func TestPercentileP90MatchesSecondFromTop(t *testing.T) {
 			sorted[i] = i
 		}
 		require.Equal(t, n-1-n/10, Percentile(sorted, 90), "n=%d", n)
+		slices.Reverse(sorted)
+		require.Equal(t, n-1-n/10, Percentile(sorted, 90), "n=%d reversed", n)
 	}
 }
 
-func TestPercentileUnsortedHistory(t *testing.T) {
+func TestPercentileUnsortedInput(t *testing.T) {
 	times := []time.Duration{
 		1 * time.Second,
 		2 * time.Second,
@@ -80,6 +82,9 @@ func TestPercentileUnsortedHistory(t *testing.T) {
 		1 * time.Second,
 		1 * time.Second,
 	}
-	slices.Sort(times)
+	original := slices.Clone(times)
 	require.Equal(t, 3*time.Second, Percentile(times, 90))
+	require.Equal(t, 1*time.Second, Percentile(times, 50))
+	// The caller's slice keeps its order.
+	require.Equal(t, original, times)
 }
