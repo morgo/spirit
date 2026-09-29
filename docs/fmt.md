@@ -12,6 +12,10 @@ MySQL normalizes many SQL constructs internally. For example:
 
 These normalizations cause spurious diffs when comparing schema files against a live database (or when using [`spirit diff`](diff.md) or [`spirit lint`](lint.md) with `--source-dir`). `spirit fmt` solves this by applying each `.sql` file to a local MySQL server, reading back the canonical form via `SHOW CREATE TABLE`, and updating the file if it differs.
 
+`spirit diff` also canonicalizes both schemas before comparing them, using a normalization pipeline that mirrors MySQL's rewrites: the type aliases above, inline `PRIMARY KEY`/`UNIQUE` moved to table level, default names for unnamed indexes, column-level `CHECK` hoisted to table level, integer display widths, `TRUE`/`FALSE` defaults, function aliases, expression parenthesization, and more (the full list is in the [`pkg/statement` README](../pkg/statement/README.md#normalization)). For the constructs it covers, `spirit diff` compares an unformatted file against a live `SHOW CREATE TABLE` correctly.
+
+That pipeline is not complete, and is unlikely to ever be. MySQL rewrites table definitions in many places, some rewrites differ between server versions (for example, `DEFAULT TRUE` on an `ENUM` column), and each rule is added only after the rewrite is found. A construct the pipeline does not cover still produces a spurious diff. `spirit fmt` does not have this gap, because the MySQL server does the canonicalization itself. Run `spirit fmt` on schema files, and treat the normalization in `spirit diff` as a fallback for files that were not formatted.
+
 The `AUTO_INCREMENT` table option is stripped from the output because it is instance-specific and not meaningful in schema files.
 
 Basic usage:
