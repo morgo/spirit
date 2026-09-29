@@ -19,6 +19,11 @@ type Move struct {
 	// Autoscaling uses the busiest target host to scale all shards together.
 	EnableExperimentalAutoscaling bool `name:"enable-experimental-autoscaling" help:"EXPERIMENTAL: scale copy, per-target write and checksum threads using the busiest Aurora target host. Overrides --threads and --write-threads when all target hosts qualify." default:"false"`
 
+	// MaxCommitLatency throttles when any target's average commit latency
+	// exceeds this threshold. Same semantics as migrate's --max-commit-latency:
+	// auto-enabled only on Aurora targets, and zero disables it. See issue #468.
+	MaxCommitLatency time.Duration `name:"max-commit-latency" help:"Throttle when any target's average commit latency exceeds this threshold (currently only auto-enabled on Aurora)" optional:"" default:"100ms"`
+
 	SourceDSN string `name:"source-dsn" help:"Where to copy the tables from." default:"spirit:spirit@tcp(127.0.0.1:3306)/src"`
 	TargetDSN string `name:"target-dsn" help:"Where to copy the tables to." default:"spirit:spirit@tcp(127.0.0.1:3306)/dest"`
 	// TargetChunkSize is the in-memory byte budget the buffered copier sizes each
