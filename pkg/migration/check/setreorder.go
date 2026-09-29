@@ -6,6 +6,7 @@ import (
 	"log/slog"
 
 	"github.com/block/spirit/pkg/parser/mysql"
+	"github.com/block/spirit/pkg/utils"
 )
 
 func init() {
@@ -54,11 +55,11 @@ func setReorderCheck(ctx context.Context, r Resources, logger *slog.Logger) erro
 		// also a SET. If the existing column is a different type (e.g.,
 		// VARCHAR → SET or ENUM → SET), the reorder check is not applicable.
 		// Cross-type conversions like ENUM → SET are caught by enumSetRemovalCheck.
-		if !isSetType(existingType) {
+		if !utils.IsSetType(existingType) {
 			continue
 		}
 
-		existingElems, err := parseEnumSetValues(existingType)
+		existingElems, err := utils.ParseEnumSetElements(existingType)
 		if err != nil {
 			return cannotClassify("unable to validate SET reorder for column %q: %w", col.LookupName, err)
 		}

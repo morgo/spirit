@@ -6,6 +6,7 @@ import (
 	"log/slog"
 
 	"github.com/block/spirit/pkg/parser/mysql"
+	"github.com/block/spirit/pkg/utils"
 )
 
 func init() {
@@ -59,11 +60,11 @@ func enumSetRemovalCheck(ctx context.Context, r Resources, logger *slog.Logger) 
 			continue
 		}
 
-		if !isEnumOrSetType(existingType) {
+		if !utils.IsEnumOrSetType(existingType) {
 			continue // existing column is not ENUM/SET; nothing to protect
 		}
 
-		existingIsSet := isSetType(existingType)
+		existingIsSet := utils.IsSetType(existingType)
 
 		// SET → ENUM is rejected: a SET row can hold N elements but an
 		// ENUM cell holds at most one. We don't scan to prove single-value

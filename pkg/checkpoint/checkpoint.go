@@ -22,13 +22,7 @@ import (
 
 	"github.com/block/mysql"
 	"github.com/block/spirit/pkg/dbconn"
-)
-
-// erNoSuchTable is MySQL error 1146 (ER_NO_SUCH_TABLE); erBadFieldError is 1054
-// (ER_BAD_FIELD_ERROR), returned when a column is missing.
-const (
-	erNoSuchTable   = 1146
-	erBadFieldError = 1054
+	parsermysql "github.com/block/spirit/pkg/parser/mysql"
 )
 
 // IsIncompatible reports whether err means the checkpoint table can't be read
@@ -39,7 +33,7 @@ const (
 // (permission, server gone), which must not be mistaken for "no checkpoint".
 func IsIncompatible(err error) bool {
 	myErr, ok := errors.AsType[*mysql.MySQLError](err)
-	return ok && (myErr.Number == erNoSuchTable || myErr.Number == erBadFieldError)
+	return ok && (myErr.Number == parsermysql.ErrNoSuchTable || myErr.Number == parsermysql.ErrBadField)
 }
 
 // ErrNotFound is returned by ReadLatest when the table holds no checkpoint row

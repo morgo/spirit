@@ -21,6 +21,7 @@ import (
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/dbconn/sqlescape"
 	"github.com/block/spirit/pkg/metrics"
+	parsermysql "github.com/block/spirit/pkg/parser/mysql"
 	"github.com/block/spirit/pkg/statement"
 	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/table"
@@ -33,9 +34,6 @@ import (
 // continuous stream instead of re-copying. It always lives on the target
 // because the source may be read-only (e.g. a Vitess/PlanetScale replica).
 const syncCheckpointTableName = "_spirit_sync_checkpoint"
-
-// errNoSuchTable is MySQL's ER_NO_SUCH_TABLE (1146).
-const errNoSuchTable = 1146
 
 // shutdownFlushTimeout bounds the best-effort final flush on a clean shutdown,
 // and shutdownCheckpointTimeout bounds the final checkpoint write (kept
@@ -855,7 +853,7 @@ func (r *Runner) checkTargetEmpty(ctx context.Context) error {
 		}
 		if err != nil {
 			// A missing target table is expected on a fresh sync.
-			if myErr, ok := errors.AsType[*mysql.MySQLError](err); ok && myErr.Number == errNoSuchTable {
+			if myErr, ok := errors.AsType[*mysql.MySQLError](err); ok && myErr.Number == parsermysql.ErrNoSuchTable {
 				continue
 			}
 			return fmt.Errorf("failed to check whether target table %q is empty: %w", t.TableName, err)

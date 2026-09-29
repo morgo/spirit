@@ -8,6 +8,8 @@ Local extensions over the TiDB original:
 
 - `EscapeIdentifier`: standalone identifier quoting, the single source of
   truth for the `%n` verb.
+- `EscapeIdentifierList`: `EscapeIdentifier` over a slice, joined with
+  `", "` (a column list).
 - `%r` verb: splices a `RawSQL` argument into the SQL verbatim, with no
   quoting and no format interpretation; any other type — including a plain
   `string` — is an error, so every raw splice is an explicit, greppable

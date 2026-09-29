@@ -284,27 +284,21 @@ func formatAddConstraint(constr *Constraint) string {
 		}
 		parts = append(parts, clause)
 	case "FOREIGN KEY":
-		var columns []string
-		for _, col := range constr.Columns {
-			columns = append(columns, sqlescape.EscapeIdentifier(col))
-		}
-		var refColumns []string
-		for _, col := range constr.References.Columns {
-			refColumns = append(refColumns, sqlescape.EscapeIdentifier(col))
-		}
+		columns := sqlescape.EscapeIdentifierList(constr.Columns)
+		refColumns := sqlescape.EscapeIdentifierList(constr.References.Columns)
 
 		var fkClause string
 		if constr.Name != "" {
 			fkClause = fmt.Sprintf("ADD CONSTRAINT %s FOREIGN KEY (%s) REFERENCES %s (%s)",
 				sqlescape.EscapeIdentifier(constr.Name),
-				strings.Join(columns, ", "),
+				columns,
 				sqlescape.EscapeIdentifier(constr.References.Table),
-				strings.Join(refColumns, ", "))
+				refColumns)
 		} else {
 			fkClause = fmt.Sprintf("ADD FOREIGN KEY (%s) REFERENCES %s (%s)",
-				strings.Join(columns, ", "),
+				columns,
 				sqlescape.EscapeIdentifier(constr.References.Table),
-				strings.Join(refColumns, ", "))
+				refColumns)
 		}
 
 		// Add ON DELETE clause if present
@@ -345,11 +339,11 @@ func formatPartitionOptions(partOpts *PartitionOptions) string {
 			parts = append(parts, fmt.Sprintf("(%s)", *partOpts.Expression))
 		} else if len(partOpts.Columns) > 0 {
 			// HASH can also use column names directly
-			parts = append(parts, fmt.Sprintf("(%s)", quoteIdentList(partOpts.Columns, ", ")))
+			parts = append(parts, fmt.Sprintf("(%s)", sqlescape.EscapeIdentifierList(partOpts.Columns)))
 		}
 	case "KEY":
 		if len(partOpts.Columns) > 0 {
-			parts = append(parts, fmt.Sprintf("(%s)", quoteIdentList(partOpts.Columns, ", ")))
+			parts = append(parts, fmt.Sprintf("(%s)", sqlescape.EscapeIdentifierList(partOpts.Columns)))
 		} else {
 			// KEY() with empty columns uses primary key
 			parts = append(parts, "()")
@@ -360,13 +354,13 @@ func formatPartitionOptions(partOpts *PartitionOptions) string {
 		} else if len(partOpts.Columns) > 0 {
 			// RANGE COLUMNS
 			parts[len(parts)-1] = "RANGE COLUMNS"
-			parts = append(parts, fmt.Sprintf("(%s)", quoteIdentList(partOpts.Columns, ", ")))
+			parts = append(parts, fmt.Sprintf("(%s)", sqlescape.EscapeIdentifierList(partOpts.Columns)))
 		}
 	case "LIST":
 		if len(partOpts.Columns) > 0 {
 			// LIST COLUMNS
 			parts[len(parts)-1] = "LIST COLUMNS"
-			parts = append(parts, fmt.Sprintf("(%s)", quoteIdentList(partOpts.Columns, ", ")))
+			parts = append(parts, fmt.Sprintf("(%s)", sqlescape.EscapeIdentifierList(partOpts.Columns)))
 		}
 	}
 
@@ -422,11 +416,11 @@ func formatSubPartitionOptions(subOpts *SubPartitionOptions) string {
 			parts = append(parts, fmt.Sprintf("(%s)", *subOpts.Expression))
 		} else if len(subOpts.Columns) > 0 {
 			// HASH can also use column names directly
-			parts = append(parts, fmt.Sprintf("(%s)", quoteIdentList(subOpts.Columns, ", ")))
+			parts = append(parts, fmt.Sprintf("(%s)", sqlescape.EscapeIdentifierList(subOpts.Columns)))
 		}
 	case "KEY":
 		if len(subOpts.Columns) > 0 {
-			parts = append(parts, fmt.Sprintf("(%s)", quoteIdentList(subOpts.Columns, ", ")))
+			parts = append(parts, fmt.Sprintf("(%s)", sqlescape.EscapeIdentifierList(subOpts.Columns)))
 		} else {
 			// KEY() with empty columns uses the primary key
 			parts = append(parts, "()")
