@@ -127,7 +127,7 @@ func TestBooleanKeywordDefaultLeavesOtherTypesAlone(t *testing.T) {
 			want:   "TRUE",
 		},
 		{
-			name:   "binary pads to the column width with NULs, which binaryDefaultPaddingNormalizer folds",
+			name:   "binary pads to the column width with NULs, which binaryDefaultBytesNormalizer folds",
 			column: "`a` binary(4) NOT NULL DEFAULT TRUE",
 			want:   "1\x00\x00\x00",
 		},

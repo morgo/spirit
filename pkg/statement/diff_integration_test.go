@@ -737,8 +737,8 @@ func TestDiffIntegrationBooleanKeywordDefaultAcrossFoldingTypes(t *testing.T) {
 // its own does not say whether the exclusion it justifies is the right one, and
 // these two are excluded for reasons this layer cannot fix — scale padding
 // belongs to numeric canonicalization. binary is excluded here too, because it
-// pads the keyword to the column width; binaryDefaultPaddingNormalizer folds it
-// instead, and TestDiffIntegrationBinaryDefaultPadding covers it.
+// pads the keyword to the column width; binaryDefaultBytesNormalizer folds it
+// instead, and TestDiffIntegrationBinaryDefaultBytes covers it.
 //
 // enum and set are excluded too but are deliberately not fixtures here. They
 // have no single reading to record: through 8.4 the keyword resolves to a
@@ -1108,21 +1108,24 @@ func TestDiffIntegrationBinaryCharsetConverges(t *testing.T) {
 // hex literal (MySQL Bug #104840).
 const binaryDefaultHexReason = "SHOW CREATE TABLE reports a non-utf8mb3 binary default as '?' rather than hex"
 
-// TestDiffIntegrationBinaryDefaultPadding verifies that a literal default on a
+// TestDiffIntegrationBinaryDefaultBytes verifies that a literal default on a
 // binary(N) column matches its live form, which MySQL stores NUL-padded to the
 // column width (binary(3) DEFAULT 'a' is reported as DEFAULT 'a\0\0'), or as a
 // hex literal when the padded bytes are not valid utf8mb3. A char(N) column
-// that the binary charset makes binary(N) is padded the same way. Without the
-// padding the diff emits a MODIFY that MySQL pads again, on every run.
+// that the binary charset makes binary(N) is padded the same way. A varbinary
+// default is stored as the same bytes, unpadded (varbinary(4) DEFAULT x'61' is
+// reported as DEFAULT 'a'). Without the conversion the diff emits a MODIFY that
+// MySQL rewrites to its own form again, on every run.
 //
 // The hex form is only reported from MySQL 8.0.33. Before that, SHOW CREATE
 // TABLE replaces each byte that is not valid utf8mb3 with '?', so the stored
 // default cannot be read back and the column cannot converge. The cases in
 // needsHexReporting skip on those servers.
-func TestDiffIntegrationBinaryDefaultPadding(t *testing.T) {
+func TestDiffIntegrationBinaryDefaultBytes(t *testing.T) {
 	needsHexReporting := map[string]bool{
 		"diff_binpad_hex_not_utf8": true,
 		"diff_binpad_4byte_char":   true,
+		"diff_varbin_hex_not_utf8": true,
 	}
 	for _, tc := range []struct{ name, ddl, live string }{
 		{"diff_binpad_string", "CREATE TABLE diff_binpad_string (id int NOT NULL, b binary(3) DEFAULT 'a', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` binary(3) DEFAULT 'a\\0\\0'"},
@@ -1135,12 +1138,18 @@ func TestDiffIntegrationBinaryDefaultPadding(t *testing.T) {
 		{"diff_binpad_true", "CREATE TABLE diff_binpad_true (id int NOT NULL, b binary(4) NOT NULL DEFAULT TRUE, PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` binary(4) NOT NULL DEFAULT '1\\0\\0\\0'"},
 		{"diff_binpad_false", "CREATE TABLE diff_binpad_false (id int NOT NULL, b binary(4) DEFAULT FALSE, PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` binary(4) DEFAULT '0\\0\\0\\0'"},
 		{"diff_binpad_int", "CREATE TABLE diff_binpad_int (id int NOT NULL, b binary(3) DEFAULT -1, PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` binary(3) DEFAULT '-1\\0'"},
+		{"diff_binpad_big_int", "CREATE TABLE diff_binpad_big_int (id int NOT NULL, b binary(22) DEFAULT 18446744073709551616, PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` binary(22) DEFAULT '18446744073709551616\\0\\0'"},
 		{"diff_binpad_hex", "CREATE TABLE diff_binpad_hex (id int NOT NULL, b binary(3) DEFAULT 0x61, PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` binary(3) DEFAULT 'a\\0\\0'"},
 		{"diff_binpad_bit", "CREATE TABLE diff_binpad_bit (id int NOT NULL, b binary(3) DEFAULT b'0000000001100001', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` binary(3) DEFAULT '\\0a\\0'"},
+		{"diff_binpad_repeated_default", "CREATE TABLE diff_binpad_repeated_default (id int NOT NULL, b binary(3) DEFAULT b'01100010' DEFAULT b'01100001', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` binary(3) DEFAULT 'a\\0\\0'"},
 		{"diff_binpad_hex_not_utf8", "CREATE TABLE diff_binpad_hex_not_utf8 (id int NOT NULL, b binary(3) DEFAULT x'ff', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` binary(3) DEFAULT 0xFF0000"},
 		{"diff_binpad_4byte_char", "CREATE TABLE diff_binpad_4byte_char (id int NOT NULL, b binary(5) DEFAULT '😀', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` binary(5) DEFAULT 0xF09F988000"},
 		{"diff_binpad_char_binary_table", "CREATE TABLE diff_binpad_char_binary_table (id int NOT NULL, b char(3) DEFAULT 'a', t char(3) DEFAULT TRUE, PRIMARY KEY (id)) DEFAULT CHARSET=binary", "`b` binary(3) DEFAULT 'a\\0\\0'"},
 		{"diff_binpad_char_collate_binary", "CREATE TABLE diff_binpad_char_collate_binary (id int NOT NULL, b char(3) COLLATE binary DEFAULT 'a', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` binary(3) DEFAULT 'a\\0\\0'"},
+		{"diff_varbin_hex", "CREATE TABLE diff_varbin_hex (id int NOT NULL, b varbinary(4) DEFAULT x'61', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` varbinary(4) DEFAULT 'a'"},
+		{"diff_varbin_bit", "CREATE TABLE diff_varbin_bit (id int NOT NULL, b varbinary(4) DEFAULT b'0000000001100001', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` varbinary(4) DEFAULT '\\0a'"},
+		{"diff_varbin_int", "CREATE TABLE diff_varbin_int (id int NOT NULL, b varbinary(4) DEFAULT 007, PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` varbinary(4) DEFAULT '7'"},
+		{"diff_varbin_hex_not_utf8", "CREATE TABLE diff_varbin_hex_not_utf8 (id int NOT NULL, b varbinary(4) DEFAULT x'ff', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` varbinary(4) DEFAULT 0xFF"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if needsHexReporting[tc.name] {
@@ -1155,23 +1164,23 @@ func TestDiffIntegrationBinaryDefaultPadding(t *testing.T) {
 			require.NoError(t, err)
 			stmts, err := live.Diff(desired, nil)
 			require.NoError(t, err)
-			require.Nil(t, stmts, "a binary default must match its NUL-padded live form")
+			require.Nil(t, stmts, "a binary default must match its live form")
 			stmts, err = desired.Diff(live, nil)
 			require.NoError(t, err)
-			require.Nil(t, stmts, "the NUL-padded live form must match the binary default")
+			require.Nil(t, stmts, "the live form must match the binary default")
 		})
 	}
 }
 
-// TestDiffIntegrationBinaryDefaultPaddingConverges verifies that the MODIFY
-// emitted for a binary(N) default round-trips: MySQL applies it and stores the
-// padded value it carries (NULs escaped inside a string, or a bare hex literal),
+// TestDiffIntegrationBinaryDefaultBytesConverges verifies that the MODIFY
+// emitted for a binary(N) or varbinary(N) default round-trips: MySQL applies it
+// and stores the value it carries (NULs escaped inside a string, or a bare hex literal),
 // after which a re-diff converges to nil.
-func TestDiffIntegrationBinaryDefaultPaddingConverges(t *testing.T) {
+func TestDiffIntegrationBinaryDefaultBytesConverges(t *testing.T) {
 	tt := testutils.NewTestTable(t, "diff_binpad_converge",
-		"CREATE TABLE diff_binpad_converge (id int NOT NULL, a binary(3), k binary(4) NOT NULL, w binary(3) DEFAULT 'a', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci")
+		"CREATE TABLE diff_binpad_converge (id int NOT NULL, a binary(3), k binary(4) NOT NULL, w binary(3) DEFAULT 'a', v varbinary(4), PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci")
 	desired, err := ParseCreateTable(
-		"CREATE TABLE diff_binpad_converge (id int NOT NULL, a binary(3) DEFAULT 'a', k binary(4) NOT NULL DEFAULT TRUE, w binary(4) DEFAULT 'a', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci")
+		"CREATE TABLE diff_binpad_converge (id int NOT NULL, a binary(3) DEFAULT 'a', k binary(4) NOT NULL DEFAULT TRUE, w binary(4) DEFAULT 'a', v varbinary(4) DEFAULT x'61', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci")
 	require.NoError(t, err)
 
 	live, err := ParseCreateTable(showCreateTable(t, tt.DB, tt.Name))
@@ -1186,6 +1195,7 @@ func TestDiffIntegrationBinaryDefaultPaddingConverges(t *testing.T) {
 	require.Contains(t, liveSQL, "`a` binary(3) DEFAULT 'a\\0\\0'")
 	require.Contains(t, liveSQL, "`k` binary(4) NOT NULL DEFAULT '1\\0\\0\\0'")
 	require.Contains(t, liveSQL, "`w` binary(4) DEFAULT 'a\\0\\0\\0'")
+	require.Contains(t, liveSQL, "`v` varbinary(4) DEFAULT 'a'")
 
 	live, err = ParseCreateTable(liveSQL)
 	require.NoError(t, err)
@@ -1194,16 +1204,16 @@ func TestDiffIntegrationBinaryDefaultPaddingConverges(t *testing.T) {
 	require.Nil(t, stmts, "re-diff after applying the ALTER must converge")
 }
 
-// TestDiffIntegrationBinaryDefaultPaddingHexConverges verifies that a padded
-// default that is not valid utf8mb3 is emitted as a bare hex literal MySQL
+// TestDiffIntegrationBinaryDefaultBytesHexConverges verifies that a binary or
+// varbinary default that is not valid utf8mb3 is emitted as a bare hex literal MySQL
 // stores unchanged, after which a re-diff converges to nil. It needs MySQL
 // 8.0.33+, which reports such a default as hex (see binaryDefaultHexReason).
-func TestDiffIntegrationBinaryDefaultPaddingHexConverges(t *testing.T) {
+func TestDiffIntegrationBinaryDefaultBytesHexConverges(t *testing.T) {
 	testutils.SkipBeforeMySQLVersion(t, "8.0.33", binaryDefaultHexReason)
 	tt := testutils.NewTestTable(t, "diff_binpad_hex_converge",
-		"CREATE TABLE diff_binpad_hex_converge (id int NOT NULL, h binary(3), PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci")
+		"CREATE TABLE diff_binpad_hex_converge (id int NOT NULL, h binary(3), v varbinary(4), PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci")
 	desired, err := ParseCreateTable(
-		"CREATE TABLE diff_binpad_hex_converge (id int NOT NULL, h binary(3) DEFAULT x'ff', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci")
+		"CREATE TABLE diff_binpad_hex_converge (id int NOT NULL, h binary(3) DEFAULT x'ff', v varbinary(4) DEFAULT x'ff', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci")
 	require.NoError(t, err)
 
 	live, err := ParseCreateTable(showCreateTable(t, tt.DB, tt.Name))
@@ -1211,16 +1221,18 @@ func TestDiffIntegrationBinaryDefaultPaddingHexConverges(t *testing.T) {
 	stmts, err := live.Diff(desired, nil)
 	require.NoError(t, err)
 	require.Len(t, stmts, 1)
-	require.Contains(t, stmts[0].Statement, "DEFAULT x'ff0000'")
+	require.Contains(t, stmts[0].Statement, "`h` binary(3) NULL DEFAULT x'ff0000'")
+	require.Contains(t, stmts[0].Statement, "`v` varbinary(4) NULL DEFAULT x'ff'")
 	testutils.RunSQL(t, stmts[0].Statement)
 
 	var stored string
 	testutils.RunSQL(t, "INSERT INTO diff_binpad_hex_converge (id) VALUES (1)")
-	require.NoError(t, tt.DB.QueryRowContext(t.Context(), "SELECT HEX(h) FROM diff_binpad_hex_converge WHERE id = 1").Scan(&stored))
-	require.Equal(t, "FF0000", stored)
+	require.NoError(t, tt.DB.QueryRowContext(t.Context(), "SELECT CONCAT(HEX(h), '/', HEX(v)) FROM diff_binpad_hex_converge WHERE id = 1").Scan(&stored))
+	require.Equal(t, "FF0000/FF", stored)
 
 	liveSQL := showCreateTable(t, tt.DB, tt.Name)
 	require.Contains(t, liveSQL, "`h` binary(3) DEFAULT 0xFF0000")
+	require.Contains(t, liveSQL, "`v` varbinary(4) DEFAULT 0xFF")
 	live, err = ParseCreateTable(liveSQL)
 	require.NoError(t, err)
 	stmts, err = live.Diff(desired, nil)

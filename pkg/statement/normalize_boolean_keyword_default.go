@@ -34,7 +34,7 @@ func init() { registerNormalizer(booleanKeywordDefaultNormalizer{}) }
 //   - year, which puts the keyword through YEAR's own interpretation:
 //     year DEFAULT TRUE stores '2001', not 1.
 //   - binary, which pads to the column width with NULs: binary(4) DEFAULT TRUE
-//     stores '1\0\0\0'. [binaryDefaultPaddingNormalizer] folds it to that
+//     stores '1\0\0\0'. [binaryDefaultBytesNormalizer] folds it to that
 //     padded value instead. varbinary has nothing to pad and does fold here.
 //     This includes a char column stored as binary because its charset
 //     resolves to binary: char(3) DEFAULT TRUE under DEFAULT CHARSET=binary

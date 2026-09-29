@@ -132,12 +132,14 @@ func TestUnknownDefaultKindKeepsHeuristicEmission(t *testing.T) {
 
 // A hex literal is emitted bare. Quoted, it would be the text x'1a' rather than
 // the byte it spells: MySQL rejects that on a column too narrow for the text,
-// and stores the text itself on a column wide enough for it.
+// and stores the text itself on a column wide enough for it. The column is an
+// integer because binaryDefaultBytesNormalizer rewrites a hex default on
+// binary and varbinary to the bytes it stores.
 func TestHexLiteralDefaultIsEmittedBare(t *testing.T) {
 	for _, column := range []string{
-		"`a` varbinary(16) DEFAULT 0x1A",
-		"`a` varbinary(16) DEFAULT x'1a'",
-		"`a` varbinary(16) DEFAULT X'1A'",
+		"`a` int DEFAULT 0x1A",
+		"`a` int DEFAULT x'1a'",
+		"`a` int DEFAULT X'1A'",
 	} {
 		t.Run(column, func(t *testing.T) {
 			ct, err := ParseCreateTable("CREATE TABLE `t` (" + column + ")")

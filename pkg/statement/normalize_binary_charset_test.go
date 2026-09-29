@@ -58,7 +58,7 @@ func TestBinaryCharsetNormalizer(t *testing.T) {
 // TestBinaryCharsetBooleanDefaultOrderIndependent: booleanKeywordDefaultNormalizer
 // folds a TRUE/FALSE default on char but not on binary, which pads it with
 // NULs. Under a binary table default char(3) is stored as binary(3), so the
-// keyword must be padded by binaryDefaultPaddingNormalizer, not folded to '1',
+// keyword must be padded by binaryDefaultBytesNormalizer, not folded to '1',
 // whether the rules run before or after the type rewrite. varchar is stored as
 // varbinary, which folds either way.
 func TestBinaryCharsetBooleanDefaultOrderIndependent(t *testing.T) {
