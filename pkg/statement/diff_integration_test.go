@@ -735,8 +735,10 @@ func TestDiffIntegrationBooleanKeywordDefaultAcrossFoldingTypes(t *testing.T) {
 // reading that puts each out of scope and the diff it still emits as a result.
 // Asserting the leftover diff alongside the reading is deliberate: a reading on
 // its own does not say whether the exclusion it justifies is the right one, and
-// these three are excluded for reasons this layer cannot fix — scale and width
-// padding belong to numeric and string canonicalization.
+// these two are excluded for reasons this layer cannot fix — scale padding
+// belongs to numeric canonicalization. binary is excluded here too, because it
+// pads the keyword to the column width; binaryDefaultPaddingNormalizer folds it
+// instead, and TestDiffIntegrationBinaryDefaultPadding covers it.
 //
 // enum and set are excluded too but are deliberately not fixtures here. They
 // have no single reading to record: through 8.4 the keyword resolves to a
@@ -748,20 +750,18 @@ func TestDiffIntegrationBooleanKeywordDefaultAcrossFoldingTypes(t *testing.T) {
 func TestDiffIntegrationBooleanKeywordDefaultOnExcludedTypes(t *testing.T) {
 	const declaredSQL = "CREATE TABLE diff_bool_keyword_excluded_types (" +
 		"scaled decimal(4,2) NOT NULL DEFAULT TRUE, " +
-		"yr year NOT NULL DEFAULT TRUE, " +
-		"bin binary(4) NOT NULL DEFAULT TRUE)"
+		"yr year NOT NULL DEFAULT TRUE)"
 	tt := testutils.NewTestTable(t, "diff_bool_keyword_excluded_types", declaredSQL)
 
 	live := showCreateTable(t, tt.DB, tt.Name)
 	require.Contains(t, live, "`scaled` decimal(4,2) NOT NULL DEFAULT '1.00'")
 	require.Contains(t, live, "`yr` year NOT NULL DEFAULT '2001'")
-	require.Contains(t, live, "`bin` binary(4) NOT NULL DEFAULT '1\\0\\0\\0'")
 
 	// The table was created from this very declaration, so every statement here
 	// re-stores a value the column already holds.
 	stmts := diffLiveTable(t, tt.DB, tt.Name, declaredSQL)
 	require.Len(t, stmts, 1)
-	for _, col := range []string{"scaled", "yr", "bin"} {
+	for _, col := range []string{"scaled", "yr"} {
 		require.Contains(t, stmts[0].Statement, "MODIFY COLUMN `"+col+"`")
 	}
 }
@@ -1096,6 +1096,82 @@ func TestDiffIntegrationBinaryCharsetConverges(t *testing.T) {
 	require.Equal(t, "varbinary(3)", columnType)
 
 	live, err = ParseCreateTable(showCreateTable(t, tt.DB, tt.Name))
+	require.NoError(t, err)
+	stmts, err = live.Diff(desired, nil)
+	require.NoError(t, err)
+	require.Nil(t, stmts, "re-diff after applying the ALTER must converge")
+}
+
+// TestDiffIntegrationBinaryDefaultPadding verifies that a literal default on a
+// binary(N) column matches its live form, which MySQL stores NUL-padded to the
+// column width (binary(3) DEFAULT 'a' is reported as DEFAULT 'a\0\0'), or as a
+// hex literal when the padded bytes are not valid utf8mb3. A char(N) column
+// that the binary charset makes binary(N) is padded the same way. Without the
+// padding the diff emits a MODIFY that MySQL pads again, on every run.
+func TestDiffIntegrationBinaryDefaultPadding(t *testing.T) {
+	for _, tc := range []struct{ name, ddl, live string }{
+		{"diff_binpad_string", "CREATE TABLE diff_binpad_string (id int NOT NULL, b binary(3) DEFAULT 'a', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` binary(3) DEFAULT 'a\\0\\0'"},
+		{"diff_binpad_empty", "CREATE TABLE diff_binpad_empty (id int NOT NULL, b binary(3) NOT NULL DEFAULT '', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` binary(3) NOT NULL DEFAULT '\\0\\0\\0'"},
+		{"diff_binpad_no_width", "CREATE TABLE diff_binpad_no_width (id int NOT NULL, b binary DEFAULT '', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` binary(1) DEFAULT '\\0'"},
+		{"diff_binpad_zero_width", "CREATE TABLE diff_binpad_zero_width (id int NOT NULL, b binary(0) DEFAULT '', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` binary(0) DEFAULT ''"},
+		{"diff_binpad_full", "CREATE TABLE diff_binpad_full (id int NOT NULL, b binary(3) DEFAULT 'abc', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` binary(3) DEFAULT 'abc'"},
+		{"diff_binpad_nul", "CREATE TABLE diff_binpad_nul (id int NOT NULL, b binary(3) DEFAULT 'a\\0', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` binary(3) DEFAULT 'a\\0\\0'"},
+		{"diff_binpad_multibyte", "CREATE TABLE diff_binpad_multibyte (id int NOT NULL, b binary(3) DEFAULT 'é', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` binary(3) DEFAULT 'é\\0'"},
+		{"diff_binpad_true", "CREATE TABLE diff_binpad_true (id int NOT NULL, b binary(4) NOT NULL DEFAULT TRUE, PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` binary(4) NOT NULL DEFAULT '1\\0\\0\\0'"},
+		{"diff_binpad_false", "CREATE TABLE diff_binpad_false (id int NOT NULL, b binary(4) DEFAULT FALSE, PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` binary(4) DEFAULT '0\\0\\0\\0'"},
+		{"diff_binpad_int", "CREATE TABLE diff_binpad_int (id int NOT NULL, b binary(3) DEFAULT -1, PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` binary(3) DEFAULT '-1\\0'"},
+		{"diff_binpad_hex", "CREATE TABLE diff_binpad_hex (id int NOT NULL, b binary(3) DEFAULT 0x61, PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` binary(3) DEFAULT 'a\\0\\0'"},
+		{"diff_binpad_bit", "CREATE TABLE diff_binpad_bit (id int NOT NULL, b binary(3) DEFAULT b'0000000001100001', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` binary(3) DEFAULT '\\0a\\0'"},
+		{"diff_binpad_hex_not_utf8", "CREATE TABLE diff_binpad_hex_not_utf8 (id int NOT NULL, b binary(3) DEFAULT x'ff', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` binary(3) DEFAULT 0xFF0000"},
+		{"diff_binpad_4byte_char", "CREATE TABLE diff_binpad_4byte_char (id int NOT NULL, b binary(5) DEFAULT '😀', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` binary(5) DEFAULT 0xF09F988000"},
+		{"diff_binpad_char_binary_table", "CREATE TABLE diff_binpad_char_binary_table (id int NOT NULL, b char(3) DEFAULT 'a', t char(3) DEFAULT TRUE, PRIMARY KEY (id)) DEFAULT CHARSET=binary", "`b` binary(3) DEFAULT 'a\\0\\0'"},
+		{"diff_binpad_char_collate_binary", "CREATE TABLE diff_binpad_char_collate_binary (id int NOT NULL, b char(3) COLLATE binary DEFAULT 'a', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` binary(3) DEFAULT 'a\\0\\0'"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tt := testutils.NewTestTable(t, tc.name, tc.ddl)
+			liveSQL := showCreateTable(t, tt.DB, tt.Name)
+			require.Contains(t, liveSQL, tc.live, "the reading this case pins")
+			desired, err := ParseCreateTable(tc.ddl)
+			require.NoError(t, err)
+			live, err := ParseCreateTable(liveSQL)
+			require.NoError(t, err)
+			stmts, err := live.Diff(desired, nil)
+			require.NoError(t, err)
+			require.Nil(t, stmts, "a binary default must match its NUL-padded live form")
+			stmts, err = desired.Diff(live, nil)
+			require.NoError(t, err)
+			require.Nil(t, stmts, "the NUL-padded live form must match the binary default")
+		})
+	}
+}
+
+// TestDiffIntegrationBinaryDefaultPaddingConverges verifies that the MODIFY
+// emitted for a binary(N) default round-trips: MySQL applies it and stores the
+// padded value it carries (NULs escaped inside a string, or a bare hex literal),
+// after which a re-diff converges to nil.
+func TestDiffIntegrationBinaryDefaultPaddingConverges(t *testing.T) {
+	tt := testutils.NewTestTable(t, "diff_binpad_converge",
+		"CREATE TABLE diff_binpad_converge (id int NOT NULL, a binary(3), h binary(3), k binary(4) NOT NULL, w binary(3) DEFAULT 'a', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci")
+	desired, err := ParseCreateTable(
+		"CREATE TABLE diff_binpad_converge (id int NOT NULL, a binary(3) DEFAULT 'a', h binary(3) DEFAULT x'ff', k binary(4) NOT NULL DEFAULT TRUE, w binary(4) DEFAULT 'a', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci")
+	require.NoError(t, err)
+
+	live, err := ParseCreateTable(showCreateTable(t, tt.DB, tt.Name))
+	require.NoError(t, err)
+	stmts, err := live.Diff(desired, nil)
+	require.NoError(t, err)
+	require.Len(t, stmts, 1)
+	require.Contains(t, stmts[0].Statement, "DEFAULT 'a\\0\\0'")
+	require.Contains(t, stmts[0].Statement, "DEFAULT x'ff0000'")
+	testutils.RunSQL(t, stmts[0].Statement)
+
+	liveSQL := showCreateTable(t, tt.DB, tt.Name)
+	require.Contains(t, liveSQL, "`a` binary(3) DEFAULT 'a\\0\\0'")
+	require.Contains(t, liveSQL, "`h` binary(3) DEFAULT 0xFF0000")
+	require.Contains(t, liveSQL, "`k` binary(4) NOT NULL DEFAULT '1\\0\\0\\0'")
+	require.Contains(t, liveSQL, "`w` binary(4) DEFAULT 'a\\0\\0\\0'")
+
+	live, err = ParseCreateTable(liveSQL)
 	require.NoError(t, err)
 	stmts, err = live.Diff(desired, nil)
 	require.NoError(t, err)
