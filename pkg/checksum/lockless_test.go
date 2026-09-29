@@ -1052,7 +1052,9 @@ func TestStatsReportsInFlightWork(t *testing.T) {
 
 	stop, _ := runUntil(t, c)
 	<-started
-	require.Equal(t, 1, c.Stats().InFlight)
+	// The dispatcher publishes InFlight after its send on the buffered work
+	// channel completes, so a worker can start the chunk first. Wait for it.
+	require.Eventually(t, func() bool { return c.Stats().InFlight == 1 }, time.Second, time.Millisecond)
 	close(release)
 	require.Eventually(t, func() bool { return c.Stats().InFlight == 0 }, time.Second, time.Millisecond)
 	err := stop()
