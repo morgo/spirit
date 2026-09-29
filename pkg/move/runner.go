@@ -118,6 +118,15 @@ type Runner struct {
 	throttler   throttler.Throttler
 	monitorDBs  []*sql.DB
 	autoscale   copier.AutoscaleConfig
+	// flushConcurrency and flushBatchSize shape each forward feed's drain.
+	// Zero leaves the change package's defaults; autoscaling derives them
+	// from the targets (moveFlushBounds).
+	flushConcurrency, flushBatchSize int
+	// buildAurora and auroraVCPUs are the Aurora probes setupThrottling
+	// runs. NewRunner sets them to the throttler package's; tests replace
+	// them, because CI has no Aurora to probe.
+	buildAurora func(context.Context, throttler.AuroraSetup) (throttler.AuroraResult, error)
+	auroraVCPUs func(context.Context, *sql.DB) (int, error)
 
 	applier     applier.Applier
 	chunkerMu   sync.RWMutex // Publishes copyChunker to concurrent Progress callers.
@@ -246,8 +255,14 @@ func NewRunner(m *Move) (*Runner, error) {
 		reverseWriteThreads: m.WriteThreads,
 		logger:              slog.Default(),
 		metricsSink:         &metrics.NoopSink{},
+		buildAurora:         buildAurora,
+		auroraVCPUs:         throttler.AuroraVCPUs,
 	}
 	return r, nil
+}
+
+func buildAurora(ctx context.Context, setup throttler.AuroraSetup) (throttler.AuroraResult, error) {
+	return setup.Build(ctx)
 }
 
 // recordCopyCompleted reports the copy aggregate settled during this
@@ -682,7 +697,7 @@ func (r *Runner) setupDiscovery(ctx context.Context) error {
 // lock before it can destroy the first run's target data.
 func (r *Runner) setupUnderLocks(ctx context.Context) error {
 	var err error
-	if err := r.setupAutoscaling(ctx); err != nil {
+	if err := r.setupThrottling(ctx); err != nil {
 		return err
 	}
 
@@ -972,20 +987,27 @@ func (r *Runner) buildReplClients(ctx context.Context, resumePositions map[strin
 	r.logger.Debug("Setting up repl clients", "sourceCount", len(r.sources))
 	for i := range r.sources {
 		src := &r.sources[i]
-		replConfig := change.NewClientDefaultConfig()
-		replConfig.Logger = r.logger
-		replConfig.CancelFunc = r.fatalError
-		replConfig.DDLFilterSchema = src.config.DBName
-		replConfig.DDLFilterTables = r.move.SourceTables
-		replConfig.DBConfig = r.dbConfig
-		replConfig.UnderLoad = func() bool { return throttler.GradualOnly(r.currentThrottler()).IsThrottled() }
-		client, err := change.NewAutoClient(ctx, src.db, src.config.Addr, src.config.User, src.config.Passwd, r.applier, replConfig, resumePositions[src.sourceKey()])
+		client, err := change.NewAutoClient(ctx, src.db, src.config.Addr, src.config.User, src.config.Passwd, r.applier, r.replClientConfig(src), resumePositions[src.sourceKey()])
 		if err != nil {
 			return fmt.Errorf("source %d: %w", i, err)
 		}
 		src.replClient = client
 	}
 	return nil
+}
+
+// replClientConfig is a source feed's change-client config, including the
+// load signal and flush shape setupThrottling derived.
+func (r *Runner) replClientConfig(src *sourceInfo) *change.ClientConfig {
+	replConfig := change.NewClientDefaultConfig()
+	replConfig.Logger = r.logger
+	replConfig.CancelFunc = r.fatalError
+	replConfig.DDLFilterSchema = src.config.DBName
+	replConfig.DDLFilterTables = r.move.SourceTables
+	replConfig.DBConfig = r.dbConfig
+	replConfig.UnderLoad = func() bool { return throttler.GradualOnly(r.currentThrottler()).IsThrottled() }
+	replConfig.FlushConcurrency, replConfig.BatchSize = r.flushConcurrency, r.flushBatchSize
+	return replConfig
 }
 
 func (r *Runner) newCopy(ctx context.Context) error {

@@ -1,8 +1,8 @@
 # Autoscale
 
-The `autoscale` package holds the primitives shared by Spirit's phase-level thread-count controllers. Two phases currently scale their worker pools at runtime — the copier's read/write pools ([issue #831](https://github.com/block/spirit/issues/831)) and the checksum's reader pool ([#1087](https://github.com/block/spirit/pull/1087)) — and both apply the same control law to different pools. Defining that law once means the two cannot silently drift apart.
+The `autoscale` package holds the primitives shared by Spirit's phase-level thread-count controllers. Two phases currently scale their worker pools at runtime — the copier's read/write pools ([issue #831](https://github.com/block/spirit/issues/831)) and the checksum's reader pool ([#1087](https://github.com/block/spirit/pull/1087)) — and both apply the same control law to different pools. Defining that law once means the two cannot silently drift apart. The same holds across commands: `migrate`, `move` and `sync` all size and scale their pools with these primitives.
 
-Autoscaling is experimental and opt-in via `--enable-experimental-autoscaling`. Nothing here runs unless it is set.
+Autoscaling is experimental and opt-in via `--enable-experimental-autoscaling`. Without it no controller runs and every pool keeps its configured size. A few pieces are used either way: both checksum checkers gate their workers through `Limiter` at a fixed limit, and `Tick` paces the applier's stats emitter.
 
 ## The zone law
 
@@ -17,7 +17,7 @@ Each tick, a controller classifies the throttler's continuous utilization signal
 
 The shape is "gentle in the normal regime, abrupt only in emergencies". The full derivation — why additive steps rather than classic AIMD, why the dead band has hysteresis, and why the resting point depends on which side the band is approached from — lives on `copier.autoScaler`, where it was first worked out. This package holds only the mechanism.
 
-`MinVCPUs` (4) is part of the law rather than of any phase: the signal's denominator is the instance vCPU count, so below it one thread is half or a third of the whole scale and no dead band is wide enough to rest in. The migration runner enforces it once at setup by disabling autoscaling for the whole migration.
+`MinVCPUs` (4) is part of the law rather than of any phase: the signal's denominator is the instance vCPU count, so below it one thread is half or a third of the whole scale and no dead band is wide enough to rest in. Each runner enforces it once at setup by disabling autoscaling for the whole run: `migrate` checks the server it alters, `sync` its target, and `move` every target (one small target disables scaling for all of them).
 
 ## What the controllers share
 
@@ -33,13 +33,17 @@ The shape is "gentle in the normal regime, abrupt only in emergencies". The full
 
   Unlike `Ceiling`, the read ceiling is a share of the instance rather than a multiple of the start. That is because of the checksum: its snapshot transactions must all take their read view at one instant, so the entire pool is created serially under the table lock whether or not scaling reaches it. The ceiling is spent up front, in lock time, which is why it stops at half the box. (For most real instance sizes — any multiple of 4 above `MinVCPUs` — the two formulas happen to agree, but they are not the same rule and should not be collapsed.)
 
-  Both bounds come from the instance rather than from `--threads`. When autoscaling engages, the migration runner ignores `--threads` and `--write-threads` entirely: a controller told to find the right size should not also be told where to stop, and those flags are usually left at their defaults. [docs/migrate.md](../../docs/migrate.md#enable-experimental-autoscaling) has the sizing worked out per instance type.
+  Both bounds come from the instance rather than from `--threads`. When autoscaling engages, every runner ignores `--threads` and `--write-threads` entirely: a controller told to find the right size should not also be told where to stop, and those flags are usually left at their defaults. [docs/migrate.md](../../docs/migrate.md#enable-experimental-autoscaling) has the sizing worked out per instance type.
+
+  `move` sizes from its *smallest* target and divides the read and write starts and ceilings by the most target shards sharing one host, since those schemas share one instance. Every runner fits the read bounds to its `--max-connections` pool, and `sync` also splits that pool between checksum reads and repair writes.
 
 - **`FlushBounds`** derives the change feed's drain shape from the instance — a `(concurrency, batch size)` pair rather than a start-and-ceiling, because the flush is not steered by the utilization band. It has its own AIMD controller keyed on *lock contention*, so the instance only sets where that controller starts: `max(MinFlushConcurrency, WriteStart(vCPUs))` capped at `MaxFlushConcurrency`, paired with whatever batch size holds `FlushRowsInFlight` rows in flight.
 
   The product being constant is the whole point. A larger instance buys more concurrent `REPLACE` statements, each holding proportionally fewer row locks — not more rows in flight at once. That is what makes widening past the historical concurrency of 8 safe rather than a throughput-for-deadlocks trade: a flush batch takes a next-key lock per row per `UNIQUE` secondary index, so two batches collide when any of their rows land in adjacent slots of any such index, and the chance of that is set by how many slots each statement claims, not by how many siblings it has. `32 × 250` and `8 × 1000` push the same rows and the former holds a quarter of the locks per statement. `TestReplaceContendsOnlyOnUniqueIndexes` in `pkg/applier` establishes the premise against a real server: rows adjacent in the primary key do not contend (a `REPLACE`'s clustered-index conflict is with an exact PK, so under `READ COMMITTED` it is a record lock with no gap), rows adjacent in a `UNIQUE` secondary index do.
 
   `MaxFlushConcurrency` is not an independent judgement: it is exactly `FlushRowsInFlight / MinFlushBatchSize`, the widest flush that can still hold the invariant. `MinFlushConcurrency` is the historical `change.DefaultFlushConcurrency`, so every instance below `4xlarge` receives precisely the pre-derivation pair and this mechanism is a no-op there. Deriving *downwards* was never the goal — the contention controller already narrows a flush that is actually colliding, and it does so from evidence rather than from a core count.
+
+  `migrate` and `sync` use the pair as returned, capped by `ClientCeiling`. `move` divides the width by (sources × most target shards on one host), because every flush fans out to every shard, caps it at `ClientCeiling` ÷ sources, and floors the result at `MinFlushConcurrency`. The floor applies after the cap and keeps the rule above: the derivation never narrows a flush below the historical default.
 
   `FlushRowsInFlight` is a bare `8000` because this package cannot name `change.DefaultFlushConcurrency × change.DefaultBatchSize` (`pkg/change` imports this one). `TestFlushBoundsPreservesChangeDefaults` in `pkg/migration` — which can see both — pins the agreement.
 
@@ -57,7 +61,7 @@ The shape is "gentle in the normal regime, abrupt only in emergencies". The full
 
 Everything genuinely phase-specific: how big a step is, which pool it lands on, and what may veto one.
 
-- **Copier** ([`pkg/copier`](../copier/README.md)) has two pools fed by one signal, so utilization alone cannot say which to grow. The applier queue between them arbitrates: starved → readers are the bottleneck, full → writers are. A balanced pipeline holds. The write side additionally refuses to grow when the redo-aware Aurora signal has no commit-latency backstop (`throttler.ResolveMaxWriteThreads`).
+- **Copier** ([`pkg/copier`](../copier/README.md)) has two pools fed by one signal, so utilization alone cannot say which to grow. The applier queue between them arbitrates: starved → readers are the bottleneck, full → writers are. A balanced pipeline holds. The write side additionally refuses to grow when the redo-aware Aurora signal has no commit-latency backstop (`throttler.ResolveMaxWriteThreads`). `migrate` probes for the redo-aware signal itself; `move` and `sync` read it from `AuroraResult.RedoAware`, the same probe that built their throttler. After the copy, `copier.StartWriteAutoscaler` can run the write side alone; `sync` keeps it running for checksum repairs during continuous verification.
 - **Checksum** ([`pkg/checksum`](../checksum/README.md)) has one pool and no arbitration, plus a veto the utilization signal cannot see: the change feed's post-flush residual. A feed losing ground means the checksum's reads are winning a race against writes that actually have to finish, so a worker is shed — on stock MySQL as well as Aurora, where there is no continuous signal at all.
 
 ## See Also
@@ -65,4 +69,4 @@ Everything genuinely phase-specific: how big a step is, which pool it lands on, 
 - [pkg/throttler](../throttler/README.md) — the source of the continuous signal (`GradualThrottler`) and of the binary hard-stop underneath all of this
 - [pkg/copier](../copier/README.md) — the write/read autoscaler and the law's derivation
 - [pkg/checksum](../checksum/README.md) — the checksum controller and its backlog veto
-- [docs/migrate.md](../../docs/migrate.md) — operator-facing documentation for `--enable-experimental-autoscaling`
+- [docs/migrate.md](../../docs/migrate.md), [docs/move.md](../../docs/move.md#enable-experimental-autoscaling), [docs/sync.md](../../docs/sync.md#autoscaling) — operator-facing documentation for `--enable-experimental-autoscaling`
