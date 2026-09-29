@@ -61,20 +61,19 @@ func TestMoveWithConcurrentWrites(t *testing.T) {
 }
 
 func testMoveWithConcurrentWrites(t *testing.T, deferSecondaryIndexes bool) {
-	sourceDSN := testutils.DSNForDatabase("source_concurrent")
-	targetDSN := testutils.DSNForDatabase("dest_concurrent")
-
-	// Clean up both databases to ensure a fresh start for each test run
-	// This is necessary because the test is called twice (with different deferSecondaryIndexes values)
-	// and the targetStateCheck validates that target tables are empty
-	t.Logf("Cleaning up databases for deferSecondaryIndexes=%v", deferSecondaryIndexes)
-	testutils.RunSQL(t, `DROP DATABASE IF EXISTS source_concurrent`)
-	testutils.RunSQL(t, `DROP DATABASE IF EXISTS dest_concurrent`)
+	// Unique (per-process) database names: the move treats any DDL in its
+	// source schema as a schema change and cancels itself, so a fixed name
+	// lets a concurrent `go test` against the same server kill this run by
+	// dropping and recreating the schema. Fresh databases per call also give
+	// the second call the empty target that targetStateCheck requires.
+	sourceName, sourceDB := testutils.CreateUniqueTestDatabase(t)
+	targetName, targetDB := testutils.CreateUniqueTestDatabase(t)
+	sourceDSN := testutils.DSNForDatabase(sourceName)
+	targetDSN := testutils.DSNForDatabase(targetName)
 
 	// Setup source database with a table similar to the load test
-	t.Logf("Creating source database")
-	testutils.RunSQL(t, `CREATE DATABASE source_concurrent`)
-	testutils.RunSQL(t, `CREATE TABLE source_concurrent.xfers (
+	t.Logf("Creating source table for deferSecondaryIndexes=%v", deferSecondaryIndexes)
+	testutils.RunSQLInDatabase(t, sourceName, `CREATE TABLE xfers (
 		id INT NOT NULL PRIMARY KEY AUTO_INCREMENT,
 		x_token VARCHAR(36) NOT NULL,
 		cents INT NOT NULL,
@@ -98,16 +97,8 @@ func testMoveWithConcurrentWrites(t *testing.T, deferSecondaryIndexes bool) {
 	)`)
 
 	// Insert some initial data
-	testutils.RunSQL(t, `INSERT INTO source_concurrent.xfers (x_token, cents, currency, s_token, r_token, version, created_at, updated_at)
+	testutils.RunSQLInDatabase(t, sourceName, `INSERT INTO xfers (x_token, cents, currency, s_token, r_token, version, created_at, updated_at)
 		VALUES ('initial-1', 100, 'USD', 'sender-1', 'receiver-1', 1, NOW(), NOW())`)
-
-	// Setup target database
-	testutils.RunSQL(t, `CREATE DATABASE dest_concurrent`)
-
-	// Open connection to source for concurrent writes
-	sourceDB, err := sql.Open("block-mysql", sourceDSN)
-	require.NoError(t, err)
-	defer utils.CloseAndLog(sourceDB)
 
 	// Start concurrent write load
 	ctx, cancel := context.WithCancel(t.Context())
@@ -139,7 +130,7 @@ func testMoveWithConcurrentWrites(t *testing.T, deferSecondaryIndexes bool) {
 	}
 
 	// Run move - this should succeed even with concurrent writes
-	err = move.Run()
+	err := move.Run()
 
 	// Stop the write threads
 	// They will start failing as soon as move.Run() finishes successfully,
@@ -156,13 +147,10 @@ func testMoveWithConcurrentWrites(t *testing.T, deferSecondaryIndexes bool) {
 
 	// Verify data was moved correctly
 	var sourceCount, targetCount int
-	err = sourceDB.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM source_concurrent.xfers_old").Scan(&sourceCount)
+	err = sourceDB.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM xfers_old").Scan(&sourceCount)
 	require.NoError(t, err)
 
-	targetDB, err := sql.Open("block-mysql", targetDSN)
-	require.NoError(t, err)
-	defer utils.CloseAndLog(targetDB)
-	err = targetDB.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM dest_concurrent.xfers").Scan(&targetCount)
+	err = targetDB.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM xfers").Scan(&targetCount)
 	require.NoError(t, err)
 
 	t.Logf("Source count: %d, Target count: %d", sourceCount, targetCount)
