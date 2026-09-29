@@ -63,6 +63,19 @@ type AuroraSetup struct {
 type AuroraResult struct {
 	Throttlers []Throttler
 	MonitorDB  *sql.DB
+
+	// ProbeErr is the IsAurora probe's error, when it failed. Throttlers is
+	// then empty. Build treats a failed probe as "not Aurora" so throttling
+	// stays quiet on community MySQL, but an autoscaling caller wants to warn:
+	// it was asked to scale and cannot tell whether it should.
+	ProbeErr error
+
+	// RedoAware reports whether the threads throttler runs the redo-aware
+	// perf_schema signal rather than the Threads_running fallback. That signal
+	// ignores redo-log waiters, so it cannot see write threads oversubscribing
+	// the log; ResolveMaxWriteThreads takes it to decide whether growth needs
+	// the commit-latency backstop. False when Throttlers is empty.
+	RedoAware bool
 }
 
 // Build probes the source for Aurora and assembles the Aurora throttlers.
@@ -107,7 +120,7 @@ func (s AuroraSetup) Build(ctx context.Context) (AuroraResult, error) {
 		// Non-Aurora MySQL with locked-down perf_schema lands here too;
 		// keep it at Debug so the common case isn't noisy.
 		s.Logger.Debug("Aurora probe failed, skipping Aurora throttlers", "error", err)
-		return AuroraResult{}, nil
+		return AuroraResult{ProbeErr: err}, nil
 	case !isAurora:
 		return AuroraResult{}, nil
 	}
@@ -147,7 +160,7 @@ func (s AuroraSetup) Build(ctx context.Context) (AuroraResult, error) {
 	}
 	throttlers = append(throttlers, tr)
 
-	return AuroraResult{Throttlers: throttlers, MonitorDB: monitorDB}, nil
+	return AuroraResult{Throttlers: throttlers, MonitorDB: monitorDB, RedoAware: mode == redoAwareMode}, nil
 }
 
 // selectThreadsMode picks the redo-aware signal when the user can read the

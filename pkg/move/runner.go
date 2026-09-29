@@ -118,6 +118,10 @@ type Runner struct {
 	throttler   throttler.Throttler
 	monitorDBs  []*sql.DB
 	autoscale   copier.AutoscaleConfig
+	// flushConcurrency and flushBatchSize shape each forward feed's drain.
+	// Zero leaves the change package's defaults; autoscaling derives them
+	// from the targets (moveFlushBounds).
+	flushConcurrency, flushBatchSize int
 
 	applier     applier.Applier
 	chunkerMu   sync.RWMutex // Publishes copyChunker to concurrent Progress callers.
@@ -231,6 +235,9 @@ func NewRunner(m *Move) (*Runner, error) {
 	}
 	if m.TargetChunkSize == 0 {
 		m.TargetChunkSize = table.DefaultTargetChunkBytes
+	}
+	if m.MaxCommitLatency == 0 {
+		m.MaxCommitLatency = throttler.DefaultMaxCommitLatency
 	}
 	// WriteThreads has no "0 means auto" meaning any more, so fill in the Kong
 	// default for programmatic callers as well. Warn on
@@ -682,7 +689,7 @@ func (r *Runner) setupDiscovery(ctx context.Context) error {
 // lock before it can destroy the first run's target data.
 func (r *Runner) setupUnderLocks(ctx context.Context) error {
 	var err error
-	if err := r.setupAutoscaling(ctx); err != nil {
+	if err := r.setupThrottling(ctx); err != nil {
 		return err
 	}
 
@@ -979,6 +986,7 @@ func (r *Runner) buildReplClients(ctx context.Context, resumePositions map[strin
 		replConfig.DDLFilterTables = r.move.SourceTables
 		replConfig.DBConfig = r.dbConfig
 		replConfig.UnderLoad = func() bool { return throttler.GradualOnly(r.currentThrottler()).IsThrottled() }
+		replConfig.FlushConcurrency, replConfig.BatchSize = r.flushConcurrency, r.flushBatchSize
 		client, err := change.NewAutoClient(ctx, src.db, src.config.Addr, src.config.User, src.config.Passwd, r.applier, replConfig, resumePositions[src.sourceKey()])
 		if err != nil {
 			return fmt.Errorf("source %d: %w", i, err)

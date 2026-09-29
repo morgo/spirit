@@ -67,7 +67,9 @@ runs without a change stream.
 for Aurora targets with at least four vCPUs. Eligible targets override
 `--threads` and `--write-threads`; other targets retain those configured counts.
 The target's load and commit latency are sampled through a separate two-connection
-monitor pool. Source load is not measured.
+monitor pool. That monitoring, and the throttling it drives, runs without this
+flag too (see [max-commit-latency](#max-commit-latency)); the flag only adds
+thread-count scaling on top of it. Source load is not measured.
 
 During the initial copy, the shared copier controller adjusts read and write
 workers using target load and the applier queue. After copying, the continuous
@@ -99,6 +101,7 @@ observe its load but do not share a single worker budget.
 - [threads](#threads)
 - [write-threads](#write-threads)
 - [flush-interval](#flush-interval)
+- [max-commit-latency](#max-commit-latency)
 - [defer-secondary-indexes](#defer-secondary-indexes)
 - [force](#force)
 
@@ -223,6 +226,15 @@ File+offset checkpoints also record the source's `@@server_uuid`. Resume refuses
 coordinates from a different server or an older checkpoint without identity;
 use `--force` to discard the partial copy and start fresh. GTID checkpoints
 remain portable across servers, subject to the normal GTID resume checks.
+
+### max-commit-latency
+
+- Type: Duration
+- Default value: `100ms`
+
+Throttles the sync when the Aurora target's average commit latency exceeds this threshold, as [migrate's max-commit-latency](migrate.md#max-commit-latency) does for its source. The target is monitored whether or not [autoscaling](#autoscaling) is enabled, alongside the Aurora threads throttler: the initial copy pauses and replication flushes narrow while it is overloaded. A target that is not Aurora, or a custom applier that writes somewhere other than the target, is not monitored.
+
+A negative value disables the commit-latency throttler. That also removes the backstop autoscaling needs to grow write threads above their starting count while the target runs the redo-aware threads signal; in that combination the pool can shed threads but not grow. In the Go API, zero selects the default.
 
 ### max-connections
 

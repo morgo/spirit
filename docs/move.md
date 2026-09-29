@@ -17,6 +17,7 @@ This will copy all tables from the source database to the target database, verif
 - [defer-cutover](#defer-cutover)
 - [defer-secondary-indexes](#defer-secondary-indexes)
 - [force](#force)
+- [max-commit-latency](#max-commit-latency)
 - [max-connections](#max-connections)
 - [reverse-window](#reverse-window)
 - [source-dsn](#source-dsn)
@@ -78,6 +79,15 @@ When set to `true`, target tables are created without deferrable regular seconda
 When Move cannot resume from an existing checkpoint — for example the checkpoint was written by an incompatible Spirit version, or the target is in a state the resume path cannot validate — it fails rather than risk corrupting a partially-copied target (see [checkpoint-max-age](#checkpoint-max-age)).
 
 Passing `--force` changes that recovery behaviour: instead of failing, Move wipes the target tables and starts the copy fresh, checking for source-side failures before wiping and re-running the full post-setup checks against the cleaned target. Expired checkpoints and malformed or missing source positions are eligible for forced recovery; transient read or connection failures are not. Source and target must refer to different databases, even if different hostnames or credentials are used. Use it only when the target's current contents can safely be discarded.
+
+### max-commit-latency
+
+- Type: Duration
+- Default value: `100ms`
+
+Throttles the copy when any Aurora target's average commit latency exceeds this threshold, as [migrate's max-commit-latency](migrate.md#max-commit-latency) does for its source. Every Aurora target is monitored whether or not [experimental autoscaling](#enable-experimental-autoscaling) is enabled, alongside the Aurora threads throttler, and any one overloaded target pauses the copy. Targets that are not Aurora are not monitored.
+
+A negative value disables the commit-latency throttler. That also removes the backstop autoscaling needs to grow write threads above their starting count while a target runs the redo-aware threads signal; in that combination the pools can shed threads but not grow. In the Go API, zero selects the default.
 
 ### max-connections
 
@@ -191,7 +201,9 @@ As in migration, the copier owns throttling: it pauses before reading another ch
 
 Targets sharing a host share one Aurora monitor. Initial counts and ceilings use the smallest target host and divide its budget by the largest number of target shards sharing a host, with at least one worker per shard. The client CPU budget also limits growth. Host identity includes the connection transport and address (including port), independently of database and credentials. Use consistent direct endpoints: DNS aliases and proxies are not resolved to physical hosts.
 
-Every target host must be Aurora with at least four vCPUs. Non-Aurora hosts, small instances or failed Aurora probes retain the configured fixed thread counts. Capacity-query and monitor-startup failures abort setup. Aurora monitoring uses thread utilization and a 100ms commit-latency backstop; stale signals pause copying. The initial and sentinel-wait checksums use the same load signal, and binlog draining narrows under load. Monitor connections are separate from the data pools.
+Every target host must be Aurora with at least four vCPUs. Non-Aurora hosts, small instances or failed Aurora probes retain the configured fixed thread counts. Capacity-query and monitor-startup failures abort setup. Aurora monitoring uses thread utilization and the [max-commit-latency](#max-commit-latency) backstop; stale signals pause copying. That monitoring runs without this flag too; the flag only adds thread-count scaling on top of it. The initial and sentinel-wait checksums use the same load signal, and binlog draining narrows under load. Monitor connections are separate from the data pools.
+
+Each source's binlog flush is also sized from the targets, as `migrate` and `sync` size theirs: the smallest target's flush width, divided by the number of sources and by the largest number of target shards sharing a host (every flush fans out to every shard), and never narrower than the default of 8 concurrent statements. The batch size shrinks as the width grows, so the rows each flush has in flight stay the same.
 
 This flag is experimental, as it is for `migrate`. It applies to forward copying and checksums; the reverse window does not acquire new monitors for its write destinations.
 
