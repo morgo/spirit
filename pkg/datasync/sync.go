@@ -12,7 +12,7 @@
 // The source is either a built-in MySQL binlog client (constructed from
 // SourceDSN) or a caller-injected change.Source — e.g. a Vitess /
 // PlanetScale VStream. The target is written through an applier; today
-// that is a MySQL SingleTargetApplier, but the applier abstraction is
+// that is a single-target MySQLApplier, but the applier abstraction is
 // what makes the sync heterogeneous: a future Postgres applier would
 // let this sync MySQL → Postgres without changing the runner.
 //
@@ -102,7 +102,7 @@ type Sync struct {
 
 	// Applier optionally provides a pre-constructed applier.Applier. When
 	// set, the runner uses this instead of constructing a MySQL
-	// SingleTargetApplier from the target. Required when Source is set: the
+	// single-target MySQLApplier from the target. Required when Source is set: the
 	// injected change.Source needs the same applier instance the copier
 	// uses, so all writes flow through one logical apply path.
 	Applier applier.Applier `kong:"-"`

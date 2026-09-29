@@ -1254,7 +1254,7 @@ func (r *Runner) Run(ctx context.Context) (retErr error) {
 	// Sort targets by targetKey (addr/dbname/keyrange) for deterministic
 	// ordering. The checkpoint is written to targets[0], so the order must be
 	// stable across runs even if the caller constructed Targets from a map.
-	// The ShardedApplier routes by key range, so slice order is otherwise
+	// The applier routes by key range, so slice order is otherwise
 	// irrelevant to which target a row lands on.
 	slices.SortFunc(r.targets, func(a, b applier.Target) int {
 		return strings.Compare(targetKey(a), targetKey(b))
@@ -2351,39 +2351,19 @@ func (r *Runner) Cancel() {
 	r.cancelFunc()
 }
 
-// createApplier creates the appropriate applier based on the number of targets.
+// createApplier creates the applier that writes to the targets. With several
+// targets it routes each row to the target whose key range contains its hash.
 // Note: The applier is NOT started here. The copier will start it when it begins copying.
 func (r *Runner) createApplier() (applier.Applier, error) {
-	if len(r.targets) == 1 && r.targets[0].KeyRange == "0" {
-		// Single target - use SingleTargetApplier
-		appl, err := applier.NewSingleTargetApplier(r.targets[0], &applier.ApplierConfig{
-			DBConfig: r.dbConfig,
-			Logger:   r.logger,
-			Threads:  r.move.WriteThreads,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("failed to create SingleTargetApplier: %w", err)
-		}
-		r.logger.Debug("Created SingleTargetApplier")
-		return appl, nil
-	}
-
-	// Multiple targets - use ShardedApplier
-	r.logger.Info("Creating ShardedApplier", "targetCount", len(r.targets))
-
-	// Create the ShardedApplier
-	appl, err := applier.NewShardedApplier(
-		r.targets,
-		&applier.ApplierConfig{
-			DBConfig: r.dbConfig,
-			Logger:   r.logger,
-			Threads:  r.move.WriteThreads,
-		},
-	)
+	appl, err := applier.New(r.targets, &applier.ApplierConfig{
+		DBConfig: r.dbConfig,
+		Logger:   r.logger,
+		Threads:  r.move.WriteThreads,
+	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to create ShardedApplier: %w", err)
+		return nil, fmt.Errorf("failed to create applier: %w", err)
 	}
-	r.logger.Info("ShardedApplier created successfully")
+	r.logger.Debug("created applier", "targetCount", len(r.targets))
 	return appl, nil
 }
 

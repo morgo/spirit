@@ -65,8 +65,26 @@ func TestParseKeyRange(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name:    "empty string",
-			input:   "",
+			name:          "empty string is the whole key space",
+			input:         "",
+			wantErr:       false,
+			wantUnbounded: true,
+		},
+		{
+			name:          "unsharded shard name 0 is the whole key space",
+			input:         "0",
+			wantErr:       false,
+			wantUnbounded: true,
+		},
+		{
+			name:          "dash is the whole key space",
+			input:         "-",
+			wantErr:       false,
+			wantUnbounded: true,
+		},
+		{
+			name:    "a shard name other than 0",
+			input:   "00",
 			wantErr: true,
 		},
 		{
