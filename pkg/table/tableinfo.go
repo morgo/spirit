@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/block/spirit/pkg/dbconn/sqlescape"
+	"github.com/block/spirit/pkg/utils"
 )
 
 const (
@@ -287,8 +288,8 @@ func (t *TableInfo) addColumn(name, mysqlType string, generated bool) error {
 		t.NonGeneratedColumns = append(t.NonGeneratedColumns, name)
 	}
 	ordinal := len(t.Columns) - 1
-	if isEnumColumnType(mysqlType) || isSetColumnType(mysqlType) {
-		elements, err := parseEnumSetElements(mysqlType)
+	if utils.IsEnumOrSetType(mysqlType) {
+		elements, err := utils.ParseEnumSetElements(mysqlType)
 		if err != nil {
 			return fmt.Errorf("parsing ENUM/SET elements for %s.%s.%s: %w", t.SchemaName, t.TableName, name, err)
 		}
@@ -710,7 +711,7 @@ func (t *TableInfo) DecodeBinlogRow(row []any) error {
 		mysqlType := t.columnsMySQLTps[colName]
 		var decoded string
 		var derr error
-		if isSetColumnType(mysqlType) {
+		if utils.IsSetType(mysqlType) {
 			decoded, derr = decodeSetBitmask(intVal, elements)
 		} else {
 			decoded, derr = decodeEnumOrdinal(intVal, elements)
