@@ -515,6 +515,16 @@ func TestEscapeIdentifier(t *testing.T) {
 	require.Equal(t, "use "+EscapeIdentifier("foo`bar"), out)
 }
 
+func TestEscapeIdentifierList(t *testing.T) {
+	require.Empty(t, EscapeIdentifierList(nil))
+	require.Equal(t, "`a`", EscapeIdentifierList([]string{"a"}))
+	require.Equal(t, "`a`, `b`, `c`", EscapeIdentifierList([]string{"a", "b", "c"}))
+	// Identifiers containing a backtick must have it doubled, otherwise the
+	// quoting breaks out and produces invalid SQL.
+	require.Equal(t, "`a``b`", EscapeIdentifierList([]string{"a`b"}))
+	require.Equal(t, "`a``b`, `c`", EscapeIdentifierList([]string{"a`b", "c"}))
+}
+
 func BenchmarkEscapeString(b *testing.B) {
 	for b.Loop() {
 		escapeSQL("select %?", "3") //nolint:errcheck

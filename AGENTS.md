@@ -169,7 +169,7 @@ pkg/
   status/     → State machine and progress reporting
   metrics/    → Metric types for observability
   buildinfo/  → Build version and metadata
-  utils/      → General utilities
+  utils/      → Shared helpers with no spirit dependencies (see "Shared helpers" below)
   testutils/  → Test helpers (DSN, database creation, SQL execution)
 
 compose/      → Docker Compose configs for MySQL test environments
@@ -309,6 +309,17 @@ Normalization canonicalizes a parsed `CreateTable` so a user-written schema matc
 2. Register it in an `init()` function using `registerNormalizer()` (defined in `normalize.go`)
 3. Mutate the **structured** fields of `CreateTable` (`Columns`, `Indexes`, …) and return the same instance — never touch `Raw`
 4. Keep the rule order-independent (it runs after the struct is fully parsed) and follow an existing rule (e.g., `normalize_integer_display_width.go`)
+
+### Shared helpers: look in `pkg/utils` first
+Before writing a small helper (a percentile, a string/grant parser, an ENUM/SET element parser, …), check `pkg/utils/` for an existing one. If none exists and the helper has few dependencies — the standard library only, no other spirit package — add it to `pkg/utils` and export it, rather than as a private function in the package that first needs it. A private helper gets copied the second time another package needs it, and the copies then drift apart.
+
+`pkg/utils` imports nothing from spirit, so every package can use it without an import cycle. Keep it that way. A helper that needs another spirit package belongs in that package instead:
+- Identifier quoting goes in `pkg/dbconn/sqlescape` (`EscapeIdentifier`, `EscapeIdentifierList`).
+- Helpers that run a query go in `pkg/dbconn`.
+- MySQL error numbers come from `pkg/parser/mysql` (`ErrNoSuchTable`, …). Do not define local constants for them.
+
+### Methods live in the file that defines their type
+All methods (receivers) of a type go in the same file as the type's declaration. Do not split them into topic files such as `autoscale.go` or `helpers.go`. If a group of methods is a coherent unit with its own dependencies and wants its own file, give it its own type there (e.g. `rowSettler` in `pkg/checksum/lockless_settle.go`) instead of adding more methods to the original type. Some existing code does not follow this yet; do not add to it, and move methods back when you touch them.
 
 ### Working with the parser
 All SQL parsing goes through `pkg/statement/` (built on `pkg/parser`, Spirit's fork of the TiDB parser). Do not parse SQL manually. The `Statement` type wraps parsed DDL and provides safety analysis methods.

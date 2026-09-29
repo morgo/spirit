@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/block/mysql"
+	parsermysql "github.com/block/spirit/pkg/parser/mysql"
 	"github.com/block/spirit/pkg/utils"
 	"github.com/stretchr/testify/require"
 )
@@ -101,16 +102,6 @@ func CreateUniqueTestDatabase(t *testing.T) (string, *sql.DB) {
 	return dbName, scopedDB
 }
 
-// Error numbers a server without the VECTOR type returns for the probe below.
-// A missing built-in is looked up as a stored function, so what comes back
-// depends on the connecting user's privileges: root sees "does not exist",
-// while a user without EXECUTE on the schema (the CI test user) is denied
-// first and never learns the function is missing.
-const (
-	erSpDoesNotExist   = 1305 // FUNCTION test.VECTOR_DIM does not exist
-	erProcAccessDenied = 1370 // execute command denied ... for routine 'test.VECTOR_DIM'
-)
-
 // vectorSupported caches the one-time capability probe behind
 // SkipUnlessVectorSupported. err holds an infrastructure failure (see below),
 // which is reported to every caller rather than silently skipping them.
@@ -161,10 +152,15 @@ func SkipUnlessVectorSupported(t *testing.T) {
 }
 
 // isUnknownFunctionErr reports whether err is the server telling us a function
-// does not exist — in either of the two forms described above.
+// does not exist, as a server without the VECTOR type does for the probe in
+// SkipUnlessVectorSupported. A missing built-in is looked up as a stored
+// function, so what comes back depends on the connecting user's privileges:
+// root sees "does not exist" (ER_SP_DOES_NOT_EXIST), while a user without
+// EXECUTE on the schema (the CI test user) is denied first
+// (ER_PROCACCESS_DENIED_ERROR) and never learns the function is missing.
 func isUnknownFunctionErr(err error) bool {
 	myErr, ok := errors.AsType[*mysql.MySQLError](err)
-	return ok && (myErr.Number == erSpDoesNotExist || myErr.Number == erProcAccessDenied)
+	return ok && (myErr.Number == parsermysql.ErrSpDoesNotExist || myErr.Number == parsermysql.ErrProcaccessDenied)
 }
 
 // RunSQLInDatabase runs SQL in a specific database

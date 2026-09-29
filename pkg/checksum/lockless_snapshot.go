@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/block/spirit/pkg/dbconn/sqlescape"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/utils"
 	"golang.org/x/sync/errgroup"
@@ -223,7 +224,7 @@ func readHotSnapshotRows(ctx context.Context, db rowQuerier, chunk *table.Chunk,
 			return nil, 0, false, fmt.Errorf("missing snapshot key type for %s", key)
 		}
 		types[i] = tp
-		projections[i] = table.QuoteColumns([]string{key})
+		projections[i] = sqlescape.EscapeIdentifier(key)
 		base, _, _ := strings.Cut(strings.ToUpper(tp), "(")
 		switch base {
 		case "DATE", "DATETIME", "TIMESTAMP", "TIME":

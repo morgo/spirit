@@ -2,26 +2,9 @@ package table
 
 import (
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/require"
 )
-
-func TestFindP90(t *testing.T) {
-	times := []time.Duration{
-		1 * time.Second,
-		2 * time.Second,
-		1 * time.Second,
-		3 * time.Second,
-		10 * time.Second,
-		1 * time.Second,
-		1 * time.Second,
-		1 * time.Second,
-		1 * time.Second,
-		1 * time.Second,
-	}
-	require.Equal(t, 3*time.Second, LazyFindP90(times))
-}
 
 type castableTpTest struct {
 	tp       string
@@ -167,19 +150,6 @@ func TestChecksumCastTp(t *testing.T) {
 	} {
 		require.Equal(t, tc.expected, checksumCastTp(tc.sourceTp, tc.targetTp), "source: %s, target: %s", tc.sourceTp, tc.targetTp)
 	}
-}
-
-func TestQuoteCols(t *testing.T) {
-	cols := []string{"a", "b", "c"}
-	require.Equal(t, "`a`, `b`, `c`", QuoteColumns(cols))
-
-	cols = []string{"a"}
-	require.Equal(t, "`a`", QuoteColumns(cols))
-
-	// Identifiers containing a backtick must have it doubled, otherwise the
-	// quoting breaks out and produces invalid SQL.
-	require.Equal(t, "`a``b`", QuoteColumns([]string{"a`b"}))
-	require.Equal(t, "`a``b`, `c`", QuoteColumns([]string{"a`b", "c"}))
 }
 
 func TestExpandRowConstructorComparison(t *testing.T) {

@@ -2,10 +2,11 @@ package applier
 
 import (
 	"fmt"
-	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/block/spirit/pkg/utils"
 )
 
 // timingRingSize is the number of most-recent chunklet timings retained for
@@ -270,18 +271,7 @@ func (r *timingRing) percentiles() timingPercentiles {
 	return p
 }
 
-// p50p90 sorts s in place and returns its 50th and 90th percentiles.
+// p50p90 returns the 50th and 90th percentiles of s.
 func p50p90(s []time.Duration) (p50, p90 time.Duration) {
-	slices.Sort(s)
-	return percentile(s, 50), percentile(s, 90)
-}
-
-// percentile returns the p-th percentile of a sorted slice using the
-// nearest-rank method (ceil(n*p/100), 1-indexed).
-func percentile(sorted []time.Duration, p int) time.Duration {
-	if len(sorted) == 0 {
-		return 0
-	}
-	idx := max((len(sorted)*p+99)/100, 1)
-	return sorted[idx-1]
+	return utils.Percentile(s, 50), utils.Percentile(s, 90)
 }
