@@ -1055,8 +1055,11 @@ func TestShardedApplierDeleteKeysUnderLock(t *testing.T) {
 		{int64(2)},
 		{int64(3)},
 	}
-	_, err = applier.DeleteKeys(ctx, sourceTable, target1Table, keysToDelete, []*dbconn.TableLock{lock1, lock2})
+	affected, err := applier.DeleteKeys(ctx, sourceTable, target1Table, keysToDelete, []*dbconn.TableLock{lock1, lock2})
 	require.NoError(t, err)
+	// Under lock the per-shard counts are unknown, so the key count is
+	// reported — once, not once per shard — matching SingleTargetApplier.
+	require.Equal(t, int64(len(keysToDelete)), affected)
 
 	require.NoError(t, lock1.Close(ctx))
 	require.NoError(t, lock2.Close(ctx))
@@ -1297,4 +1300,77 @@ func TestShardedApplierRenamedTarget(t *testing.T) {
 	require.Equal(t, map[int64]string{1: "odd-one"}, rowNames(shard2DB, "t1"))
 	// The renamed tables are untouched by the un-renamed flow.
 	require.Equal(t, map[int64]string{3: "odd-three"}, rowNames(shard2DB, "t1_old"))
+}
+
+// TestShardedApplierApplyRenamedColumn verifies the copy path honours the
+// column mapping's renames: the INSERT must name the target columns, and each
+// value must be typed by its source column. Before the fix writeChunklet used
+// the source column names on the target table, so a renamed column failed.
+func TestShardedApplierApplyRenamedColumn(t *testing.T) {
+	testutils.RunSQL(t, "DROP DATABASE IF EXISTS sharded_rencol_source")
+	testutils.RunSQL(t, "DROP DATABASE IF EXISTS sharded_rencol_shard1")
+	testutils.RunSQL(t, "DROP DATABASE IF EXISTS sharded_rencol_shard2")
+	testutils.RunSQL(t, "CREATE DATABASE sharded_rencol_source")
+	testutils.RunSQL(t, "CREATE DATABASE sharded_rencol_shard1")
+	testutils.RunSQL(t, "CREATE DATABASE sharded_rencol_shard2")
+
+	base, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	open := func(dbName string) *sql.DB {
+		cfg := base.Clone()
+		cfg.DBName = dbName
+		db, err := sql.Open("block-mysql", cfg.FormatDSN())
+		require.NoError(t, err)
+		t.Cleanup(func() { utils.CloseAndLog(db) })
+		return db
+	}
+	sourceDB := open("sharded_rencol_source")
+	shard1DB := open("sharded_rencol_shard1")
+	shard2DB := open("sharded_rencol_shard2")
+
+	ctx := t.Context()
+	_, err = sourceDB.ExecContext(ctx, `CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT NOT NULL, name VARCHAR(100))`)
+	require.NoError(t, err)
+	for _, db := range []*sql.DB{shard1DB, shard2DB} {
+		_, err = db.ExecContext(ctx, `CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT NOT NULL, full_name VARCHAR(100))`)
+		require.NoError(t, err)
+	}
+
+	sourceTable := table.NewTableInfo(sourceDB, "sharded_rencol_source", "t1")
+	require.NoError(t, sourceTable.SetInfo(ctx))
+	sourceTable.ShardingColumn = "user_id"
+	sourceTable.HashFunc = testutils.EvenOddHasher
+	targetTable := table.NewTableInfo(shard1DB, "sharded_rencol_shard1", "t1")
+	require.NoError(t, targetTable.SetInfo(ctx))
+
+	applier, err := NewShardedApplier([]Target{
+		{DB: shard1DB, KeyRange: "-80"}, // even user_ids
+		{DB: shard2DB, KeyRange: "80-"}, // odd user_ids
+	}, NewApplierDefaultConfig())
+	require.NoError(t, err)
+	require.NoError(t, applier.Start(ctx))
+	defer func() { require.NoError(t, applier.Stop()) }()
+
+	chunk := &table.Chunk{
+		Table:         sourceTable,
+		NewTable:      targetTable,
+		ColumnMapping: table.NewColumnMapping(sourceTable, targetTable, map[string]string{"name": "full_name"}),
+	}
+	var callbackErr error
+	var affected int64
+	require.NoError(t, applier.Apply(ctx, chunk, [][]any{
+		{int64(1), int64(101), "odd-one"},
+		{int64(2), int64(102), "even-two"},
+	}, func(n int64, err error) {
+		affected, callbackErr = n, err
+	}))
+	require.NoError(t, applier.Wait(ctx))
+	require.NoError(t, callbackErr)
+	require.Equal(t, int64(2), affected)
+
+	var name string
+	require.NoError(t, shard1DB.QueryRowContext(ctx, "SELECT full_name FROM t1 WHERE id = 2").Scan(&name))
+	require.Equal(t, "even-two", name)
+	require.NoError(t, shard2DB.QueryRowContext(ctx, "SELECT full_name FROM t1 WHERE id = 1").Scan(&name))
+	require.Equal(t, "odd-one", name)
 }

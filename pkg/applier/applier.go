@@ -39,10 +39,14 @@ const (
 	// row count and this bound is much looser.)
 	MaxStatementSizeBytes = 1024 * 1024
 
-	defaultBufferSize   = 128              // Size of the shared buffer channel for chunklets
-	defaultWriteWorkers = 2                // Number of write workers, default low for tests, but in practice we can use 40+
-	chunkTaskTimeout    = time.Second * 60 // Timeout for any task (copy chunk, delete keys, upsert rows)
+	defaultBufferSize   = 128 // Size of the shared buffer channel for chunklets
+	defaultWriteWorkers = 2   // Number of write workers, default low for tests, but in practice we can use 40+
 )
+
+// chunkTaskTimeout bounds one applier write — a copy chunklet, a DeleteKeys or
+// an UpsertRows call — including its retries. Both appliers apply it to every
+// write path. A var only so tests can shorten it.
+var chunkTaskTimeout = time.Second * 60
 
 // Target represents a shard target with its database connection, configuration, and key range.
 // Key ranges are expressed as Vitess-style strings (e.g., "-80", "80-", "80-c0").
