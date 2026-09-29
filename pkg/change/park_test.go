@@ -242,8 +242,18 @@ func TestVerifyRowAtNextChangeFailures(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			h := newVerifyHarness()
-			if tc.flushErr != nil {
-				h.flushFn = func(context.Context) error { return tc.flushErr }
+			// The dispatches are the rows of one event, so they all land
+			// before the parked flush finishes. Without this wait the first
+			// Release can wake Verify, which then flushes, verifies and reads
+			// the rewrite count before the second row has been observed.
+			dispatched := make(chan struct{})
+			h.flushFn = func(ctx context.Context) error {
+				select {
+				case <-dispatched:
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+				return tc.flushErr
 			}
 			var wg sync.WaitGroup
 			wg.Go(func() {
@@ -251,6 +261,7 @@ func TestVerifyRowAtNextChangeFailures(t *testing.T) {
 				for _, d := range tc.dispatch {
 					d(h)
 				}
+				close(dispatched)
 			})
 
 			ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
