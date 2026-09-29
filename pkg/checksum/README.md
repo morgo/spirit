@@ -978,7 +978,7 @@ two:
 | `VARBINARY`, the `BLOB`s | `binary` | |
 | `VECTOR` (MySQL 9.7+) | `binary` | `CAST(… AS char)` is rejected outright by the server (`ER_WRONG_ARGUMENTS`) |
 | `JSON` | asymmetric, see below | |
-| **everything else** — `DATE`, `TIME(N)`, `YEAR`, `BIT(N)`, … | `char CHARACTER SET utf8mb4` | the `default` branch, so an unlisted type is compared as its rendered text |
+| **everything else** — `DATE`, `TIME(N)`, `YEAR`, `BIT(N)`, … | `char CHARACTER SET utf8mb4` | the `default` branch, so an unlisted type is compared as the bytes `CAST(… AS char)` returns for it — usually its rendered text, but see the gaps below |
 
 The fallback matters for one case in particular: `TIME(N)` is **not** in the
 `datetime` row, so it takes the default branch and renders its fraction in
@@ -986,14 +986,25 @@ full (`CAST(TIME'10:00:00.100000' AS char)` → `10:00:00.100000`, CRC32
 `4947716`). `TIME` columns therefore do not share the fractional-second blind
 spot described below — only `DATETIME` and `TIMESTAMP` do.
 
-The fallback also swallows one type the table above implies is handled.
-`castableTp` matches on the type string after the width is stripped, and the
-`decimal` case is spelled exactly — so `DECIMAL(12,4) UNSIGNED` reduces to
-`decimal unsigned`, matches nothing, and is compared as rendered text. The
-scale is then *not* normalized, which means an `ALTER` that widens the scale of
-an unsigned `DECIMAL` compares `169.09` against `169.0900` and reports a
-difference on every row of the column. This is a gap in the cast table rather
-than a documented behaviour; the signed form is unaffected.
+**Two known gaps in the fallback.** `castableTp` switches on the type string
+*after* the width, `ZEROFILL` and decimal width have been stripped, and two
+shapes reach the `default` branch that should not:
+
+- `DECIMAL(M,D) UNSIGNED` reduces to `decimal unsigned`, which matches no case
+  (`case "decimal"` is spelled exactly), so the scale is never normalized.
+  `DECIMAL(10,2) UNSIGNED` → `DECIMAL(12,4) UNSIGNED` compares `169.09`
+  against `169.0900` — CRC32 `1865833143` vs `2558327555`. The signed form is
+  fine.
+- `BIT(N)` takes the default branch too, and `CAST(bit AS char)` returns the
+  raw stored bytes at each column's *own* width rather than a rendered
+  number: `BIT(8)` → `BIT(16)` holding `b'00000001'` compares `0x01` against
+  `0x0001` — CRC32 `2768625435` vs `920527465`. (`CAST(bit AS unsigned)`
+  yields `2212294583` on both sides.)
+
+Both are value-preserving widenings, so a **perfect** copy fails the digest,
+the repair cannot converge, and the cut-over is refused. That is fail-closed —
+no data is at risk — but the migration is unusable. Both are pre-existing gaps
+in `castableTp` rather than intended behaviour, tracked in block/spirit#1291.
 
 `ENUM` and `SET` are compared as their **string** value, not their stored
 ordinal, so appending values to the end of an `ENUM` list is invisible to the
@@ -1010,11 +1021,13 @@ are in the `castExpr` comment in `pkg/table`.
 
 ### Lossy conversions, and which gate catches them
 
-Spirit only supports conversions that preserve the data, and **no preflight
-check enforces that** — nothing measures your data against a narrower type
-before the copy starts. Two different mechanisms catch it afterwards, and it is
-worth knowing which, because they fail at different times and look nothing
-alike.
+Spirit only supports conversions that preserve the data. A few conversions are
+refused in preflight by their *shape* — `enumSetRemoval`
+(`pkg/migration/check/`) rejects `ENUM`/`SET` → numeric and `SET` → `ENUM`
+outright — but **no preflight check measures your data against the narrower
+type**, so for the general case nothing has looked at a single row by the time
+the copy starts. Two different mechanisms catch it afterwards, and it is worth
+knowing which, because they fail at different times and look nothing alike.
 
 **Most lossy conversions abort during the copy.** Spirit connects with a
 non-strict `sql_mode` (`NO_AUTO_VALUE_ON_ZERO` and nothing else,
