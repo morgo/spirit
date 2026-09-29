@@ -9,17 +9,7 @@ import (
 	"time"
 
 	"github.com/block/mysql"
-)
-
-// MySQL error codes for "you don't have permission" failures. The redo-aware
-// probe distinguishes these from other errors so the log message can suggest a
-// concrete fix (grant SELECT) when it's actually a grants problem, and avoid
-// that misleading suggestion otherwise.
-const (
-	errAccessDenied         = 1045 // ER_ACCESS_DENIED_ERROR
-	errDBAccessDenied       = 1044 // ER_DBACCESS_DENIED_ERROR
-	errTableAccessDenied    = 1142 // ER_TABLEACCESS_DENIED_ERROR (SELECT on a table denied)
-	errSpecificAccessDenied = 1227 // ER_SPECIFIC_ACCESS_DENIED_ERROR
+	parsermysql "github.com/block/spirit/pkg/parser/mysql"
 )
 
 // AuroraSetup orchestrates probing for Aurora and assembling the Aurora-
@@ -202,7 +192,7 @@ func isPrivilegeDeniedError(err error) bool {
 		return false
 	}
 	switch me.Number {
-	case errAccessDenied, errDBAccessDenied, errTableAccessDenied, errSpecificAccessDenied:
+	case parsermysql.ErrAccessDenied, parsermysql.ErrDBaccessDenied, parsermysql.ErrTableaccessDenied, parsermysql.ErrSpecificAccessDenied:
 		return true
 	default:
 		return false

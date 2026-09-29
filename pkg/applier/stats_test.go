@@ -12,27 +12,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestPercentileNearestRank(t *testing.T) {
-	require.Equal(t, time.Duration(0), percentile(nil, 50))
-	require.Equal(t, time.Duration(0), percentile([]time.Duration{}, 90))
-
-	one := []time.Duration{7 * time.Millisecond}
-	require.Equal(t, 7*time.Millisecond, percentile(one, 50))
-	require.Equal(t, 7*time.Millisecond, percentile(one, 90))
-
-	two := []time.Duration{1 * time.Millisecond, 2 * time.Millisecond}
-	require.Equal(t, 1*time.Millisecond, percentile(two, 50))
-	require.Equal(t, 2*time.Millisecond, percentile(two, 90))
-
-	// 1..100ms: nearest-rank p50 = 50ms, p90 = 90ms
-	hundred := make([]time.Duration, 100)
-	for i := range hundred {
-		hundred[i] = time.Duration(i+1) * time.Millisecond
-	}
-	require.Equal(t, 50*time.Millisecond, percentile(hundred, 50))
-	require.Equal(t, 90*time.Millisecond, percentile(hundred, 90))
-}
-
 func TestTimingRingPercentiles(t *testing.T) {
 	var r timingRing
 

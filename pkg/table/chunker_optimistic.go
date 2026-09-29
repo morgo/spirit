@@ -10,6 +10,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/block/spirit/pkg/dbconn/sqlescape"
 )
 
 type chunkerOptimistic struct {
@@ -133,7 +135,7 @@ func (t *chunkerOptimistic) nextChunkByPrefetching() (*Chunk, error) {
 	// that produced it, not with whatever the next chunk will use.
 	offset := t.chunkSize
 	t.prefetchChunks++
-	key := QuoteColumns(t.Ti.KeyColumns[:1])
+	key := sqlescape.EscapeIdentifier(t.Ti.KeyColumns[0])
 	query := fmt.Sprintf("SELECT %s FROM %s WHERE %s > ? ORDER BY %s LIMIT 1 OFFSET %d",
 		key, t.Ti.QuotedTableName, key, key, offset,
 	)
