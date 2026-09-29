@@ -517,7 +517,7 @@ func (t *TableInfo) setMinMax(ctx context.Context) error {
 	if isBITType(t.keyColumnsMySQLTp[0]) {
 		return nil
 	}
-	quotedKey := QuoteColumns(t.KeyColumns[:1])
+	quotedKey := sqlescape.EscapeIdentifier(t.KeyColumns[0])
 	query := fmt.Sprintf("SELECT IFNULL(min(%s),'0'), IFNULL(max(%s),'0') FROM %s", quotedKey, quotedKey, t.QuotedTableName)
 	var minimum, maximum string
 	err := t.db.QueryRowContext(ctx, query).Scan(&minimum, &maximum)

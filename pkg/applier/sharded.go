@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/block/spirit/pkg/dbconn"
+	"github.com/block/spirit/pkg/dbconn/sqlescape"
 	"github.com/block/spirit/pkg/metrics"
 	"github.com/block/spirit/pkg/table"
 )
@@ -820,7 +821,7 @@ func (a *ShardedApplier) DeleteKeys(ctx context.Context, sourceTable, targetTabl
 	// the database connection (shard.writeDB) already determines which database to write to
 	deleteStmt := fmt.Sprintf("DELETE FROM %s WHERE (%s) IN (%s)",
 		targetTable.QuotedTableName,
-		table.QuoteColumns(sourceTable.KeyColumns),
+		sqlescape.EscapeIdentifierList(sourceTable.KeyColumns),
 		inClause,
 	)
 

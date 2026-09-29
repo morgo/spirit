@@ -152,19 +152,6 @@ func TestChecksumCastTp(t *testing.T) {
 	}
 }
 
-func TestQuoteCols(t *testing.T) {
-	cols := []string{"a", "b", "c"}
-	require.Equal(t, "`a`, `b`, `c`", QuoteColumns(cols))
-
-	cols = []string{"a"}
-	require.Equal(t, "`a`", QuoteColumns(cols))
-
-	// Identifiers containing a backtick must have it doubled, otherwise the
-	// quoting breaks out and produces invalid SQL.
-	require.Equal(t, "`a``b`", QuoteColumns([]string{"a`b"}))
-	require.Equal(t, "`a``b`, `c`", QuoteColumns([]string{"a`b", "c"}))
-}
-
 func TestExpandRowConstructorComparison(t *testing.T) {
 	require.Equal(t, "((`a` > 1)\n OR (`a` = 1 AND `b` >= 2))",
 		expandRowConstructorComparison([]string{"a", "b"},

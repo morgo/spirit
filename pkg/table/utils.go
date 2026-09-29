@@ -276,14 +276,6 @@ func removeZerofill(s string) string {
 	return strings.ReplaceAll(s, " zerofill", "")
 }
 
-func QuoteColumns(cols []string) string {
-	q := make([]string, len(cols))
-	for i, col := range cols {
-		q[i] = sqlescape.EscapeIdentifier(col)
-	}
-	return strings.Join(q, ", ")
-}
-
 // expandRowConstructorComparison is a workaround for MySQL
 // not always optimizing conditions such as (a,b,c) > (1,2,3).
 // This limitation is still current in 8.0, and was not fixed

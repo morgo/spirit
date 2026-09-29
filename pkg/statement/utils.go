@@ -9,17 +9,6 @@ import (
 	"github.com/block/spirit/pkg/dbconn/sqlescape"
 )
 
-// quoteIdentList quotes each identifier via sqlescape.EscapeIdentifier (the
-// single source of truth for MySQL identifier quoting) and joins them with the
-// given separator. Helps the common "column list" rendering pattern.
-func quoteIdentList(idents []string, sep string) string {
-	quoted := make([]string, len(idents))
-	for i, s := range idents {
-		quoted[i] = sqlescape.EscapeIdentifier(s)
-	}
-	return strings.Join(quoted, sep)
-}
-
 // numericPartitionValueRe matches the subset of string values that can
 // be safely rendered unquoted as a partition value: plain optionally-
 // signed integer literals (e.g. "2020", "-1") and simple decimal floats

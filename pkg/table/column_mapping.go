@@ -90,13 +90,7 @@ func (m *ColumnMapping) computeIntersection() ([]string, []string) {
 // Columns returns two comma-separated, backtick-quoted column lists
 // for source and target. When there are no renames, both strings are identical.
 func (m *ColumnMapping) Columns() (source, target string) {
-	srcQuoted := make([]string, len(m.sourceColumns))
-	tgtQuoted := make([]string, len(m.targetColumns))
-	for i := range m.sourceColumns {
-		srcQuoted[i] = sqlescape.EscapeIdentifier(m.sourceColumns[i])
-		tgtQuoted[i] = sqlescape.EscapeIdentifier(m.targetColumns[i])
-	}
-	return strings.Join(srcQuoted, ", "), strings.Join(tgtQuoted, ", ")
+	return sqlescape.EscapeIdentifierList(m.sourceColumns), sqlescape.EscapeIdentifierList(m.targetColumns)
 }
 
 // ColumnsSlice returns parallel slices of source and target column names.
