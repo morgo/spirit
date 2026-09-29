@@ -490,6 +490,28 @@ func (ct *CreateTable) GetTableOptions() map[string]any {
 	return options
 }
 
+// TableDefault returns the charset and collation a column declared without
+// either takes in this table. The collation is empty when the definition does
+// not determine it — DEFAULT CHARSET=utf8mb4 alone takes the server's default
+// for it — and both are empty when the definition declares no default at all,
+// which leaves it to the schema. SHOW CREATE TABLE always spells both out.
+func (ct *CreateTable) TableDefault() CharsetCollation {
+	var d CharsetCollation
+	if collation := ct.TableOptions.getCollation(); collation != nil {
+		d.Collation = *collation
+	}
+	if charset := ct.TableOptions.getCharset(); charset != nil {
+		d.Charset = *charset
+	}
+	d = d.normalized()
+	if d.Collation == "" && charsetDefaultCollationIsFixed(d.Charset) {
+		if _, collation, ok := DefaultCollationForCharset(d.Charset); ok {
+			d.Collation = collation
+		}
+	}
+	return d
+}
+
 func (ct *CreateTable) GetPartition() *PartitionOptions {
 	return ct.Partition
 }
