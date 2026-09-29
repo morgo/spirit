@@ -730,7 +730,7 @@ func (r *Runner) setup(ctx context.Context) error {
 	r.progMu.Lock()
 	r.applier = appl
 	if r.autoscale.Enabled {
-		if a, ok := appl.(*applier.SingleTargetApplier); ok {
+		if a, ok := appl.(*applier.MySQLApplier); ok {
 			a.SetInitialWriteWorkers(r.autoscale.StartThreads)
 		}
 	}
@@ -864,7 +864,7 @@ func (r *Runner) checkTargetEmpty(ctx context.Context) error {
 }
 
 // createApplier returns the caller-injected applier, or constructs a
-// MySQL SingleTargetApplier for the target. The applier is not started
+// single-target MySQLApplier for the target. The applier is not started
 // here — the copier starts its async workers for the initial copy and
 // stops them when it finishes; the subscription flush path uses the
 // applier's synchronous UpsertRows/DeleteKeys, which do not require the
@@ -874,13 +874,13 @@ func (r *Runner) createApplier() (applier.Applier, error) {
 		r.logger.Info("Using caller-provided applier")
 		return r.sync.Applier, nil
 	}
-	appl, err := applier.NewSingleTargetApplier(r.target, &applier.ApplierConfig{
+	appl, err := applier.New([]applier.Target{r.target}, &applier.ApplierConfig{
 		DBConfig: r.targetDBConfig,
 		Logger:   r.logger,
 		Threads:  r.sync.WriteThreads,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to create SingleTargetApplier: %w", err)
+		return nil, fmt.Errorf("failed to create applier: %w", err)
 	}
 	return appl, nil
 }

@@ -135,7 +135,7 @@ Available options: `WithThreads(n)`, `WithWriteThreads(n)`, `WithAutoscaling()`,
 - Integration tests connect to real MySQL — there are no mocked database tests for core logic
 - Use `CreateUniqueTestDatabase(t)` only for tests that run concurrent migrations or need full database isolation (e.g., `TestPreventConcurrentRuns`, `TestDeferCutOverE2E`)
 - The `table` package provides a `MockChunker` for testing copier/applier without real chunking
-- Test files live alongside their source files (e.g., `single_target.go` / `single_target_test.go`)
+- Test files live alongside their source files (e.g., `mysql_applier.go` / `mysql_applier_test.go`)
 - Use `wg.Go()` (Go 1.26+) instead of `wg.Add(1)` + `go func() { defer wg.Done(); ... }()`
 - Use `tt.DB` for DML in concurrent goroutines — no need to open a separate `*sql.DB` connection
 
