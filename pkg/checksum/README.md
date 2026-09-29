@@ -234,22 +234,38 @@ Three things bound it in practice, none of which eliminate it:
 | Concurrency ceiling | fixed at construction — the pool cannot grow once the lock is released, and the ceiling lengthens the lock window in proportion | resizable mid-pass |
 | Busy table | one pass, regardless of write rate | extra reads: retries, subdivision, settling |
 | Blind to | nothing within `T0` | a row whose PK moves between two chunk reads |
-| Cross-server / N sources | impossible — a lock and a snapshot cannot span servers | supported |
+| Cross-server / N sources | not supported by `SingleChecker`; achievable with locks, at a cost that scales with the topology (see below) | native — each chunk is read from every source and target and aggregated |
 | Implementation | simple | substantially more complex |
 | Used by | `spirit migrate` (default) | `spirit move`, `spirit sync`, `spirit migrate --enable-experimental-lockless-checksum` |
 
-The two rows worth dwelling on are the ones that make snapshot unusable in
-places rather than merely expensive:
+Two rows are worth dwelling on, because both are about cost growing where
+lockless's does not:
 
-- **A snapshot cannot span servers or shards.** A table lock and a
-  `REPEATABLE READ` read view are per-server. `spirit move` (N sources onto M
-  targets) and `spirit sync` (a target on another server) have no snapshot
-  available to them at all, which is why they are lockless-only. The same is
-  true of a source fronted by a Vitess vtgate.
+- **A cross-server serialization point must be built, not borrowed — and
+  building it is what costs.** One MySQL `REPEATABLE READ` view is per-server,
+  so there is no single snapshot spanning servers to take. But the equivalent
+  can be *manufactured*, and Spirit used to: lock the tables on every source
+  **and** every target, drain every change feed to empty under those locks,
+  open a `REPEATABLE READ` transaction on each server inside that quiesced
+  window, then release. The resulting snapshots are independent but mutually
+  consistent, because nothing could write between them. This is what the
+  `DistributedChecker` did, and it worked.
+
+  What removed it (block/spirit#1281) is that the price scales with the
+  topology while the guarantee does not improve. Every server is frozen
+  simultaneously rather than one at a time; the lock window grows with the
+  number of servers, since locks and then transaction pools are established
+  serially across all of them; any single server failing to lock fails the
+  whole pass; and all of it sits on the critical path of a move. Lockless
+  covers the same topologies by reading each chunk from every source and every
+  target and aggregating the CRCs and counts — no window, nothing frozen.
+  A source fronted by a Vitess vtgate is the case where the locking route is
+  genuinely unavailable rather than merely expensive.
 - **The lock is brief; the stall it causes is not.** `LOCK TABLES` waits for
   in-flight statements and then blocks new ones behind a metadata lock. Every
   blocked query holds its connection, so an application's pool drains
-  head-of-line, and recovery outlasts the lock itself.
+  head-of-line, and recovery outlasts the lock itself. This is the cost that
+  the bullet above multiplies by the number of servers.
 
 ### Hot rows, and the lag question
 
@@ -376,8 +392,10 @@ or a cleared per-pass mismatch counter as resume evidence.
 Cross-server callers such as datasync go through the same factory. Naming a
 `TargetDB` says the copy being verified is on another server, which is what
 makes the factory build a repair path that reads one server and writes the
-other; it is lockless-only, because a table lock and a `REPEATABLE READ`
-snapshot cannot span two servers. Such a caller typically runs the feed's
+other; it is lockless-only, because `SingleChecker` locks and snapshots exactly
+one server (a cross-server serialization point can be built, but the checker
+that did it was removed — see
+[Cost and operational profile](#cost-and-operational-profile)). Such a caller typically runs the feed's
 periodic flush itself for the whole process rather than per run, and says so
 with `ExternalFlushLoop` — otherwise every run starts and stops it, which is
 what a migration and a move want.
