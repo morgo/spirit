@@ -8,6 +8,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/block/spirit/pkg/checksum"
 	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
@@ -169,6 +170,68 @@ func TestTpConversion(t *testing.T) {
 		MODIFY COLUMN intasstring INT NULL DEFAULT NULL`)
 	require.NoError(t, m.Run(t.Context()))
 	require.NoError(t, m.Close())
+}
+
+// TestWideningConversions checks that value-preserving widenings whose
+// rendered text changes still pass the checksum: an UNSIGNED DECIMAL scale
+// change (169.09 -> 169.0900) and a BIT width change (0x01 -> 0x0001). Both
+// used to fail the checksum on every row, so the cutover was refused.
+func TestWideningConversions(t *testing.T) {
+	t.Parallel()
+	tt := testutils.NewTestTable(t, "wideningconv", `CREATE TABLE wideningconv (
+		id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+		d DECIMAL(10,2) UNSIGNED NOT NULL,
+		dz DECIMAL(10,2) ZEROFILL NOT NULL,
+		b BIT(8) NOT NULL
+	)`)
+	tt.SeedRows(t, "INSERT INTO wideningconv (d, dz, b) SELECT 169.09, 169.09, b'00000001'", 1000)
+
+	m := NewTestRunner(t, "wideningconv", `MODIFY COLUMN d DECIMAL(12,4) UNSIGNED NOT NULL,
+		MODIFY COLUMN dz DECIMAL(12,4) ZEROFILL NOT NULL,
+		MODIFY COLUMN b BIT(16) NOT NULL`)
+	require.NoError(t, m.Run(t.Context()))
+	require.NoError(t, m.Close())
+
+	var d string
+	var b uint64
+	require.NoError(t, tt.DB.QueryRowContext(t.Context(), "SELECT d, b+0 FROM wideningconv LIMIT 1").Scan(&d, &b))
+	require.Equal(t, "169.0900", d)
+	require.Equal(t, uint64(1), b)
+}
+
+// TestTemporalPrecisionNarrowing checks that reducing a TIMESTAMP's
+// fractional-second precision fails the checksum when it would lose data.
+// MySQL rounds .999999 up to the next second with no warning, so the copy
+// cannot catch it; the checksum casts both sides to the wider precision and
+// does. When no row holds a fraction nothing is lost, and the migration
+// succeeds.
+func TestTemporalPrecisionNarrowing(t *testing.T) {
+	t.Parallel()
+	t.Run("lossy", func(t *testing.T) {
+		t.Parallel()
+		testutils.NewTestTable(t, "tsnarrowlossy", `CREATE TABLE tsnarrowlossy (
+			id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+			ts TIMESTAMP(6) NOT NULL
+		)`)
+		testutils.RunSQL(t, "INSERT INTO tsnarrowlossy (ts) VALUES ('2026-01-01 10:00:00'), ('2026-01-01 10:00:00.999999')")
+
+		m := NewTestRunner(t, "tsnarrowlossy", "MODIFY COLUMN ts TIMESTAMP NOT NULL")
+		err := m.Run(t.Context())
+		require.ErrorIs(t, err, checksum.ErrDifferencesExhausted)
+		require.NoError(t, m.Close())
+	})
+	t.Run("no_fraction", func(t *testing.T) {
+		t.Parallel()
+		testutils.NewTestTable(t, "tsnarrowclean", `CREATE TABLE tsnarrowclean (
+			id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+			ts TIMESTAMP(6) NOT NULL
+		)`)
+		testutils.RunSQL(t, "INSERT INTO tsnarrowclean (ts) VALUES ('2026-01-01 10:00:00'), ('2026-01-01 10:00:01')")
+
+		m := NewTestRunner(t, "tsnarrowclean", "MODIFY COLUMN ts TIMESTAMP NOT NULL")
+		require.NoError(t, m.Run(t.Context()))
+		require.NoError(t, m.Close())
+	})
 }
 
 // TestEnumReorder verifies that ENUM reordering ALTERs are refused at preflight.

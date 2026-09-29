@@ -185,7 +185,7 @@ func (a *ShardedApplier) Start(ctx context.Context) error {
 
 	// If already started, return without error
 	if a.started {
-		a.logger.Info("ShardedApplier already started, skipping")
+		a.logger.Debug("ShardedApplier already started, skipping")
 		return nil
 	}
 
@@ -247,7 +247,7 @@ func (a *ShardedApplier) Apply(ctx context.Context, chunk *table.Chunk, rows [][
 		return errors.New("HashFunc not configured in TableInfo")
 	}
 
-	a.logger.Info("Apply called", "rowCount", len(rows), "shardingColumn", shardingColumn, "table", chunk.Table.TableName)
+	a.logger.Debug("Apply called", "rowCount", len(rows), "shardingColumn", shardingColumn, "table", chunk.Table.TableName)
 
 	// Find the ordinal position of the sharding column within non-generated columns.
 	// This is important because the rows passed to Apply() only contain non-generated columns
@@ -257,7 +257,7 @@ func (a *ShardedApplier) Apply(ctx context.Context, chunk *table.Chunk, rows [][
 		return err
 	}
 
-	a.logger.Info("Found sharding column", "shardingColumn", shardingColumn, "ordinal", shardingOrdinal)
+	a.logger.Debug("Found sharding column", "shardingColumn", shardingColumn, "ordinal", shardingOrdinal)
 
 	// Assign a work ID for tracking
 	workID := a.nextWorkID.Add(1)
@@ -571,17 +571,22 @@ func (a *ShardedApplier) writeChunklet(ctx context.Context, shard *shardTarget, 
 	ctx, cancel := context.WithTimeout(ctx, chunkTaskTimeout)
 	defer cancel()
 
-	// Get the intersected column names
-	columnList, _ := chunkletData.chunk.ColumnMapping.Columns()
-	columnNames, _ := chunkletData.chunk.ColumnMapping.ColumnsSlice()
+	// The intersected source and target column lists are parallel: the
+	// INSERT names the target columns (renames applied), and each value is
+	// rendered using its source column's type, since the value came from a
+	// source SELECT. Same as SingleTargetApplier.writeChunklet and this
+	// applier's own UpsertRows.
+	mapping := chunkletData.chunk.ColumnMapping
+	_, targetColumnList := mapping.Columns()
+	sourceColumnNames, _ := mapping.ColumnsSlice()
 
 	// Resolve each column's type once per chunklet, not once per value — the
 	// type is a property of the column, and the parse dominated the build.
 	// See the SingleTargetApplier's writeChunklet for the measurement.
-	targetTable := chunkletData.chunk.ColumnMapping.TargetTable()
-	colTypes := make([]table.ColumnType, len(columnNames))
-	for i, colName := range columnNames {
-		typeStr, ok := targetTable.GetColumnMySQLType(colName)
+	sourceTable := mapping.SourceTable()
+	colTypes := make([]table.ColumnType, len(sourceColumnNames))
+	for i, colName := range sourceColumnNames {
+		typeStr, ok := sourceTable.GetColumnMySQLType(colName)
 		if !ok {
 			return 0, time.Since(buildStart), fmt.Errorf("column %s not found in table info", colName)
 		}
@@ -590,16 +595,16 @@ func (a *ShardedApplier) writeChunklet(ctx context.Context, shard *shardTarget, 
 
 	// Build VALUES clauses for all rows in the chunklet
 	valuesClauses := make([]string, 0, len(chunkletData.rows))
-	values := make([]string, len(columnNames))
+	values := make([]string, len(sourceColumnNames))
 	for _, row := range chunkletData.rows {
-		if len(columnNames) != len(row.values) {
+		if len(sourceColumnNames) != len(row.values) {
 			return 0, time.Since(buildStart), fmt.Errorf("column count mismatch: chunk %s has %d columns, but chunklet has %d values",
-				chunkletData.chunk.String(), len(columnNames), len(row.values))
+				chunkletData.chunk.String(), len(sourceColumnNames), len(row.values))
 		}
 		for i, value := range row.values {
 			datum, err := table.NewDatumFromValueWithType(value, colTypes[i])
 			if err != nil {
-				return 0, time.Since(buildStart), fmt.Errorf("failed to convert value to datum for column %s: %w", columnNames[i], err)
+				return 0, time.Since(buildStart), fmt.Errorf("failed to convert value to datum for column %s: %w", sourceColumnNames[i], err)
 			}
 			// datum.String() returns a complete pre-escaped SQL literal
 			// (NULL, a numeric, 0x… hex, or a "..."-quoted string). Safe
@@ -610,19 +615,19 @@ func (a *ShardedApplier) writeChunklet(ctx context.Context, shard *shardTarget, 
 		valuesClauses = append(valuesClauses, "("+strings.Join(values, ", ")+")")
 	}
 
-	// Build the INSERT statement
+	// Build the INSERT statement — target columns, with renames applied.
 	// Note: We use just the table name, not the fully qualified name, because
 	// the database connection (shard.writeDB) already determines which database to write to
 	query := fmt.Sprintf("INSERT IGNORE INTO %s (%s) VALUES %s",
-		chunkletData.chunk.ColumnMapping.TargetTable().QuotedTableName,
-		columnList,
+		mapping.TargetTable().QuotedTableName,
+		targetColumnList,
 		strings.Join(valuesClauses, ", "),
 	)
 
 	buildTime := time.Since(buildStart)
 
 	a.logger.Debug("writing chunklet to shard", "shardID", shard.shardID,
-		"rowCount", len(chunkletData.rows), "table", chunkletData.chunk.ColumnMapping.TargetTable().TableName)
+		"rowCount", len(chunkletData.rows), "table", mapping.TargetTable().TableName)
 
 	// Execute the batch insert on this shard's database
 	result, err := dbconn.RetryableTransaction(ctx, shard.writeDB, dbconn.IgnoreDupKeyWarnings, shard.dbConfig, query)
@@ -803,11 +808,6 @@ func (a *ShardedApplier) DeleteKeys(ctx context.Context, sourceTable, targetTabl
 	if err != nil {
 		return 0, err
 	}
-	// Create a context with timeout for the entire operation
-	// This prevents hanging indefinitely if shards are unresponsive
-	ctx, cancel := context.WithTimeout(ctx, chunkTaskTimeout)
-	defer cancel()
-
 	// Render the key tuples into the IN(...) element list via table.Datum,
 	// the same type-aware path UpsertRows uses (see deleteKeysInClause).
 	inClause, err := deleteKeysInClause(sourceTable, keys)
@@ -839,11 +839,10 @@ func (a *ShardedApplier) DeleteKeys(ctx context.Context, sourceTable, targetTabl
 			// The lock connection is the only connection allowed to write
 			// to this shard's table while LOCK TABLES is held.
 			if shardLocks != nil {
+				// ExecUnderLock does not report affected rows; the total
+				// is reported as the key count after collection, below.
 				if err = shardLocks[shard.shardID].ExecUnderLock(ctx, deleteStmt); err != nil {
 					err = fmt.Errorf("failed to execute delete under lock on shard %d: %w", shard.shardID, err)
-				} else {
-					// We can't know the actual affected rows when using lock, so estimate
-					affected = 0
 				}
 			} else {
 				// Execute as a retryable transaction
@@ -869,6 +868,12 @@ func (a *ShardedApplier) DeleteKeys(ctx context.Context, sourceTable, targetTabl
 	}
 	if len(errs) > 0 {
 		return 0, errors.Join(errs...)
+	}
+	if shardLocks != nil {
+		// Under lock the per-shard counts are unknown. Report the key count,
+		// as SingleTargetApplier does: each key lives on at most one shard,
+		// so it is the upper bound on rows deleted across the broadcast.
+		return int64(len(keys)), nil
 	}
 	return totalAffected, nil
 }
@@ -917,10 +922,6 @@ func (a *ShardedApplier) UpsertRows(ctx context.Context, mapping *table.ColumnMa
 	if err != nil {
 		return 0, err
 	}
-
-	// Create a context with timeout for the entire operation
-	ctx, cancel := context.WithTimeout(ctx, chunkTaskTimeout)
-	defer cancel()
 
 	sourceTable := mapping.SourceTable()
 	if sourceTable.ShardingColumn == "" {
