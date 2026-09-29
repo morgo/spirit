@@ -411,6 +411,9 @@ func TestExpectedImageCRCMatchesRealRowAcrossConversions(t *testing.T) {
 			"INSERT INTO src VALUES (1, b'00000101')", []any{int32(1), int64(5)}},
 		{"bit17 to varbinary", "id INT PRIMARY KEY, b BIT(17)", "id INT PRIMARY KEY, b VARBINARY(20)",
 			"INSERT INTO src VALUES (1, 131071)", []any{int32(1), int64(131071)}},
+		// string source into a BIT target: cast to binary, bound as-is
+		{"varchar to bit", "id INT PRIMARY KEY, b VARCHAR(8)", "id INT PRIMARY KEY, b BIT(8)",
+			"INSERT INTO src VALUES (1, '5')", []any{int32(1), "5"}},
 		// cast to the wider fractional precision, datetime(6)
 		{"datetime narrowing", "id INT PRIMARY KEY, d DATETIME(6)", "id INT PRIMARY KEY, d DATETIME",
 			"INSERT INTO src VALUES (1, '2026-01-01 10:00:00.999999')", []any{int32(1), "2026-01-01 10:00:00.999999"}},

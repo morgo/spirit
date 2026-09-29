@@ -1036,6 +1036,15 @@ func TestChecksumTypeConversions(t *testing.T) {
 		{name: "decimal_unsigned_scale", srcType: "DECIMAL(10,2) UNSIGNED", tgtType: "DECIMAL(12,4) UNSIGNED", value: "169.09"},
 		{name: "decimal_zerofill_scale", srcType: "DECIMAL(10,2) ZEROFILL", tgtType: "DECIMAL(12,4) ZEROFILL", value: "169.09"},
 		{name: "bit_width", srcType: "BIT(8)", tgtType: "BIT(16)", value: "b'00000001'"},
+		// A string or binary copied into BIT stores its bytes ('5' is 0x35),
+		// everything else its numeric value.
+		{name: "varchar_to_bit", srcType: "VARCHAR(8)", tgtType: "BIT(8)", value: "'5'"},
+		{name: "latin1_varchar_to_bit", srcType: "VARCHAR(1) CHARACTER SET latin1", tgtType: "BIT(8)", value: "_latin1 x'E9'"},
+		{name: "varbinary_to_bit", srcType: "VARBINARY(8)", tgtType: "BIT(8)", value: "x'05'"},
+		{name: "json_to_bit", srcType: "JSON", tgtType: "BIT(8)", value: "'5'"},
+		{name: "int_to_bit", srcType: "INT", tgtType: "BIT(8)", value: "5"},
+		{name: "float_to_bit", srcType: "FLOAT", tgtType: "BIT(8)", value: "5"},
+		{name: "enum_to_bit", srcType: "ENUM('a','b')", tgtType: "BIT(8)", value: "'b'"},
 		{name: "timestamp_widening", srcType: "TIMESTAMP", tgtType: "TIMESTAMP(6)", value: "'2026-01-01 10:00:00'"},
 		{name: "datetime_partial_widening", srcType: "DATETIME(3)", tgtType: "DATETIME(6)", value: "'2026-01-01 10:00:00.123'"},
 		// Narrowing with no fractional data loses nothing, so it must pass.

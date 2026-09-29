@@ -144,6 +144,26 @@ func TestChecksumCastTp(t *testing.T) {
 		{"decimal(10,2) unsigned", "decimal(12,4) unsigned", "decimal(12,4)"},
 		{"bit(8)", "bit(16)", "unsigned"},
 		{"binary(50)", "binary(100)", "binary(100)"},
+		// A BIT target stores a string/binary source as its bytes and every
+		// other source as its numeric value.
+		{"varchar(8)", "bit(8)", "binary"},
+		{"char(1)", "bit(8)", "binary"},
+		{"text", "bit(8)", "binary"},
+		{"varbinary(8)", "bit(8)", "binary"},
+		{"binary(1)", "bit(8)", "binary"},
+		{"blob", "bit(8)", "binary"},
+		{"json", "bit(8)", "binary"},
+		{"int", "bit(8)", "unsigned"},
+		{"bigint unsigned", "bit(64)", "unsigned"},
+		{"decimal(5,0)", "bit(8)", "unsigned"},
+		{"float", "bit(8)", "unsigned"},
+		{"double", "bit(8)", "unsigned"},
+		{"year", "bit(16)", "unsigned"},
+		{"enum('a','b')", "bit(8)", "unsigned"},
+		{"set('a','b')", "bit(8)", "unsigned"},
+		{"time", "bit(64)", "unsigned"},
+		// The exception is only for a BIT target.
+		{"varchar(8)", "int", "signed"},
 	} {
 		require.Equal(t, tc.expected, checksumCastTp(tc.sourceTp, tc.targetTp), "source: %s, target: %s", tc.sourceTp, tc.targetTp)
 	}

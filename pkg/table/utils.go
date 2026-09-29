@@ -107,8 +107,21 @@ func castableTp(tp string) string {
 
 // checksumCastTp returns the type the checksum casts a column to, given the
 // source and target column types. The cast type comes from the target (see
-// ColumnMapping.ChecksumExprs) with one exception: DATETIME/TIMESTAMP are
-// cast to the wider of the two columns' fractional-second precisions.
+// ColumnMapping.ChecksumExprs) with two exceptions, where the target's cast
+// alone would misjudge a perfect copy or a lossy one:
+//
+//   - A BIT target with a string/binary source (see isByteStoredInBit) is
+//     cast to binary rather than unsigned.
+//   - DATETIME/TIMESTAMP are cast to the wider of the two columns'
+//     fractional-second precisions.
+//
+// A string or binary copied into a BIT column is stored as its bytes, not
+// parsed as a number: VARCHAR '5' becomes 0x35, so the source casts to
+// unsigned as 5 and the target as 53. Every other source (integers,
+// DECIMAL, FLOAT, YEAR, ENUM, …) is stored as its numeric value, which is
+// what the unsigned cast compares. binary rather than char, because a char
+// cast re-encodes the source string into utf8mb4: a latin1 'é' is stored in
+// BIT as 0xE9, which only a byte comparison matches.
 //
 // The wider precision is the only choice that is correct in all cases:
 //
@@ -128,6 +141,9 @@ func castableTp(tp string) string {
 // DATETIME) the target's own cast is used, as before.
 func checksumCastTp(sourceTp, targetTp string) string {
 	castTp := castableTp(targetTp)
+	if removeWidth(targetTp) == "bit" && isByteStoredInBit(sourceTp) {
+		return "binary"
+	}
 	if !isDatetimeOrTimestamp(targetTp) || !isDatetimeOrTimestamp(sourceTp) {
 		return castTp
 	}
@@ -135,6 +151,18 @@ func checksumCastTp(sourceTp, targetTp string) string {
 		return fmt.Sprintf("datetime(%d)", srcFsp)
 	}
 	return castTp
+}
+
+// isByteStoredInBit reports whether a value of column type tp is stored as
+// its bytes when written into a BIT column, rather than as a number. That is
+// true of the string, binary and JSON types, measured on MySQL 8.0.
+func isByteStoredInBit(tp string) bool {
+	switch removeWidth(tp) {
+	case "char", "varchar", "tinytext", "text", "mediumtext", "longtext",
+		"binary", "varbinary", "tinyblob", "blob", "mediumblob", "longblob", "json":
+		return true
+	}
+	return false
 }
 
 // isDatetimeOrTimestamp reports whether tp (an information_schema
