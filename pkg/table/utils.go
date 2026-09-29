@@ -1,34 +1,12 @@
 package table
 
 import (
-	"cmp"
 	"fmt"
 	"regexp"
-	"slices"
 	"strings"
-	"time"
 
 	"github.com/block/spirit/pkg/dbconn/sqlescape"
 )
-
-// LazyFindP90 finds the second to last value in a slice.
-// This is the same as a p90 if there are 10 values, but if
-// there were 100 values it would technically be a p99 etc.
-func LazyFindP90(a []time.Duration) time.Duration {
-	slices.SortFunc(a, func(x, y time.Duration) int {
-		return cmp.Compare(y, x) // descending
-	})
-	return a[len(a)/10]
-}
-
-// lazyFindP90Uint64 is the byte-signal twin of LazyFindP90, used by the
-// memory-based dynamic chunker (see dynamicChunkSizer.TargetChunkBytes).
-func lazyFindP90Uint64(a []uint64) uint64 {
-	slices.SortFunc(a, func(x, y uint64) int {
-		return cmp.Compare(y, x) // descending
-	})
-	return a[len(a)/10]
-}
 
 // castableTp returns an approximate type that tp can be casted to.
 // This is because in the context of CAST()/CONVERT() MySQL will
