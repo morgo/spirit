@@ -13,7 +13,7 @@ Checksums validate data consistency between two tables. During schema changes, t
 
 ## Why Checksums Matter
 
-Checksums are a **defensive feature against bugs**. While Spirit is designed to correctly copy and apply data changes, subtle data corruption can occur during online operations in many ways.
+Checksums are a **defensive feature against bugs** — and, for two specific copy-phase optimizations, a load-bearing part of the copy algorithm rather than a check on it (see [Not only bugs](#not-only-bugs-two-copy-phase-optimizations-are-unsafe-by-design) below). While Spirit is designed to correctly copy and apply data changes, subtle data corruption can occur during online operations in many ways.
 
 Naive implementations that only compare row counts fail to catch most of these problems—validating the actual data is essential. Common issues include:
 
@@ -28,6 +28,138 @@ Naive implementations that only compare row counts fail to catch most of these p
 While we do our best to prevent such bugs, we also want to be pedantic when it comes to data integrity. In most cases we have observed that the checksum process takes about 10% of the time as the copy-rows stage, which makes it an easy cost to justify.
 
 There are also some known cases where a checksum failure is not a bug. This includes adding a unique index on non-unique data, or a lossy data type conversion (e.g., `VARCHAR(100)` → `VARCHAR(10)` when records exist requiring more than 10 characters). Both are important cases to handle, and prevent a cutover operation from executing.
+
+### Not only bugs: two copy-phase optimizations are unsafe by design
+
+Everything above is about catching mistakes. There is a second reason the
+checksum exists, and it is a stronger one: **two optimizations in the copy
+phase are known not to be correct on their own, and a repairing checksum is
+what makes them safe.** They are not latent bugs awaiting a fix — they are
+positions taken deliberately, because the airtight alternative costs more than
+the repair does. Automatic repair (`FixDifferences`) is in the checksum *for
+this reason*, and the initial checksum before cutover is therefore a
+*component of the copy algorithm* rather than an audit of it. Which of the two
+checkers runs makes no difference; both repair.
+
+**Two properties make that arrangement sound, and they are worth stating before
+the cases themselves:**
+
+1. **Every one of these optimizations is switched off before the checksum
+   runs.** Copy → `SetWatermarkOptimization(ctx, false)` → drain → checksum, in
+   that order, and the same call also moves a non-memory-comparable key's
+   subscription onto its safe (FIFO) path. So the checksum verifies a *closed*
+   window rather than chasing a feed that is still allowed to drop events, and
+   a chunk it repairs cannot be re-broken behind it.
+2. **Repair is scoped to the initial checksum.** It exists to absorb exactly
+   this copy-phase exposure. The continuous checksum that runs during a
+   deferred cutover is a different question — by then nothing should be
+   diverging, so on `move` repair is deliberately *off* there
+   (`FixDifferences: false` in `continuousCheckerConfig`) and a divergence that
+   survives a full feed drain returns `ErrPermanentDivergence` and aborts:
+   visibility is preferred over a silent recopy while cutover may be imminent.
+   Migration currently reuses its one repairing checker for both its initial
+   and continuous passes, so its continuous pass does still repair — see
+   [Who repairs, and when](#who-repairs-and-when).
+
+Three mechanisms are involved, all in `pkg/change` (see [that package's
+README](../change/README.md#watermark-optimization)):
+
+- **`KeyAboveHighWatermark`** — at ingest, **discard** a change for a key the
+  copier has not reached yet, on the grounds that the copier's own later
+  `SELECT` will read the row in its current state anyway.
+- **`KeyBelowLowWatermark` / `KeyNotYetDispatched`** — at flush time, defer a
+  change only while a chunk read covering its key is genuinely in flight.
+- **The buffered map** keys pending changes by `utils.HashKey` and keeps one
+  row image per key, so a row updated ten times is applied once.
+
+#### 1. Keys that are not memory-comparable
+
+All three compare or hash the key **in Go**, and for keys that are not memory
+comparable Go's answer is not MySQL's. `Datum.compare` falls through to
+lexicographic byte comparison for `unknownType` — which is every `VARCHAR`,
+`CHAR`, `TEXT`, `JSON`, temporal and `FLOAT`/`DOUBLE`/`DECIMAL` key — and
+`HashKey` is Go string equality:
+
+- `'aa'` and `'AA'` are the **same row** under `utf8mb4_0900_ai_ci`, and two
+  different Go map keys.
+- `"ch"` sorts **after** `"h"` under `utf8mb4_czech_ci`, and before it in Go.
+
+So a watermark decision can be wrong in either direction — a change discarded
+that should have been buffered, or buffered that could have been discarded —
+and two collation-equal keys occupy two map slots while resolving to one MySQL
+row, which lets the map's non-deterministic iteration order apply their events
+in the wrong order. Reimplementing MySQL's collation semantics in Go exactly is
+not practical, so Spirit does not try.
+[Issue #479](https://github.com/block/spirit/issues/479) records the position
+in as many words — "checksum will fix any discrepancies" — and
+`TableInfo.PrimaryKeyIsMemoryComparable` is the predicate that identifies these
+keys.
+
+**The unsafety is confined to the copy phase, which is what makes it
+repairable.** The `SetWatermarkOptimization(ctx, false)` call that runs
+immediately after row copy does double duty for these keys: it stops the
+watermark filtering, and it drains the buffered map and switches the
+subscription into **FIFO queue mode**, which replays events in binlog order and
+lets the target's own collation-aware uniqueness collapse them onto the right
+row. Every change from that point on is applied safely, so the checksum is
+establishing that the rows copied *up to that point* are correct — and
+repairing the ones that are not.
+
+#### 2. The binlog visibility window
+
+The second one applies to **every** key type, memory-comparable or not, and it
+is the reason the above-watermark discard cannot be made safe by fixing
+collations alone. MySQL delivers a transaction's row events to subscribers at
+the binlog **sync** stage — *before* the engine-commit stage makes its rows
+visible to readers. `binlog_order_commits=ON` (required by preflight) fixes the
+*order* of engine commits; it does not close that window. So:
+
+```
+                   binlog sync                engine commit
+                   (feed sees T)              (rows readable)
+ time  ─────────────────●───────────────────────────●──────────────►
+                        │                       t_visible
+ feed                   └─ key is above the high watermark → DISCARDED
+ copier                         ├─ SELECT of the chunk covering that key
+                                └─ its snapshot opens before t_visible, so the
+                                   pre-T row is what gets copied
+ position                       the next flush publishes a GTID/offset that
+                                already contains T — no resume refetches it
+```
+
+End state: the change exists on the source, is absent from the target, is in no
+buffer, and no resume coordinate will bring it back. An `INSERT` leaves a
+missing row, an `UPDATE` a stale one, a discarded `DELETE` a phantom. The
+window is sub-millisecond on a healthy primary, but it widens to the semi-sync
+ACK round trip (the whole point of "lossless" semi-sync is that data reaches
+replicas *before* it is locally visible), to Aurora's commit latency under
+load, or to the full replication lag when the feed and the copier read from a
+replica.
+
+`migrate` and `move` gate cutover on a mandatory repairing checksum, so this
+never reaches trusted data — the visible cost is a `differencesFound > 0` and a
+chunk recopy. `sync` repairs lazily, so its target can serve a
+missing/stale/phantom row until a later pass covers that chunk. A consumer of
+`pkg/copier` + `pkg/change` that runs no checksum at all has no backstop.
+
+The field signature of a run that hit this is `keys_dropped_above_high > 0` in
+the watermark-toggle log line **together with** non-zero checksum differences.
+The full analysis, the four candidate fixes, and a deterministic repro
+(`TestKeyAboveWatermarkVisibilityWindow`) are in
+[pkg/change/README.md](../change/README.md#above-watermark-discard-vs-binlog-visibility).
+
+#### What this means when you read a result
+
+A checksum that reports differences is not automatically a bug report. On a
+table with a collated string key, or on a source with a wide commit-visibility
+window, some rate of repaired chunks is the design working as intended. What
+*is* a signal is differences that **do not resolve**: repeated passes
+re-finding a divergence in the same range is the case both checkers escalate
+and ultimately refuse to pass (see [Chunk repair](#chunk-repair)).
+
+It also means the checksum is not a 10% tax that a sufficiently confident
+operator could skip. For these two paths it is the only thing standing between
+an accepted optimization and silent data loss.
 
 ## Implementations
 
@@ -759,6 +891,18 @@ Two consequences of the applier being the write path:
 - JSON columns are read **bare**, with no round-trip cast. The read/write pair is already text-mediated (the `SELECT` renders each document to text; the applier writes it back as a literal the target re-parses), so a repaired row lands as exactly the one-text-round-trip image the checksum's source side predicts. Casting on top would apply `parse∘render` twice, which does not converge for the doubles MySQL's JSON text parser misrounds — see `castExpr` in `pkg/table`.
 
 The read is not synchronized with the change feed: a row deleted on the source after the repair reads it is written back if the feed has already applied that `DELETE` to the target. The chunk stays diverged and the next attempt repairs it again, converging once the churn on that key range stops. Cut-over requires a pass that finds no differences at all, so sustained delete churn on one chunk costs attempts, never a bad cut-over.
+
+### Who repairs, and when
+
+`FixDifferences` is a per-run policy, not a property of a checker, and the runners do not all set it:
+
+| Run | `FixDifferences` | A divergence means |
+|---|---|---|
+| Initial checksum — `migrate`, `move`, `sync` | `true` | Repair the chunk, re-verify it on a later pass, fail only if it keeps coming back |
+| `move` continuous checksum (sentinel wait) | `false` | `ErrPermanentDivergence`; the move aborts |
+| `migrate` continuous checksum (sentinel wait) | `true` (same checker object as its initial pass) | Repaired, as in the initial pass |
+
+The reason repair exists at all is the [copy-phase exposure](#not-only-bugs-two-copy-phase-optimizations-are-unsafe-by-design) the initial checksum stands behind: the row copy runs with optimizations that are only correct *given* a repairing check afterwards. A continuous pass is in a different position. It runs after that check has already passed and after the optimizations were disabled, so nothing should be diverging any more — and while a cut-over may be moments away, a loud failure is worth more than a quiet recopy. That is why `move` turns repair off there; a resumed move blanks the checksum watermark and its initial checksum repairs the chunk. Migration has not been split this way: it builds one checker with `FixDifferences: true` and reuses it for `RunContinuous`.
 
 ## Pacing and scaling
 
