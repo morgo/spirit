@@ -7,7 +7,8 @@ import (
 )
 
 // ToTableInfo builds a connection-less table.TableInfo from the parsed CREATE
-// TABLE, carrying the column types and primary key columns that Spirit's
+// TABLE, carrying the column types, charsets and collations, the table's
+// default charset and collation, and the primary key columns that Spirit's
 // checks read from table metadata. schemaName names the schema the table lives
 // in; it is only used for error messages and by checks that query MySQL, which
 // cannot run against the returned TableInfo anyway (see
@@ -19,16 +20,23 @@ func (ct *CreateTable) ToTableInfo(schemaName string) (*table.TableInfo, error) 
 	columns := make([]table.ColumnMeta, 0, len(ct.Columns))
 	for i := range ct.Columns {
 		col := &ct.Columns[i]
-		columns = append(columns, table.ColumnMeta{
+		meta := table.ColumnMeta{
 			Name:      col.Name,
 			MySQLType: formatColumnTypeAsMetadata(col),
 			Generated: col.GeneratedExpr != nil,
-		})
+		}
+		if col.CarriesCharset() {
+			meta.Charset, meta.Collation = col.determinedCharsetCollation(ct)
+			meta.CollationUnknown = meta.Collation == ""
+		}
+		columns = append(columns, meta)
 	}
 	ti, err := table.NewTableInfoFromMeta(schemaName, ct.TableName, columns, ct.primaryKeyColumns())
 	if err != nil {
 		return nil, fmt.Errorf("build table metadata for %q: %w", ct.TableName, err)
 	}
+	defaults := ct.TableDefault()
+	ti.DefaultCharset, ti.DefaultCollation = defaults.Charset, defaults.Collation
 	return ti, nil
 }
 
