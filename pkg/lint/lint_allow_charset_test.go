@@ -745,3 +745,22 @@ func TestUTF8MB3SpellingsConfigure(t *testing.T) {
 		})
 	}
 }
+
+// TestConfigureCharsetsWithSpaces: entries are trimmed, so a list written
+// with spaces after the commas matches, and the suggestion has no stray space.
+func TestConfigureCharsetsWithSpaces(t *testing.T) {
+	stmts, err := statement.New(`CREATE TABLE t1 (
+		id INT PRIMARY KEY,
+		a VARCHAR(3) CHARACTER SET utf8mb3,
+		b VARCHAR(3) CHARACTER SET latin1
+	) CHARACTER SET utf8mb4`)
+	require.NoError(t, err)
+
+	linter := AllowCharset{}
+	require.NoError(t, linter.Configure(map[string]string{"charsets": " utf8mb4, utf8mb3 ,"}))
+
+	violations := linter.Lint(nil, stmts)
+	require.Len(t, violations, 1)
+	require.Equal(t, "b", *violations[0].Location.Column)
+	require.Equal(t, "Use a supported character set: utf8mb4, utf8mb3", *violations[0].Suggestion)
+}

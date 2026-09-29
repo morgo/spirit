@@ -35,7 +35,12 @@ func (l *AllowCharset) Configure(config map[string]string) error {
 	for k, v := range config {
 		switch k {
 		case "charsets":
-			l.charsets = strings.Split(v, ",")
+			l.charsets = nil
+			for cs := range strings.SplitSeq(v, ",") {
+				if cs = strings.TrimSpace(cs); cs != "" {
+					l.charsets = append(l.charsets, cs)
+				}
+			}
 		default:
 			return fmt.Errorf("unknown configuration key for %q: %s", l.Name(), k)
 		}
