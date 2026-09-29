@@ -1517,3 +1517,117 @@ func TestNewTargetValidation(t *testing.T) {
 	_, err = a.UpsertRows(t.Context(), chunk.ColumnMapping, []LogicalRow{{RowImage: []any{int64(1), "a"}}}, nil)
 	require.ErrorContains(t, err, "ShardingColumn not configured")
 }
+
+// TestUnderLockRejectsNilLock verifies that a nil entry in locks is refused on
+// both under-lock paths, rather than dereferenced inside the cutover flush.
+func TestUnderLockRejectsNilLock(t *testing.T) {
+	a, err := New([]Target{{DB: &sql.DB{}}}, NewApplierDefaultConfig())
+	require.NoError(t, err)
+	tbl := table.NewTableInfo(nil, "test", "t1")
+	tbl.Columns = []string{"id"}
+	tbl.KeyColumns = []string{"id"}
+	_, err = a.UpsertRows(t.Context(), table.NewColumnMapping(tbl, tbl, nil),
+		[]LogicalRow{{RowImage: []any{int64(1)}}}, []*dbconn.TableLock{nil})
+	require.ErrorContains(t, err, "table lock 0 is nil")
+	_, err = a.DeleteKeys(t.Context(), tbl, tbl, [][]any{{int64(1)}}, []*dbconn.TableLock{nil})
+	require.ErrorContains(t, err, "table lock 0 is nil")
+}
+
+// TestSingleTargetPartialRangeRejectsUnownedRow verifies that a single target
+// that owns only part of the key space refuses a row it does not own, on the
+// copy path and the change-feed path, rather than write it or drop it.
+func TestSingleTargetPartialRangeRejectsUnownedRow(t *testing.T) {
+	testutils.RunSQL(t, "DROP DATABASE IF EXISTS test_partial_range")
+	testutils.RunSQL(t, "CREATE DATABASE test_partial_range")
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	cfg.DBName = "test_partial_range"
+	db, err := sql.Open("block-mysql", cfg.FormatDSN())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+	_, err = db.ExecContext(t.Context(), "CREATE TABLE t1 (id BIGINT PRIMARY KEY, name VARCHAR(10))")
+	require.NoError(t, err)
+	tbl := table.NewTableInfo(db, cfg.DBName, "t1")
+	require.NoError(t, tbl.SetInfo(t.Context()))
+	tbl.ShardingColumn = "id"
+	tbl.HashFunc = testutils.EvenOddHasher // even -> "-80", odd -> "80-"
+
+	a, err := New([]Target{{DB: db, Config: cfg, KeyRange: "-80"}}, NewApplierDefaultConfig())
+	require.NoError(t, err)
+	require.NoError(t, a.Start(t.Context()))
+	defer func() { require.NoError(t, a.Stop()) }()
+
+	chunk := &table.Chunk{Table: tbl, NewTable: tbl, ColumnMapping: table.NewColumnMapping(tbl, tbl, nil)}
+	var called atomic.Bool
+	err = a.Apply(t.Context(), chunk, [][]any{{int64(2), "own"}, {int64(1), "unowned"}}, func(int64, error) { called.Store(true) })
+	require.ErrorContains(t, err, "no shard found")
+	require.NoError(t, a.Wait(t.Context()))
+	require.False(t, called.Load(), "a rejected Apply must not report the chunk as written")
+
+	_, err = a.UpsertRows(t.Context(), chunk.ColumnMapping, []LogicalRow{{RowImage: []any{int64(3), "unowned"}}}, nil)
+	require.ErrorContains(t, err, "no shard found")
+
+	var n int
+	require.NoError(t, db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM t1").Scan(&n))
+	require.Equal(t, 0, n)
+}
+
+// TestUnderLockSharedConnection verifies that shards which share one *sql.DB
+// also share the one table lock taken on it, and that a second lock on that
+// connection is refused as ambiguous.
+func TestUnderLockSharedConnection(t *testing.T) {
+	testutils.RunSQL(t, "DROP DATABASE IF EXISTS test_shared_conn_lock")
+	testutils.RunSQL(t, "CREATE DATABASE test_shared_conn_lock")
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	cfg.DBName = "test_shared_conn_lock"
+	db, err := sql.Open("block-mysql", cfg.FormatDSN())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+	ctx := t.Context()
+	_, err = db.ExecContext(ctx, "CREATE TABLE t1 (id BIGINT PRIMARY KEY, name VARCHAR(10))")
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, "INSERT INTO t1 VALUES (1, 'a'), (2, 'b')")
+	require.NoError(t, err)
+	tbl := table.NewTableInfo(db, cfg.DBName, "t1")
+	require.NoError(t, tbl.SetInfo(ctx))
+	tbl.ShardingColumn = "id"
+	tbl.HashFunc = testutils.EvenOddHasher
+
+	a, err := New([]Target{
+		{DB: db, Config: cfg, KeyRange: "-80"},
+		{DB: db, Config: cfg, KeyRange: "80-"},
+	}, NewApplierDefaultConfig())
+	require.NoError(t, err)
+
+	lock, err := dbconn.NewTableLock(ctx, db, []*table.TableInfo{tbl}, dbconn.NewDBConfig(), slog.Default())
+	require.NoError(t, err)
+	defer utils.CloseAndLogWithContext(ctx, lock)
+	mapping := table.NewColumnMapping(tbl, tbl, nil)
+
+	_, err = a.UpsertRows(ctx, mapping, []LogicalRow{{RowImage: []any{int64(3), "c"}}}, []*dbconn.TableLock{lock, lock})
+	require.ErrorContains(t, err, "more than one table lock supplied for shard 0")
+
+	// One lock covers both shards: an even row routes to shard 0, an odd row
+	// to shard 1, and the delete broadcasts to both.
+	_, err = a.UpsertRows(ctx, mapping, []LogicalRow{
+		{RowImage: []any{int64(3), "c"}},
+		{RowImage: []any{int64(4), "d"}},
+	}, []*dbconn.TableLock{lock})
+	require.NoError(t, err)
+	_, err = a.DeleteKeys(ctx, tbl, tbl, [][]any{{int64(1)}}, []*dbconn.TableLock{lock})
+	require.NoError(t, err)
+	require.NoError(t, lock.Close(ctx))
+
+	var ids []int64
+	rows, err := db.QueryContext(ctx, "SELECT id FROM t1 ORDER BY id")
+	require.NoError(t, err)
+	defer utils.CloseAndLog(rows)
+	for rows.Next() {
+		var id int64
+		require.NoError(t, rows.Scan(&id))
+		ids = append(ids, id)
+	}
+	require.NoError(t, rows.Err())
+	require.Equal(t, []int64{2, 3, 4}, ids)
+}

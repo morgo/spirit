@@ -61,7 +61,7 @@ var chunkTaskTimeout = time.Second * 60
 type Target struct {
 	DB       *sql.DB
 	Config   *mysql.Config
-	KeyRange string // Vitess-style key range: "-80", "80-", "80-c0", or "0" for unsharded
+	KeyRange string // Vitess-style key range: "-80", "80-", "80-c0"; "", "0" or "-" for unsharded
 }
 
 // ApplyCallback is invoked when rows have been safely flushed to the target(s).

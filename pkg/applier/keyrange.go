@@ -102,6 +102,16 @@ func (kr keyRange) String() string {
 	return fmt.Sprintf("[0x%016x, 0x%016x)", kr.start, kr.end)
 }
 
+// IsFullKeyRange reports whether kr is a valid Vitess-style key range that
+// covers the whole key space ("", "0", "-", "0-"). A one-target applier with
+// such a range writes every row without routing; any other range routes, so
+// rows outside it are refused. Callers that write one logical target use this
+// to reject a partial range before setup.
+func IsFullKeyRange(kr string) bool {
+	parsed, err := parseKeyRange(kr)
+	return err == nil && parsed.coversAll()
+}
+
 // ValidateKeyRanges parses each Vitess-style key range and checks that no two
 // overlap — the same rules New enforces at construction. It
 // exists so callers can fail fast on a bad shard layout before doing any work

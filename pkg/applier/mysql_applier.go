@@ -177,9 +177,15 @@ func New(targets []Target, cfg *ApplierConfig) (*MySQLApplier, error) {
 		}
 	}
 
-	// Log the parsed key ranges for debugging
+	// Log the target-to-range mapping. With several targets it is the first
+	// thing an operator checks when rows land on the wrong shard, so it is
+	// logged at Info; a single target adds nothing worth an Info line.
+	logLevel := slog.LevelDebug
+	if len(shards) > 1 {
+		logLevel = slog.LevelInfo
+	}
 	for i, shard := range shards {
-		cfg.Logger.Debug("parsed key range for shard",
+		cfg.Logger.Log(context.Background(), logLevel, "parsed key range for shard",
 			"shardID", i,
 			"keyRange", targets[i].KeyRange,
 			"parsed", shard.keyRange.String())
@@ -850,15 +856,19 @@ func (a *MySQLApplier) feedbackCoordinator(ctx context.Context) {
 // the rows to the wrong server.
 //
 // Returns nil if no locks were supplied (callers then use the regular
-// per-shard write connections). Otherwise every shard must receive exactly one
-// lock and every lock must belong to a shard; anything else is a caller bug
-// (typically a lock taken on a different server than this applier writes to)
-// and is an error returned before anything is executed.
+// per-shard write connections). Otherwise each distinct shard connection must
+// receive exactly one lock (shards that share a connection share its lock) and
+// every lock must belong to a shard; anything else is a caller bug (typically a
+// lock taken on a different server than this applier writes to) and is an
+// error returned before anything is executed.
 func (a *MySQLApplier) resolveShardLocks(locks []*dbconn.TableLock) (map[int]*dbconn.TableLock, error) {
 	if len(locks) == 0 {
 		return nil, nil
 	}
-	shardLocks := make(map[int]*dbconn.TableLock, len(a.shards))
+	// Index the locks by the connection they were acquired on. Several shards
+	// may share one connection (and so one lock); two locks on one connection
+	// are ambiguous and refused.
+	lockByDB := make(map[*sql.DB]*dbconn.TableLock, len(locks))
 	for i, lock := range locks {
 		if lock == nil {
 			return nil, fmt.Errorf("table lock %d is nil", i)
@@ -867,15 +877,18 @@ func (a *MySQLApplier) resolveShardLocks(locks []*dbconn.TableLock) (map[int]*db
 		if shardID == -1 {
 			return nil, fmt.Errorf("table lock %d was not acquired on any target's connection", i)
 		}
-		if shardLocks[shardID] != nil {
+		if lockByDB[lock.DB()] != nil {
 			return nil, fmt.Errorf("more than one table lock supplied for shard %d", shardID)
 		}
-		shardLocks[shardID] = lock
+		lockByDB[lock.DB()] = lock
 	}
+	shardLocks := make(map[int]*dbconn.TableLock, len(a.shards))
 	for _, shard := range a.shards {
-		if shardLocks[shard.shardID] == nil {
+		lock := lockByDB[shard.writeDB]
+		if lock == nil {
 			return nil, fmt.Errorf("no table lock supplied for shard %d: writing under lock requires one lock per shard, acquired on that shard's connection", shard.shardID)
 		}
+		shardLocks[shard.shardID] = lock
 	}
 	return shardLocks, nil
 }

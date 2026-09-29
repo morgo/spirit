@@ -2,6 +2,8 @@ package applier
 
 import (
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestParseKeyRange(t *testing.T) {
@@ -281,5 +283,14 @@ func TestKeyRangeOverlaps(t *testing.T) {
 				t.Errorf("keyRange(%q).overlaps(%q) = %v, want %v", tt.range1, tt.range2, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestIsFullKeyRange(t *testing.T) {
+	for _, kr := range []string{"", "0", "-", "0-", "00-"} {
+		require.True(t, IsFullKeyRange(kr), "key range %q", kr)
+	}
+	for _, kr := range []string{"-80", "80-", "40-80", "00", "zz", "80-40"} {
+		require.False(t, IsFullKeyRange(kr), "key range %q", kr)
 	}
 }
