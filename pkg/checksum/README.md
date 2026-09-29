@@ -149,28 +149,51 @@ time the pass ends the claim can be many hours old, and the gap between `T0`
 and cut-over is entirely uncovered.
 
 **Lockless.** Each chunk is read whenever a worker gets to it, and re-read
-until it agrees. There is no shared instant:
+until the target agrees with a source image the checker has **witnessed**.
+That is a weaker statement than "they were equal at some instant", and the
+difference matters — see below:
 
 ```
   app writes ────────────────────────────────────────────────────────►
-
-   chunk A    ├r┤✗ ···wait··· ├r┤✓
+             src v1        src v2               src v3
+   chunk A    ├r┤✗ ···wait··· ├r┤✓ tgt caught up to v1
    chunk B         ├r┤✓
    chunk C            ├r┤✗ ··· ├r┤✗ ··· ├r┤✗ ··· ├─settle─┤✓
    chunk D                 ├r┤✓
-                    ▲   ▲            ▲                ▲     │      │
-                    tA  tB           tD               tC    │      │
-                                                             └──────┘
-       every ✓ is its own instant — there is no single T      not covered
+                                  ▲                  ▲      │      │
+                     a ✓ means "the target reached a        │      │
+                     source state we saw" — not that both   │      │
+                     held it at the same moment      └──────┴──────┘
+                                                        not covered
 ```
 
-> **Claim:** for every chunk there exists an instant at which source and
-> target were equal. Those instants differ per chunk.
+> **Claim:** for every chunk, the target reached a state the source is known
+> to have held. **Not** that source and target held it simultaneously.
 
-The weakness is that it is a per-chunk claim, not a table-wide one. The
-strength is that every one of those instants is *later* than `T0` would have
-been — the last chunk is verified minutes before cut-over rather than hours
-after the snapshot that vouched for it.
+The retry rule is what makes this precise: a chunk passes when the target's
+CRC equals *either* the source CRC read a moment ago *or* the one read at the
+start of the retry window (`lockless.go`, the `newTgt == item.originalSrc ||
+newTgt == newSrc` test). So the source may already have moved from `v1` to
+`v2` by the time the target reaches `v1`, and there was never an instant at
+which both held `v1`. What is established is **lineage, not simultaneity**:
+the target's state is a function of the source's history as delivered by the
+feed, so reaching a witnessed image is evidence the pipeline carried that
+image faithfully. That is exactly the property
+[the premise](#the-premise-spirit-owns-the-target) buys, and it is the right
+thing to check for a bug in the pipeline.
+
+The weakness, then, is not just that the claim is per-chunk rather than
+table-wide — it is that it is a claim about *delivery*, not about a common
+point in time. The strength is that the evidence is far fresher: the last
+chunk is verified minutes before cut-over rather than hours after the
+snapshot that vouched for it.
+
+One exception runs the other way. A row resolved by
+[settling](#continuously-updated-hot-rows) gets a **stronger** guarantee than
+a retried chunk, not a weaker one: the reader is parked, so the target is
+frozen, and the comparison is against the after-image of a specific event at a
+specific position. That is a genuine point-in-time equality — the only place
+in the lockless algorithm where simultaneity is actually established.
 
 **Neither claim reaches cut-over.** Both diagrams end with an uncovered
 window, and both windows are the same kind of gap: a divergence introduced
@@ -180,63 +203,87 @@ point about what a checksum is for — see
 serialization point. Cut-over is safe because the change feed is correct; the
 checksum exists to catch the case where it is not.
 
-### The blind spot lockless has and snapshot does not
+### Cross-chunk sampling: a different shape of coverage
 
-A row whose **primary key changes** can cross from one chunk into another
-between the two reads. If the earlier range is read before the move and the
-later one after it, a row the target lost is missing from both reads:
+Lockless reads different ranges at different times, so a row whose **primary
+key changes** can migrate out of a range that has not been read yet and into
+one that already has — and be absent from both readings:
 
 ```
-  source:   id=7 lives in chunk C  ──┬──►  id=7 lives in chunk A
-  target:   id=7 lives in chunk C  ──┴──►  id=7 gone (the bug)
-  ──────────────────────────────────────────────────────────────────►
-                      │              │            │
-   chunk A read ──────┘              │            │
-     source: no id=7 yet             │            │
-     target: no id=7 yet   ✓ equal   │            │
-                                     │            │
-                       UPDATE t SET id=7 WHERE …──┘
-                       feed applies the delete half, loses the insert
-                                                  │
-   chunk C read ──────────────────────────────────┘
-     source: id=7 moved out
-     target: id=7 moved out         ✓ equal
+  the row:   id=900  ─────────────►  id=7
+             (UPDATE t SET id=7 WHERE id=900)
+  ranges:    900 ∈ chunk C           7 ∈ chunk A
 
-                       → the pass is clean, and id=7 is missing
+  ──────────────────────┬───────────────────┬────────────────────────►
+                        │                   │
+   chunk A read ────────┘                   │
+     source: no id=7 yet                    │
+     target: no id=7 yet     ✓ equal        │
+                                            │
+                 the move happens ──────────┤
+                 feed applies delete(900), loses insert(7)
+                                            │
+   chunk C read ────────────────────────────┘
+     source: id=900 gone (moved out)
+     target: id=900 gone (deleted)  ✓ equal
+
+           → every chunk reported equal, and id=7 appeared in
+             neither side of any reading
 ```
 
-Chunks are walked in key order, so "the low range first, the high range later"
-is the *normal* order, not a contrived one. Under a snapshot this cannot
-happen: at `T0` the row is in exactly one range, and both sides of that range
-are read at `T0`, so the loss mismatches there.
+Chunks are walked in key order, so "low range first, high range later" is the
+normal order, not a contrived one.
 
-Three things bound it in practice, none of which eliminate it:
+**This does not, however, make a lockless pass blinder than a snapshot pass
+over the same window.** A snapshot's `T0` is established at the *start* of the
+pass, before any chunk is read, so the move above is after `T0` too: the
+snapshot reads both ranges in their pre-move state, finds them equal, and
+reports clean as well. The loss falls in the post-`T0` window it already does
+not cover.
+
+That argument generalises, and it is worth saying what would falsify it. For
+this hole to hide a divergence, the divergence has to be *created by* the
+move — the feed dropping one half of a delete/insert pair — which puts it
+mid-pass, hence post-`T0`. A divergence that existed *before* the pass is
+caught by both: the snapshot mismatches at `T0`, and lockless mismatches
+whichever range holds the row when it reads it. On a moved row it is often
+repaired without either checker's help, because the binlog carries the insert
+half as a full after-image and applying it overwrites whatever the target
+held.
+
+So: cross-chunk sampling changes the *shape* of the coverage — a lockless pass
+can report every chunk equal without having examined a given row at all,
+which a snapshot pass structurally cannot — without widening the set of
+divergences that survive a single pass. What bounds it:
 
 - The exposure per row is the interval between the two chunk reads, not the
   length of the pass. More workers narrows it.
-- `RunContinuous` re-walks from the start, and the next pass reads both ranges
-  after the move. The **finite** pre-cut-over gate is where a single pass has
-  to carry the weight.
-- A PK update is two events in the change feed, and losing exactly one of them
-  is the bug class this misses — not a wholesale copy failure, which shows up
-  in every chunk it touches.
+- `RunContinuous` re-walks from the start, and the next pass reads both
+  ranges after the move.
 
 ### Cost and operational profile
 
 | | `SingleChecker` (snapshot) | `LocklessChecker` (optimistic) |
 | --- | --- | --- |
-| Proves | one instant, whole table | one instant per chunk |
-| Instant is | the *start* of the pass | spread across the pass, each as late as its chunk |
+| Proves | equality at one instant, whole table | per chunk, that the target reached a *witnessed* source state — lineage, not simultaneity (settled rows excepted: those are point-in-time) |
+| Evidence dates from | the *start* of the pass | each chunk's own last read, so as late as that chunk got to |
 | Read isolation | `REPEATABLE READ`, pinned pool | `READ COMMITTED`, ordinary reads |
 | Locks | brief `LOCK TABLES` on every table | none |
 | InnoDB history list | grows for the whole pass (read views pin undo); `YieldTimeout` (24h default) exists only to bound this | no growth |
 | Query stalls | every query queues behind the metadata lock, and connection pools fill head-of-line while it is held | none |
 | Concurrency ceiling | fixed at construction — the pool cannot grow once the lock is released, and the ceiling lengthens the lock window in proportion | resizable mid-pass |
 | Busy table | one pass, regardless of write rate | extra reads: retries, subdivision, settling |
-| Blind to | nothing within `T0` | a row whose PK moves between two chunk reads |
+| Temporally blind to | anything after `T0` | anything after each chunk's last read, and a row that migrates between two chunk reads (which is inside the pass, but see [above](#cross-chunk-sampling-a-different-shape-of-coverage)) |
 | Cross-server / N sources | not supported by `SingleChecker`; achievable with locks, at a cost that scales with the topology (see below) | native — each chunk is read from every source and target and aggregated |
 | Implementation | simple | substantially more complex |
 | Used by | `spirit migrate` (default) | `spirit move`, `spirit sync`, `spirit migrate --enable-experimental-lockless-checksum` |
+
+None of those rows is a claim about the digest. Both checkers compare a 32-bit
+`CRC32` aggregated with `BIT_XOR`, plus a row count, so "equal" means *equal
+digest and equal count* — two different chunk contents can in principle
+collide. That caveat is identical for both, and identical to
+[pt-table-checksum](#checksum-algorithm)'s, so it is not part of what
+distinguishes them; "temporally blind to" above is scoped to time on purpose.
 
 Two rows are worth dwelling on, because both are about cost growing where
 lockless's does not:
@@ -276,32 +323,44 @@ more mismatches mean more hot ranges to settle.
 
 The shape is real, and the cost is real: settling deliberately stalls apply in
 order to freeze the target (see
-[the premise](#the-premise-spirit-owns-the-target)). But it is only paid for
-**hot rows, and hot rows cannot be unlimited.**
+[the premise](#the-premise-spirit-owns-the-target)). What keeps it from
+running away is that the **settling work per pass is bounded**, from two
+different directions depending on the table.
 
-That is not an assumption, it is arithmetic. A row is hot because it is
-rewritten inside the retry window faster than the checksum can read it. For
-a *range* to stay hot it has to change every window, and subdivision has
-already cut it toward ~128 rows — so N hot ranges demand write throughput
-proportional to N, on the same server, against distinct key ranges:
+On a **large** table the bound is throughput. A row is hot because it is
+rewritten inside the retry window faster than the checksum can read it; for a
+*range* to stay hot it has to change every window, and subdivision has
+already cut it toward ~128 rows. So N simultaneously hot ranges demand write
+throughput proportional to N, against N distinct key ranges, on one server:
 
 ```
   write throughput on the source
         │
         ├──► bounds how many distinct ranges can change every ~5s
-        │          = bounds the number of hot ranges
+        │          = bounds the number of hot ranges at once
         │
         └──► is also what the change feed has to apply
-                   = a write rate high enough to make most of the table
-                     hot fails the migration on feed lag first, long
-                     before it fails on settling
+                   = a rate high enough to make a large table's ranges
+                     mostly hot fails the migration on feed lag first,
+                     long before it fails on settling
 ```
 
-Both arms come from the same finite budget, which is why "most of the table is
-hot" is not a reachable state. And each hot row has to be observed equal
-**once** — settling is one-off work per row, not a standing tax.
+On a **small** table that argument does not apply — a single continuously
+updated row can make a one-chunk table entirely hot while the feed keeps up
+without effort. The bound there is simply absolute size: "entirely hot" is a
+handful of ranges, so the settling work is a handful of `settleBudget`
+windows, not a growing tax.
 
-What bounds it in the implementation:
+Note what is *not* claimed: settling is **not** one-off work per row. Each
+continuous pass calls `chunker.Reset()` and re-walks from the start, so a row
+that stays hot can be settled again on every pass. What stops that from being
+continuous is pacing, not convergence — `MinPassInterval`
+(`LocklessMinPassInterval`, 1 hour in production) puts an hour between passes,
+so a permanently hot row costs one bounded escalation per hour. The finite
+pre-cut-over gate is the case with no such gap, and it is bounded by
+`MaxPasses` instead.
+
+What bounds it within a pass:
 
 - Settling is the **last** resort, not the first. A range reaches it only
   after `MaxHotAttempts` (10) observations of a moving source, and only after
@@ -312,8 +371,9 @@ What bounds it in the implementation:
 - Parking terminates **faster the hotter the row is** — it ends at that row's
   next change. The rows that defeat read-and-compare are the ones this
   resolves quickest.
-- Nothing is re-parked once a row has passed, so apply lag incurred by
-  settling is repaid rather than compounded.
+- Within a pass, a row that has passed is not re-parked, so the apply lag a
+  settle incurs is repaid before the pass ends rather than compounding
+  through it.
 
 What to watch, in that order: `HotChunksSettledThisPass` rising while
 `HotChunksDeferredThisPass` falls is the mechanism working. **Both** rising,
@@ -321,11 +381,89 @@ pass over pass, is the loop above, and the lever is fewer checksum workers —
 which the backlog signal already pulls by itself when autoscaling is enabled
 (see [Pacing and scaling](#pacing-and-scaling)).
 
-Two guards keep a non-converging table from becoming an unbounded wait rather
-than an error: the finite gate stops after `MaxPasses` (10) with
-`ErrVerificationUnresolved`, and the continuous loop paces passes at
-`LocklessMinPassInterval` (1 hour) so a small hot table is not re-checksummed
-back to back.
+And a non-converging table ends as an error rather than an unbounded wait:
+the finite gate stops after `MaxPasses` (10) with
+`ErrVerificationUnresolved`.
+
+### Prior art, and what is new here
+
+The lockless checksum is a hybrid of two established ideas plus one that does
+not appear to have published prior art.
+
+**Borrowed: the chunk digest.** CRC32 with `BIT_XOR` aggregation, pushed down
+to the server so a chunk costs one row on the wire, is
+[pt-table-checksum](#checksum-algorithm)'s. Both checkers use it unchanged.
+
+**Borrowed: the stream is the arbiter, and you pause the consumer, not the
+producer.** This is the
+[DBLog](https://netflixtechblog.com/dblog-a-generic-change-data-capture-framework-69351fb9099b)
+family — Netflix's watermark-based CDC framework, and Debezium's *incremental
+snapshots* built on it. Spirit's copier is already modelled on DBLog's
+buffered producer/consumer pipeline (see [pkg/copier](../copier/README.md)).
+DBLog's chunk-selection trick is the relevant part here: rather than locking
+the table, it writes a **low watermark** row, runs the chunk `SELECT`, writes a
+**high watermark** row, then watches its own change log for those two markers
+and reconciles the chunk against whatever events landed between them. Its brief
+pause of *log processing* — not of the application's writes — is the same shape
+as parking the feed's reader.
+
+**What differs, and why.** The resolution rule is the fork in the road:
+
+```
+  DBLog / Debezium incremental snapshot      Spirit lockless checksum
+  ────────────────────────────────────       ─────────────────────────────
+  goal: PRODUCE one correct stream           goal: VERIFY two copies that
+        from a snapshot + a log                    another pipeline maintains
+
+  row changed inside the window?             chunk disagrees?
+    → drop it from the chunk;                  → re-read after a delay and a
+      the log event wins                         feed flush; accept any source
+                                                 image we have witnessed
+                                             → still hot? subdivide toward
+                                               ~128 rows
+                                             → still hot? settle it against
+                                               the stream's own after-image
+
+  needs a writable marker table on           writes NOTHING to the source;
+  the source, so markers land in-band        ordering evidence is out-of-band
+                                             (flush completion, park position)
+
+  no target — it emits                       owns the target, so it can
+                                             freeze that side instead
+```
+
+Three consequences worth stating plainly:
+
+- **DBLog's rule cannot produce a verdict.** "The row changed inside the
+  window, so drop it from the chunk and let the log carry it" is exactly right
+  when you are emitting a stream, and useless when you are checking one: it
+  would systematically decline to verify the hot rows — the only rows where a
+  lost update is hard to catch. A verifier has to do the opposite of dropping
+  them.
+- **No markers means no write access to the source.** Spirit's verification
+  path writes nothing at all (only a *repair* writes, and only to the target).
+  So there is no in-band low/high watermark to reconcile against, and the
+  ordering facts come from elsewhere: `RetryFlushWait` (the target cannot have
+  moved until a feed flush landed) and, for settling, the reader's park
+  position.
+- **Spirit has a target to freeze; DBLog does not.** DBLog reconciles a
+  snapshot against a log because it has nothing it owns. Spirit owns the
+  target ([the premise](#the-premise-spirit-owns-the-target)), which is what
+  makes stopping the consumer a real serialization point rather than just a
+  pause.
+
+**New: settling a row against its own next change.**
+[`VerifyRowAtNextChange`](#continuously-updated-hot-rows) has no analogue in
+either. The watermark bracket bounds a *read*; it offers nothing for a row
+being rewritten continuously, which is precisely the case that defeats
+read-and-compare. Waiting for that row's next event, parking the reader on it,
+draining, and comparing the target against the event's after-image inverts the
+difficulty: the hotter the row, the sooner its verdict arrives.
+
+> **On lineage:** this section compares algorithms, which is checkable from
+> both. It deliberately does not claim the design was derived from DBLog or
+> Debezium — the repo records DBLog as the *copier's* inspiration and
+> pt-table-checksum as the digest's, and nothing more than that.
 
 ### Which to use
 
