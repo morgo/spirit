@@ -220,7 +220,7 @@ func (c *Column) EffectiveCharsetCollation(table *CreateTable) (cs, collation st
 			collation = strings.ToLower(def)
 		}
 	}
-	return normalizeCharsetName(cs), normalizeCollationName(collation)
+	return NormalizeCharsetName(cs), normalizeCollationName(collation)
 }
 
 // determinedCharsetCollation returns the charset and collation the column
@@ -232,7 +232,7 @@ func (c *Column) EffectiveCharsetCollation(table *CreateTable) (cs, collation st
 // linter does not.
 func (c *Column) determinedCharsetCollation(table *CreateTable) (cs, collation string) {
 	cs, collation = resolvedCharsetCollation(c, table)
-	cs = normalizeCharsetName(cs)
+	cs = NormalizeCharsetName(cs)
 	if collation != "" {
 		return cs, normalizeCollationName(collation)
 	}
