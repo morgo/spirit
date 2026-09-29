@@ -125,7 +125,7 @@ Which signals count depends on the phase, and the runner reports only the ones t
 
 That last row matters for a wrapper polling after a run ends: a loaded server — or a replica-lag throttler that fails closed once its poll loop has stopped — must not make a finished migration, a cutover, or a sentinel wait look paused.
 
-A `move` reports no throttling at all — it copies through a `Noop` throttler for now.
+A `move` reports the combined load signal of its Aurora targets, whether or not autoscaling is enabled: the whole signal in `CopyRows`, load signals only in `Checksum` and — while its continuous checksum runs — in `WaitingOnSentinelTable`, and the zero value elsewhere. A `sync` reports its Aurora target's load signal in `CopyRows` and `ApplyChangeset`. A target that is not Aurora, or whose Aurora probe fails, contributes no signal.
 
 ## See Also
 

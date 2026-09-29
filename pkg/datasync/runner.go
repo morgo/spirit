@@ -64,6 +64,11 @@ type Runner struct {
 	monitorDB                        *sql.DB
 	autoscale                        copier.AutoscaleConfig
 	flushConcurrency, flushBatchSize int
+	// buildAurora and auroraVCPUs are the Aurora probes setupThrottling
+	// runs. NewRunner sets them to the throttler package's; tests replace
+	// them, because CI has no Aurora to probe.
+	buildAurora func(context.Context, throttler.AuroraSetup) (throttler.AuroraResult, error)
+	auroraVCPUs func(context.Context, *sql.DB) (int, error)
 
 	sourceUUID string // server owning file:position checkpoints
 	sync       *Sync
@@ -189,8 +194,27 @@ func NewRunner(s *Sync) (*Runner, error) {
 		metricsSink:      &metrics.NoopSink{},
 		locklessReadyCh:  make(chan struct{}),
 		firstCleanPassCh: make(chan struct{}),
+		buildAurora:      buildAurora,
+		auroraVCPUs:      throttler.AuroraVCPUs,
 	}
 	return r, nil
+}
+
+func buildAurora(ctx context.Context, setup throttler.AuroraSetup) (throttler.AuroraResult, error) {
+	return setup.Build(ctx)
+}
+
+// replClientConfig is the built-in source feed's change-client config,
+// including the load signal and flush shape setupThrottling derived.
+func (r *Runner) replClientConfig() *change.ClientConfig {
+	replConfig := change.NewClientDefaultConfig()
+	replConfig.Logger = r.logger
+	replConfig.CancelFunc = r.fatalError
+	replConfig.DDLFilterSchema = r.source.config.DBName
+	replConfig.DBConfig = r.sourceDBConfig
+	replConfig.UnderLoad = r.TargetUnderLoad
+	replConfig.FlushConcurrency, replConfig.BatchSize = r.flushConcurrency, r.flushBatchSize
+	return replConfig
 }
 
 // recordCopyCompleted reports the copy aggregate settled during this
@@ -694,7 +718,7 @@ func (r *Runner) setup(ctx context.Context) error {
 		return nil
 	}
 
-	if err := r.setupAutoscaling(ctx); err != nil {
+	if err := r.setupThrottling(ctx); err != nil {
 		return err
 	}
 
@@ -758,14 +782,7 @@ func (r *Runner) setup(ctx context.Context) error {
 	if r.sync.Source != nil {
 		r.setReplClient(r.sync.Source)
 	} else {
-		replConfig := change.NewClientDefaultConfig()
-		replConfig.Logger = r.logger
-		replConfig.CancelFunc = r.fatalError
-		replConfig.DDLFilterSchema = r.source.config.DBName
-		replConfig.DBConfig = r.sourceDBConfig
-		replConfig.UnderLoad = r.TargetUnderLoad
-		replConfig.FlushConcurrency, replConfig.BatchSize = r.flushConcurrency, r.flushBatchSize
-		client, err := change.NewAutoClient(ctx, r.source.db, r.source.config.Addr, r.source.config.User, r.source.config.Passwd, r.applier, replConfig, pos)
+		client, err := change.NewAutoClient(ctx, r.source.db, r.source.config.Addr, r.source.config.User, r.source.config.Passwd, r.applier, r.replClientConfig(), pos)
 		if err != nil {
 			return err
 		}
