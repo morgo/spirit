@@ -337,7 +337,7 @@ MySQL rewrites many constructs when it stores a table definition, so the form a 
 
 Two layers of canonicalization apply:
 
-1. **The parser** already folds most type *aliases* before Spirit sees them: `BOOL`/`BOOLEAN` → `tinyint(1)`, `SERIAL` → `bigint unsigned NOT NULL AUTO_INCREMENT UNIQUE`, `INTEGER` → `int`, `NVARCHAR` → `varchar`, `DEC` → `decimal`. Nothing in Spirit is needed for these.
+1. **The parser** already folds most type *aliases* before Spirit sees them: `BOOL`/`BOOLEAN` → `tinyint(1)`, `SERIAL` → `bigint unsigned NOT NULL AUTO_INCREMENT UNIQUE`, `INTEGER` → `int`, `DEC` → `decimal`. Nothing in Spirit is needed for these. `NCHAR`/`NVARCHAR` are an exception: the parser folds them to `char`/`varchar` but drops the `utf8mb3` character set MySQL stores them with ([#1299](https://github.com/block/spirit/issues/1299)).
 2. **Spirit's normalization rules** handle the canonicalizations the parser does *not* — each mirrors something MySQL does when storing the table:
 
    | Rule (`normalize_*.go`) | Canonicalization |
@@ -375,7 +375,7 @@ Because canonicalization happens at parse time, **`Diff` assumes normalized inpu
 
 ### Relationship to `spirit fmt`
 
-Normalization is an **offline, best-effort** approximation of what MySQL does: it needs no database and covers the common cases. [`spirit fmt`](../../docs/fmt.md) is the **ground-truth** canonicalizer — it round-trips a `CREATE TABLE` through a live MySQL server and reads back `SHOW CREATE TABLE`, so it captures *every* transformation, including ones normalization does not implement (e.g. `DEFAULT FALSE` → `DEFAULT '0'`, and the expression rewrites that restructure rather than rename — `MOD(a,b)` → `(a % b)`, `INSTR(a,b)` → `locate(b,a)`, `WEEKOFYEAR(d)` → `week(d,3)`). Use `spirit fmt` to canonicalize schema files on disk; normalization keeps in-memory parsing and diffing accurate without a server.
+Normalization is an **offline, best-effort** approximation of what MySQL does: it needs no database and covers the common cases. [`spirit fmt`](../../docs/fmt.md) is the **ground-truth** canonicalizer — it round-trips a `CREATE TABLE` through a live MySQL server and reads back `SHOW CREATE TABLE`, so it captures *every* transformation, including ones normalization does not implement (e.g. the national character set of `NCHAR`/`NVARCHAR` columns, and the expression rewrites that restructure rather than rename — `MOD(a,b)` → `(a % b)`, `INSTR(a,b)` → `locate(b,a)`, `WEEKOFYEAR(d)` → `week(d,3)`). Use `spirit fmt` to canonicalize schema files on disk; normalization keeps in-memory parsing and diffing accurate without a server.
 
 ## Helper Functions
 
