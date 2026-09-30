@@ -164,6 +164,12 @@ func explicitUnlessTableDefault(value, tableDefault *string) *string {
 	return value
 }
 
+// namesCharsetOnly reports whether a column declares a charset without a
+// collation.
+func namesCharsetOnly(col *Column) bool {
+	return col.Charset != nil && col.Collation == nil
+}
+
 // charsetCollationEqual reports whether two columns have the same effective
 // charset and collation given their owning tables' defaults. Equality is
 // decided on the RESOLVED values, not the written ones: a column that
@@ -178,7 +184,9 @@ func explicitUnlessTableDefault(value, tableDefault *string) *string {
 // attribute falls back to comparing the written values with redundant
 // table-default spellings normalized away — an unexpressed preference is
 // treated as a match rather than guessed at, which keeps the diff from
-// emitting a MODIFY it could never prove converged.
+// emitting a MODIFY it could never prove converged. A column that names a
+// utf8mb4 charset without a COLLATE is the one exception: it matches any
+// utf8mb4 collation, whatever the table defaults are.
 func charsetCollationEqual(a, b *Column, source, target *CreateTable, opts *DiffOptions) bool {
 	if !charsetCarryingTypes[strings.ToLower(a.Type)] {
 		// Non-character types have no table default to inherit, so compare
@@ -212,6 +220,18 @@ func charsetCollationEqual(a, b *Column, source, target *CreateTable, opts *Diff
 
 	if sourceCollation != "" && targetCollation != "" {
 		return sourceCollation == targetCollation
+	}
+	// A column that names its charset without a COLLATE takes that charset's
+	// default collation, not the table's. The column still has no collation
+	// here only when that default depends on the server (utf8mb4; see
+	// defaultCollationNormalizer), so it matches any collation of the charset
+	// both sides resolved to. The written-value comparison below cannot see
+	// this: the live form spells the server's choice out as a COLLATE, which
+	// differs from the table default whenever the table uses another
+	// charset or collation, and a MODIFY restating the bare charset would
+	// never converge against it.
+	if sourceCharset != "" && targetCharset != "" && (namesCharsetOnly(a) || namesCharsetOnly(b)) {
+		return true
 	}
 	return ptrEqual(
 		explicitUnlessTableDefault(a.Collation, source.TableOptions.getCollation()),

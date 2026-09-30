@@ -898,6 +898,58 @@ func TestDiff(t *testing.T) {
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, a varchar(3), b varchar(3) CHARACTER SET utf8mb4) DEFAULT CHARSET=utf8mb4",
 			expected: "",
 		},
+		{
+			// A column naming utf8mb4 without a COLLATE takes the server's
+			// utf8mb4 default, not the table's collation, and SHOW CREATE
+			// TABLE writes that default out when the table uses another
+			// charset. The source is the live form from MySQL 8.0.43.
+			// Before the fix this emitted a MODIFY restating the bare
+			// charset on every plan, which could never converge.
+			name:     "Utf8mb4ColumnWithoutCollationInOtherCharsetTable",
+			source:   "CREATE TABLE t1 (b char(4) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci DEFAULT 'a') DEFAULT CHARSET=latin1",
+			target:   "CREATE TABLE t1 (b char(4) CHARACTER SET utf8mb4 DEFAULT 'a') DEFAULT CHARSET=latin1",
+			expected: "",
+		},
+		{
+			name:     "Utf8mb4ColumnWithoutCollationInOtherCharsetTable_Reverse",
+			source:   "CREATE TABLE t1 (b char(4) CHARACTER SET utf8mb4 DEFAULT 'a') DEFAULT CHARSET=latin1",
+			target:   "CREATE TABLE t1 (b char(4) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci DEFAULT 'a') DEFAULT CHARSET=latin1",
+			expected: "",
+		},
+		{
+			// The same holds in a utf8mb4 table on a collation other than
+			// the server's default: the column does not take the table's.
+			name:     "Utf8mb4ColumnWithoutCollationInOtherCollationTable",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, b varchar(3) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci DEFAULT NULL) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, b varchar(3) CHARACTER SET utf8mb4) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin",
+			expected: "",
+		},
+		{
+			// Any utf8mb4 collation matches, as it does for a utf8mb4 table
+			// default without a COLLATE.
+			name:     "Utf8mb4ColumnWithoutCollationMatchesAnyUtf8mb4Collation",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, b varchar(3) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL) DEFAULT CHARSET=latin1",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, b varchar(3) CHARACTER SET utf8mb4) DEFAULT CHARSET=latin1",
+			expected: "",
+		},
+		{
+			// The charset is still compared: a utf8mb4 column does not match
+			// one inheriting a latin1 table default.
+			name:     "Utf8mb4ColumnWithoutCollationStillComparesCharset",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, b varchar(3) DEFAULT NULL) DEFAULT CHARSET=latin1",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, b varchar(3) CHARACTER SET utf8mb4) DEFAULT CHARSET=latin1",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `b` varchar(3) CHARACTER SET utf8mb4 NULL",
+		},
+		{
+			// A column that inherits a utf8mb4 table default is not covered
+			// by the exception: it takes the table's collation, so a live
+			// column on another collation is MODIFYed back onto it, and the
+			// MODIFY converges.
+			name:     "InheritingColumnStillDetectsCollationDrift",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, b varchar(3) COLLATE utf8mb4_bin DEFAULT NULL) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, b varchar(3)) DEFAULT CHARSET=utf8mb4",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `b` varchar(3) NULL",
+		},
 		// A table-level DEFAULT CHARSET/COLLATE change only affects columns
 		// added later, so when the table defaults differ, a column that
 		// inherits its table default must still be MODIFYed to converge in a
