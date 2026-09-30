@@ -76,12 +76,22 @@ func TestEnumSetMemberSpacesLeavesRaw(t *testing.T) {
 }
 
 // TestEnumSetMemberSpacesConverge: each declared column diffs clean against
-// its SHOW CREATE TABLE reading, in both directions.
+// its SHOW CREATE TABLE reading, in both directions and both registration
+// orders.
 func TestEnumSetMemberSpacesConverge(t *testing.T) {
+	registered := normalizers
+	t.Cleanup(func() { normalizers = registered })
+
 	for _, tc := range []struct{ declared, live string }{
 		{
 			"CREATE TABLE t (b enum('a','b ') DEFAULT 'b') DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
 			"CREATE TABLE t (`b` enum('a','b') DEFAULT 'b') DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
+		},
+		{
+			// enumSetDefaultNormalizer must resolve the default against the
+			// stripped members, whichever of the two rules runs first.
+			"CREATE TABLE t (b enum('a','B ') DEFAULT 'b', s set('x','Y ') DEFAULT 'y,x ') DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
+			"CREATE TABLE t (`b` enum('a','B') DEFAULT 'B', `s` set('x','Y') DEFAULT 'x,Y') DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
 		},
 		{
 			"CREATE TABLE t (b enum('a','b ') CHARACTER SET binary DEFAULT 'b ') DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
@@ -105,16 +115,19 @@ func TestEnumSetMemberSpacesConverge(t *testing.T) {
 		},
 	} {
 		t.Run(tc.declared, func(t *testing.T) {
-			declared, err := ParseCreateTable(tc.declared)
-			require.NoError(t, err)
-			live, err := ParseCreateTable(tc.live)
-			require.NoError(t, err)
-			stmts, err := live.Diff(declared, nil)
-			require.NoError(t, err)
-			require.Nil(t, stmts)
-			stmts, err = declared.Diff(live, nil)
-			require.NoError(t, err)
-			require.Nil(t, stmts)
+			for _, order := range [][]Normalizer{registered, reversed(registered)} {
+				normalizers = order
+				declared, err := ParseCreateTable(tc.declared)
+				require.NoError(t, err)
+				live, err := ParseCreateTable(tc.live)
+				require.NoError(t, err)
+				stmts, err := live.Diff(declared, nil)
+				require.NoError(t, err)
+				require.Nil(t, stmts)
+				stmts, err = declared.Diff(live, nil)
+				require.NoError(t, err)
+				require.Nil(t, stmts)
+			}
 		})
 	}
 }
