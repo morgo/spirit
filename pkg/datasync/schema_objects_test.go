@@ -128,6 +128,7 @@ func TestSyncLogsSourceTriggersRoutinesAndEvents(t *testing.T) {
 		return n
 	}
 	h.eventually(func() bool { return count("t1") == 1 }, 30*time.Second, "initial copy")
+	h.awaitContinuous(30 * time.Second)
 	testutils.RunSQLInDatabase(t, src.DBName, "INSERT INTO t1 VALUES (2,'two')")
 	h.eventually(func() bool { return count("t1") == 2 && count("audit") == 1 }, 30*time.Second,
 		"the source trigger's insert into audit reaches the target")
