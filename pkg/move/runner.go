@@ -1934,6 +1934,7 @@ func (r *Runner) checkResources() check.Resources {
 			DB:     r.sources[i].db,
 			Config: r.sources[i].config,
 			DSN:    r.sources[i].dsn,
+			Tables: r.sources[i].tables,
 		}
 	}
 	return check.Resources{
