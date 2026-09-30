@@ -1655,3 +1655,68 @@ func TestPKCollationChange(t *testing.T) {
 		})
 	}
 }
+
+// TestEnumSetBinaryMemberSpaces runs a copy migration of binary enum and set
+// columns whose members end in spaces, which MySQL keeps under the binary
+// charset. The shadow table is built from the parsed ALTER, and the change
+// feed replays members by name, so a member stripped anywhere on that path
+// would store 'b' for 'b ' and fail the checksum.
+func TestEnumSetBinaryMemberSpaces(t *testing.T) {
+	t.Parallel()
+	tableName := "enumsp_mig"
+	tt := testutils.NewTestTable(t, tableName, fmt.Sprintf(`CREATE TABLE %s (
+		id int NOT NULL AUTO_INCREMENT PRIMARY KEY,
+		b enum('a','b ') COLLATE binary NOT NULL,
+		s set('x','y ') COLLATE binary NOT NULL
+	) DEFAULT CHARSET=utf8mb4`, tableName))
+	tt.SeedRows(t, fmt.Sprintf("INSERT INTO %s (b, s) SELECT 'b ', 'x,y '", tableName), 200)
+
+	// Making the columns nullable is not an INSTANT change, so the rows are
+	// copied into a shadow table.
+	m := NewTestRunner(t, tableName, "MODIFY b enum('a','b ','c') COLLATE binary NULL, MODIFY s set('x','y ','z') COLLATE binary NULL",
+		WithThreads(1),
+		WithTestThrottler(),
+		WithSkipDropAfterCutover())
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	dmlDone := make(chan struct{})
+	go func() {
+		defer close(dmlDone)
+		if !waitForCopyRows(t, ctx, m) {
+			return
+		}
+		for i := 1; i <= 20; i++ {
+			if ctx.Err() != nil {
+				return
+			}
+			_, _ = tt.DB.ExecContext(ctx, fmt.Sprintf("INSERT INTO %s (b, s) VALUES ('b ', 'y ')", tableName))
+			_, _ = tt.DB.ExecContext(ctx, fmt.Sprintf("UPDATE %s SET b = 'a', s = 'x' WHERE id = %d", tableName, i))
+			_, _ = tt.DB.ExecContext(ctx, fmt.Sprintf("UPDATE %s SET b = 'b ', s = 'x,y ' WHERE id = %d", tableName, i))
+		}
+	}()
+
+	require.NoError(t, m.Run(ctx))
+	cancel()
+	<-dmlDone
+	require.NoError(t, m.Close())
+
+	oldName := m.changes[0].oldTableName()
+	t.Cleanup(func() { testutils.RunSQL(t, "DROP TABLE IF EXISTS `"+oldName+"`") })
+	var oldTables int
+	require.NoError(t, tt.DB.QueryRowContext(t.Context(),
+		`SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='test' AND table_name=?`, oldName).Scan(&oldTables))
+	require.Equal(t, 1, oldTables, "the migration must have copied the rows")
+
+	for col, want := range map[string]string{"b": "enum('a','b ','c')", "s": "set('x','y ','z')"} {
+		var colType string
+		require.NoError(t, tt.DB.QueryRowContext(t.Context(),
+			`SELECT column_type FROM information_schema.columns
+			 WHERE table_schema='test' AND table_name=? AND column_name=?`, tableName, col).Scan(&colType))
+		require.Equal(t, want, colType)
+	}
+	var stripped int
+	require.NoError(t, tt.DB.QueryRowContext(t.Context(),
+		fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE b = 'b' OR b = '' OR FIND_IN_SET('y', s) > 0", tableName)).Scan(&stripped))
+	require.Zero(t, stripped, "no row may hold a member stripped of its spaces")
+}
