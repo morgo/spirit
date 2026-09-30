@@ -1446,6 +1446,38 @@ func TestBufferedMapQueueModeOversizedRowAdmitted(t *testing.T) {
 	require.Equal(t, int64(1), sub.timesParked.Load())
 }
 
+// TestBufferedMapWideKeyAccounted: a buffered change holds its key three times
+// over (the hashed key, the original key tuple, and the key column in the row
+// image), so a wide primary key must be counted each time on both the map and
+// the queue path. Queue mode is where wide keys show up in practice: it is
+// chosen for non-memory-comparable PKs, usually a string under a
+// case-insensitive collation.
+func TestBufferedMapWideKeyAccounted(t *testing.T) {
+	wide := strings.Repeat("k", 8*1024)
+	for _, queueMode := range []bool{false, true} {
+		t.Run(fmt.Sprintf("queueMode=%t", queueMode), func(t *testing.T) {
+			sub := &bufferedMap{
+				changes:              make(map[string]bufferedChange),
+				pkIsMemoryComparable: !queueMode,
+				logger:               slog.Default(),
+				table:                &table.TableInfo{SchemaName: "test", TableName: "bare"},
+			}
+			sub.cond = sync.NewCond(&sub.Mutex)
+
+			sub.HasChanged([]any{wide}, []any{wide}, false)
+			if queueMode {
+				require.Len(t, sub.queue, 1)
+				require.Empty(t, sub.changes)
+			} else {
+				require.Len(t, sub.changes, 1)
+				require.Empty(t, sub.queue)
+			}
+			require.Greater(t, sub.sizeBytes, int64(3*len(wide)),
+				"the hashed key, the key tuple and the row image must each count the wide key")
+		})
+	}
+}
+
 // TestBufferedMapRealFlushWakesParked exercises the full HasChanged →
 // park → real Flush → broadcast → resume cycle against a live DB-backed
 // subscription. The bare-helper tests above broadcast by hand; this one

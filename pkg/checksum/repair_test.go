@@ -158,6 +158,38 @@ func TestRepairBatchesBoundedByBytes(t *testing.T) {
 	require.Equal(t, 16, totalRows, "every source row must be written exactly once")
 }
 
+// TestRepairBatchesBoundedByRows is the row-count twin of
+// TestRepairBatchesBoundedByBytes: narrow rows reach repairBatchRows long
+// before repairBatchBytes, so every batch but the last must be exactly
+// repairBatchRows rows. TestRepairStreamsChunkThroughApplier crosses the cut
+// but asserts only the end state, which a single whole-chunk batch also meets.
+func TestRepairBatchesBoundedByRows(t *testing.T) {
+	src := testutils.NewTestTable(t, "repairnarrow_t1", "CREATE TABLE repairnarrow_t1 (a INT NOT NULL AUTO_INCREMENT, b VARCHAR(255) NOT NULL, c INT, PRIMARY KEY (a))")
+	testutils.NewTestTable(t, "_repairnarrow_t1_new", "CREATE TABLE _repairnarrow_t1_new LIKE repairnarrow_t1")
+	testutils.RunSQL(t, "CREATE TABLE _repairnarrow_t1_chkpnt (a INT)") // for binlog advancement
+	src.SeedRows(t, "INSERT INTO repairnarrow_t1 (b, c) SELECT REPEAT('x', 200), 1", 2*repairBatchRows+1)
+
+	repairer, chunk, db := newRepairFixture(t, "repairnarrow_t1", "_repairnarrow_t1_new", nil)
+	spy := &applier.MockApplier{Inner: repairer.applier}
+	repairer.applier = spy
+
+	require.NoError(t, repairer.Recopy(t.Context(), chunk))
+	requireTablesMatch(t, db, "repairnarrow_t1", "_repairnarrow_t1_new")
+
+	var rows int
+	require.NoError(t, db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM repairnarrow_t1").Scan(&rows))
+	require.Greater(t, rows, 2*repairBatchRows, "the fixture must span at least two full batches")
+	var want []int
+	for n := rows; n > 0; n -= repairBatchRows {
+		want = append(want, min(n, repairBatchRows))
+	}
+	var got []int
+	for _, batch := range spy.ApplyCalls() {
+		got = append(got, len(batch))
+	}
+	require.Equal(t, want, got, "batches must be cut at repairBatchRows")
+}
+
 // TestRepairDoesNotLockSourceRows is the regression test for block/spirit#1130.
 // The repair used to be `REPLACE INTO _new (...) SELECT ... FROM original`, and
 // under REPEATABLE READ that SELECT is a *locking* read: it took shared
