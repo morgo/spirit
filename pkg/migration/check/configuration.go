@@ -6,6 +6,7 @@ import (
 	"log/slog"
 
 	"github.com/block/mysql"
+	"github.com/block/spirit/pkg/dbconn"
 	parsermysql "github.com/block/spirit/pkg/parser/mysql"
 )
 
@@ -75,6 +76,11 @@ func configurationCheck(ctx context.Context, r Resources, logger *slog.Logger) e
 		}
 	} else if binlogTransactionCompression != "0" {
 		return errors.New("binlog_transaction_compression must be OFF: spirit does not support compressed transactions in the binary log")
+	}
+	// partial_revokes=ON lets a REVOKE remove a global grant for one schema,
+	// which the privileges check does not read (see dbconn.CheckPartialRevokesOff).
+	if err := dbconn.CheckPartialRevokesOff(ctx, r.DB); err != nil {
+		return err
 	}
 
 	if logBin != "1" {

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 
 	"github.com/block/mysql"
+	"github.com/block/spirit/pkg/dbconn"
 	parsermysql "github.com/block/spirit/pkg/parser/mysql"
 )
 
@@ -68,6 +69,12 @@ func configurationCheck(ctx context.Context, r Resources, logger *slog.Logger) e
 			}
 		} else if binlogTransactionCompression != "0" {
 			return fmt.Errorf("source %d: binlog_transaction_compression must be OFF for move operations", i)
+		}
+		// partial_revokes=ON lets a REVOKE remove a global grant for one
+		// schema, which the privileges check does not read (see
+		// dbconn.CheckPartialRevokesOff).
+		if err := dbconn.CheckPartialRevokesOff(ctx, src.DB); err != nil {
+			return fmt.Errorf("source %d: %w", i, err)
 		}
 		if logBin != "1" {
 			return fmt.Errorf("source %d: log_bin must be enabled", i)
