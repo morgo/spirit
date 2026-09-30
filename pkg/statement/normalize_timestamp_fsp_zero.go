@@ -39,6 +39,7 @@ var fspFunctions = map[string]bool{
 //	datetime DEFAULT (SYSDATE(0))                    -> DEFAULT (sysdate())
 //	bigint DEFAULT (UNIX_TIMESTAMP(NOW(0)))          -> DEFAULT (unix_timestamp(now()))
 //	datetime(3) DEFAULT CURRENT_TIMESTAMP(3)         -> unchanged
+//	datetime(3) DEFAULT (IFNULL(NOW(3), NOW(0)))     -> DEFAULT (ifnull(now(3),now()))
 //
 // The type's own fsp of 0 is already dropped at parse time (datetime(0)
 // arrives as datetime), but the argument of the function call was kept, so

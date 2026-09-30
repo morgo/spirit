@@ -64,30 +64,66 @@ func TestTimestampFspZeroIsIdempotent(t *testing.T) {
 }
 
 // TestTimestampFspZeroConverges checks that each declared form diffs clean
-// against the definition MySQL reports for it, in both directions.
+// against the definition MySQL 8.0.43 reports for it, in both directions and
+// under both registration orders of the normalizers.
 func TestTimestampFspZeroConverges(t *testing.T) {
-	declared, err := ParseCreateTable("CREATE TABLE t (" +
-		"a datetime(0) DEFAULT CURRENT_TIMESTAMP(0), " +
-		"b timestamp(0) NULL DEFAULT CURRENT_TIMESTAMP(0) ON UPDATE CURRENT_TIMESTAMP(0), " +
-		"c datetime DEFAULT NOW(0) ON UPDATE LOCALTIMESTAMP(0), " +
-		"d datetime DEFAULT (CURRENT_TIMESTAMP(0)), " +
-		"e datetime DEFAULT (NOW(0) + INTERVAL 1 DAY), " +
-		"f time DEFAULT (CURTIME(0)))")
-	require.NoError(t, err)
-	live, err := ParseCreateTable("CREATE TABLE `t` (" +
-		"`a` datetime DEFAULT CURRENT_TIMESTAMP, " +
-		"`b` timestamp NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, " +
-		"`c` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, " +
-		"`d` datetime DEFAULT (now()), " +
-		"`e` datetime DEFAULT ((now() + interval 1 day)), " +
-		"`f` time DEFAULT (curtime()))")
-	require.NoError(t, err)
+	requireDefaultsConverge(t, []defaultPair{
+		{"literal default", "(a datetime(0) DEFAULT CURRENT_TIMESTAMP(0))",
+			"(`a` datetime DEFAULT CURRENT_TIMESTAMP)"},
+		{"literal default and on update", "(a timestamp(0) NULL DEFAULT CURRENT_TIMESTAMP(0) ON UPDATE CURRENT_TIMESTAMP(0))",
+			"(`a` timestamp NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP)"},
+		{"now and localtimestamp", "(a datetime DEFAULT NOW(0) ON UPDATE LOCALTIMESTAMP(0))",
+			"(`a` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP)"},
+		{"expression current_timestamp", "(a datetime DEFAULT (CURRENT_TIMESTAMP(0)))",
+			"(`a` datetime DEFAULT (now()))"},
+		{"expression localtime", "(a datetime DEFAULT (LOCALTIME(0)))",
+			"(`a` datetime DEFAULT (now()))"},
+		{"expression localtimestamp", "(a datetime DEFAULT (LOCALTIMESTAMP(0)))",
+			"(`a` datetime DEFAULT (now()))"},
+		{"expression current_time", "(a time DEFAULT (CURRENT_TIME(0)))",
+			"(`a` time DEFAULT (curtime()))"},
+		{"expression interval", "(a datetime DEFAULT (NOW(0) + INTERVAL 1 DAY))",
+			"(`a` datetime DEFAULT ((now() + interval 1 day)))"},
+		{"expression curtime", "(a time DEFAULT (CURTIME(0)))",
+			"(`a` time DEFAULT (curtime()))"},
+		{"zero next to non-zero fsp", "(a datetime(3) DEFAULT (IFNULL(NOW(3), NOW(0))))",
+			"(`a` datetime(3) DEFAULT (ifnull(now(3),now())))"},
+		{"zero next to no fsp", "(a datetime DEFAULT (COALESCE(NOW(), NOW(0))))",
+			"(`a` datetime DEFAULT (coalesce(now(),now())))"},
+	})
+}
 
-	stmts, err := live.Diff(declared, nil)
-	require.NoError(t, err)
-	assert.Nil(t, stmts)
+// TestTimestampFspZeroMixedCalls: an expression holding a zero fsp alongside
+// a call with a non-zero fsp, or with none, drops only the zero one. MySQL
+// 8.0.43 stores these as (ifnull(now(3),now())) and (coalesce(now(),now())).
+func TestTimestampFspZeroMixedCalls(t *testing.T) {
+	for column, want := range map[string]string{
+		"a datetime(3) DEFAULT (IFNULL(NOW(3), NOW(0)))": "ifnull(now(3), now())",
+		"a datetime DEFAULT (COALESCE(NOW(), NOW(0)))":   "coalesce(now(), now())",
+	} {
+		t.Run(column, func(t *testing.T) {
+			ct, err := ParseCreateTable("CREATE TABLE t (" + column + ")")
+			require.NoError(t, err)
+			require.NotNil(t, ct.Columns[0].Default)
+			assert.Equal(t, want, *ct.Columns[0].Default)
+		})
+	}
+}
 
-	stmts, err = declared.Diff(live, nil)
-	require.NoError(t, err)
-	assert.Nil(t, stmts)
+// TestTimestampFspZeroBeforeAliases runs the rule on its own, over spellings
+// functionAliasNormalizer would otherwise have renamed first, so the rule
+// holds whichever order the two run in.
+func TestTimestampFspZeroBeforeAliases(t *testing.T) {
+	for text, want := range map[string]string{
+		"localtime(0)":      "localtime()",
+		"localtimestamp(0)": "localtimestamp()",
+		"current_time(0)":   "current_time()",
+	} {
+		t.Run(text, func(t *testing.T) {
+			def := text
+			ct := &CreateTable{Columns: []Column{{Name: "a", Type: "datetime", Default: &def, DefaultIsExpr: true}}}
+			ct = timestampFspZeroNormalizer{}.Normalize(ct)
+			assert.Equal(t, want, *ct.Columns[0].Default)
+		})
+	}
 }

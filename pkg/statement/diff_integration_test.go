@@ -481,6 +481,9 @@ func TestDiffIntegrationTimestampFspZeroCreatedAsDeclared(t *testing.T) {
 		"d datetime DEFAULT (CURRENT_TIMESTAMP(0)), " +
 		"e datetime DEFAULT (NOW(0) + INTERVAL 1 DAY), " +
 		"f time DEFAULT (CURTIME(0)), " +
+		"g datetime(3) DEFAULT (IFNULL(NOW(3), NOW(0))), " +
+		"h datetime DEFAULT (COALESCE(NOW(), NOW(0))), " +
+		"i datetime DEFAULT (LOCALTIME(0)), " +
 		"PRIMARY KEY (id))"
 
 	tt := testutils.NewTestTable(t, "diff_fsp_zero", declaredSQL)
@@ -489,6 +492,8 @@ func TestDiffIntegrationTimestampFspZeroCreatedAsDeclared(t *testing.T) {
 	require.Contains(t, live, "`a` datetime DEFAULT CURRENT_TIMESTAMP,")
 	require.Contains(t, live, "`b` timestamp NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,")
 	require.Contains(t, live, "`d` datetime DEFAULT (now()),")
+	require.Contains(t, live, "`g` datetime(3) DEFAULT (ifnull(now(3),now())),")
+	require.Contains(t, live, "`h` datetime DEFAULT (coalesce(now(),now())),")
 
 	stmts := diffLiveTable(t, tt.DB, tt.Name, declaredSQL)
 	require.Nil(t, stmts)
