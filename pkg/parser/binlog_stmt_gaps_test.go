@@ -1222,6 +1222,39 @@ func TestColumnNChar(t *testing.T) {
 	RunTest(t, table, false)
 }
 
+// TestColumnEnumSetCharset covers an explicit charset on ENUM and SET columns.
+// Unlike CHAR/VARCHAR/TEXT, whose binary charset is carried by the type name
+// (BINARY, VARBINARY, BLOB), ENUM and SET have no binary type, so the restored
+// text must write every charset, binary included. Without it the column is
+// created in the table's default charset. MySQL stores CHARACTER SET binary
+// and BYTE as CHARACTER SET binary COLLATE binary, and ASCII as latin1.
+func TestColumnEnumSetCharset(t *testing.T) {
+	table := []testCase{
+		{"CREATE TABLE t (a ENUM('x','y') CHARACTER SET binary)", true, "CREATE TABLE `t` (`a` ENUM('x','y') CHARACTER SET BINARY)"},
+		{"CREATE TABLE t (a ENUM('x','y') CHARSET latin1)", true, "CREATE TABLE `t` (`a` ENUM('x','y') CHARACTER SET LATIN1)"},
+		{"CREATE TABLE t (a ENUM('x','y') BYTE)", true, "CREATE TABLE `t` (`a` ENUM('x','y') CHARACTER SET BINARY)"},
+		{"CREATE TABLE t (a ENUM('x','y') ASCII)", true, "CREATE TABLE `t` (`a` ENUM('x','y') CHARACTER SET LATIN1)"},
+		{"CREATE TABLE t (a ENUM('x','y') BINARY)", true, "CREATE TABLE `t` (`a` ENUM('x','y') BINARY)"},
+		{"CREATE TABLE t (a ENUM('x','y') CHARACTER SET latin1 BINARY)", true, "CREATE TABLE `t` (`a` ENUM('x','y') BINARY CHARACTER SET LATIN1)"},
+		{"CREATE TABLE t (a ENUM('x','y') CHARACTER SET binary COLLATE binary)", true, "CREATE TABLE `t` (`a` ENUM('x','y') CHARACTER SET BINARY COLLATE binary)"},
+		{"CREATE TABLE t (a ENUM('x','y') CHARACTER SET latin1 COLLATE latin1_bin)", true, "CREATE TABLE `t` (`a` ENUM('x','y') CHARACTER SET LATIN1 COLLATE latin1_bin)"},
+		{"CREATE TABLE t (a SET('x','y') CHARACTER SET binary DEFAULT 'x')", true, "CREATE TABLE `t` (`a` SET('x','y') CHARACTER SET BINARY DEFAULT _UTF8MB4'x')"},
+		{"CREATE TABLE t (a SET('x','y') CHARACTER SET latin1)", true, "CREATE TABLE `t` (`a` SET('x','y') CHARACTER SET LATIN1)"},
+		{"CREATE TABLE t (a SET('x','y') BYTE)", true, "CREATE TABLE `t` (`a` SET('x','y') CHARACTER SET BINARY)"},
+		{"ALTER TABLE t ADD COLUMN b ENUM('x','y') CHARACTER SET binary", true, "ALTER TABLE `t` ADD COLUMN `b` ENUM('x','y') CHARACTER SET BINARY"},
+		{"ALTER TABLE t MODIFY b SET('x','y') CHARACTER SET latin1", true, "ALTER TABLE `t` MODIFY COLUMN `b` SET('x','y') CHARACTER SET LATIN1"},
+		// No charset: nothing is written, the table default applies.
+		{"CREATE TABLE t (a ENUM('x','y'))", true, "CREATE TABLE `t` (`a` ENUM('x','y'))"},
+		// A routine parameter or return type carries its COLLATE on the
+		// type itself (a column carries it as a column option), so this is
+		// the path that restores an ENUM/SET type-level collation.
+		{"CREATE PROCEDURE p(a ENUM('x','y') CHARACTER SET latin1 COLLATE latin1_bin) BEGIN END", true, "CREATE PROCEDURE `p`(IN `a` ENUM('x','y') CHARACTER SET LATIN1 COLLATE latin1_bin) BEGIN END"},
+		{"CREATE PROCEDURE p(a SET('x','y') COLLATE utf8mb4_bin) BEGIN END", true, "CREATE PROCEDURE `p`(IN `a` SET('x','y') COLLATE utf8mb4_bin) BEGIN END"},
+		{"CREATE PROCEDURE p(a ENUM('x','y') CHARACTER SET binary COLLATE binary) BEGIN END", true, "CREATE PROCEDURE `p`(IN `a` ENUM('x','y') CHARACTER SET BINARY) BEGIN END"},
+	}
+	RunTest(t, table, false)
+}
+
 // TestStructuredSystemVariable covers @@scope.instance.component system
 // variables whose component after the dot is quoted separately; the fully
 // unquoted spelling lexes as a single token and restores identically.

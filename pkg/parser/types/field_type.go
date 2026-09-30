@@ -559,11 +559,27 @@ func (ft *FieldType) Restore(ctx *format.RestoreCtx) error {
 		ctx.WriteKeyWord(" BINARY")
 	}
 
-	if IsTypeChar(ft.GetType()) || IsTypeBlob(ft.GetType()) {
+	switch {
+	case IsTypeChar(ft.GetType()) || IsTypeBlob(ft.GetType()):
+		// The binary charset is carried by the type name (BINARY,
+		// VARBINARY, BLOB), so it is not written again.
 		if ft.charset != "" && ft.charset != charset.CharsetBin {
 			ctx.WriteKeyWord(" CHARACTER SET " + ft.charset)
 		}
 		if ft.collate != "" && ft.collate != charset.CharsetBin {
+			ctx.WriteKeyWord(" COLLATE ")
+			ctx.WritePlain(ft.collate)
+		}
+	case ft.GetType() == mysql.TypeEnum || ft.GetType() == mysql.TypeSet:
+		// ENUM and SET have no binary type name, so every charset,
+		// binary included, is written out. Dropping it would create the
+		// column in the table's default charset instead.
+		if ft.charset != "" {
+			ctx.WriteKeyWord(" CHARACTER SET " + ft.charset)
+		}
+		// The binary charset has only the binary collation, which the
+		// CHARACTER SET clause already implies.
+		if ft.collate != "" && (ft.charset != charset.CharsetBin || ft.collate != charset.CollationBin) {
 			ctx.WriteKeyWord(" COLLATE ")
 			ctx.WritePlain(ft.collate)
 		}

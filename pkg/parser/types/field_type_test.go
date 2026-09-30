@@ -15,11 +15,13 @@ package types_test
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/block/spirit/pkg/parser"
 	"github.com/block/spirit/pkg/parser/ast"
 	"github.com/block/spirit/pkg/parser/charset"
+	"github.com/block/spirit/pkg/parser/format"
 	"github.com/block/spirit/pkg/parser/mysql"
 
 	// import parser_driver
@@ -270,6 +272,62 @@ func TestEnumSetFlen(t *testing.T) {
 		require.NoError(t, err)
 		col := stmt.(*ast.CreateTableStmt).Cols[0]
 		require.Equal(t, ca.ex, col.Tp.GetFlen())
+	}
+}
+
+// TestEnumSetBinaryCharset checks that an ENUM or SET column declared with the
+// binary charset (CHARACTER SET binary or BYTE) parses with the binary
+// collation, which is what MySQL stores, and without the binary flag: unlike
+// CHAR/VARCHAR/TEXT there is no binary type name for the flag to select.
+func TestEnumSetBinaryCharset(t *testing.T) {
+	p := parser.New()
+	cases := []struct {
+		sql     string
+		charset string
+		collate string
+		binFlag bool
+	}{
+		{"enum('a') CHARACTER SET binary", charset.CharsetBin, charset.CollationBin, false},
+		{"enum('a') BYTE", charset.CharsetBin, charset.CollationBin, false},
+		{"set('a') CHARACTER SET binary", charset.CharsetBin, charset.CollationBin, false},
+		{"set('a') BYTE", charset.CharsetBin, charset.CollationBin, false},
+		{"enum('a') CHARACTER SET latin1", charset.CharsetLatin1, "", false},
+		{"enum('a') BINARY", "", "", true},
+		{"set('a') CHARACTER SET latin1 BINARY", charset.CharsetLatin1, "", true},
+		{"enum('a')", "", "", false},
+	}
+	for _, ca := range cases {
+		stmt, err := p.ParseOneStmt(fmt.Sprintf("create table t (e %v)", ca.sql), "", "")
+		require.NoError(t, err, ca.sql)
+		tp := stmt.(*ast.CreateTableStmt).Cols[0].Tp
+		require.Equal(t, ca.charset, tp.GetCharset(), ca.sql)
+		require.Equal(t, ca.collate, tp.GetCollate(), ca.sql)
+		require.Equal(t, ca.binFlag, mysql.HasBinaryFlag(tp.GetFlag()), ca.sql)
+	}
+}
+
+// TestEnumSetRestoreCollate pins how Restore writes an ENUM/SET type-level
+// collation: written, except the binary collation that CHARACTER SET binary
+// already implies. The grammar sets a type-level collation on an ENUM/SET for
+// the binary charset and for a routine parameter or return type written with
+// COLLATE (a column's COLLATE is a column option instead).
+func TestEnumSetRestoreCollate(t *testing.T) {
+	for _, tc := range []struct {
+		tp            byte
+		cs, coll, out string
+	}{
+		{mysql.TypeEnum, charset.CharsetLatin1, "latin1_bin", "ENUM('a') CHARACTER SET LATIN1 COLLATE latin1_bin"},
+		{mysql.TypeSet, charset.CharsetBin, charset.CollationBin, "SET('a') CHARACTER SET BINARY"},
+		{mysql.TypeEnum, "", "utf8mb4_bin", "ENUM('a') COLLATE utf8mb4_bin"},
+		{mysql.TypeSet, charset.CharsetLatin1, "", "SET('a') CHARACTER SET LATIN1"},
+	} {
+		ft := NewFieldType(tc.tp)
+		ft.SetElems([]string{"a"})
+		ft.SetCharset(tc.cs)
+		ft.SetCollate(tc.coll)
+		var sb strings.Builder
+		require.NoError(t, ft.Restore(format.NewRestoreCtx(format.DefaultRestoreFlags, &sb)))
+		require.Equal(t, tc.out, sb.String())
 	}
 }
 

@@ -74,7 +74,10 @@ syntax. Forking lets us:
   set (upstream only doubles the quote character, so `'a\\b'` restored
   as `'a\b'` and a COMMENT containing a newline restored across two
   lines). `RestoreStringEscapeBackslash` now only affects unquoted
-  output.
+  output. ENUM and SET columns restore an explicit charset, binary
+  included (`ENUM('a','b') CHARACTER SET BINARY`); upstream writes a
+  column charset only for CHAR/VARCHAR/TEXT, so the restored DDL created
+  the column in the table's default charset.
 
 The AST (`ast` package), `format` restore machinery, `charset`, `mysql`
 constants, `opcode`, and `types` packages keep their upstream shapes, so

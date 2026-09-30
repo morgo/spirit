@@ -1437,6 +1437,111 @@ func TestDiffIntegrationBinaryCharsetConverges(t *testing.T) {
 	require.Nil(t, stmts, "re-diff after applying the ALTER must converge")
 }
 
+// TestIntegrationEnumSetCharsetRestoredAlter runs the restored alter of an
+// ENUM or SET column with an explicit charset against MySQL, and checks the
+// column has that charset rather than the table's utf8mb4 default. The
+// migration runner executes this restored text (for the INSTANT and INPLACE
+// attempts and for the shadow table), so a dropped charset silently changes
+// the schema.
+//
+// information_schema.columns reports CHARACTER_SET_NAME and COLLATION_NAME as
+// NULL for an ENUM or SET in the binary charset, so the binary cases expect
+// NULL. The bug being guarded against yields 'utf8mb4'.
+func TestIntegrationEnumSetCharsetRestoredAlter(t *testing.T) {
+	for _, tc := range []struct {
+		name, alter string
+		charset     sql.NullString
+		collation   sql.NullString
+	}{
+		{"add_enum_binary", "ALTER TABLE t ADD COLUMN c enum('a','b') CHARACTER SET binary", sql.NullString{}, sql.NullString{}},
+		{"add_enum_byte", "ALTER TABLE t ADD COLUMN c enum('a','b') BYTE", sql.NullString{}, sql.NullString{}},
+		{"add_enum_latin1", "ALTER TABLE t ADD COLUMN c enum('a','b') CHARACTER SET latin1", sql.NullString{String: "latin1", Valid: true}, sql.NullString{String: "latin1_swedish_ci", Valid: true}},
+		{"add_enum_ascii", "ALTER TABLE t ADD COLUMN c enum('a','b') ASCII", sql.NullString{String: "latin1", Valid: true}, sql.NullString{String: "latin1_swedish_ci", Valid: true}},
+		{"add_enum_latin1_binary_attr", "ALTER TABLE t ADD COLUMN c enum('a','b') CHARACTER SET latin1 BINARY", sql.NullString{String: "latin1", Valid: true}, sql.NullString{String: "latin1_bin", Valid: true}},
+		{"modify_set_binary", "ALTER TABLE t MODIFY c set('a','b') CHARACTER SET binary DEFAULT 'a'", sql.NullString{}, sql.NullString{}},
+		{"modify_set_latin1", "ALTER TABLE t MODIFY c set('a','b') CHARACTER SET latin1", sql.NullString{String: "latin1", Valid: true}, sql.NullString{String: "latin1_swedish_ci", Valid: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tbl := "enum_set_charset_" + tc.name
+			ddl := "CREATE TABLE " + tbl + " (id int NOT NULL PRIMARY KEY) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci"
+			if strings.Contains(tc.alter, "MODIFY") {
+				ddl = "CREATE TABLE " + tbl + " (id int NOT NULL PRIMARY KEY, c set('a','b')) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci"
+			}
+			tt := testutils.NewTestTable(t, tbl, ddl)
+
+			stmts, err := New(tc.alter)
+			require.NoError(t, err)
+			testutils.RunSQL(t, fmt.Sprintf("ALTER TABLE `%s` %s", tt.Name, stmts[0].Alter))
+
+			var cs, coll sql.NullString
+			require.NoError(t, tt.DB.QueryRowContext(t.Context(),
+				"SELECT character_set_name, collation_name FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? AND column_name = 'c'",
+				tt.Name).Scan(&cs, &coll))
+			require.Equal(t, tc.charset, cs, "restored alter: %s", stmts[0].Alter)
+			require.Equal(t, tc.collation, coll, "restored alter: %s", stmts[0].Alter)
+			if !tc.charset.Valid {
+				require.Contains(t, showCreateTable(t, tt.DB, tt.Name), "CHARACTER SET binary COLLATE binary")
+			}
+		})
+	}
+}
+
+// TestDiffIntegrationEnumSetBinaryCharset verifies that an ENUM or SET column
+// declared with the binary charset (CHARACTER SET binary or BYTE) matches its
+// live form, which MySQL reports as CHARACTER SET binary COLLATE binary.
+// Without the binary collation on the declared side, the diff emits a MODIFY
+// that MySQL stores as the same column again, on every run.
+func TestDiffIntegrationEnumSetBinaryCharset(t *testing.T) {
+	ddl := "CREATE TABLE diff_enum_set_binary (id int NOT NULL, a enum('x','y') CHARACTER SET binary, b set('x','y') CHARACTER SET binary DEFAULT 'x', c enum('x','y') BYTE, d set('x','y') BYTE, e enum('x','y') CHARACTER SET binary COLLATE binary, PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci"
+	tt := testutils.NewTestTable(t, "diff_enum_set_binary", ddl)
+	desired, err := ParseCreateTable(ddl)
+	require.NoError(t, err)
+	live, err := ParseCreateTable(showCreateTable(t, tt.DB, tt.Name))
+	require.NoError(t, err)
+	stmts, err := live.Diff(desired, nil)
+	require.NoError(t, err)
+	require.Nil(t, stmts, "an enum/set column with the binary charset must match its live form")
+	stmts, err = desired.Diff(live, nil)
+	require.NoError(t, err)
+	require.Nil(t, stmts, "the live form must match an enum/set column with the binary charset")
+}
+
+// TestDiffIntegrationEnumSetBareUTF8MB4ConvergesThroughRestore applies the
+// diff's MODIFY through the parser-restored alter the runner executes, and
+// requires the re-diff to be empty. A declared ENUM/SET naming CHARACTER SET
+// utf8mb4 without a COLLATE takes the server default, so against a column
+// inheriting a utf8mb4_bin or latin1 table default the diff emits a MODIFY. If
+// the restore drops the charset, the MODIFY is a no-op and the plan never
+// converges.
+func TestDiffIntegrationEnumSetBareUTF8MB4ConvergesThroughRestore(t *testing.T) {
+	for i, tc := range []struct{ tableDefault, colType string }{
+		{"DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin", "enum('x','y')"},
+		{"DEFAULT CHARSET=latin1", "set('x','y')"},
+	} {
+		t.Run(fmt.Sprint(i), func(t *testing.T) {
+			tbl := fmt.Sprintf("enum_set_bare_utf8mb4_%d", i)
+			tt := testutils.NewTestTable(t, tbl, fmt.Sprintf("CREATE TABLE %s (id int NOT NULL PRIMARY KEY, c %s) %s", tbl, tc.colType, tc.tableDefault))
+			desired, err := ParseCreateTable(fmt.Sprintf("CREATE TABLE %s (id int NOT NULL PRIMARY KEY, c %s CHARACTER SET utf8mb4) %s", tbl, tc.colType, tc.tableDefault))
+			require.NoError(t, err)
+
+			live, err := ParseCreateTable(showCreateTable(t, tt.DB, tt.Name))
+			require.NoError(t, err)
+			plan, err := live.Diff(desired, nil)
+			require.NoError(t, err)
+			require.Len(t, plan, 1)
+			stmts, err := New(plan[0].Statement)
+			require.NoError(t, err)
+			testutils.RunSQL(t, fmt.Sprintf("ALTER TABLE `%s` %s", tt.Name, stmts[0].Alter))
+
+			live, err = ParseCreateTable(showCreateTable(t, tt.DB, tt.Name))
+			require.NoError(t, err)
+			plan, err = live.Diff(desired, nil)
+			require.NoError(t, err)
+			require.Nil(t, plan, "restored alter %q did not converge", stmts[0].Alter)
+		})
+	}
+}
+
 // A TEXT(M) or BLOB(M) column is stored as the smallest type that holds M
 // bytes, so a table created from those declarations must diff clean against
 // them. Without textBlobLengthNormalizer the diff emits `MODIFY COLUMN ...

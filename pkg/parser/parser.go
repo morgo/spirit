@@ -22288,6 +22288,12 @@ yynewstate:
 			}
 			tp.SetFlen(fieldLen)
 			tp.SetCharset(opt.Charset)
+			if opt.Charset == charset.CharsetBin {
+				// CHARACTER SET binary (or BYTE) has only the binary
+				// collation, which is what MySQL stores. There is no binary
+				// type name to switch to, so the binary flag is not set.
+				tp.SetCollate(charset.CollationBin)
+			}
 			if opt.IsBinary {
 				tp.AddFlag(mysql.BinaryFlag)
 			}
@@ -22307,6 +22313,12 @@ yynewstate:
 			}
 			tp.SetFlen(fieldLen)
 			tp.SetCharset(opt.Charset)
+			if opt.Charset == charset.CharsetBin {
+				// CHARACTER SET binary (or BYTE) has only the binary
+				// collation, which is what MySQL stores. There is no binary
+				// type name to switch to, so the binary flag is not set.
+				tp.SetCollate(charset.CollationBin)
+			}
 			if opt.IsBinary {
 				tp.AddFlag(mysql.BinaryFlag)
 			}
