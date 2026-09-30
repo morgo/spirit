@@ -925,12 +925,36 @@ func TestDiff(t *testing.T) {
 			expected: "",
 		},
 		{
-			// Any utf8mb4 collation matches, as it does for a utf8mb4 table
-			// default without a COLLATE.
-			name:     "Utf8mb4ColumnWithoutCollationMatchesAnyUtf8mb4Collation",
-			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, b varchar(3) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL) DEFAULT CHARSET=latin1",
+			// default_collation_for_utf8mb4 can also be utf8mb4_general_ci,
+			// which the bare column then takes.
+			name:     "Utf8mb4ColumnWithoutCollationMatchesGeneralCI",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, b varchar(3) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT NULL) DEFAULT CHARSET=latin1",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, b varchar(3) CHARACTER SET utf8mb4) DEFAULT CHARSET=latin1",
 			expected: "",
+		},
+		{
+			// default_collation_for_utf8mb4 accepts only utf8mb4_0900_ai_ci
+			// and utf8mb4_general_ci, so a live column on utf8mb4_bin is
+			// never what the bare column creates: it is MODIFYed.
+			name:     "Utf8mb4ColumnWithoutCollationDetectsNonDefaultCollation",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, b varchar(3) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL) DEFAULT CHARSET=latin1",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, b varchar(3) CHARACTER SET utf8mb4) DEFAULT CHARSET=latin1",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `b` varchar(3) CHARACTER SET utf8mb4 NULL",
+		},
+		{
+			name:     "Utf8mb4ColumnWithoutCollationDetectsNonDefaultCollation_Utf8mb4Table",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, b varchar(3) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, b varchar(3) CHARACTER SET utf8mb4) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `b` varchar(3) CHARACTER SET utf8mb4 NULL",
+		},
+		{
+			// The bare column on the source side of a diff between two
+			// declared schemas: a target that names a non-default collation
+			// is still applied.
+			name:     "Utf8mb4ColumnWithoutCollationToExplicitNonDefaultCollation",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, b varchar(3) CHARACTER SET utf8mb4) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, b varchar(3) COLLATE utf8mb4_bin) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `b` varchar(3) COLLATE utf8mb4_bin NULL",
 		},
 		{
 			// The charset is still compared: a utf8mb4 column does not match
@@ -944,9 +968,10 @@ func TestDiff(t *testing.T) {
 			// A column that inherits a utf8mb4 table default is not covered
 			// by the exception: it takes the table's collation, so a live
 			// column on another collation is MODIFYed back onto it, and the
-			// MODIFY converges.
+			// MODIFY converges. The source is the live form, which spells
+			// the charset out.
 			name:     "InheritingColumnStillDetectsCollationDrift",
-			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, b varchar(3) COLLATE utf8mb4_bin DEFAULT NULL) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, b varchar(3) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, b varchar(3)) DEFAULT CHARSET=utf8mb4",
 			expected: "ALTER TABLE `t1` MODIFY COLUMN `b` varchar(3) NULL",
 		},
@@ -1916,6 +1941,40 @@ func TestDiff_DiffOptions(t *testing.T) {
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, b VARCHAR(100)) CHARSET=latin1",
 			opts:     &DiffOptions{IgnoreCharsetCollation: true, IgnoreAutoIncrement: true, IgnoreEngine: true},
 			expected: "ALTER TABLE `t1` MODIFY COLUMN `b` varchar(100) NULL",
+		},
+		{
+			// A column naming utf8mb4 without a COLLATE still matches its
+			// live form when resolution against the table defaults is
+			// skipped, in both directions.
+			name:     "IgnoreCharsetCollation_Utf8mb4ColumnWithoutCollation",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, b char(4) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci DEFAULT 'a') DEFAULT CHARSET=latin1",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, b char(4) CHARACTER SET utf8mb4 DEFAULT 'a') DEFAULT CHARSET=latin1",
+			opts:     &DiffOptions{IgnoreCharsetCollation: true, IgnoreAutoIncrement: true, IgnoreEngine: true},
+			expected: "",
+		},
+		{
+			name:     "IgnoreCharsetCollation_Utf8mb4ColumnWithoutCollation_Reverse",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, b char(4) CHARACTER SET utf8mb4 DEFAULT 'a') DEFAULT CHARSET=latin1",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, b char(4) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci DEFAULT 'a') DEFAULT CHARSET=latin1",
+			opts:     &DiffOptions{IgnoreCharsetCollation: true, IgnoreAutoIncrement: true, IgnoreEngine: true},
+			expected: "",
+		},
+		{
+			name:     "IgnoreCharsetCollation_Utf8mb4ColumnWithoutCollationDetectsNonDefault",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, b char(4) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT 'a') DEFAULT CHARSET=latin1",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, b char(4) CHARACTER SET utf8mb4 DEFAULT 'a') DEFAULT CHARSET=latin1",
+			opts:     &DiffOptions{IgnoreCharsetCollation: true, IgnoreAutoIncrement: true, IgnoreEngine: true},
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `b` char(4) CHARACTER SET utf8mb4 NULL DEFAULT 'a'",
+		},
+		{
+			// A column that names utf8mb4 *with* a COLLATE is not the bare
+			// case: its written collation is compared, even against a
+			// server-default collation.
+			name:     "IgnoreCharsetCollation_Utf8mb4ColumnWithCollationStillCompared",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, b char(4) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT 'a') DEFAULT CHARSET=latin1",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, b char(4) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci DEFAULT 'a') DEFAULT CHARSET=latin1",
+			opts:     &DiffOptions{IgnoreCharsetCollation: true, IgnoreAutoIncrement: true, IgnoreEngine: true},
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `b` char(4) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NULL DEFAULT 'a'",
 		},
 
 		// IgnorePartitioning
