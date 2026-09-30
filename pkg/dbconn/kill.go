@@ -32,6 +32,19 @@ var (
 	TransactionWeightThreshold int64 = 1_000_000
 
 	ErrTableLockFound = errors.New("explicit table lock found! spirit cannot proceed")
+
+	// errHeavyTransactionSkipped marks a kill that left a blocking transaction
+	// alive because its weight exceeds TransactionWeightThreshold.
+	errHeavyTransactionSkipped = errors.New("a blocking transaction is too heavy to kill safely")
+
+	// errBlockerLookupFailed marks a kill that could not list the blocking
+	// sessions, so it killed nothing. The lookup can fail for as long as a
+	// transaction is running a statement MySQL cannot copy into
+	// information_schema.innodb_trx: MySQL 9.7 fails every read of that table
+	// while a running statement's text holds a 4-byte character, such as an
+	// emoji. The statement's lock wait outlasts most such statements, so the
+	// kill looks again while the statement still waits.
+	errBlockerLookupFailed = errors.New("could not list the sessions blocking the lock")
 )
 
 // forceKillGracePeriod returns how long to wait before force-killing
@@ -116,17 +129,29 @@ WHERE t.processlist_id = ?
 	killStatement    = "KILL %d"
 
 	// forceKillPrivilegeProbe verifies the connection can read every
-	// performance_schema / information_schema table the force-kill queries
-	// (TableLockQuery and LongRunningEventQuery) depend on. It selects zero rows
-	// (LIMIT 0) so it neither scans nor logs, but MySQL still enforces
-	// table-level SELECT privileges at prepare time, so a missing grant surfaces
-	// as an error.
+	// performance_schema table the force-kill queries (TableLockQuery and
+	// LongRunningEventQuery) depend on. It selects zero rows (LIMIT 0) so it
+	// neither scans nor logs, but MySQL still enforces table-level SELECT
+	// privileges at prepare time, so a missing grant surfaces as an error.
+	// It does not prove the PROCESS privilege that
+	// information_schema.innodb_trx needs: see processPrivilegeProbe.
 	forceKillPrivilegeProbe = `SELECT 1
 FROM performance_schema.metadata_locks ml
     JOIN performance_schema.threads t ON ml.owner_thread_id = t.thread_id
     LEFT JOIN performance_schema.events_transactions_current etc ON etc.thread_id = ml.owner_thread_id
     LEFT JOIN information_schema.innodb_trx trx ON t.processlist_id = trx.trx_mysql_thread_id
 LIMIT 0`
+
+	// processPrivilegeProbe verifies the connection holds PROCESS, which
+	// information_schema.innodb_trx needs. MySQL checks PROCESS for the InnoDB
+	// information_schema tables only when it fills them, and it skips the fill
+	// for a query that can return no rows, so forceKillPrivilegeProbe passes
+	// without it. This probe can return a row, so MySQL fills the table and
+	// checks the privilege. It reads INNODB_METRICS, which needs the same
+	// PROCESS privilege, rather than innodb_trx itself: filling innodb_trx
+	// copies every running statement's text, and on MySQL 9.7 that fails
+	// while any of them contains a character utf8mb3 cannot hold.
+	processPrivilegeProbe = "SELECT 1 FROM information_schema.innodb_metrics LIMIT 1"
 )
 
 type LockDetail struct {
@@ -146,7 +171,7 @@ type LockDetail struct {
 }
 
 func KillLockingTransactions(ctx context.Context, db *sql.DB, tables []*table.TableInfo, config *DBConfig, logger *slog.Logger, ignorePIDs []int) error {
-	_, err := killLockingTransactions(ctx, db, tables, config, logger, ignorePIDs)
+	_, _, err := killBlockers(ctx, db, tables, config, logger, ignorePIDs)
 	return err
 }
 
@@ -167,13 +192,26 @@ func statementIsWaitingForTableLock(ctx context.Context, db *sql.DB, tables []*t
 	return pending > 0, nil
 }
 
-// killLockingTransactions also returns the successfully signalled sessions.
-// KILL acknowledges the request before rollback and lock release complete.
+// killLockingTransactions also returns the successfully signalled sessions,
+// including when killing another one failed. KILL acknowledges the request
+// before rollback and lock release complete. A blocker left alive because it
+// is too heavy to kill is reported as errHeavyTransactionSkipped.
 func killLockingTransactions(ctx context.Context, db *sql.DB, tables []*table.TableInfo, config *DBConfig, logger *slog.Logger, ignorePIDs []int) ([]int, error) {
+	killed, heavy, err := killBlockers(ctx, db, tables, config, logger, ignorePIDs)
+	if len(heavy) > 0 {
+		err = errors.Join(err, fmt.Errorf("%w: sessions %v", errHeavyTransactionSkipped, heavy))
+	}
+	return killed, err
+}
+
+// killBlockers kills the transactions holding locks on tables. It returns the
+// sessions it signalled and the blocking sessions it left alive because their
+// transactions are too heavy to kill.
+func killBlockers(ctx context.Context, db *sql.DB, tables []*table.TableInfo, config *DBConfig, logger *slog.Logger, ignorePIDs []int) (killed, heavy []int, err error) {
 	// First, check if there are explicit table locks that would prevent us from acquiring the metadata lock.
 	locks, err := GetTableLocks(ctx, db, tables, logger, ignorePIDs)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get table locks: %w", err)
+		return nil, nil, fmt.Errorf("%w: failed to get table locks: %w", errBlockerLookupFailed, err)
 	}
 	if len(locks) > 0 {
 		// If we find any table locks, we cannot proceed with the metadata lock.
@@ -188,28 +226,26 @@ func killLockingTransactions(ctx context.Context, db *sql.DB, tables []*table.Ta
 				"objectName", lock.ObjectName,
 			)
 		}
-		return nil, ErrTableLockFound
+		return nil, nil, ErrTableLockFound
 	}
-	pids, err := GetLockingTransactions(ctx, db, tables, config, logger, ignorePIDs)
+	pids, heavy, err := getLockingTransactions(ctx, db, tables, logger, ignorePIDs)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get locking transactions: %w", err)
+		return nil, nil, fmt.Errorf("%w: failed to get locking transactions: %w", errBlockerLookupFailed, err)
 	}
 	// Now we can kill these transactions
 	var errs []error
-	var killed []int
 	for _, pid := range pids {
 		logger.Warn("killing locking transaction", "pid", pid)
-		err = KillTransaction(ctx, db, pid)
-		if err != nil {
+		if err := KillTransaction(ctx, db, pid); err != nil {
 			errs = append(errs, fmt.Errorf("failed to kill transaction %d: %w", pid, err))
 		} else {
 			killed = append(killed, pid)
 		}
 	}
 	if len(errs) > 0 {
-		return nil, fmt.Errorf("errors occurred while killing locking transactions: %w", errors.Join(errs...))
+		return killed, heavy, fmt.Errorf("errors occurred while killing locking transactions: %w", errors.Join(errs...))
 	}
-	return killed, nil
+	return killed, heavy, nil
 }
 
 // GetLockingTransactions queries the performance schema to find locking transactions
@@ -218,6 +254,13 @@ func killLockingTransactions(ctx context.Context, db *sql.DB, tables []*table.Ta
 // If a transaction's weight exceeds the TransactionWeightThreshold, it will be skipped.
 // If no long-running transactions are found, it returns nil.
 func GetLockingTransactions(ctx context.Context, db *sql.DB, tables []*table.TableInfo, config *DBConfig, logger *slog.Logger, ignorePIDs []int) ([]int, error) {
+	pids, _, err := getLockingTransactions(ctx, db, tables, logger, ignorePIDs)
+	return pids, err
+}
+
+// getLockingTransactions is GetLockingTransactions that also returns the
+// sessions it skipped because their transactions are too heavy to kill.
+func getLockingTransactions(ctx context.Context, db *sql.DB, tables []*table.TableInfo, logger *slog.Logger, ignorePIDs []int) (pids, heavy []int, err error) {
 	// This function should query the performance schema to find long-running transactions
 	// that are holding locks on the specified tables.
 
@@ -246,7 +289,7 @@ func GetLockingTransactions(ctx context.Context, db *sql.DB, tables []*table.Tab
 
 	rows, err := db.QueryContext(ctx, query, params...)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer utils.CloseAndLog(rows)
 
@@ -268,7 +311,7 @@ func GetLockingTransactions(ctx context.Context, db *sql.DB, tables []*table.Tab
 			&lock.RunningTime,
 			&lock.TrxWeight,
 		); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		logger.Info("found locking transaction",
 			"pid", lock.PID,
@@ -282,11 +325,11 @@ func GetLockingTransactions(ctx context.Context, db *sql.DB, tables []*table.Tab
 		locks = append(locks, lock)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	if len(locks) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	var uniquePids []int
@@ -296,6 +339,9 @@ func GetLockingTransactions(ctx context.Context, db *sql.DB, tables []*table.Tab
 				"pid", lock.PID,
 				"weight", lock.TrxWeight.Int64,
 				"threshold", TransactionWeightThreshold)
+			if !slices.Contains(heavy, lock.PID) {
+				heavy = append(heavy, lock.PID)
+			}
 			continue // Skip transactions that are too heavy
 		}
 		// Check if this PID is already in the unique list using slices.Contains
@@ -306,7 +352,7 @@ func GetLockingTransactions(ctx context.Context, db *sql.DB, tables []*table.Tab
 
 	logger.Info("found locking transactions", "count", len(uniquePids), "pids", uniquePids)
 
-	return uniquePids, nil
+	return uniquePids, heavy, nil
 }
 
 func GetTableLocks(ctx context.Context, db *sql.DB, tables []*table.TableInfo, logger *slog.Logger, ignorePIDs []int) ([]*LockDetail, error) {
@@ -336,7 +382,6 @@ func GetTableLocks(ctx context.Context, db *sql.DB, tables []*table.TableInfo, l
 
 	rows, err := tx.QueryContext(ctx, query, params...)
 	if err != nil {
-		logger.Error("failed to query table locks", "error", err)
 		return nil, err
 	}
 	defer utils.CloseAndLog(rows)
@@ -370,17 +415,66 @@ func GetTableLocks(ctx context.Context, db *sql.DB, tables []*table.TableInfo, l
 	return locks, nil
 }
 
-// CheckForceKillPrivileges verifies that the connection can read the
-// performance_schema and information_schema tables required by the force-kill
-// queries used during cutover (see GetTableLocks and GetLockingTransactions).
-// It returns an error when any of those tables is inaccessible — for example,
-// when the user lacks SELECT on performance_schema.*.
+// CheckForceKillPrivileges verifies that the connection's user holds every
+// privilege force-kill needs: SELECT on the performance_schema tables its
+// queries read (see GetTableLocks and GetLockingTransactions), PROCESS to read
+// information_schema.innodb_trx, and CONNECTION_ADMIN or SUPER to kill another
+// user's session. It returns an error naming each one that is missing.
 //
-// It is intended for preflight privilege checks: the probe selects zero rows
-// and logs nothing, so unlike GetTableLocks / GetLockingTransactions it neither
-// scans server-wide locks nor emits "found locking transaction" log lines.
-func CheckForceKillPrivileges(ctx context.Context, db *sql.DB) (err error) {
-	rows, err := db.QueryContext(ctx, forceKillPrivilegeProbe)
+// A privilege the user lacks matches ErrForceKillPrivilegeMissing. A read
+// that fails for another reason, such as a lost connection, does not, so a
+// caller can tell a missing grant from a check it could not run.
+//
+// It is intended for preflight privilege checks. It reads SHOW GRANTS, one
+// row of information_schema.innodb_metrics, no rows of the performance_schema
+// lock tables, and, when rds_superuser_role is granted, the global
+// activate_all_roles_on_login. It logs nothing, so unlike GetTableLocks /
+// GetLockingTransactions it neither scans server-wide locks nor emits "found
+// locking transaction" log lines.
+func CheckForceKillPrivileges(ctx context.Context, db *sql.DB) error {
+	var errs []error
+	if err := runPrivilegeProbe(ctx, db, forceKillPrivilegeProbe); err != nil {
+		errs = append(errs, markAccessDenied(fmt.Errorf("read the performance_schema lock tables: %w", err)))
+	}
+	if err := runPrivilegeProbe(ctx, db, processPrivilegeProbe); err != nil {
+		errs = append(errs, markAccessDenied(fmt.Errorf("check for PROCESS, which information_schema.innodb_trx needs: %w", err)))
+	}
+	if err := checkKillPrivilege(ctx, db); err != nil {
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
+}
+
+// ErrForceKillPrivilegeMissing matches an error from CheckForceKillPrivileges
+// that names a privilege the user lacks.
+var ErrForceKillPrivilegeMissing = errors.New("missing a privilege force-kill needs")
+
+// missingPrivilegeError marks err as a missing privilege without changing
+// its text.
+type missingPrivilegeError struct{ err error }
+
+func (e missingPrivilegeError) Error() string { return e.err.Error() }
+func (e missingPrivilegeError) Unwrap() error { return e.err }
+func (e missingPrivilegeError) Is(target error) bool {
+	return target == ErrForceKillPrivilegeMissing
+}
+
+// markAccessDenied marks a probe's error as a missing privilege when MySQL
+// denied the read, and leaves any other failure as it is.
+func markAccessDenied(err error) error {
+	if myErr, ok := errors.AsType[*mysql.MySQLError](err); ok {
+		switch myErr.Number {
+		case parsermysql.ErrTableaccessDenied, parsermysql.ErrSpecificAccessDenied:
+			return missingPrivilegeError{err}
+		}
+	}
+	return err
+}
+
+// runPrivilegeProbe runs a probe query and drains its result, so an error
+// raised while the server fills the result surfaces too.
+func runPrivilegeProbe(ctx context.Context, db *sql.DB, query string) (err error) {
+	rows, err := db.QueryContext(ctx, query)
 	if err != nil {
 		return err
 	}
@@ -391,8 +485,6 @@ func CheckForceKillPrivileges(ctx context.Context, db *sql.DB) (err error) {
 			err = cerr
 		}
 	}()
-	// Drain the (zero-row) result set so any driver-side error surfaces during
-	// iteration before we check rows.Err().
 	for rows.Next() {
 	}
 	return rows.Err()

@@ -1,6 +1,7 @@
 package dbconn
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"log/slog"
@@ -124,51 +125,180 @@ func TestKillLongRunningTransactions(t *testing.T) {
 	}
 }
 
-// TestCheckForceKillPrivileges verifies the preflight privilege probe used by
-// the move and migration checks: it must error when the connection lacks SELECT
-// on performance_schema.* and succeed once it is granted. Because the probe
-// selects zero rows it never emits "found locking transaction" log lines during
-// preflight. A root connection is required to create the restricted user and
-// grant privileges (the default test user lacks GRANT OPTION).
+// TestCheckForceKillPrivileges verifies the preflight privilege check used by
+// the move and migration checks: it must name each force-kill privilege the
+// user lacks (SELECT on performance_schema.*, PROCESS, CONNECTION_ADMIN) and
+// succeed once all are granted. Because the probes return at most one row it
+// never emits "found locking transaction" log lines during preflight. A root
+// connection is required to create the restricted user and grant privileges
+// (the default test user lacks GRANT OPTION).
 func TestCheckForceKillPrivileges(t *testing.T) {
 	config, err := mysql.ParseDSN(testutils.DSN())
 	require.NoError(t, err)
 	config.User = "root" // needs grant privilege
 	rootDB, err := sql.Open("block-mysql", fmt.Sprintf("%s:%s@tcp(%s)/%s", config.User, config.Passwd, config.Addr, config.DBName))
 	require.NoError(t, err)
-	defer utils.CloseAndLog(rootDB)
+	// Close in a cleanup, not a defer: cleanups run last-in first-out after
+	// the test returns, so the drops registered below still have a connection.
+	t.Cleanup(func() { utils.CloseAndLog(rootDB) })
 
 	_, err = rootDB.ExecContext(t.Context(), "DROP USER IF EXISTS testforcekillprobeuser")
 	require.NoError(t, err)
 	_, err = rootDB.ExecContext(t.Context(), "CREATE USER testforcekillprobeuser")
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		_, _ = rootDB.ExecContext(t.Context(), "DROP USER IF EXISTS testforcekillprobeuser")
+		_, _ = rootDB.ExecContext(context.Background(), "DROP USER IF EXISTS testforcekillprobeuser")
 	})
-	// Grant SELECT on the test schema only, so the user can connect but cannot
-	// read performance_schema.
+	// Grant SELECT on the test schema only, so the user can connect but holds
+	// none of the force-kill privileges.
 	_, err = rootDB.ExecContext(t.Context(), "GRANT SELECT ON test.* TO testforcekillprobeuser")
 	require.NoError(t, err)
 
-	connect := func() *sql.DB {
+	// check reconnects, so each new grant is picked up.
+	check := func() error {
 		db, err := sql.Open("block-mysql", fmt.Sprintf("testforcekillprobeuser:@tcp(%s)/%s", config.Addr, config.DBName))
 		require.NoError(t, err)
-		return db
+		defer utils.CloseAndLog(db)
+		return CheckForceKillPrivileges(t.Context(), db)
 	}
 
-	lowPrivDB := connect()
-	require.Error(t, CheckForceKillPrivileges(t.Context(), lowPrivDB),
-		"probe must fail without SELECT on performance_schema.*")
-	require.NoError(t, lowPrivDB.Close())
+	err = check()
+	require.ErrorContains(t, err, "read the performance_schema lock tables")
+	require.ErrorContains(t, err, "check for PROCESS")
+	require.ErrorContains(t, err, "missing CONNECTION_ADMIN or SUPER privilege")
+	require.ErrorIs(t, err, ErrForceKillPrivilegeMissing)
 
 	_, err = rootDB.ExecContext(t.Context(), "GRANT SELECT ON `performance_schema`.* TO testforcekillprobeuser")
 	require.NoError(t, err)
+	err = check()
+	require.NotContains(t, err.Error(), "performance_schema lock tables")
+	// The LIMIT 0 lock-table probe joins innodb_trx too, but MySQL checks
+	// PROCESS only when it fills that table.
+	require.ErrorContains(t, err, "check for PROCESS")
+	require.ErrorContains(t, err, "PROCESS")
+	require.ErrorContains(t, err, "missing CONNECTION_ADMIN or SUPER privilege")
+	require.ErrorIs(t, err, ErrForceKillPrivilegeMissing)
 
-	// Reconnect so the new grant is picked up.
-	grantedDB := connect()
-	defer utils.CloseAndLog(grantedDB)
-	require.NoError(t, CheckForceKillPrivileges(t.Context(), grantedDB),
-		"probe must succeed once SELECT on performance_schema.* is granted")
+	// Each probe's own access-denied error names a missing privilege, so
+	// grant the rest and check one probe at a time.
+	_, err = rootDB.ExecContext(t.Context(), "GRANT CONNECTION_ADMIN ON *.* TO testforcekillprobeuser")
+	require.NoError(t, err)
+	err = check()
+	require.ErrorContains(t, err, "check for PROCESS")
+	require.NotContains(t, err.Error(), "CONNECTION_ADMIN")
+	require.ErrorIs(t, err, ErrForceKillPrivilegeMissing)
+
+	_, err = rootDB.ExecContext(t.Context(), "GRANT PROCESS ON *.* TO testforcekillprobeuser")
+	require.NoError(t, err)
+	require.NoError(t, check(), "check must pass once every force-kill privilege is granted")
+
+	_, err = rootDB.ExecContext(t.Context(), "REVOKE SELECT ON `performance_schema`.* FROM testforcekillprobeuser")
+	require.NoError(t, err)
+	err = check()
+	require.ErrorContains(t, err, "read the performance_schema lock tables")
+	require.NotContains(t, err.Error(), "check for PROCESS")
+	require.ErrorIs(t, err, ErrForceKillPrivilegeMissing)
+
+	// A check that cannot run names no missing privilege.
+	closed, err := sql.Open("block-mysql", testutils.DSN())
+	require.NoError(t, err)
+	require.NoError(t, closed.Close())
+	err = CheckForceKillPrivileges(t.Context(), closed)
+	require.ErrorContains(t, err, "sql: database is closed")
+	require.NotErrorIs(t, err, ErrForceKillPrivilegeMissing)
+}
+
+// The check must not depend on what other sessions are running. Filling
+// information_schema.innodb_trx copies each running statement's text, and on
+// some MySQL versions that fails while a statement holds a character utf8mb3
+// cannot store, so the check proves PROCESS without reading innodb_trx.
+func TestCheckForceKillPrivilegesBesideAFourByteCharacterStatement(t *testing.T) {
+	db, err := New(testutils.DSN(), NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	statementDone := runFourByteCharacterStatement(t, ctx, db, "forcekill_probe_mb4", 3)
+	require.NoError(t, CheckForceKillPrivileges(ctx, db))
+	require.NoError(t, <-statementDone)
+}
+
+// runFourByteCharacterStatement starts, in a transaction that has read its own
+// table, a statement that holds a 4-byte character and runs for seconds. It
+// returns once the statement is running, with a channel for its result. MySQL
+// 9.7 fails every read of information_schema.innodb_trx until the statement
+// ends, because it cannot copy the statement's text into that table.
+func runFourByteCharacterStatement(t *testing.T, ctx context.Context, db *sql.DB, tableName string, seconds int) <-chan error {
+	t.Helper()
+	tt := testutils.NewTestTable(t, tableName, fmt.Sprintf("CREATE TABLE %s (id INT PRIMARY KEY)", tableName))
+	// Reading an InnoDB table puts the transaction in innodb_trx, with its
+	// running statement's text.
+	tx, err := tt.DB.BeginTx(ctx, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = tx.Rollback() })
+	var pid int
+	require.NoError(t, tx.QueryRowContext(ctx, "SELECT CONNECTION_ID()").Scan(&pid))
+	_, err = tx.ExecContext(ctx, "SELECT * FROM "+tableName)
+	require.NoError(t, err)
+	stmt := fmt.Sprintf("SELECT SLEEP(%d), '\U0001F600'", seconds)
+	statementDone := make(chan error, 1)
+	go func() {
+		_, err := tx.ExecContext(ctx, stmt)
+		statementDone <- err
+	}()
+	require.Eventually(t, func() bool {
+		var n int
+		err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM performance_schema.threads WHERE processlist_id = ? AND processlist_info LIKE ?", pid, fmt.Sprintf("SELECT SLEEP(%d)%%", seconds)).Scan(&n)
+		return err == nil && n == 1
+	}, 2*time.Second, 10*time.Millisecond, "the statement must be running")
+	return statementDone
+}
+
+// A user can hold the force-kill privileges through a role. The check counts
+// them while the role is active on the session, and not once it is inactive,
+// since only an active role's privileges let the session kill.
+func TestCheckForceKillPrivilegesThroughARole(t *testing.T) {
+	config, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	config.User = "root" // needs grant privilege
+	rootDB, err := sql.Open("block-mysql", fmt.Sprintf("%s:%s@tcp(%s)/%s", config.User, config.Passwd, config.Addr, config.DBName))
+	require.NoError(t, err)
+	// Close in a cleanup, not a defer: cleanups run last-in first-out after
+	// the test returns, so the drops registered below still have a connection.
+	t.Cleanup(func() { utils.CloseAndLog(rootDB) })
+
+	for _, stmt := range []string{
+		"DROP USER IF EXISTS testforcekillroleuser",
+		"DROP ROLE IF EXISTS testforcekillrole",
+		"CREATE ROLE testforcekillrole",
+		"GRANT CONNECTION_ADMIN, PROCESS ON *.* TO testforcekillrole",
+		"GRANT SELECT ON `performance_schema`.* TO testforcekillrole",
+		"CREATE USER testforcekillroleuser",
+		"GRANT SELECT ON test.* TO testforcekillroleuser",
+		"GRANT testforcekillrole TO testforcekillroleuser",
+		"SET DEFAULT ROLE testforcekillrole TO testforcekillroleuser",
+	} {
+		_, err = rootDB.ExecContext(t.Context(), stmt)
+		require.NoError(t, err, stmt)
+	}
+	t.Cleanup(func() {
+		_, _ = rootDB.ExecContext(context.Background(), "DROP USER IF EXISTS testforcekillroleuser")
+		_, _ = rootDB.ExecContext(context.Background(), "DROP ROLE IF EXISTS testforcekillrole")
+	})
+
+	db, err := sql.Open("block-mysql", fmt.Sprintf("testforcekillroleuser:@tcp(%s)/%s", config.Addr, config.DBName))
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+	// SET ROLE is per session, so pin one connection.
+	db.SetMaxOpenConns(1)
+	require.NoError(t, CheckForceKillPrivileges(t.Context(), db), "the default role grants every force-kill privilege")
+
+	_, err = db.ExecContext(t.Context(), "SET ROLE NONE")
+	require.NoError(t, err)
+	err = CheckForceKillPrivileges(t.Context(), db)
+	require.ErrorContains(t, err, "read the performance_schema lock tables")
+	require.ErrorContains(t, err, "check for PROCESS")
+	require.ErrorContains(t, err, "missing CONNECTION_ADMIN or SUPER privilege")
 }
 
 func TestForceKillGracePeriod(t *testing.T) {

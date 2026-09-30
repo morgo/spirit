@@ -1,12 +1,16 @@
 package dbconn
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -377,6 +381,35 @@ func TestTableLockCloseDuringExecUnderLock(t *testing.T) {
 	require.Zero(t, db.Stats().InUse)
 }
 
+// The table lock's kill must still end a blocker while another transaction
+// runs a statement that holds a 4-byte character. On MySQL 9.7 the kill
+// cannot list the blockers until that statement ends, so it looks again while
+// LOCK TABLES waits, and the lock is acquired before its timeout.
+func TestTableLockKillsBesideAFourByteCharacterStatement(t *testing.T) {
+	tt := testutils.NewTestTable(t, "tablelock_mb4", "CREATE TABLE tablelock_mb4 (id INT PRIMARY KEY)")
+	config := NewDBConfig()
+	config.LockWaitTimeout = 10
+	config.ForceKillAfter = time.Second
+	db, err := New(testutils.DSN(), config)
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
+	blocker, err := tt.DB.BeginTx(ctx, nil)
+	require.NoError(t, err)
+	defer func() { _ = blocker.Rollback() }()
+	_, err = blocker.ExecContext(ctx, "SELECT * FROM tablelock_mb4")
+	require.NoError(t, err)
+	statementDone := runFourByteCharacterStatement(t, ctx, db, "tablelock_mb4_other", 2)
+	tbl := &table.TableInfo{SchemaName: "test", TableName: "tablelock_mb4", QuotedTableName: "`tablelock_mb4`"}
+	lock, err := NewTableLock(ctx, db, []*table.TableInfo{tbl}, config, slog.Default())
+	require.NoError(t, err)
+	require.NoError(t, lock.Close(ctx))
+	_, err = blocker.ExecContext(ctx, "SELECT 1")
+	require.Error(t, err, "the blocker must have been killed")
+	require.NoError(t, <-statementDone)
+}
+
 // TestExecUnderLockCancellation checks that a statement started under the lock
 // is not interrupted by a cancel of the caller's context (issue #1338), that no
 // statement starts after a cancel, and that a statement still running when the
@@ -427,4 +460,54 @@ func TestExecUnderLockCancellation(t *testing.T) {
 		_ = lock.Close(t.Context())
 		require.Zero(t, db.Stats().InUse)
 	})
+}
+
+// The table lock's kill looks for the blockers again while LOCK TABLES
+// waits, and stops once it returns, so a lookup that never succeeds cannot
+// hold up NewTableLock, which waits for the kill before it returns.
+func TestTableLockStopsLookingOnceLockTablesReturns(t *testing.T) {
+	lockCtx, lockDone := context.WithCancel(t.Context())
+	t.Cleanup(lockDone)
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	// LOCK TABLES returns while the third lookup runs.
+	const lookups = 3
+	var calls, lateCalls atomic.Int32
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		killTableLockBlockers(t.Context(), lockCtx, logger, func(context.Context) error {
+			if lockCtx.Err() != nil {
+				lateCalls.Add(1)
+			}
+			if calls.Add(1) == lookups {
+				lockDone()
+			}
+			return fmt.Errorf("%w: %w", errBlockerLookupFailed, io.EOF)
+		})
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		require.FailNow(t, "the kill must stop looking once LOCK TABLES returns")
+	}
+	require.Equal(t, int32(lookups), calls.Load(), "the kill must look again while LOCK TABLES waits, and not after")
+	require.Zero(t, lateCalls.Load(), "no lookup may start after LOCK TABLES returns")
+	require.Equal(t, 1, strings.Count(logs.String(), "could not list the sessions blocking the table lock"))
+	require.Contains(t, logs.String(), "level=WARN msg=\"stopped looking for the sessions blocking the table lock")
+	require.NotContains(t, logs.String(), "level=ERROR")
+}
+
+// A kill that fails for another reason, such as an explicit table lock, is
+// not retried.
+func TestTableLockDoesNotRetryAKillThatListedTheBlockers(t *testing.T) {
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	calls := 0
+	killTableLockBlockers(t.Context(), t.Context(), logger, func(context.Context) error {
+		calls++
+		return ErrTableLockFound
+	})
+	require.Equal(t, 1, calls)
+	require.Contains(t, logs.String(), "failed to kill locking transactions")
 }

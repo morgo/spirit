@@ -23,7 +23,8 @@ func init() {
 //   - RELOAD for FLUSH TABLES
 //   - Table-level privileges (SELECT, INSERT, etc.) on the source database
 //   - LOCK TABLES for cutover
-//   - CONNECTION_ADMIN + PROCESS + performance_schema access for force-kill (enabled by default)
+//   - CONNECTION_ADMIN or SUPER, PROCESS, and performance_schema access for
+//     force-kill (enabled by default), checked by dbconn.CheckForceKillPrivileges
 //   - Visibility of every view, trigger, event and stored routine in the
 //     source schema in information_schema, so the source_schema_objects check
 //     cannot pass just because they are hidden (see schemaGrants)
@@ -35,17 +36,16 @@ func init() {
 // rds_superuser_role counts for what SHOW GRANTS lists for it, and its name
 // alone counts for nothing.
 //
-// The one exception is older than the visibility requirement: on RDS, a
-// granted rds_superuser_role is accepted by name in place of CONNECTION_ADMIN
-// and PROCESS when activate_all_roles_on_login=ON (see
-// rdsSuperuserRoleActive), and the visibility requirement left it as it was.
-// Those two privileges are only used by force-kill during cutover, to find
-// and kill other users' sessions that block the table lock. If the role lacks
-// them, the kill fails and is logged, and the cutover waits for the blocking
-// sessions or times out with an error. It never goes ahead without the lock,
-// and no object is missed. Visibility is
-// different: without it, the object scan sees an empty schema and passes, so
-// no name-based exemption applies to it.
+// The force-kill privileges are checked by dbconn.CheckForceKillPrivileges.
+// On RDS it accepts a granted rds_superuser_role by name in place of
+// CONNECTION_ADMIN when activate_all_roles_on_login=ON, and proves PROCESS by
+// reading an InnoDB information_schema table. Force-kill uses those
+// privileges only during cutover, to find and kill other users' sessions that
+// block the table lock. If the role lacks CONNECTION_ADMIN, the kill fails
+// and is logged, and the cutover waits for the blocking sessions or times out
+// with an error. It never goes ahead without the lock, and no object is
+// missed. Visibility is different: without it, the object scan sees an empty
+// schema and passes, so no name-based exemption applies to it.
 func privilegesCheck(ctx context.Context, r Resources, _ *slog.Logger) error {
 	for i, src := range r.Sources {
 		if err := checkSourcePrivileges(ctx, src); err != nil {
@@ -77,7 +77,7 @@ type querier interface {
 // sourcePrivileges checks one source's privileges (see privilegesCheck).
 // forceKillProbe checks the privileges force-kill needs.
 func sourcePrivileges(ctx context.Context, db querier, schemaName string, forceKillProbe func(context.Context) error) error {
-	var foundAll, foundSuper, foundReplicationClient, foundReplicationSlave, foundDBAll, foundReload, foundConnectionAdmin, foundProcess bool
+	var foundAll, foundSuper, foundReplicationClient, foundReplicationSlave, foundDBAll, foundReload bool
 
 	grants, err := readGrants(ctx, db)
 	if err != nil {
@@ -108,46 +108,19 @@ func sourcePrivileges(ctx context.Context, db querier, schemaName string, forceK
 		if schemaName != "" && utils.DBLevelGrantCoversSchema(grant, schemaName) {
 			foundDBAll = true
 		}
-		if strings.Contains(grant, `CONNECTION_ADMIN`) && strings.Contains(grant, ` ON *.*`) {
-			foundConnectionAdmin = true
-		}
-		if strings.Contains(grant, `PROCESS`) && strings.Contains(grant, ` ON *.*`) {
-			foundProcess = true
-		}
 	}
 	if foundAll {
 		return schemaObjectVisibilityFromGrants(grants, schemaName, allSchemaObjects...)
 	}
 
-	// A granted rds_superuser_role stands in for CONNECTION_ADMIN and PROCESS
-	// when activate_all_roles_on_login=ON (see privilegesCheck for why this
-	// name-based exemption covers only these two force-kill privileges).
-	skipRolePrivilegeCheck, err := rdsSuperuserRoleActive(ctx, db, grants)
-	if err != nil {
-		return err
-	}
-
-	// Move operations always use force-kill (it's enabled by default in DBConfig).
-	// Check the force-kill related privileges.
-	var errs []error
-
-	// Verify SELECT access on performance_schema.*, which is required for the
-	// queries used by force-kill during cutover. This is a privilege probe only:
-	// it selects zero rows and logs nothing. The actual lock detection (which
-	// does log) runs during cutover, not preflight.
+	// Move operations always use force-kill (it's enabled by default in
+	// DBConfig), so its privileges are required. The check logs nothing; the
+	// lock detection that does log runs during cutover, not preflight.
 	if err := forceKillProbe(ctx); err != nil {
-		errs = append(errs, err)
-	}
-	if !skipRolePrivilegeCheck {
-		if !foundConnectionAdmin && !foundSuper {
-			errs = append(errs, errors.New("missing CONNECTION_ADMIN or SUPER privilege"))
+		if errors.Is(err, dbconn.ErrForceKillPrivilegeMissing) {
+			return fmt.Errorf("insufficient privileges to run a move with force-kill enabled. Needed: CONNECTION_ADMIN/SUPER, PROCESS, and SELECT on performance_schema.*: %w", err)
 		}
-		if !foundProcess {
-			errs = append(errs, errors.New("missing PROCESS privilege"))
-		}
-	}
-	if len(errs) > 0 {
-		return fmt.Errorf("insufficient privileges to run a move with force-kill enabled. Needed: CONNECTION_ADMIN/SUPER, PROCESS, and SELECT on performance_schema.*: %w", errors.Join(errs...))
+		return fmt.Errorf("could not check the privileges force-kill needs: %w", err)
 	}
 
 	hasBasePrivileges := (foundSuper && foundReplicationSlave && foundDBAll) ||
@@ -156,33 +129,6 @@ func sourcePrivileges(ctx context.Context, db querier, schemaName string, forceK
 		return fmt.Errorf("insufficient privileges to run a move. Needed: SUPER|REPLICATION CLIENT, RELOAD, REPLICATION SLAVE and ALL on %s.*", schemaName)
 	}
 	return schemaObjectVisibilityFromGrants(grants, schemaName, allSchemaObjects...)
-}
-
-// rdsSuperuserRoleActive reports whether the user has the RDS
-// rds_superuser_role and activate_all_roles_on_login=ON makes it active on
-// every connection. Its presence is then accepted in place of CONNECTION_ADMIN
-// and PROCESS, whatever SHOW GRANTS lists for it; this exemption predates the
-// visibility requirement and does not apply to it (see privilegesCheck). The
-// server setting is read only when the role is granted. A failed
-// read is returned as an error, so that a transient failure is never taken
-// for a missing privilege.
-func rdsSuperuserRoleActive(ctx context.Context, db dbconn.RowQuerier, grants []string) (bool, error) {
-	if !rdsSuperuserRoleGranted(grants) {
-		return false, nil
-	}
-	return dbconn.ActivateAllRolesOnLogin(ctx, db)
-}
-
-// rdsSuperuserRoleGranted reports whether a role grant line, such as
-// GRANT `rds_superuser_role`@`%` TO `user`@`%`, grants rds_superuser_role.
-func rdsSuperuserRoleGranted(grants []string) bool {
-	for _, grant := range grants {
-		if strings.HasPrefix(grant, "GRANT `") && strings.Contains(grant, " TO ") &&
-			slices.Contains(utils.ParseRoleNames(grant), "rds_superuser_role") {
-			return true
-		}
-	}
-	return false
 }
 
 // schemaObject is a kind of schema object whose visibility in

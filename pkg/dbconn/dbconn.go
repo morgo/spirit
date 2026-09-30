@@ -15,6 +15,7 @@ import (
 
 	"github.com/block/mysql"
 	"github.com/block/spirit/pkg/dbconn/sqlescape"
+	parsermysql "github.com/block/spirit/pkg/parser/mysql"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/utils"
 )
@@ -478,15 +479,17 @@ func forceExec(ctx context.Context, db *sql.DB, dbConfig *DBConfig, logger *slog
 			}
 			return result.err
 		}
-		// The kill step never ends a LOCK TABLES session, so another attempt
-		// succeeds only if that session happens to unlock in time. Until
-		// then its exclusive metadata lock request queues for a full lock
-		// wait timeout again, blocking reads and writes to the table.
-		if errors.Is(result.killErr, ErrTableLockFound) {
-			logger.Warn("not retrying statement after lock wait timeout: an explicit table lock blocks it, and force-kill does not end LOCK TABLES sessions",
+		// A blocker the kill could not end is still there for the next
+		// attempt, whose kill cannot end it either. That attempt succeeds only
+		// if the blocker happens to finish in time. Until then its exclusive
+		// metadata lock request queues for a full lock wait timeout again,
+		// blocking reads and writes to the table.
+		if reason, survives := blockerSurvivesKill(result); survives {
+			logger.Warn("not retrying statement after lock wait timeout: "+reason,
 				"attempt", attempt,
 				"max_attempts", attempts,
 				"error", result.err,
+				"kill_error", result.killErr,
 			)
 			return result.err
 		}
@@ -589,6 +592,8 @@ func execWithKillWorker(ctx context.Context, conn *sql.Conn, connID int, delay t
 // A second failure in a row restarts the wait: over a longer stretch the
 // statement could have got its lock and started a new wait, and its blockers
 // must get the full delay from then.
+// A kill that could not list the blockers killed nothing, so the worker tries
+// again at the next poll that still sees the statement waiting.
 // The kill runs on ctx, so it finishes even if the statement returns while it
 // runs.
 func killWhenWaiting(ctx, stmtCtx context.Context, connID int, started time.Time, delay time.Duration, waiting func(context.Context, int) (bool, error), kill func(context.Context, int) ([]int, error), logger *slog.Logger) forceExecAttempt {
@@ -596,6 +601,7 @@ func killWhenWaiting(ctx, stmtCtx context.Context, connID int, started time.Time
 	lastNotWaiting := started
 	sawWaiting := false
 	lastCheckFailed := false
+	lookupFailed := false
 	// A statement can be queued from its start, so the first check is due by
 	// the delay even before any check has seen it waiting.
 	next := time.NewTimer(untilNextCheck(started, lastNotWaiting, delay, true))
@@ -630,7 +636,21 @@ func killWhenWaiting(ctx, stmtCtx context.Context, connID int, started time.Time
 		case checkStarted.Sub(lastNotWaiting) >= delay:
 			attempt.killAttempted = true
 			attempt.killed, attempt.killErr = kill(ctx, connID)
-			return attempt
+			if !errors.Is(attempt.killErr, errBlockerLookupFailed) {
+				return attempt
+			}
+			// The kill could not list the blockers, so it killed nothing.
+			// Look again once a poll interval has passed, and only if the
+			// statement is still waiting then. This check succeeded and saw
+			// the wait, so a single failed check after it keeps the wait.
+			if !lookupFailed {
+				logger.Warn("could not list the sessions blocking the statement; looking again while it waits", "error", attempt.killErr)
+				lookupFailed = true
+			}
+			sawWaiting = true
+			lastCheckFailed = false
+			next.Reset(killPollInterval)
+			continue
 		default:
 			sawWaiting = true
 		}
@@ -653,6 +673,22 @@ func untilNextCheck(now, lastNotWaiting time.Time, delay time.Duration, waiting 
 		return max(untilDelay, 0)
 	}
 	return killPollInterval
+}
+
+// blockerSurvivesKill reports whether the attempt's kill left a blocker that
+// no kill ends, and why. It does not cover a kill that found nothing to end:
+// that blocker may have finished on its own, or a new one taken its place,
+// and the next attempt's kill handles either.
+func blockerSurvivesKill(a forceExecAttempt) (reason string, survives bool) {
+	switch {
+	case errors.Is(a.killErr, ErrTableLockFound):
+		return "an explicit table lock blocks it, and force-kill does not end LOCK TABLES sessions", true
+	case errors.Is(a.killErr, errHeavyTransactionSkipped):
+		return "a blocking transaction is too heavy to roll back safely, and force-kill does not end it", true
+	case errors.Is(a.killErr, &mysql.MySQLError{Number: parsermysql.ErrKillDenied}):
+		return "the user may not kill a blocking session: it needs CONNECTION_ADMIN or SUPER, and SYSTEM_USER if the session belongs to a SYSTEM_USER account", true
+	}
+	return "", false
 }
 
 func shouldRetryForceExecAfterKill(err error, killAttempted bool) bool {

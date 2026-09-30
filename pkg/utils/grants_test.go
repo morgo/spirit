@@ -169,6 +169,10 @@ func TestGlobalGrantHasAny(t *testing.T) {
 		{"GRANT EVENT ON `app`.* TO `u`@`%`", []string{"EVENT"}, false},
 		{"GRANT SELECT ON `performance_schema`.* TO `u`@`%`", []string{"SELECT"}, false},
 		{"GRANT `role1`@`%` TO `u`@`%`", []string{"SELECT"}, false},
+		{"GRANT CONNECTION_ADMIN,SYSTEM_VARIABLES_ADMIN ON *.* TO `u`@`%`", []string{"CONNECTION_ADMIN", "SUPER"}, true},
+		{"GRANT SELECT, PROCESS ON *.* TO `u`@`%`", []string{"CONNECTION_ADMIN", "SUPER"}, false},
+		{"GRANT `rds_SUPERuser_role`@`%` TO `u`@`%`", []string{"SUPER"}, false},
+		{"GRANT SELECT ON *.* TO `SUPER`@`%`", []string{"SUPER"}, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.grant, func(t *testing.T) {
