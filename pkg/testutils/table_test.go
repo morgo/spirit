@@ -21,15 +21,41 @@ func TestDropArtifactsRespectsDeadline(t *testing.T) {
 	t.Cleanup(func() { _ = trx.Rollback() }) // release before table cleanup
 	_, err = trx.ExecContext(t.Context(), "SELECT * FROM cleanup_locked")
 	require.NoError(t, err)
+	// The transaction holds the pool's only connection. Warm a second, idle
+	// one now so dropArtifacts reaches the MDL wait under the deadline
+	// instead of racing a fresh dial against it.
+	require.NoError(t, tt.DB.PingContext(t.Context()))
 
 	// The transaction holds MDL, so DROP cannot complete until it ends.
 	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 	defer cancel()
 	err = tt.dropArtifacts(ctx)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
-	require.Equal(t, 1, strings.Count(err.Error(), context.DeadlineExceeded.Error()), "report the deadline only once")
+	// Count joined leaves, not substrings of err.Error(): a deadline hit
+	// inside the driver can read "i/o timeout" and still wrap
+	// context.DeadlineExceeded.
+	require.Equal(t, 1, countJoinedLeaves(err, context.DeadlineExceeded), "report the deadline only once")
 	require.NoError(t, trx.Rollback())
 	require.NoError(t, tt.dropArtifacts(t.Context()))
+}
+
+// countJoinedLeaves walks the errors.Join tree of err and counts the leaves
+// (errors that do not unwrap to a slice) that match target via errors.Is.
+func countJoinedLeaves(err, target error) int {
+	if err == nil {
+		return 0
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		var n int
+		for _, e := range joined.Unwrap() {
+			n += countJoinedLeaves(e, target)
+		}
+		return n
+	}
+	if errors.Is(err, target) {
+		return 1
+	}
+	return 0
 }
 
 func TestDropArtifactsReportsErrors(t *testing.T) {
