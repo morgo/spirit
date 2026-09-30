@@ -56,7 +56,9 @@ var maxConnLifetime = time.Minute * 3
 // sets them, and timeout= only covers the dial, so without this a server that
 // accepts the TCP connection but never completes the handshake blocks New
 // forever. A live server completes the handshake in milliseconds, so 30s
-// only fires on a server that is stalled or unreachable.
+// only fires on a server that is stalled or unreachable. A DSN that sets a
+// longer timeout= gets that value as the deadline instead, because the dial
+// runs under the same context and would otherwise be cut short.
 const connectTimeout = 30 * time.Second
 
 // sessionWaitTimeout is the wait_timeout, in seconds, set on every spirit
@@ -494,6 +496,11 @@ func newWithConnectTimeout(inputDSN string, config *DBConfig, connectionType str
 	dsn, err := newDSN(inputDSN, config)
 	if err != nil {
 		return nil, err
+	}
+	// The dial runs under the ping's context, so a DSN timeout= longer than
+	// the ping deadline would be silently cut short. Honor the longer value.
+	if cfg, err := mysql.ParseDSN(dsn); err == nil && cfg.Timeout > timeout {
+		timeout = cfg.Timeout
 	}
 	defer func() {
 		if db != nil && err == nil { // successful connection

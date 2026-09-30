@@ -387,6 +387,30 @@ func TestValidCertificateBundle(t *testing.T) {
 // returns the listener's address.
 func stalledServer(t *testing.T) string {
 	t.Helper()
+	return stalledServerWithGreeting(t, nil)
+}
+
+// noTLSGreeting is a HandshakeV10 greeting packet whose capability flags omit
+// CLIENT_SSL: protocol 10, server version, connection id, scramble part 1,
+// filler, capabilities (lower) = LONG_PASSWORD|PROTOCOL_41|SECURE_CONNECTION,
+// charset, status, capabilities (upper) = PLUGIN_AUTH, scramble length,
+// reserved, scramble part 2, auth plugin name.
+func noTLSGreeting() []byte {
+	payload := []byte{0x0a}
+	payload = append(payload, "8.0.0\x00"...)
+	payload = append(payload, 1, 0, 0, 0)
+	payload = append(payload, "abcdefgh"...)
+	payload = append(payload, 0x00, 0x01, 0x82, 0xff, 0x02, 0x00, 0x08, 0x00, 21)
+	payload = append(payload, make([]byte, 10)...)
+	payload = append(payload, "ijklmnopqrst\x00"...)
+	payload = append(payload, "mysql_native_password\x00"...)
+	return append([]byte{byte(len(payload)), 0, 0, 0}, payload...)
+}
+
+// stalledServerWithGreeting is stalledServer, except that it writes greeting
+// (if non-nil) to each connection before going silent.
+func stalledServerWithGreeting(t *testing.T, greeting []byte) string {
+	t.Helper()
 	ln, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	var mu sync.Mutex
@@ -401,6 +425,9 @@ func stalledServer(t *testing.T) string {
 			mu.Lock()
 			conns = append(conns, conn)
 			mu.Unlock()
+			if greeting != nil {
+				_, _ = conn.Write(greeting)
+			}
 		}
 	})
 	t.Cleanup(func() {
@@ -437,4 +464,41 @@ func TestNewStalledHandshakeTimesOut(t *testing.T) {
 			require.Less(t, elapsed, 10*time.Second, "the ping deadline did not bound the handshake")
 		})
 	}
+}
+
+// TestNewPreferredFallbackStalledHandshakeTimesOut covers the PREFERRED
+// plaintext fallback. The server greets without CLIENT_SSL, so the TLS attempt
+// fails with ErrNoTLS and New falls back to plaintext; the server then never
+// answers the handshake response, so the fallback ping stalls in auth. That
+// second ping must be bounded by the same deadline, and a stall after the dial
+// shows the deadline covers more than the dial.
+func TestNewPreferredFallbackStalledHandshakeTimesOut(t *testing.T) {
+	addr := stalledServerWithGreeting(t, noTLSGreeting())
+	cfg := NewDBConfig()
+	cfg.TLSMode = "PREFERRED"
+	const timeout = 200 * time.Millisecond
+	start := time.Now()
+	db, err := newWithConnectTimeout(fmt.Sprintf("spirit:spirit@tcp(%s)/test", addr), cfg, "main database", timeout)
+	elapsed := time.Since(start)
+	require.Nil(t, db)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.ErrorContains(t, err, "[MAIN-DATABASE-CONNECTION-FALLBACK] ping failed")
+	require.Less(t, elapsed, 10*time.Second, "the fallback ping deadline did not bound the handshake")
+}
+
+// TestNewHonorsLongerDSNTimeout checks that a DSN timeout= longer than the
+// ping deadline is not silently cut short: the dial runs under the ping's
+// context, so New uses the longer of the two as the deadline.
+func TestNewHonorsLongerDSNTimeout(t *testing.T) {
+	addr := stalledServer(t)
+	cfg := NewDBConfig()
+	cfg.TLSMode = "DISABLED"
+	const dsnTimeout = time.Second
+	start := time.Now()
+	db, err := newWithConnectTimeout(fmt.Sprintf("spirit:spirit@tcp(%s)/test?timeout=%s", addr, dsnTimeout), cfg, "main database", 100*time.Millisecond)
+	elapsed := time.Since(start)
+	require.Nil(t, db)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.GreaterOrEqual(t, elapsed, dsnTimeout, "a longer DSN timeout= was cut short by the ping deadline")
+	require.Less(t, elapsed, 10*time.Second)
 }
