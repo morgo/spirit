@@ -35,16 +35,19 @@ func init() { registerNormalizer(charBinaryLiteralDefaultNormalizer{}) }
 //     on binary (see [binaryDefaultBytesNormalizer]), and the written literal
 //     already matches that. Bytes that are not valid in the charset at all
 //     are rejected by MySQL.
-//   - ascii and latin1, and a column whose charset the table does not
-//     determine, when every byte is ASCII. Those bytes are the same
-//     characters in any ASCII-compatible charset, which the server default
-//     is taken to be. A latin1 byte above 0x7F is reported transcoded to the
-//     connection's charset, which this rule does not reproduce.
+//   - the single-byte and multi-byte charsets in [asciiCompatibleCharsets],
+//     when every byte is ASCII. Those bytes are the same characters in each of
+//     them. A byte above 0x7F is reported transcoded to the connection's
+//     charset (latin1 x'e9' comes back as 'é'), which this rule does not
+//     reproduce.
 //
-// Every other charset is left alone: utf16 and the other wide charsets pad and
-// decode the bytes their own way. So is a value longer than the column's
-// width, which MySQL rejects, and an expression default, which MySQL stores
-// as written.
+// Every other charset is left alone. utf16 and the other wide charsets pad and
+// decode the bytes their own way, and swe7 maps some ASCII bytes to other
+// characters (x'5b' is 'Ä'). So is a column whose charset the statement does
+// not determine: it takes the database's default charset, which can be any of
+// those (on a utf16 database, char(2) DEFAULT x'6162' stores the one character
+// U+6162). A value longer than the column's width, which MySQL rejects, and an
+// expression default, which MySQL stores as written, are left alone too.
 //
 // The rule reads the column's type through [storedColumnType], so a char or
 // varchar column whose charset resolves to binary is left to
@@ -79,16 +82,34 @@ func (charBinaryLiteralDefaultNormalizer) Normalize(ct *CreateTable) *CreateTabl
 // [charBinaryLiteralDefaultNormalizer] for the charsets it accepts and why.
 func readableInCharset(value string, c *Column, ct *CreateTable) bool {
 	cs, _ := resolvedCharsetCollation(c, ct)
-	switch NormalizeCharsetName(cs) {
-	case charset.CharsetUTF8MB4, charset.CharsetUTF8MB3:
+	cs = NormalizeCharsetName(cs)
+	if cs == charset.CharsetUTF8MB4 || cs == charset.CharsetUTF8MB3 {
 		return utils.ValidUTF8MB3(value)
-	case charset.CharsetASCII, charset.CharsetLatin1, "":
-		for i := range len(value) {
-			if value[i] >= utf8.RuneSelf {
-				return false
-			}
-		}
-		return true
 	}
-	return false
+	if !asciiCompatibleCharsets[cs] {
+		return false // including "", a charset the statement does not determine
+	}
+	for i := range len(value) {
+		if value[i] >= utf8.RuneSelf {
+			return false
+		}
+	}
+	return true
+}
+
+// asciiCompatibleCharsets are the charsets in which each byte from 0x00 to 0x7F
+// is the ASCII character of the same code, so SHOW CREATE TABLE reports a
+// default made of those bytes unchanged. Each was measured against MySQL
+// 8.0.43 with every byte in that range. A charset missing from the list
+// is one the bytes decode differently in (swe7, and the wide charsets ucs2,
+// utf16, utf16le and utf32), or one handled separately (utf8mb4, utf8mb3,
+// binary).
+var asciiCompatibleCharsets = map[string]bool{
+	"armscii8": true, "ascii": true, "big5": true, "cp1250": true, "cp1251": true,
+	"cp1256": true, "cp1257": true, "cp850": true, "cp852": true, "cp866": true,
+	"cp932": true, "dec8": true, "eucjpms": true, "euckr": true, "gb18030": true,
+	"gb2312": true, "gbk": true, "geostd8": true, "greek": true, "hebrew": true,
+	"hp8": true, "keybcs2": true, "koi8r": true, "koi8u": true, "latin1": true,
+	"latin2": true, "latin5": true, "latin7": true, "macce": true, "macroman": true,
+	"sjis": true, "tis620": true, "ujis": true,
 }
