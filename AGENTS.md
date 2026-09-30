@@ -129,7 +129,7 @@ m := NewTestMigration(t, WithThreads(1), WithStatement("ALTER TABLE mytable ENGI
 require.NoError(t, m.Run())
 ```
 
-Available options: `WithThreads(n)`, `WithWriteThreads(n)`, `WithAutoscaling()`, `WithStatement(sql)`, `WithTestThrottler()`, `WithDeferCutOver()`, `WithDBName(name)`, `WithRespectSentinel()`, `WithHost(host)`, `WithReplicaDSN(dsn)`, `WithReplicaMaxLag(d)`, `WithSkipDropAfterCutover()`.
+Available options: `WithThreads(n)`, `WithWriteThreads(n)`, `WithAutoscaling()`, `WithStatement(sql)`, `WithTestThrottler()` (paces the copy at 1s per chunk), `WithCopyStalledAfterChunks(n)` (copies n chunks, then holds the copy until cancel), `WithDeferCutOver()`, `WithDBName(name)`, `WithRespectSentinel()`, `WithHost(host)`, `WithReplicaDSN(dsn)`, `WithReplicaMaxLag(d)`, `WithSkipDropAfterCutover()`.
 
 **General test patterns:**
 - Integration tests connect to real MySQL — there are no mocked database tests for core logic
