@@ -12842,11 +12842,14 @@ StringType:
 		opt := $5.(*ast.OptBinary)
 		tp.SetElems(make([]string, len(elems)))
 		fieldLen := -1 // enum_flen = max(ele_flen)
+		// Members are kept as written. MySQL strips their trailing spaces
+		// only once it has resolved the column's charset, and keeps them
+		// when that is binary, which the grammar cannot see here (COLLATE
+		// binary and a binary table default are both outside this rule).
 		for i, e := range elems {
-			trimmed := strings.TrimRight(e.Value, " ")
-			tp.SetElemWithIsBinaryLit(i, trimmed, e.IsBinaryLiteral)
-			if len(trimmed) > fieldLen {
-				fieldLen = len(trimmed)
+			tp.SetElemWithIsBinaryLit(i, e.Value, e.IsBinaryLiteral)
+			if len(e.Value) > fieldLen {
+				fieldLen = len(e.Value)
 			}
 		}
 		tp.SetFlen(fieldLen)
@@ -12869,10 +12872,10 @@ StringType:
 		opt := $5.(*ast.OptBinary)
 		tp.SetElems(make([]string, len(elems)))
 		fieldLen := len(elems) - 1 // set_flen = sum(ele_flen) + number_of_ele - 1
+		// Members are kept as written, as for ENUM above.
 		for i, e := range elems {
-			trimmed := strings.TrimRight(e.Value, " ")
-			tp.SetElemWithIsBinaryLit(i, trimmed, e.IsBinaryLiteral)
-			fieldLen += len(trimmed)
+			tp.SetElemWithIsBinaryLit(i, e.Value, e.IsBinaryLiteral)
+			fieldLen += len(e.Value)
 		}
 		tp.SetFlen(fieldLen)
 		tp.SetCharset(opt.Charset)

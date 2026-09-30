@@ -922,3 +922,23 @@ func filterRule(vs []Violation, rule string) []Violation {
 	}
 	return out
 }
+
+// TestTypePedantic_SameName_EnumSetMemberSpaces: MySQL strips the trailing
+// spaces from a non-binary enum or set member, so columns written with and
+// without them store the same type. Under the binary charset the spaces are
+// data, and the types differ.
+func TestTypePedantic_SameName_EnumSetMemberSpaces(t *testing.T) {
+	tables := parseTables(t,
+		"CREATE TABLE t1 (id BIGINT PRIMARY KEY, status ENUM('a','b '), tags SET('x','y '), INDEX (status), INDEX (tags)) DEFAULT CHARSET=utf8mb4",
+		"CREATE TABLE t2 (id BIGINT PRIMARY KEY, status ENUM('a','b'), tags SET('x','y'), INDEX (status), INDEX (tags)) DEFAULT CHARSET=utf8mb4",
+	)
+	require.Empty(t, filterRule(newTypePedantic(t).Lint(tables, nil), "same_name"))
+
+	tables = parseTables(t,
+		"CREATE TABLE t1 (id BIGINT PRIMARY KEY, status ENUM('a','b '), INDEX (status)) DEFAULT CHARSET=binary",
+		"CREATE TABLE t2 (id BIGINT PRIMARY KEY, status ENUM('a','b'), INDEX (status)) DEFAULT CHARSET=binary",
+	)
+	sameName := filterRule(newTypePedantic(t).Lint(tables, nil), "same_name")
+	require.Len(t, sameName, 2, "a tie flags both columns")
+	require.Contains(t, sameName[0].Message+sameName[1].Message, "enum('a','b ')")
+}

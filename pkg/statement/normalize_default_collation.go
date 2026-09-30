@@ -39,11 +39,16 @@ func init() { registerNormalizer(defaultCollationNormalizer{}) }
 // MySQL, rather than "any latin1 collation".
 //
 // utf8mb4 is excluded: its default depends on the server version and on
-// default_collation_for_utf8mb4, so it stays underdetermined. binary is left
-// alone: the parser already turns `CHAR(3) CHARACTER SET binary` into BINARY(3)
-// with the binary collation, as MySQL does, binaryCharsetNormalizer does the
-// same for a column that inherits a binary table default, and a binary table
-// default has no other collation to be confused with.
+// default_collation_for_utf8mb4, so it stays underdetermined. The binary
+// charset is filled in only on an enum or set column: the parser already turns
+// `CHAR(3) CHARACTER SET binary` into BINARY(3) with the binary collation, as
+// MySQL does, binaryCharsetNormalizer does the same for a column that inherits
+// a binary table default, and a binary table default has no other collation to
+// be confused with. An enum or set keeps its type, and SHOW CREATE TABLE
+// writes the collation out on it:
+//
+//	b enum('a','b') CHARACTER SET binary (table charset utf8mb4)
+//	  -> enum('a','b') CHARACTER SET binary COLLATE binary
 //
 // A column with the BINARY attribute is left to binaryAttributeNormalizer,
 // which selects the charset's _bin collation for it. Filling in the default
@@ -60,6 +65,13 @@ func (defaultCollationNormalizer) Normalize(ct *CreateTable) *CreateTable {
 			continue
 		}
 		if col.Raw != nil && mysql.HasBinaryFlag(col.Raw.Tp.GetFlag()) {
+			continue
+		}
+		if strings.EqualFold(*col.Charset, charset.CharsetBin) {
+			// Only an enum or set gets here: the parser gives every other
+			// type that declares the binary charset its collation.
+			collation := charset.CollationBin
+			col.Collation = &collation
 			continue
 		}
 		if collation, ok := fixedDefaultCollation(*col.Charset); ok {
