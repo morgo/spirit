@@ -486,19 +486,20 @@ func TestNewPreferredFallbackStalledHandshakeTimesOut(t *testing.T) {
 	require.Less(t, elapsed, 10*time.Second, "the fallback ping deadline did not bound the handshake")
 }
 
-// TestNewHonorsLongerDSNTimeout checks that a DSN timeout= longer than the
-// ping deadline is not silently cut short: the dial runs under the ping's
-// context, so New uses the longer of the two as the deadline.
-func TestNewHonorsLongerDSNTimeout(t *testing.T) {
+// TestNewAddsDSNTimeoutToDeadline checks that a DSN timeout= is added to the
+// ping deadline. The dial runs under the ping's context, so taking only the
+// larger of the two would let a slow dial use up the handshake's budget.
+func TestNewAddsDSNTimeoutToDeadline(t *testing.T) {
 	addr := stalledServer(t)
 	cfg := NewDBConfig()
 	cfg.TLSMode = "DISABLED"
 	const dsnTimeout = time.Second
+	const timeout = 500 * time.Millisecond
 	start := time.Now()
-	db, err := newWithConnectTimeout(fmt.Sprintf("spirit:spirit@tcp(%s)/test?timeout=%s", addr, dsnTimeout), cfg, "main database", 100*time.Millisecond)
+	db, err := newWithConnectTimeout(fmt.Sprintf("spirit:spirit@tcp(%s)/test?timeout=%s", addr, dsnTimeout), cfg, "main database", timeout)
 	elapsed := time.Since(start)
 	require.Nil(t, db)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
-	require.GreaterOrEqual(t, elapsed, dsnTimeout, "a longer DSN timeout= was cut short by the ping deadline")
+	require.GreaterOrEqual(t, elapsed, dsnTimeout+timeout, "the DSN timeout= was not added to the handshake budget")
 	require.Less(t, elapsed, 10*time.Second)
 }
