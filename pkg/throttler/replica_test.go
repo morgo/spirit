@@ -189,6 +189,11 @@ type lagQueryFixture struct {
 const (
 	lagQueryAppliedGTID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:5"
 	lagQueryBehindGTID  = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:10"
+
+	// lagQueryClockAllowanceMs absorbs rate differences between the test's
+	// clock and the MySQL server's (e.g. a server in a VM) over one fixture
+	// call. It is far below every offset the test distinguishes.
+	lagQueryClockAllowanceMs = 50
 )
 
 func newLagQueryFixture(t *testing.T) *lagQueryFixture {
@@ -219,48 +224,66 @@ func newLagQueryFixture(t *testing.T) *lagQueryFixture {
 // applyingOffsetUs and appliedOffsetUs place the commit timestamps relative to
 // the server's NOW(6); a nil applyingOffsetUs means no transaction is in
 // flight. queuedGTID equal to lagQueryAppliedGTID means the queue is caught up.
-func (f *lagQueryFixture) lag(t *testing.T, applyingOffsetUs *int, appliedOffsetUs int, queuedGTID string) int64 {
+//
+// It also returns an upper bound, in milliseconds, on how far the server's
+// NOW(6) advanced between writing the timestamps and running the query: the
+// wall time around both, rounded up, plus 1ms for the query's CEIL and a
+// small allowance for the client and server clocks ticking at slightly
+// different rates.
+func (f *lagQueryFixture) lag(t *testing.T, applyingOffsetUs *int, appliedOffsetUs int, queuedGTID string) (lagMs, elapsedMs int64) {
 	t.Helper()
 	ctx := t.Context()
+	start := time.Now()
 	_, err := f.db.ExecContext(ctx, "REPLACE INTO lagq_worker VALUES ('', NOW(6) + INTERVAL ? MICROSECOND, ?, NOW(6) + INTERVAL ? MICROSECOND)",
 		applyingOffsetUs, lagQueryAppliedGTID, appliedOffsetUs)
 	require.NoError(t, err)
 	_, err = f.db.ExecContext(ctx, "REPLACE INTO lagq_conn VALUES ('', ?, NOW(6))", queuedGTID)
 	require.NoError(t, err)
-	var lag int64
-	require.NoError(t, f.db.QueryRowContext(ctx, f.query).Scan(&lag))
-	return lag
+	require.NoError(t, f.db.QueryRowContext(ctx, f.query).Scan(&lagMs))
+	elapsed := time.Since(start)
+	return lagMs, elapsed.Milliseconds() + 1 + 1 + lagQueryClockAllowanceMs
 }
 
 // TestMySQL8LagQuery covers the lag arithmetic. See
 // https://github.com/block/spirit/issues/1326.
+//
+// The fixture writes commit timestamps relative to NOW(6) in one statement and
+// the query reads NOW(6) in a later one, so every reading grows by however long
+// the round trips took. Offsets that must not be reached are therefore an hour
+// away, and upper bounds are the offset plus the elapsed time the fixture
+// measured, not a fixed margin that a slow runner can exceed.
 func TestMySQL8LagQuery(t *testing.T) {
 	f := newLagQueryFixture(t)
 	offset := func(us int) *int { return &us }
+	const hourUs = 3_600_000_000
 
 	// A commit timestamp ahead of the replica's NOW(6) (clock skew) reports
 	// 0, not a negative lag.
-	require.Equal(t, int64(0), f.lag(t, offset(500_000), 500_000, lagQueryBehindGTID))
+	lag, _ := f.lag(t, offset(hourUs), hourUs, lagQueryBehindGTID)
+	require.Equal(t, int64(0), lag)
 
 	// Committed 5s ago and still behind: the clamp does not hide real lag.
-	lag := f.lag(t, offset(-5_000_000), -5_000_000, lagQueryBehindGTID)
+	lag, elapsedMs := f.lag(t, offset(-5_000_000), -5_000_000, lagQueryBehindGTID)
 	require.GreaterOrEqual(t, lag, int64(5000))
-	require.Less(t, lag, int64(10000))
+	require.LessOrEqual(t, lag, 5000+elapsedMs)
 
 	// Applier only (queue caught up): a transaction that committed 200ms ago
 	// reports at least 200ms. A whole-second NOW() truncates the current
-	// second, so it reads anywhere from -800ms to 200ms here.
-	lag = f.lag(t, offset(-200_000), -1_000_000, lagQueryAppliedGTID)
+	// second, so it reads anywhere from -800ms to 200ms here. The last applied
+	// transaction is an hour old, so the upper bound also proves the caught-up
+	// queue contributes nothing.
+	lag, elapsedMs = f.lag(t, offset(-200_000), -hourUs, lagQueryAppliedGTID)
 	require.GreaterOrEqual(t, lag, int64(200))
-	require.Less(t, lag, int64(1000))
+	require.LessOrEqual(t, lag, 200+elapsedMs)
 
 	// Idle applier with a backlog (SQL thread stopped, IO thread still
 	// queueing): applier_latency_ms is NULL, and the queue latency must still
 	// be reported rather than the whole reading collapsing to 0.
-	lag = f.lag(t, nil, -5_000_000, lagQueryBehindGTID)
+	lag, elapsedMs = f.lag(t, nil, -5_000_000, lagQueryBehindGTID)
 	require.GreaterOrEqual(t, lag, int64(5000))
-	require.Less(t, lag, int64(10000))
+	require.LessOrEqual(t, lag, 5000+elapsedMs)
 
 	// Idle applier and caught up: no lag.
-	require.Equal(t, int64(0), f.lag(t, nil, -5_000_000, lagQueryAppliedGTID))
+	lag, _ = f.lag(t, nil, -5_000_000, lagQueryAppliedGTID)
+	require.Equal(t, int64(0), lag)
 }
