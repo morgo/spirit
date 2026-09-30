@@ -466,6 +466,54 @@ func TestDiffIntegrationDescIndex(t *testing.T) {
 	require.Nil(t, stmts)
 }
 
+// A table created with an fsp of 0 in its timestamp defaults is stored without
+// it, so it must diff clean against the declaration it was created from.
+// Without timestampFspZeroNormalizer the diff emits `MODIFY ... DEFAULT
+// current_timestamp(0)` on every run.
+func TestDiffIntegrationTimestampFspZeroCreatedAsDeclared(t *testing.T) {
+	const declaredSQL = "CREATE TABLE diff_fsp_zero (" +
+		"id int NOT NULL, " +
+		"a datetime(0) DEFAULT CURRENT_TIMESTAMP(0), " +
+		"b timestamp(0) NULL DEFAULT CURRENT_TIMESTAMP(0) ON UPDATE CURRENT_TIMESTAMP(0), " +
+		"c datetime DEFAULT NOW(0) ON UPDATE LOCALTIMESTAMP(0), " +
+		"d datetime DEFAULT (CURRENT_TIMESTAMP(0)), " +
+		"e datetime DEFAULT (NOW(0) + INTERVAL 1 DAY), " +
+		"f time DEFAULT (CURTIME(0)), " +
+		"PRIMARY KEY (id))"
+
+	tt := testutils.NewTestTable(t, "diff_fsp_zero", declaredSQL)
+
+	live := showCreateTable(t, tt.DB, tt.Name)
+	require.Contains(t, live, "`a` datetime DEFAULT CURRENT_TIMESTAMP,")
+	require.Contains(t, live, "`b` timestamp NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,")
+	require.Contains(t, live, "`d` datetime DEFAULT (now()),")
+
+	stmts := diffLiveTable(t, tt.DB, tt.Name, declaredSQL)
+	require.Nil(t, stmts)
+}
+
+// Adding a zero-fsp default to an existing column is a real change: the diff
+// is emitted, MySQL stores the call without the fsp, and a re-diff is clean.
+func TestDiffIntegrationTimestampFspZeroConverges(t *testing.T) {
+	tt := testutils.NewTestTable(t, "diff_fsp_zero_change",
+		"CREATE TABLE diff_fsp_zero_change (id int NOT NULL, a datetime, b datetime, PRIMARY KEY (id))")
+
+	const targetSQL = "CREATE TABLE diff_fsp_zero_change (id int NOT NULL, " +
+		"a datetime(0) DEFAULT CURRENT_TIMESTAMP(0) ON UPDATE CURRENT_TIMESTAMP(0), " +
+		"b datetime DEFAULT (NOW(0) + INTERVAL 1 DAY), " +
+		"PRIMARY KEY (id))"
+
+	stmts := diffLiveTable(t, tt.DB, tt.Name, targetSQL)
+	require.Len(t, stmts, 1)
+
+	execStatements(t, tt.DB, stmts)
+	live := showCreateTable(t, tt.DB, tt.Name)
+	require.Contains(t, live, "`a` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,")
+	require.Contains(t, live, "`b` datetime DEFAULT ((now() + interval 1 day)),")
+
+	requireConverged(t, tt.DB, tt.Name, targetSQL)
+}
+
 // TestDiffIntegrationSubpartitionNoSpuriousDiff verifies that a subpartitioned
 // table does not diff against the definition it was created from. The live
 // definition differs cosmetically in two ways Diff has to absorb: the partition
