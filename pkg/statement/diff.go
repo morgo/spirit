@@ -126,7 +126,9 @@ func charsetOfCollation(collation string) string {
 // charset but no collation uses utf8mb4's default collation, and a table with
 // neither option uses the server defaults — both depend on server version
 // and configuration. Every other charset's default collation is fixed, and
-// defaultCollationNormalizer has already filled it in.
+// defaultCollationNormalizer has already filled it in — except binary's, which
+// is the charset's only collation and is resolved here, because a binary table
+// default is canonicalized without a COLLATE (see binaryCharsetNormalizer).
 func resolvedCharsetCollation(col *Column, table *CreateTable) (charset, collation string) {
 	switch {
 	case col.Collation != nil:
@@ -149,6 +151,9 @@ func resolvedCharsetCollation(col *Column, table *CreateTable) (charset, collati
 		} else if collation != "" {
 			charset = charsetOfCollation(collation)
 		}
+	}
+	if charset == "binary" && collation == "" {
+		collation = "binary"
 	}
 	return charset, collation
 }

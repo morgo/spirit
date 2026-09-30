@@ -2006,3 +2006,69 @@ func TestDiffIntegrationEnumSetDefaultFoldAllowlist(t *testing.T) {
 		assert.False(t, collationFoldsASCIICase(c.cs, c.collation), c.collation)
 	}
 }
+
+// TestDiffIntegrationEnumSetMemberSpaces verifies that an enum or set member
+// written with trailing spaces matches its live form: MySQL keeps the spaces
+// when the column's charset is binary, through its own CHARACTER SET or
+// COLLATE or the table default, and strips them otherwise.
+func TestDiffIntegrationEnumSetMemberSpaces(t *testing.T) {
+	for _, tc := range []struct{ name, ddl, live string }{
+		{"diff_enumsp_charset", "CREATE TABLE diff_enumsp_charset (id int NOT NULL, b enum('a','b ') CHARACTER SET binary DEFAULT 'b ', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
+			"`b` enum('a','b ') CHARACTER SET binary COLLATE binary DEFAULT 'b '"},
+		{"diff_enumsp_collate", "CREATE TABLE diff_enumsp_collate (id int NOT NULL, b enum('a','b ') COLLATE binary DEFAULT 'b ', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
+			"`b` enum('a','b ') CHARACTER SET binary COLLATE binary DEFAULT 'b '"},
+		{"diff_enumsp_tabledefault", "CREATE TABLE diff_enumsp_tabledefault (id int NOT NULL, b enum('a','b ') DEFAULT 'b ', PRIMARY KEY (id)) DEFAULT CHARSET=binary",
+			"`b` enum('a','b ') DEFAULT 'b '"},
+		{"diff_enumsp_set", "CREATE TABLE diff_enumsp_set (id int NOT NULL, b set('a','b ') CHARACTER SET binary DEFAULT 'a,b ', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
+			"`b` set('a','b ') CHARACTER SET binary COLLATE binary DEFAULT 'a,b '"},
+		{"diff_enumsp_utf8mb4", "CREATE TABLE diff_enumsp_utf8mb4 (id int NOT NULL, b enum('a','b ') DEFAULT 'b', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
+			"`b` enum('a','b') DEFAULT 'b'"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tt := testutils.NewTestTable(t, tc.name, tc.ddl)
+			liveSQL := showCreateTable(t, tt.DB, tt.Name)
+			require.Contains(t, liveSQL, tc.live, "the reading this case pins")
+			desired, err := ParseCreateTable(tc.ddl)
+			require.NoError(t, err)
+			live, err := ParseCreateTable(liveSQL)
+			require.NoError(t, err)
+			stmts, err := live.Diff(desired, nil)
+			require.NoError(t, err)
+			require.Nil(t, stmts, "a member written with trailing spaces must match its live form")
+			stmts, err = desired.Diff(live, nil)
+			require.NoError(t, err)
+			require.Nil(t, stmts, "the live form must match a member written with trailing spaces")
+		})
+	}
+}
+
+// TestDiffIntegrationEnumSetMemberSpacesModify verifies that the MODIFY
+// emitted for another change to a binary enum or set column writes each member
+// with its trailing spaces. Written without them, MySQL would store a
+// different member, and reject the default that no longer names one (error
+// 1067). After the ALTER the members and default are unchanged and a re-diff
+// converges to nil.
+func TestDiffIntegrationEnumSetMemberSpacesModify(t *testing.T) {
+	tt := testutils.NewTestTable(t, "diff_enumsp_modify",
+		"CREATE TABLE diff_enumsp_modify (id int NOT NULL, b enum('a','b ') CHARACTER SET binary DEFAULT 'b ', s set('x','y ') CHARACTER SET binary DEFAULT 'y ', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci")
+	desired, err := ParseCreateTable(
+		"CREATE TABLE diff_enumsp_modify (id int NOT NULL, b enum('a','b ') CHARACTER SET binary DEFAULT 'b ' COMMENT 'changed', s set('x','y ') CHARACTER SET binary DEFAULT 'y ' COMMENT 'changed', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci")
+	require.NoError(t, err)
+
+	live, err := ParseCreateTable(showCreateTable(t, tt.DB, tt.Name))
+	require.NoError(t, err)
+	stmts, err := live.Diff(desired, nil)
+	require.NoError(t, err)
+	require.Len(t, stmts, 1)
+	testutils.RunSQL(t, stmts[0].Statement)
+
+	liveSQL := showCreateTable(t, tt.DB, tt.Name)
+	require.Contains(t, liveSQL, "`b` enum('a','b ') CHARACTER SET binary COLLATE binary DEFAULT 'b ' COMMENT 'changed'")
+	require.Contains(t, liveSQL, "`s` set('x','y ') CHARACTER SET binary COLLATE binary DEFAULT 'y ' COMMENT 'changed'")
+
+	live, err = ParseCreateTable(liveSQL)
+	require.NoError(t, err)
+	stmts, err = live.Diff(desired, nil)
+	require.NoError(t, err)
+	require.Nil(t, stmts, "re-diff after applying the ALTER must converge")
+}

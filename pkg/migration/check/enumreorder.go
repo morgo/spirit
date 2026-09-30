@@ -44,8 +44,7 @@ func enumReorderCheck(ctx context.Context, r Resources, logger *slog.Logger) err
 			continue // handled by setReorderCheck
 		}
 
-		newElems := col.ColDef.Tp.GetElems()
-		if len(newElems) == 0 {
+		if len(col.ColDef.Tp.GetElems()) == 0 {
 			continue
 		}
 
@@ -68,6 +67,10 @@ func enumReorderCheck(ctx context.Context, r Resources, logger *slog.Logger) err
 		}
 		if len(existingElems) == 0 {
 			continue
+		}
+		newElems, err := storedNewMembers(ctx, r, col)
+		if err != nil {
+			return err
 		}
 
 		if !isCompatibleEnumChange(existingElems, newElems) {
