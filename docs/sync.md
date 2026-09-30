@@ -51,6 +51,10 @@ source privileges depend on the change feed:
   `SELECT` on the source schema is required for the initial copy. GTID
   auto-detection does not apply to an injected source.
 
+With either feed, a source table with an `ENUM` or `SET` member reported with
+a `?` also needs `CREATE TEMPORARY TABLES` on the source schema, including a
+member that really is `?` (see [Requirements](#requirements)).
+
 ## Requirements
 
 - **MySQL 8.0+** on both ends

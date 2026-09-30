@@ -172,6 +172,52 @@ func TestMisreportedEnumSetErrorIgnoresQuestionMarkMembers(t *testing.T) {
 	assert.Equal(t, []string{"?", "b?"}, members)
 }
 
+// TestMisreportedEnumSetErrorIgnoresEscapedMembers checks that a member
+// information_schema reports escaped (a backslash as \\, a newline as \n) is
+// not mistaken for a misreported one, and is decoded as MySQL stores it.
+func TestMisreportedEnumSetErrorIgnoresEscapedMembers(t *testing.T) {
+	tt := testutils.NewTestTable(t, "enumset_escaped", `CREATE TABLE enumset_escaped (
+		id INT NOT NULL PRIMARY KEY,
+		e ENUM('a\\b','?','nl\nx') NOT NULL
+	) DEFAULT CHARSET=utf8mb4`)
+
+	ti := NewTableInfo(tt.DB, "test", "enumset_escaped")
+	require.NoError(t, ti.SetInfo(t.Context()))
+	require.NoError(t, ti.MisreportedEnumSetError())
+	members, ok := ti.EnumSetMembers("e")
+	require.True(t, ok)
+	assert.Equal(t, []string{`a\b`, "?", "nl\nx"}, members)
+}
+
+// TestSetInfoStoredEnumSetMembersRequirePrimaryKey checks the probe on a
+// server with sql_require_primary_key=ON, which refuses a table without a
+// primary key (error 3750), temporary tables included.
+func TestSetInfoStoredEnumSetMembersRequirePrimaryKey(t *testing.T) {
+	testutils.NewTestTable(t, "enumset_reqpk", `CREATE TABLE enumset_reqpk (
+		id INT NOT NULL PRIMARY KEY,
+		e ENUM('😀','?') NOT NULL
+	) DEFAULT CHARSET=utf8mb4`)
+
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	if cfg.Params == nil {
+		cfg.Params = map[string]string{}
+	}
+	cfg.Params["sql_require_primary_key"] = "ON"
+	db, err := sql.Open("block-mysql", cfg.FormatDSN())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+	var on int
+	require.NoError(t, db.QueryRowContext(t.Context(), "SELECT @@SESSION.sql_require_primary_key").Scan(&on))
+	require.Equal(t, 1, on)
+
+	ti := NewTableInfo(db, "test", "enumset_reqpk")
+	require.NoError(t, ti.SetInfo(t.Context()))
+	members, ok := ti.EnumSetMembers("e")
+	require.True(t, ok)
+	assert.Equal(t, []string{"😀", "?"}, members)
+}
+
 // TestSetInfoStoredEnumSetMembersNeedTemporaryTables checks that SetInfo
 // fails, naming the privilege, when it cannot read back the members of a
 // column reported with a '?', instead of decoding binlog rows to '?'.

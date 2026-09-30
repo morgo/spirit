@@ -292,7 +292,9 @@ func (r *Runner) Run(ctx context.Context) (retErr error) {
 	// Sync only ever reads the source data (copy SELECTs + the change feed).
 	// It never writes the source's data, acquires no source locks, and
 	// performs no cutover. With an injected change.Source it needs only SELECT
-	// on the source schema; the built-in MySQL binlog client additionally
+	// on the source schema (plus CREATE TEMPORARY TABLES for a table with an
+	// ENUM or SET member reported with a '?', see
+	// table.TableInfo.MisreportedEnumSetError); the built-in MySQL binlog client additionally
 	// needs REPLICATION SLAVE/CLIENT (validated on Start) and RELOAD, because
 	// it issues FLUSH BINARY LOGS to establish its start position. Disable the
 	// one dbConfig behaviour that would otherwise demand more:
@@ -718,7 +720,8 @@ func (r *Runner) ChecksumStats() checksum.LocklessCheckerStats {
 // source, and prepares either a fresh copy or a checkpoint resume.
 //
 // Sync deliberately runs no source privilege/configuration preflight: it
-// needs only SELECT on the source, and the change source validates any
+// needs only SELECT on the source (plus CREATE TEMPORARY TABLES for a table
+// with an ENUM or SET member reported with a '?'), and the change source validates any
 // feed-specific requirements itself (the MySQL binlog client checks
 // REPLICATION privileges + ROW binlog format on Start; a VStream
 // authenticates over gRPC). A table without a primary key surfaces a clear
@@ -983,9 +986,10 @@ func (r *Runner) getTables(ctx context.Context) ([]*table.TableInfo, error) {
 		}
 		ti := table.NewTableInfo(r.source.db, r.source.config.DBName, tableName)
 		ti.Host = r.source.config.Addr
-		// Sync only needs SELECT on the source, so skip the ANALYZE TABLE
-		// (it needs INSERT + a writable server); the row estimate comes from
-		// information_schema instead.
+		// Sync needs no write privilege on the source, so skip the ANALYZE
+		// TABLE (it needs INSERT + a writable server); the row estimate comes
+		// from information_schema instead. SetInfo may still create a
+		// temporary table, for an ENUM or SET member reported with a '?'.
 		ti.DisableAnalyze = true
 		if err := ti.SetInfo(ctx); err != nil {
 			return nil, err

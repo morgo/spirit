@@ -14,7 +14,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/block/mysql"
 	"github.com/block/spirit/pkg/dbconn/sqlescape"
+	parsermysql "github.com/block/spirit/pkg/parser/mysql"
 	"github.com/block/spirit/pkg/utils"
 )
 
@@ -308,9 +310,9 @@ func (t *TableInfo) setColumns(ctx context.Context) error {
 //
 // A '?' is also an ordinary member character, so the stored members are read
 // back (see readStoredEnumSetMembers) rather than the column refused. A column
-// whose members differ from the reported ones is recorded for
-// MisreportedEnumSetError. If they cannot be read — the probe needs the CREATE
-// TEMPORARY TABLES privilege — SetInfo fails rather than guessing.
+// with a stored member that has a character outside utf8mb3 is recorded for
+// MisreportedEnumSetError. If the members cannot be read — the probe needs the
+// CREATE TEMPORARY TABLES privilege — SetInfo fails rather than guessing.
 func (t *TableInfo) setStoredEnumSetMembers(ctx context.Context) error {
 	for ord, name := range t.Columns {
 		reported, ok := t.enumSetElements[ord]
@@ -320,13 +322,24 @@ func (t *TableInfo) setStoredEnumSetMembers(ctx context.Context) error {
 		mysqlType := t.columnsMySQLTps[name]
 		stored, err := readStoredEnumSetMembers(ctx, t.db, t.TableName, name, utils.IsSetType(mysqlType), len(reported))
 		if err != nil {
+			hint := ""
+			if myErr, ok := errors.AsType[*mysql.MySQLError](err); ok &&
+				(myErr.Number == parsermysql.ErrDBaccessDenied || myErr.Number == parsermysql.ErrTableaccessDenied) {
+				hint = ", which needs the CREATE TEMPORARY TABLES privilege"
+			}
 			return fmt.Errorf("column %s.%s.%s is %s, which information_schema reports with a '?' in a member. "+
 				"MySQL reports each member character outside utf8mb3 as '?', so spirit reads the members MySQL stores "+
-				"through a temporary table, which needs the CREATE TEMPORARY TABLES privilege: %w",
-				t.SchemaName, t.TableName, name, mysqlType, err)
+				"through a temporary table%s: %w",
+				t.SchemaName, t.TableName, name, mysqlType, hint, err)
 		}
+		// information_schema also escapes some characters (a backslash is
+		// reported as \\), so the stored members can differ from the parsed
+		// ones without any being misreported. Only a member with a character
+		// outside utf8mb3 is reported as '?'.
 		if !slices.Equal(stored, reported) {
 			t.enumSetElements[ord] = stored
+		}
+		if slices.ContainsFunc(stored, hasCharOutsideUTF8MB3) {
 			t.misreportedEnumSets = append(t.misreportedEnumSets, name)
 		}
 	}

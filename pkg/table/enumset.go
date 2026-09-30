@@ -78,6 +78,15 @@ func decodeSetBitmask(bitmask int64, elements []string) (string, error) {
 // it shadows a real table of the same name only within that session.
 const enumSetProbeTable = "_spirit_enumset_probe"
 
+// enumSetProbeIDColumn is the primary key column of enumSetProbeTable.
+const enumSetProbeIDColumn = "_spirit_probe_id"
+
+// hasCharOutsideUTF8MB3 reports whether s holds a character outside utf8mb3,
+// which covers only the Basic Multilingual Plane (U+0000 to U+FFFF).
+func hasCharOutsideUTF8MB3(s string) bool {
+	return strings.IndexFunc(s, func(r rune) bool { return r > 0xFFFF }) >= 0
+}
+
 // readStoredEnumSetMembers returns the members MySQL stores for the ENUM or
 // SET column column of table tableName (in the connection's schema), which
 // information_schema reports with count members.
@@ -116,8 +125,15 @@ func readStoredEnumSetMembers(ctx context.Context, db *sql.DB, tableName, column
 		err = errors.Join(err, rawErr, closeErr)
 	}()
 	quotedColumn := sqlescape.EscapeIdentifier(column)
-	if _, err := conn.ExecContext(ctx, fmt.Sprintf("CREATE TEMPORARY TABLE %s SELECT %s FROM %s LIMIT 0",
-		sqlescape.EscapeIdentifier(enumSetProbeTable), quotedColumn, sqlescape.EscapeIdentifier(tableName))); err != nil {
+	// The probe table has a primary key of its own, because a server with
+	// sql_require_primary_key=ON refuses a table without one (error 3750),
+	// temporary tables included.
+	idColumn := enumSetProbeIDColumn
+	for idColumn == column {
+		idColumn += "_"
+	}
+	if _, err := conn.ExecContext(ctx, fmt.Sprintf("CREATE TEMPORARY TABLE %s (%s INT NOT NULL AUTO_INCREMENT PRIMARY KEY) SELECT %s FROM %s LIMIT 0",
+		sqlescape.EscapeIdentifier(enumSetProbeTable), sqlescape.EscapeIdentifier(idColumn), quotedColumn, sqlescape.EscapeIdentifier(tableName))); err != nil {
 		return nil, err
 	}
 	values := make([]string, count)
