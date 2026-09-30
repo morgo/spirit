@@ -44,7 +44,14 @@ func init() { registerNormalizer(textBlobLengthNormalizer{}) }
 // default, which the statement does not determine; the column is then
 // rewritten only when every charset gives the same size (1 to 4 bytes per
 // character), which covers text(0) and any length whose size does not depend
-// on it. Otherwise it is left as written.
+// on it. Otherwise the column keeps its written length in Column.Length, so it
+// is emitted as `text(M)` and MySQL resolves the size at the charset the column
+// actually gets. Emitting it as a plain `text` would change the type: on a
+// utf8mb4 schema text(20000) is created as mediumtext, and `MODIFY COLUMN a
+// text` narrows it; on a latin1 schema text(64) is created as tinytext, and the
+// same MODIFY widens it. The diff compares such a column against the other
+// side's type at the other side's charset (see textLengthTypeEqual), since
+// only the other side determines it.
 //
 // A column whose charset resolves to binary becomes a blob (see
 // binaryCharsetNormalizer). This rule sizes it at 1 byte per character and
@@ -72,11 +79,66 @@ func (textBlobLengthNormalizer) Normalize(ct *CreateTable) *CreateTable {
 		}
 		prefix := lobSizePrefix(minBytes)
 		if prefix != lobSizePrefix(maxBytes) {
-			continue // the size depends on a charset the statement does not decide
+			// The size depends on a charset the statement does not decide:
+			// keep the written length so the column is emitted as text(M).
+			written := int(length)
+			c.Length = &written
+			continue
 		}
 		c.Type = prefix + family
 	}
 	return ct
+}
+
+// textLengthTypeEqual compares the types of two columns when one of them is a
+// TEXT(M) that textBlobLengthNormalizer left unresolved (Type `text` with
+// Column.Length set) and the other is not. It reports handled=false otherwise,
+// and the caller compares Type and Length directly.
+//
+// The unresolved column's size depends on the charset it gets, which its own
+// statement does not name. The other column's charset decides it: when the two
+// columns' charsets differ, the charset comparison already reports a
+// difference, and the emitted `MODIFY COLUMN ... text(M)` is resolved by MySQL
+// at the charset the column ends up with. So the types are equal when the
+// other column's type is the size text(M) takes at the other column's charset.
+// When that charset is not determined either (or charset resolution is
+// ignored), the types are equal when the other column's type is a size
+// text(M) takes at any charset (1 to 4 bytes per character), in keeping with
+// charsetCollationEqual, which treats an unexpressed preference as a match
+// rather than guessing at it.
+func textLengthTypeEqual(a, b *Column, source, target *CreateTable, opts *DiffOptions) (equal, handled bool) {
+	aLength, aUnresolved := unresolvedTextLength(a)
+	bLength, bUnresolved := unresolvedTextLength(b)
+	if aUnresolved == bUnresolved {
+		return false, false
+	}
+	length, other, otherTable := aLength, b, target
+	if bUnresolved {
+		length, other, otherTable = bLength, a, source
+	}
+	if other.Length != nil {
+		return false, true
+	}
+	minWidth, maxWidth := uint64(1), uint64(4)
+	if !opts.IgnoreCharsetCollation {
+		minWidth, maxWidth = textCharWidths(other, otherTable)
+	}
+	otherType := strings.ToLower(other.Type)
+	for width := minWidth; width <= maxWidth; width++ {
+		if otherType == lobSizePrefix(length*width)+"text" {
+			return true, true
+		}
+	}
+	return false, true
+}
+
+// unresolvedTextLength returns the written length of a TEXT(M) column that
+// textBlobLengthNormalizer left unresolved.
+func unresolvedTextLength(c *Column) (uint64, bool) {
+	if c.Length == nil || *c.Length < 0 || !strings.EqualFold(c.Type, "text") {
+		return 0, false
+	}
+	return uint64(*c.Length), true
 }
 
 // textCharWidths returns the range of bytes per character a text column can

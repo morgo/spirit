@@ -2011,11 +2011,17 @@ func (ct *CreateTable) columnsEqualWithContext(a, b *Column, target *CreateTable
 	if !strings.EqualFold(a.Name, b.Name) {
 		return false
 	}
-	if a.Type != b.Type {
-		return false
-	}
-	if !ptrEqual(a.Length, b.Length) {
-		return false
+	if equal, handled := textLengthTypeEqual(a, b, ct, target, opts); handled {
+		if !equal {
+			return false
+		}
+	} else {
+		if a.Type != b.Type {
+			return false
+		}
+		if !ptrEqual(a.Length, b.Length) {
+			return false
+		}
 	}
 	if !ptrEqual(a.Precision, b.Precision) {
 		return false
