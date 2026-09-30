@@ -314,6 +314,37 @@ func TestParkedRowAbandon(t *testing.T) {
 	require.False(t, gateIsParked(&g), "an abandoned row must not park the reader")
 }
 
+// TestParkedRowUnparkUnlessFired pins the step Verify takes between arming the
+// watch and waiting on it. The row is live before the reader is released, so the
+// watched change can be dispatched in between — and clearing the park that
+// dispatch sets lets the reader run past the watched event before the flush and
+// the verifier have run.
+func TestParkedRowUnparkUnlessFired(t *testing.T) {
+	t.Run("not fired: a stale park is cleared", func(t *testing.T) {
+		var g parkGate
+		w := newParkedRow(anyRow, &g)
+		g.park()
+		w.unparkUnlessFired()
+		require.False(t, gateIsParked(&g), "the watched change could never arrive")
+	})
+	t.Run("fired and released: the park is kept", func(t *testing.T) {
+		var g parkGate
+		w := newParkedRow(anyRow, &g)
+		require.True(t, w.observe("test", "t1", []any{int64(1)}, nil, false))
+		w.Release()
+		w.unparkUnlessFired()
+		require.True(t, gateIsParked(&g), "the reader must stay held at the watched change")
+	})
+	t.Run("fired, still being buffered: Release parks afterwards", func(t *testing.T) {
+		var g parkGate
+		w := newParkedRow(anyRow, &g)
+		require.True(t, w.observe("test", "t1", []any{int64(1)}, nil, false))
+		w.unparkUnlessFired()
+		w.Release()
+		require.True(t, gateIsParked(&g), "the reader must stay held at the watched change")
+	})
+}
+
 // TestVerifyRowAtNextChangeAbandonsInFlightDispatch is the same rule end to
 // end, in the window that actually produces it: a dispatch blocked in
 // HasChanged on the subscription's soft limit while the verification's budget
@@ -450,6 +481,12 @@ func (s *recordingSubscription) HasChanged([]any, []any, bool) {
 // waits for the reader to reach the source's current position — and the reader
 // is parked, by us. And the target must hold the delivered image and nothing
 // past it, which is only meaningful while writes are still arriving.
+//
+// It asserts NoError, not "NoError or ErrRowRewritten", on purpose. Every
+// change here is a single-row event, and the reader is parked from the watched
+// change until the verification returns, so no second change to the key can be
+// observed. A rewrite here means the reader ran past the watched event — the
+// park was lost — and retrying would hide exactly that.
 func TestVerifyRowAtNextChangeLive(t *testing.T) {
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 	require.NoError(t, err)
