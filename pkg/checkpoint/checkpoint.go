@@ -161,12 +161,27 @@ func (t *Table) Drop(ctx context.Context) error {
 	return dbconn.Exec(ctx, t.db, "DROP TABLE IF EXISTS %n", t.name)
 }
 
+// writeCancelGrace bounds how long Write keeps waiting for the server after
+// its caller's context is canceled. See Write.
+var writeCancelGrace = 10 * time.Second
+
 // Write records a checkpoint row, keeping a single row by overwriting it in
 // place (REPLACE on the fixed primary key id=1). The table has one logical
 // owner, so there is no value in accumulating history, and REPLACE is one atomic
 // statement — a crash mid-write leaves either the old row or the new one, never
 // none. created_at is (re)assigned by the server on each write.
+//
+// Canceling ctx does not abort an in-flight write: Write returns only once the
+// server has answered, or writeCancelGrace after the cancel. The driver's
+// cancellation only closes the socket; it does not KILL the statement, so a
+// REPLACE the server already received still commits, possibly after the caller
+// has moved on. Callers stop the checkpoint dumper by canceling its context and
+// joining it (Runner.Close, move's stopWatchTask), then read, edit, or rewrite
+// the row. Without this wait, a canceled dump could overwrite that row later.
+// See github.com/block/spirit/issues/1313.
 func (t *Table) Write(ctx context.Context, rec Record) error {
+	ctx, cancel := withCancelGrace(ctx, writeCancelGrace)
+	defer cancel()
 	var cutoverAt string
 	if !rec.CutoverAt.IsZero() {
 		cutoverAt = rec.CutoverAt.UTC().Format(time.RFC3339Nano)
@@ -234,4 +249,24 @@ func (t *Table) Exists(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	return true, nil
+}
+
+// withCancelGrace returns a context that keeps parent's values but is canceled
+// only grace after parent is done (or when the returned cancel is called). An
+// expired deadline on parent counts as done, so it also gets the grace.
+func withCancelGrace(parent context.Context, grace time.Duration) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(context.WithoutCancel(parent))
+	stop := context.AfterFunc(parent, func() {
+		timer := time.NewTimer(grace)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			cancel()
+		case <-ctx.Done():
+		}
+	})
+	return ctx, func() {
+		stop()
+		cancel()
+	}
 }
