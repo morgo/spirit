@@ -27,17 +27,7 @@ import (
 // and add a short hash suffix to disambiguate subtests / collisions.
 func uniqueTableNames(t *testing.T) (srcName, dstName string) {
 	t.Helper()
-	raw := strings.ToLower(t.Name())
-	var b strings.Builder
-	for _, r := range raw {
-		switch {
-		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '_':
-			b.WriteRune(r)
-		default:
-			b.WriteRune('_')
-		}
-	}
-	sanitized := b.String()
+	sanitized := testutils.SanitizeIdentifier(t.Name())
 
 	// Short stable hash suffix from the original name, to keep names unique
 	// even after truncation.

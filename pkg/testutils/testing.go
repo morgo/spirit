@@ -5,7 +5,9 @@ package testutils
 import (
 	"cmp"
 	"context"
+	"crypto/sha1"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -51,23 +53,49 @@ func DSNForDatabase(dbName string) string {
 	return baseDSN
 }
 
+// SanitizeIdentifier lowercases s and replaces every character outside
+// [a-z0-9_] with '_', so the result can be used as a MySQL identifier without
+// quoting. Use it to derive schema or table names from t.Name().
+func SanitizeIdentifier(s string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(s) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '_':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('_')
+		}
+	}
+	return b.String()
+}
+
+// uniqueDatabaseName returns t_<test name>_<hash>_<pid>_<counter>. The pid
+// keeps concurrent go test processes (one per package) apart on a shared
+// server, and the counter keeps calls within one process apart. MySQL limits
+// database names to 64 characters, so only the test-name part is truncated:
+// the suffix must survive, or two long names that share a prefix (such as
+// the same test defined in two packages) produce the same database, and the
+// first test to finish drops it while the other is still using it. The hash
+// of the full name keeps truncated names identifiable in logs.
+func uniqueDatabaseName(testName string, pid int, counter uint64) string {
+	sum := sha1.Sum([]byte(testName))
+	suffix := fmt.Sprintf("_%s_%d_%d", hex.EncodeToString(sum[:])[:8], pid, counter)
+
+	// CreateUniqueTestDatabase does not quote the name, so keep it to
+	// characters that need no quoting. Subtest names can contain others,
+	// e.g. the #01 go test appends to a duplicate subtest name.
+	prefix := "t_" + SanitizeIdentifier(testName)
+	if maxPrefix := 64 - len(suffix); len(prefix) > maxPrefix {
+		prefix = prefix[:maxPrefix]
+	}
+	return prefix + suffix
+}
+
 // CreateUniqueTestDatabase creates a unique database for a test and returns
 // both the database name and a *sql.DB connection scoped to that database.
 // The connection and database are automatically cleaned up when the test finishes.
 func CreateUniqueTestDatabase(t *testing.T) (string, *sql.DB) {
 	t.Helper()
-
-	// Create a unique database name based on test name and an atomic counter.
-	// The counter ensures uniqueness when called multiple times within the same test.
-	// MySQL limits database names to 64 characters, so we truncate if needed.
-	dbName := fmt.Sprintf("t_%s_%d_%d",
-		strings.ReplaceAll(strings.ToLower(t.Name()), "/", "_"),
-		os.Getpid(),
-		dbCounter.Add(1))
-	if len(dbName) > 64 {
-		dbName = dbName[:64]
-	}
-	t.Log("test database:", dbName)
 
 	// Connect to MySQL without specifying a database
 	baseDSN := DSN()
@@ -82,8 +110,23 @@ func CreateUniqueTestDatabase(t *testing.T) (string, *sql.DB) {
 	defer func() {
 		_ = rootDB.Close()
 	}()
-	_, err = rootDB.ExecContext(t.Context(), "CREATE DATABASE IF NOT EXISTS "+dbName)
+	// Plain CREATE DATABASE, not IF NOT EXISTS: the name can still exist, for
+	// example left behind by a killed run whose pid has been reused, or created
+	// by a process on another host sharing the server. Taking it over would
+	// hand this test another run's tables, and this test's cleanup would drop a
+	// database that may still be in use. Move to the next counter value instead.
+	var dbName string
+	for attempt := 1; ; attempt++ {
+		dbName = uniqueDatabaseName(t.Name(), os.Getpid(), dbCounter.Add(1))
+		_, err = rootDB.ExecContext(t.Context(), "CREATE DATABASE "+dbName)
+		myErr, ok := errors.AsType[*mysql.MySQLError](err)
+		if !ok || myErr.Number != parsermysql.ErrDBCreateExists || attempt == 10 {
+			break
+		}
+		t.Log("test database exists, trying the next name:", dbName)
+	}
 	require.NoError(t, err)
+	t.Log("test database:", dbName)
 
 	// Open a connection scoped to the new database
 	scopedDB, err := sql.Open(driverName, rootDSN+dbName)
