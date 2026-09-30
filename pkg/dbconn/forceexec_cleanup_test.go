@@ -122,6 +122,12 @@ func TestForceExecAncillaryFailuresPreserveRetry(t *testing.T) {
 				tt := testutils.NewTestTable(t, "forceexec_ancillary_failure", "CREATE TABLE forceexec_ancillary_failure (id INT PRIMARY KEY)")
 				config := NewDBConfig()
 				config.LockWaitTimeout = 1
+				// An attempt kills only once its kill worker has seen the
+				// statement waiting for the kill delay, and a slow check
+				// under load can push that past the lock wait timeout. Half
+				// the timeout, rather than the default 900ms, leaves a margin
+				// for attempts that must kill.
+				config.ForceKillAfter = 500 * time.Millisecond
 				db, err := New(testutils.DSN(), config)
 				require.NoError(t, err)
 				defer utils.CloseAndLog(db)
@@ -133,7 +139,7 @@ func TestForceExecAncillaryFailuresPreserveRetry(t *testing.T) {
 				defer func() { _ = blocker.Rollback() }()
 				var pid int
 				require.NoError(t, blocker.QueryRowContext(t.Context(), "SELECT CONNECTION_ID()").Scan(&pid))
-				// The blocked case runs every attempt at ~1.25s each.
+				// The blocked case runs up to MaxRetries attempts at ~1.75s each.
 				ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 				defer cancel()
 				_, err = blocker.ExecContext(ctx, "SELECT * FROM forceexec_ancillary_failure")
@@ -141,6 +147,7 @@ func TestForceExecAncillaryFailuresPreserveRetry(t *testing.T) {
 				var logs bytes.Buffer
 				logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 				killCalls, cleanupCalls := 0, 0
+				var attemptErrs []error // one per statement execution
 				fail := func(calls int) error {
 					// Released: only the first call is the ancillary failure. A
 					// retry kills again if it waits for its lock for the kill
@@ -150,8 +157,9 @@ func TestForceExecAncillaryFailuresPreserveRetry(t *testing.T) {
 					if release && calls > 1 {
 						return nil
 					}
-					// Keep the first attempt blocked beyond its one-second lock budget.
-					timer := time.NewTimer(250 * time.Millisecond)
+					// Keep the first attempt blocked beyond its one-second lock
+					// budget: the kill runs at 500ms.
+					timer := time.NewTimer(750 * time.Millisecond)
 					defer timer.Stop()
 					select {
 					case <-ctx.Done():
@@ -172,26 +180,32 @@ func TestForceExecAncillaryFailuresPreserveRetry(t *testing.T) {
 							return nil, fail(killCalls)
 						}
 						return []int{pid}, nil
-					}, func(context.Context, *sql.DB, []int) error { cleanupCalls++; return fail(cleanupCalls) }, nil)
-				if release {
-					// The first attempt's kill ran and failed, and the retry
-					// succeeded. Whether the retry's own kill worker also ran
-					// depends on what else holds a lock on the server.
-					require.GreaterOrEqual(t, killCalls, 1)
-					if stage == "cleanup" {
-						require.GreaterOrEqual(t, cleanupCalls, 1)
-					}
-				} else {
-					// Every attempt times out and re-arms the kill. The final
-					// attempt's failure is returned without a cleanup wait.
-					require.Equal(t, config.MaxRetries, killCalls)
-					if stage == "cleanup" {
-						require.Equal(t, config.MaxRetries-1, cleanupCalls)
-					}
+					}, func(context.Context, *sql.DB, []int) error { cleanupCalls++; return fail(cleanupCalls) },
+					func(err error) { attemptErrs = append(attemptErrs, err) })
+				// How many attempts run depends on timing: an attempt is retried
+				// only if its kill worker saw it waiting for the kill delay
+				// before it timed out. What holds however many run: the first
+				// attempt's ancillary failure does not stop the retry, the
+				// retries stay within MaxRetries, and every attempt but the last
+				// ran a kill (and, for cleanup, a cleanup wait) and was retried.
+				attempts := len(attemptErrs)
+				require.GreaterOrEqual(t, attempts, 2, "the ancillary failure must not stop the retry")
+				require.LessOrEqual(t, attempts, config.MaxRetries)
+				for _, attemptErr := range attemptErrs[:attempts-1] {
+					var ddlErr *mysql.MySQLError
+					require.ErrorAs(t, attemptErr, &ddlErr)
+					require.EqualValues(t, 1205, ddlErr.Number)
 				}
+				require.Equal(t, attempts-1, strings.Count(logs.String(), "retrying statement after lock wait timeout: it waited for its lock for the kill delay"))
+				// The last attempt is not retried, whether or not it killed.
+				require.GreaterOrEqual(t, killCalls, attempts-1)
+				require.LessOrEqual(t, killCalls, attempts)
 				if stage == "cleanup" {
+					require.Equal(t, attempts-1, cleanupCalls)
 					require.Contains(t, logs.String(), "waiting for killed sessions")
 				}
+				// ForceExec returns the last statement's own error.
+				require.Equal(t, attemptErrs[attempts-1], err)
 				require.Contains(t, logs.String(), "retrying statement anyway")
 				require.Contains(t, logs.String(), "EOF")
 				if release {
