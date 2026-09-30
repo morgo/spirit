@@ -298,13 +298,16 @@ func TestForceExecRetryKillsFreshBlocker(t *testing.T) {
 		}
 	}()
 	attempts := 0
-	start := time.Now()
+	// The retry starts only after the first kill returns, because the kill
+	// worker is joined first, so the retry's wait starts after this point.
+	var firstKillReturned, retryKillCalled time.Time
 	err = forceExec(ctx, db, config, slog.Default(),
 		"ALTER TABLE forceexec_fresh_blocker ADD COLUMN c INT, ALGORITHM=INSTANT",
 		waitingOn(tt.DB),
 		func(ctx context.Context, connID int) ([]int, error) {
 			attempts++
 			if attempts > 1 {
+				retryKillCalled = time.Now()
 				// The retry's kill worker saw it waiting: the real kill must find the fresh blocker.
 				return killLockingTransactions(ctx, db, tables, config, slog.Default(), []int{connID})
 			}
@@ -328,11 +331,12 @@ func TestForceExecRetryKillsFreshBlocker(t *testing.T) {
 				return nil, err
 			}
 			_, err = second.ExecContext(ctx, "SELECT * FROM forceexec_fresh_blocker")
+			firstKillReturned = time.Now()
 			return nil, err
 		}, waitForKilledTransactions, nil)
 	require.NoError(t, err)
 	require.Equal(t, 2, attempts, "the retry must run its own kill worker and kill")
-	require.GreaterOrEqual(t, time.Since(start), 2*config.forceKillDelay(), "each attempt keeps the grace period")
+	require.GreaterOrEqual(t, retryKillCalled.Sub(firstKillReturned), config.forceKillDelay(), "the retry gives its blocker the kill delay too")
 	_, err = second.ExecContext(ctx, "SELECT 1")
 	require.Error(t, err, "the fresh blocker must have been killed")
 	var count int
