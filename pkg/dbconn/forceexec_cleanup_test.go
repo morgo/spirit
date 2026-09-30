@@ -25,8 +25,7 @@ import (
 
 func TestForceExecWaitsForKilledSessionCleanup(t *testing.T) {
 	tt := testutils.NewTestTable(t, "forceexec_delayed_cleanup", "CREATE TABLE forceexec_delayed_cleanup (id INT PRIMARY KEY)")
-	config := NewDBConfig()
-	config.LockWaitTimeout = 1
+	config := newShortKillDelayConfig()
 	db, err := New(testutils.DSN(), config)
 	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
@@ -226,8 +225,7 @@ func TestForceExecAncillaryFailuresPreserveRetry(t *testing.T) {
 // that case; the empty PID set only makes cleanup waiting a no-op.
 func TestForceExecRetriesWhenBlockerExitsWithoutKill(t *testing.T) {
 	tt := testutils.NewTestTable(t, "forceexec_no_kill", "CREATE TABLE forceexec_no_kill (id INT PRIMARY KEY)")
-	config := NewDBConfig()
-	config.LockWaitTimeout = 1
+	config := newShortKillDelayConfig()
 	db, err := New(testutils.DSN(), config)
 	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
@@ -251,9 +249,9 @@ func TestForceExecRetriesWhenBlockerExitsWithoutKill(t *testing.T) {
 				// metadata lock on a shared server can cause.
 				return nil, nil
 			}
-			// The kill runs at the 900ms delay. Hold the blocker beyond the
+			// The kill runs at the 100ms delay. Hold the blocker beyond the
 			// first statement's one-second timeout, then let it exit voluntarily.
-			timer := time.NewTimer(250 * time.Millisecond)
+			timer := time.NewTimer(1150 * time.Millisecond)
 			defer timer.Stop()
 			select {
 			case <-ctx.Done():
@@ -276,8 +274,7 @@ func TestForceExecRetriesWhenBlockerExitsWithoutKill(t *testing.T) {
 // retry without one times out again and the caller falls back to a copy.
 func TestForceExecRetryKillsFreshBlocker(t *testing.T) {
 	tt := testutils.NewTestTable(t, "forceexec_fresh_blocker", "CREATE TABLE forceexec_fresh_blocker (id INT PRIMARY KEY)")
-	config := NewDBConfig()
-	config.LockWaitTimeout = 1
+	config := newShortKillDelayConfig()
 	db, err := New(testutils.DSN(), config)
 	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
@@ -301,22 +298,25 @@ func TestForceExecRetryKillsFreshBlocker(t *testing.T) {
 		}
 	}()
 	attempts := 0
-	start := time.Now()
+	// The retry starts only after the first kill returns, because the kill
+	// worker is joined first, so the retry's wait starts after this point.
+	var firstKillReturned, retryKillCalled time.Time
 	err = forceExec(ctx, db, config, slog.Default(),
 		"ALTER TABLE forceexec_fresh_blocker ADD COLUMN c INT, ALGORITHM=INSTANT",
 		waitingOn(tt.DB),
 		func(ctx context.Context, connID int) ([]int, error) {
 			attempts++
 			if attempts > 1 {
+				retryKillCalled = time.Now()
 				// The retry's kill worker saw it waiting: the real kill must find the fresh blocker.
 				return killLockingTransactions(ctx, db, tables, config, slog.Default(), []int{connID})
 			}
-			// The kill runs at the 900ms delay. Hold the first blocker past the
+			// The kill runs at the 100ms delay. Hold the first blocker past the
 			// one-second lock budget so the first attempt definitely fails,
 			// then swap in a fresh blocker before the retry can run. With
 			// the first attempt's request withdrawn nothing queues ahead
 			// of the fresh SELECT's shared lock.
-			timer := time.NewTimer(250 * time.Millisecond)
+			timer := time.NewTimer(1150 * time.Millisecond)
 			defer timer.Stop()
 			select {
 			case <-ctx.Done():
@@ -331,11 +331,12 @@ func TestForceExecRetryKillsFreshBlocker(t *testing.T) {
 				return nil, err
 			}
 			_, err = second.ExecContext(ctx, "SELECT * FROM forceexec_fresh_blocker")
+			firstKillReturned = time.Now()
 			return nil, err
 		}, waitForKilledTransactions, nil)
 	require.NoError(t, err)
 	require.Equal(t, 2, attempts, "the retry must run its own kill worker and kill")
-	require.GreaterOrEqual(t, time.Since(start), 2*config.forceKillDelay(), "each attempt keeps the grace period")
+	require.GreaterOrEqual(t, retryKillCalled.Sub(firstKillReturned), config.forceKillDelay(), "the retry gives its blocker the kill delay too")
 	_, err = second.ExecContext(ctx, "SELECT 1")
 	require.Error(t, err, "the fresh blocker must have been killed")
 	var count int
@@ -348,8 +349,7 @@ func TestForceExecRetryKillsFreshBlocker(t *testing.T) {
 // attempt's lock wait timeout, not an endless retry.
 func TestForceExecGivesUpAfterMaxRetries(t *testing.T) {
 	tt := testutils.NewTestTable(t, "forceexec_max_retries", "CREATE TABLE forceexec_max_retries (id INT PRIMARY KEY)")
-	config := NewDBConfig()
-	config.LockWaitTimeout = 1
+	config := newShortKillDelayConfig()
 	config.MaxRetries = 2
 	db, err := New(testutils.DSN(), config)
 	require.NoError(t, err)
@@ -382,8 +382,7 @@ func TestForceExecGivesUpAfterMaxRetries(t *testing.T) {
 // bound never falls to zero, which would retry, and kill, without end.
 func TestForceExecWithoutRetryBudgetMakesOneAttempt(t *testing.T) {
 	tt := testutils.NewTestTable(t, "forceexec_no_budget", "CREATE TABLE forceexec_no_budget (id INT PRIMARY KEY)")
-	config := NewDBConfig()
-	config.LockWaitTimeout = 1
+	config := newShortKillDelayConfig()
 	config.MaxRetries = 0
 	db, err := New(testutils.DSN(), config)
 	require.NoError(t, err)
@@ -488,8 +487,7 @@ func TestForceExecRetainsConnectionUntilKillWorkerExits(t *testing.T) {
 // same lock for a full lock wait timeout and block the table's traffic again.
 func TestForceExecStopsWhenKillFindsTableLock(t *testing.T) {
 	tt := testutils.NewTestTable(t, "forceexec_table_lock_found", "CREATE TABLE forceexec_table_lock_found (id INT PRIMARY KEY)")
-	config := NewDBConfig()
-	config.LockWaitTimeout = 1
+	config := newShortKillDelayConfig()
 	require.Greater(t, config.MaxRetries, 1)
 	db, err := New(testutils.DSN(), config)
 	require.NoError(t, err)
@@ -545,8 +543,7 @@ func TestForceExecStopsWhenABlockerSurvivesTheKill(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tt := testutils.NewTestTable(t, "forceexec_blocker_survives", "CREATE TABLE forceexec_blocker_survives (id INT PRIMARY KEY)")
-			config := NewDBConfig()
-			config.LockWaitTimeout = 1
+			config := newShortKillDelayConfig()
 			require.Greater(t, config.MaxRetries, 1)
 			db, err := New(testutils.DSN(), config)
 			require.NoError(t, err)
@@ -592,8 +589,7 @@ func TestForceExecMakesOneAttemptAgainstAHeavyTransaction(t *testing.T) {
 	threshold := TransactionWeightThreshold
 	TransactionWeightThreshold = 0
 	t.Cleanup(func() { TransactionWeightThreshold = threshold })
-	config := NewDBConfig()
-	config.LockWaitTimeout = 1
+	config := newShortKillDelayConfig()
 	require.Greater(t, config.MaxRetries, 1)
 	db, err := New(testutils.DSN(), config)
 	require.NoError(t, err)
@@ -697,8 +693,7 @@ func TestKillLockingTransactionsReportsKillsBesideADeniedOne(t *testing.T) {
 // attempt: the next attempt's KILL of the other user's blocker is denied too.
 func TestForceExecMakesOneAttemptWhenAKillIsDenied(t *testing.T) {
 	tt := testutils.NewTestTable(t, "forceexec_kill_denied", "CREATE TABLE forceexec_kill_denied (id INT PRIMARY KEY)")
-	config := NewDBConfig()
-	config.LockWaitTimeout = 1
+	config := newShortKillDelayConfig()
 	require.Greater(t, config.MaxRetries, 1)
 	db := newNoKillUserDB(t, config)
 	defer utils.CloseAndLog(db)
@@ -727,8 +722,7 @@ func TestForceExecMakesOneAttemptWhenAKillIsDenied(t *testing.T) {
 // after one attempt, leaving the locking session connected.
 func TestForceExecMakesOneAttemptAgainstLockTables(t *testing.T) {
 	tt := testutils.NewTestTable(t, "forceexec_lock_tables", "CREATE TABLE forceexec_lock_tables (id INT PRIMARY KEY)")
-	config := NewDBConfig()
-	config.LockWaitTimeout = 1
+	config := newShortKillDelayConfig()
 	require.Greater(t, config.MaxRetries, 1)
 	db, err := New(testutils.DSN(), config)
 	require.NoError(t, err)
@@ -755,6 +749,18 @@ func TestForceExecMakesOneAttemptAgainstLockTables(t *testing.T) {
 	// The locking session was not killed.
 	_, err = locker.ExecContext(ctx, "UNLOCK TABLES")
 	require.NoError(t, err)
+}
+
+// newShortKillDelayConfig returns a config with a one-second lock wait timeout
+// and a 100ms kill delay, for tests that need the kill to run but do not test
+// when it runs. The default delay at that timeout is 900ms, which leaves
+// 100ms for the waiting check and the kill before the statement times out; a
+// slow check on a loaded server misses it, and the attempt ends with no kill.
+func newShortKillDelayConfig() *DBConfig {
+	config := NewDBConfig()
+	config.LockWaitTimeout = 1
+	config.ForceKillAfter = 100 * time.Millisecond
+	return config
 }
 
 // waitingOn checks, over db, whether a session is waiting for a metadata lock
