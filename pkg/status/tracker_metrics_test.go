@@ -65,8 +65,10 @@ type typedRecordingSink struct {
 	copyRows   uint64
 	copyChunks uint64
 	panicStart bool
-	// onStarted, if set, runs at the start of RecordWorkflowPhaseStarted.
-	onStarted func()
+	// onStarted and onFinished, if set, run at the start of
+	// RecordWorkflowPhaseStarted and RecordWorkflowPhaseFinished.
+	onStarted  func()
+	onFinished func()
 }
 
 func newTypedRecordingSink() *typedRecordingSink {
@@ -86,6 +88,9 @@ func (s *typedRecordingSink) RecordWorkflowPhaseStarted(state State) {
 }
 
 func (s *typedRecordingSink) RecordWorkflowPhaseFinished(state State, outcome WorkflowPhaseOutcome) {
+	if s.onFinished != nil {
+		s.onFinished()
+	}
 	s.workflowMu.Lock()
 	defer s.workflowMu.Unlock()
 	s.finished = append(s.finished, typedPhaseEvent{state: state, outcome: outcome})
@@ -382,38 +387,49 @@ func TestTrackerTypedAttemptFinishesAfterConcurrentFatalTransition(t *testing.T)
 	}}, finished)
 }
 
+// fakeClock is a tracker clock that only moves when a test advances it.
+type fakeClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func (c *fakeClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *fakeClock) Advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = c.now.Add(d)
+}
+
 // TestTrackerExcludesSinkLatencyFromPhaseDuration pins that time spent inside
 // synchronous sink delivery is not attributed to the phase being reported.
 // It uses a fake clock: every sink callback (generic Send and the typed
-// phase-started hook) advances it by an hour and the phase body advances it by
-// 2ms, so the only correct answer is exactly 2ms and any leak of sink time
-// shows up as whole hours, independent of scheduling.
+// phase-started and phase-finished hooks) advances it by an hour and the
+// phase body advances it by 2ms, so the only correct answer is exactly 2ms
+// and any leak of sink time shows up as whole hours, independent of
+// scheduling.
 func TestTrackerExcludesSinkLatencyFromPhaseDuration(t *testing.T) {
 	const (
 		sinkLatency = time.Hour
 		work        = 2 * time.Millisecond
 	)
-	var clockMu sync.Mutex
-	now := time.Unix(0, 0)
-	advance := func(d time.Duration) {
-		clockMu.Lock()
-		defer clockMu.Unlock()
-		now = now.Add(d)
-	}
-	tracker := Tracker{now: func() time.Time {
-		clockMu.Lock()
-		defer clockMu.Unlock()
-		return now
-	}}
+	clock := &fakeClock{now: time.Unix(0, 0)}
+	tracker := Tracker{now: clock.Now}
+	slow := func() { clock.Advance(sinkLatency) }
 	sink := &typedRecordingSink{
-		recordingSink: &recordingSink{onSend: func() { advance(sinkLatency) }},
-		onStarted:     func() { advance(sinkLatency) },
+		recordingSink: &recordingSink{onSend: slow},
+		onStarted:     slow,
+		onFinished:    slow,
 	}
 	tracker.SetMetricsSink(sink, nil)
 
 	tracker.Begin()
 	require.NoError(t, tracker.Do(CopyRows, func() error {
-		advance(work)
+		clock.Advance(work)
 		return nil
 	}))
 	require.Equal(t, work, tracker.Duration(CopyRows))
@@ -423,6 +439,22 @@ func TestTrackerExcludesSinkLatencyFromPhaseDuration(t *testing.T) {
 		[]float64{0, work.Seconds()},
 		sink.values(metrics.WorkflowPhaseSecondsMetricName),
 		"reported phase durations must exclude sink latency too")
+}
+
+// TestTrackerExcludesSinkLatencyFromSetPhaseDuration pins the same for a
+// phase entered with Set, which has no Do bracket to restart its interval:
+// the time its own entry report spends in the sink must not count toward it.
+func TestTrackerExcludesSinkLatencyFromSetPhaseDuration(t *testing.T) {
+	const work = 2 * time.Millisecond
+	clock := &fakeClock{now: time.Unix(0, 0)}
+	tracker := Tracker{now: clock.Now}
+	tracker.SetMetricsSink(&recordingSink{onSend: func() { clock.Advance(time.Hour) }}, nil)
+
+	tracker.Begin()
+	tracker.Set(CutOver)
+	clock.Advance(work)
+	tracker.Set(Close)
+	require.Equal(t, work, tracker.Duration(CutOver))
 }
 
 func TestTrackerTreatsNoopSinkAsDisabled(t *testing.T) {
