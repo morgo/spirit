@@ -4,13 +4,15 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"fmt"
+	"io"
 	"log/slog"
+	"net"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/block/mysql"
 	"github.com/block/spirit/pkg/dbconn/sqlescape"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
@@ -480,50 +482,99 @@ func TestAdvisoryLockCloseDuringOutage(t *testing.T) {
 	}
 }
 
+// stallableProxy is a TCP proxy to the test MySQL server. While stall is
+// false it forwards each connection to the server; once stall is true it
+// accepts new connections and never answers them, like stalledServer. Each
+// stalled connection is reported on stalled. It returns testutils.DSN()
+// rewritten to go through the proxy.
+func stallableProxy(t *testing.T) (dsn string, stall *atomic.Bool, stalled <-chan struct{}) {
+	t.Helper()
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	target := cfg.Addr
+	ln, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	cfg.Addr = ln.Addr().String()
+
+	stall = &atomic.Bool{}
+	stalledCh := make(chan struct{}, 16)
+	var mu sync.Mutex
+	var conns []net.Conn
+	track := func(c net.Conn) {
+		mu.Lock()
+		defer mu.Unlock()
+		conns = append(conns, c)
+	}
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		for {
+			client, err := ln.Accept()
+			if err != nil {
+				return // listener closed
+			}
+			track(client)
+			if stall.Load() {
+				select {
+				case stalledCh <- struct{}{}:
+				default:
+				}
+				continue
+			}
+			server, err := (&net.Dialer{}).DialContext(t.Context(), "tcp", target)
+			if err != nil {
+				_ = client.Close()
+				continue
+			}
+			track(server)
+			wg.Go(func() { _, _ = io.Copy(server, client) })
+			wg.Go(func() { _, _ = io.Copy(client, server) })
+		}
+	})
+	t.Cleanup(func() {
+		_ = ln.Close()
+		mu.Lock()
+		for _, c := range conns {
+			_ = c.Close()
+		}
+		mu.Unlock()
+		wg.Wait()
+	})
+	return cfg.FormatDSN(), stall, stalledCh
+}
+
 // TestAdvisoryLockCloseDuringStalledReconnect checks that Close interrupts a
 // reconnect that is stuck in the handshake. The reconnect goes to a server
 // that accepts the TCP connection but never greets, so its ping can only end
 // at connectTimeout or when its context is done. The refresh loop must pass
 // its own context to the reconnect, so that the cancel in Close ends the
-// attempt instead of Close waiting out connectTimeout.
+// attempt instead of Close waiting out connectTimeout. The lock uses its
+// production dial (no newDBConn seam), through a proxy that starts stalling
+// once the lock holds its locks.
 func TestAdvisoryLockCloseDuringStalledReconnect(t *testing.T) {
 	lockTableInfo := table.TableInfo{SchemaName: "test", TableName: "reconnect-stalled-close"}
 	lockTables := []*table.TableInfo{&lockTableInfo}
 	logger := slog.Default()
 
-	stalledDSN := fmt.Sprintf("spirit:spirit@tcp(%s)/test", stalledServer(t))
-	var stall atomic.Bool
-	reconnecting := make(chan struct{})
-	var reconnectingOnce sync.Once
-	option := func(lock *AdvisoryLock) {
+	dsn, stall, stalled := stallableProxy(t)
+	lock, err := NewAdvisoryLock(t.Context(), dsn, lockTables, NewDBConfig(), logger, func(lock *AdvisoryLock) {
 		lock.refreshInterval = 100 * time.Millisecond
-		lock.newDBConn = func(ctx context.Context) (*sql.DB, error) {
-			if !stall.Load() {
-				return NewContext(ctx, testutils.DSN(), NewDBConfig())
-			}
-			reconnectingOnce.Do(func() { close(reconnecting) })
-			return NewContext(ctx, stalledDSN, NewDBConfig())
-		}
-	}
-	lock, err := NewAdvisoryLock(t.Context(), testutils.DSN(), lockTables, NewDBConfig(), logger, option)
+	})
 	require.NoError(t, err)
 	require.NotNil(t, lock)
 
-	// Force a reconnect to the stalled server (see
+	// Force a reconnect to the stalled proxy (see
 	// TestAdvisoryLockRefreshSurvivesReconnectFailure: reading lock.db is safe
 	// until the first induced refresh failure below).
 	db := lock.db
 	stall.Store(true)
 	require.NoError(t, db.Close())
 	select {
-	case <-reconnecting:
+	case <-stalled:
 	case <-time.After(30 * time.Second):
 		t.Fatal("the refresh loop did not attempt a reconnect")
 	}
-	// Give the reconnect time to connect and start waiting for the greeting,
-	// so Close cancels a ping in progress rather than one not yet started.
-	time.Sleep(200 * time.Millisecond)
 
+	// The reconnect's ping is now waiting for a greeting that never comes.
 	closed := make(chan error, 1)
 	go func() { closed <- lock.Close() }()
 	select {
