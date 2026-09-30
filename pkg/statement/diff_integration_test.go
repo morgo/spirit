@@ -766,6 +766,65 @@ func TestDiffIntegrationBooleanKeywordDefaultOnExcludedTypes(t *testing.T) {
 	}
 }
 
+// A ZEROFILL integer's default is stored padded to the display width, so a
+// table created from those declarations must diff clean against them. Without
+// zerofillDefaultNormalizer the diff emits `MODIFY ... DEFAULT 5` against the
+// live '0000000005' on every run.
+//
+// Every column writes its width. A width-less ZEROFILL column is stored with
+// the unsigned default width, which integerDisplayWidthNormalizer resolves, not
+// this rule; int(0) is included because that rule already resolves it.
+func TestDiffIntegrationZerofillDefaultCreatedAsDeclared(t *testing.T) {
+	const declaredSQL = "CREATE TABLE diff_zerofill_default (" +
+		"id int NOT NULL, " +
+		"a int(10) zerofill DEFAULT 5, " +
+		"a0 int(0) zerofill DEFAULT 5, " +
+		"b int(3) zerofill DEFAULT 12345, " +
+		"c tinyint(2) zerofill DEFAULT '7', " +
+		"d bigint(20) zerofill NOT NULL DEFAULT 0, " +
+		"e int(4) zerofill DEFAULT 0x10, " +
+		"f int(4) zerofill DEFAULT b'101', " +
+		"g int(4) zerofill DEFAULT TRUE, " +
+		"h int(4) zerofill DEFAULT 2.5, " +
+		"i int(4) zerofill DEFAULT 2.5e0, " +
+		"j int(4) zerofill DEFAULT '2.5e0', " +
+		"k int(4) zerofill DEFAULT ' 5 ', " +
+		"PRIMARY KEY (id))"
+
+	tt := testutils.NewTestTable(t, "diff_zerofill_default", declaredSQL)
+
+	live := showCreateTable(t, tt.DB, tt.Name)
+	require.Contains(t, live, "`a` int(10) unsigned zerofill DEFAULT '0000000005'")
+	require.Contains(t, live, "`a0` int(10) unsigned zerofill DEFAULT '0000000005'")
+	require.Contains(t, live, "`b` int(3) unsigned zerofill DEFAULT '12345'")
+	require.Contains(t, live, "`h` int(4) unsigned zerofill DEFAULT '0003'")
+	require.Contains(t, live, "`i` int(4) unsigned zerofill DEFAULT '0002'")
+	require.Contains(t, live, "`j` int(4) unsigned zerofill DEFAULT '0003'")
+
+	stmts := diffLiveTable(t, tt.DB, tt.Name, declaredSQL)
+	require.Nil(t, stmts)
+}
+
+// Changing a ZEROFILL default is a real change: the diff is emitted, MySQL
+// stores the padded value, and a re-diff is clean.
+func TestDiffIntegrationZerofillDefaultConverges(t *testing.T) {
+	tt := testutils.NewTestTable(t, "diff_zerofill_default_change",
+		"CREATE TABLE diff_zerofill_default_change (id int NOT NULL, a int(10) zerofill DEFAULT 5, b int(4) zerofill, PRIMARY KEY (id))")
+
+	const targetSQL = "CREATE TABLE diff_zerofill_default_change (id int NOT NULL, " +
+		"a int(10) zerofill DEFAULT 6, b int(4) zerofill DEFAULT 42, PRIMARY KEY (id))"
+
+	stmts := diffLiveTable(t, tt.DB, tt.Name, targetSQL)
+	require.Len(t, stmts, 1)
+
+	execStatements(t, tt.DB, stmts)
+	live := showCreateTable(t, tt.DB, tt.Name)
+	require.Contains(t, live, "`a` int(10) unsigned zerofill DEFAULT '0000000006'")
+	require.Contains(t, live, "`b` int(4) unsigned zerofill DEFAULT '0042'")
+
+	requireConverged(t, tt.DB, tt.Name, targetSQL)
+}
+
 // TestDiffIntegrationColumnLeavesPrimaryKeyAndRelaxes verifies that a column
 // leaving the primary key and declared nullable by the target actually becomes
 // nullable on a real MySQL server. Adding a PRIMARY KEY implicitly makes its
