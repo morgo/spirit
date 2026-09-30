@@ -3,6 +3,8 @@ package statement
 import (
 	"strconv"
 	"strings"
+
+	"github.com/block/spirit/pkg/utils"
 )
 
 func init() { registerNormalizer(yearDefaultNormalizer{}) }
@@ -19,21 +21,27 @@ func init() { registerNormalizer(yearDefaultNormalizer{}) }
 //	year DEFAULT 69                 -> '2069'
 //	year DEFAULT 70                 -> '1970'
 //	year DEFAULT 99 / '99' / '0099' -> '1999'
-//	year DEFAULT 0 / 0000           -> '0000'  (a number: the zero year)
+//	year DEFAULT 0 / 0000 / -0      -> '0000'  (a number: the zero year)
 //	year DEFAULT '0000'             -> '0000'  (a four-character string zero)
 //	year DEFAULT '0' / '00' / '000' -> '2000'  (any other string zero)
 //	year DEFAULT '00000'            -> '2000'
 //	year DEFAULT 2024 / '02024'     -> '2024'
+//	year DEFAULT +5                 -> '2005'
 //	year DEFAULT 0x07 / b'111'      -> '2007'
 //	year DEFAULT 0x0834             -> '2100'
 //	year DEFAULT 0x00 / b'0'        -> '0000'
 //	year DEFAULT TRUE               -> '2001'
 //	year DEFAULT FALSE              -> '0000'
+//	year DEFAULT '01901' / 0x076D   -> '1901'
+//	year DEFAULT '02155' / 0x086B   -> '2155'
 //	year DEFAULT 100 / 1900 / 2156  -> error 1067
+//	year DEFAULT '01900' / 0x076C   -> error 1067
+//	year DEFAULT -5                 -> error 1067
 //
 // A number, a hex or bit literal and the TRUE/FALSE keyword are all read as
-// the integer they denote. A string is read the same way, except for zero:
-// MySQL keeps it as the zero year only when the string is exactly four
+// the integer they denote; a number's sign and leading zeros are dropped first
+// (see [utils.CanonicalInteger]). A string is read the same way, except for
+// zero: MySQL keeps it as the zero year only when the string is exactly four
 // characters long, and reads any other string zero as 2000.
 //
 // The value is recorded as a [DefaultKindNumber], which is emitted bare.
@@ -49,10 +57,9 @@ func init() { registerNormalizer(yearDefaultNormalizer{}) }
 //     in it. MySQL rounds a fraction before reading it as a year (1.5 stores
 //     '2002', 0.4 stores '0000', '0.0' stores '2000') and trims whitespace but
 //     counts it towards the four characters that keep a string zero as the
-//     zero year (' 0000' stores '2000'). None of these spellings is worth
-//     reproducing that for.
-//   - a signed number (+5, -0): -0 stores '0000' where 0 would, but the sign
-//     makes it a different literal form.
+//     zero year (' 0000' stores '2000'). A sign in a string would count
+//     towards them the same way. None of these spellings is worth reproducing
+//     that for.
 //   - an expression default, which MySQL stores as written.
 type yearDefaultNormalizer struct{}
 
@@ -80,13 +87,17 @@ func storedYearDefault(c *Column) (string, bool) {
 	var value uint64
 	switch c.DefaultKind {
 	case DefaultKindNumber:
-		v, ok := digitsValue(*c.Default)
+		canonical, ok := utils.CanonicalInteger(*c.Default)
 		if !ok {
 			return "", false
 		}
+		v, err := strconv.ParseUint(canonical, 10, 64)
+		if err != nil {
+			return "", false // negative, or too large to be a year
+		}
 		value = v
 	case DefaultKindString:
-		v, ok := digitsValue(*c.Default)
+		v, ok := unsignedDigitsValue(*c.Default)
 		if !ok {
 			return "", false
 		}
@@ -137,18 +148,18 @@ func yearFromInteger(v uint64) (string, bool) {
 	return "", false
 }
 
-// digitsValue returns s as an unsigned integer if it is a non-empty run of
-// ASCII digits, and false for anything else: a sign, a fraction, an exponent,
-// whitespace, or a value too large for a uint64.
-func digitsValue(s string) (uint64, bool) {
-	if s == "" {
+// unsignedDigitsValue returns s as an unsigned integer if it is a non-empty
+// run of ASCII digits, and false for anything else: a sign, a fraction, an
+// exponent, whitespace, or a value too large for a uint64. The sign is
+// rejected separately because [utils.CanonicalInteger] accepts one.
+func unsignedDigitsValue(s string) (uint64, bool) {
+	if strings.HasPrefix(s, "+") || strings.HasPrefix(s, "-") {
 		return 0, false
 	}
-	for _, r := range s {
-		if r < '0' || r > '9' {
-			return 0, false
-		}
+	canonical, ok := utils.CanonicalInteger(s)
+	if !ok {
+		return 0, false
 	}
-	v, err := strconv.ParseUint(s, 10, 64)
+	v, err := strconv.ParseUint(canonical, 10, 64)
 	return v, err == nil
 }
