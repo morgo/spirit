@@ -135,7 +135,10 @@ type Runner struct {
 	terminalOwnership atomic.Uint32
 }
 
-var _ status.Task = (*Runner)(nil)
+var (
+	_ status.Task    = (*Runner)(nil)
+	_ status.Aborter = (*Runner)(nil)
+)
 
 func NewRunner(m *Migration) (*Runner, error) {
 	stmts, err := m.normalizeOptions()
@@ -248,6 +251,76 @@ func (r *Runner) SetMetricsSink(sink metrics.Sink) {
 
 func (r *Runner) SetLogger(logger *slog.Logger) {
 	r.logger = logger
+}
+
+// dropStaleCopyTables drops the _new and checkpoint tables that an earlier,
+// interrupted copy of the table may have left, after the ALTER has completed
+// with MySQL's own DDL. That state describes the table before this ALTER
+// changed it, so it can no longer be resumed from, and a later copy-based run
+// would only discard it. Without this, it stays behind indefinitely.
+//
+// Auxiliary table names are truncated, so two long table names can share them
+// (see utils.AuxTableName), and the state may belong to the other table. A
+// _new table without a checkpoint table may not be Spirit's at all (other
+// online schema change tools use the same name, and may still have triggers
+// writing to it). So the tables are dropped only when the checkpoint table
+// exists and its latest row names this table. Otherwise (no checkpoint table,
+// or one that cannot be read, is empty, or names another or no table) nothing
+// is dropped and the reason is logged.
+//
+// A failure is logged, not returned: the ALTER has already been applied.
+func (r *Runner) dropStaleCopyTables(ctx context.Context) {
+	if len(r.changes) != 1 {
+		return // attemptMySQLDDL only supports single-table changes.
+	}
+	tableName := r.changes[0].table.TableName
+	newName := utils.NewTableName(tableName)
+	ckpt := r.checkpointTbl()
+	ckptName := r.checkpointTableName()
+	leaveInPlace := func(reason string, args ...any) {
+		r.logger.Warn("not dropping tables from an earlier interrupted migration: "+reason,
+			append([]any{"new-table", newName, "checkpoint-table", ckptName}, args...)...)
+	}
+
+	ckptExists, err := ckpt.Exists(ctx)
+	if err != nil {
+		leaveInPlace("could not check whether the checkpoint table exists", "error", err)
+		return
+	}
+	if !ckptExists {
+		// Only a _new table can be left: without a checkpoint there is no
+		// evidence that Spirit created it, so leave it in place.
+		var n int
+		if err := r.db.QueryRowContext(ctx,
+			"SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
+			r.changes[0].table.SchemaName, newName).Scan(&n); err != nil {
+			leaveInPlace("could not check whether the new table exists", "error", err)
+			return
+		}
+		if n > 0 {
+			leaveInPlace("there is no checkpoint table to confirm the new table was created by Spirit for this table")
+		}
+		return
+	}
+	rec, err := ckpt.ReadLatest(ctx)
+	if err != nil {
+		leaveInPlace("could not read the checkpoint to confirm it belongs to this table", "error", err)
+		return
+	}
+	if rec.OriginalTableName != tableName {
+		leaveInPlace("the checkpoint does not belong to this table", "checkpoint-original-table", rec.OriginalTableName)
+		return
+	}
+	// _new first: the checkpoint is the evidence of ownership, so it must
+	// outlive _new. If a drop fails, stop and keep the checkpoint so a later
+	// run can retry.
+	for _, name := range []string{newName, ckptName} {
+		if err := dbconn.Exec(ctx, r.db, "DROP TABLE IF EXISTS %n", name); err != nil {
+			r.logger.Error("could not drop a stale table from an earlier interrupted migration", "table", name, "error", err)
+			return
+		}
+		r.logger.Info("dropped a stale table from an earlier interrupted migration", "table", name)
+	}
 }
 
 // attemptMySQLDDL tries to perform the DDL using MySQL's built-in
@@ -438,6 +511,7 @@ func (r *Runner) Run(ctx context.Context) (retErr error) {
 	err = r.attemptMySQLDDL(ctx)
 	if err == nil {
 		r.durableMutation.Store(true)
+		r.dropStaleCopyTables(ctx)
 		r.logger.Info("apply complete",
 			"instant-ddl", r.usedInstantDDL,
 			"inplace-ddl", r.usedInplaceDDL,
@@ -2071,6 +2145,13 @@ func (r *Runner) invalidateChecksumWatermark(ctx context.Context) error {
 // returns context.Canceled.
 func (r *Runner) Cancel() {
 	r.cancel(nil)
+}
+
+// Abort stops a running migration with cause (see status.Aborter). The
+// checkpoint dumper calls it when it cannot write a checkpoint, so Run returns
+// the write error instead of context.Canceled.
+func (r *Runner) Abort(cause error) {
+	r.cancel(cause)
 }
 
 // cancel cancels the migration context with cause. A nil cause is a plain
