@@ -338,9 +338,10 @@ func TestMoveWithNewTableCreation(t *testing.T) {
 //
 // The minimal-image UPDATE is committed only once the move is parked at the
 // sentinel (DeferCutOver), so the change feed is already streaming and the
-// move cannot cut over before the event reaches it. The UPDATE is the only
-// way the move can end, so the test does not race the copy. See
-// https://github.com/block/spirit/issues/1344.
+// move cannot cut over before the event reaches it. The move then ends either
+// through the UPDATE or through this package's sentinel wait limit (TestMain
+// shrinks sentinel.WaitLimit to 10s), and the assertions below reject the
+// latter. See https://github.com/block/spirit/issues/1344.
 func TestMoveFailsGracefullyWithMinimalRBR(t *testing.T) {
 	sourceDSN := testutils.DSNForDatabase("source_minrbr")
 	targetDSN := testutils.DSNForDatabase("dest_minrbr")
@@ -401,13 +402,14 @@ func TestMoveFailsGracefullyWithMinimalRBR(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, int64(1), affected, "the minimal-image UPDATE must change a row to produce a rows event")
 
+	// The sentinel wait limit bounds Run, so this timeout is only a backstop.
+	// It does not wait for Run to return: that is what it guards against.
 	var runErr error
 	select {
 	case runErr = <-done:
 	case <-time.After(time.Minute):
 		cancel()
-		<-done
-		t.Fatal("move did not abort after a minimal RBR event was committed")
+		t.Fatal("move did not return after a minimal RBR event was committed")
 	}
 
 	// The runtime check detects the minimal row image while a buffered
