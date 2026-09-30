@@ -21,7 +21,14 @@ func TestStripIntegerDisplayWidth(t *testing.T) {
 		{"CREATE TABLE t (a tinyint(1))", new(1)},                 // BOOLEAN form, preserved
 		{"CREATE TABLE t (a boolean)", new(1)},                    // folds to tinyint(1)
 		{"CREATE TABLE t (a int(10) unsigned zerofill)", new(10)}, // width kept under zerofill
-		{"CREATE TABLE t (a varchar(11))", new(11)},               // not an integer type
+		{"CREATE TABLE t (a int(0))", nil},
+		{"CREATE TABLE t (a tinyint(0))", nil},
+		{"CREATE TABLE t (a int(0) zerofill)", new(10)}, // MySQL substitutes the unsigned default width
+		{"CREATE TABLE t (a tinyint(0) zerofill)", new(3)},
+		{"CREATE TABLE t (a smallint(0) zerofill)", new(5)},
+		{"CREATE TABLE t (a mediumint(0) zerofill)", new(8)},
+		{"CREATE TABLE t (a bigint(0) zerofill)", new(20)},
+		{"CREATE TABLE t (a varchar(11))", new(11)}, // not an integer type
 	}
 	for _, tc := range tests {
 		t.Run(tc.sql, func(t *testing.T) {
