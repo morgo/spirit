@@ -254,6 +254,44 @@ func TestDiffIntegrationKeyBlockSize(t *testing.T) {
 	require.Nil(t, stmts)
 }
 
+// A table created from `year(4)` is stored as a plain `year`, so it must diff
+// clean against the declaration it was created from. Without
+// yearDisplayWidthNormalizer the diff emits `MODIFY COLUMN ... year(4)` on
+// every run.
+func TestDiffIntegrationYearDisplayWidthCreatedAsDeclared(t *testing.T) {
+	const declaredSQL = "CREATE TABLE diff_year_width (" +
+		"id int NOT NULL, " +
+		"a year(4), " +
+		"b year(4) NOT NULL DEFAULT 2024, " +
+		"PRIMARY KEY (id))"
+
+	tt := testutils.NewTestTable(t, "diff_year_width", declaredSQL)
+
+	live := showCreateTable(t, tt.DB, tt.Name)
+	require.Contains(t, live, "`a` year DEFAULT NULL")
+	require.Contains(t, live, "`b` year NOT NULL DEFAULT '2024'")
+
+	stmts := diffLiveTable(t, tt.DB, tt.Name, declaredSQL)
+	require.Nil(t, stmts)
+}
+
+// Changing a column to year(4) is a real change: the diff is emitted, MySQL
+// stores the column as `year`, and a re-diff is clean.
+func TestDiffIntegrationYearDisplayWidthConverges(t *testing.T) {
+	tt := testutils.NewTestTable(t, "diff_year_width_change",
+		"CREATE TABLE diff_year_width_change (id int NOT NULL, a smallint, PRIMARY KEY (id))")
+
+	const targetSQL = "CREATE TABLE diff_year_width_change (id int NOT NULL, a year(4), PRIMARY KEY (id))"
+
+	stmts := diffLiveTable(t, tt.DB, tt.Name, targetSQL)
+	require.Len(t, stmts, 1)
+
+	execStatements(t, tt.DB, stmts)
+	require.Contains(t, showCreateTable(t, tt.DB, tt.Name), "`a` year DEFAULT NULL")
+
+	requireConverged(t, tt.DB, tt.Name, targetSQL)
+}
+
 // TestDiffIntegrationForeignKeyNoAction verifies against a real MySQL server
 // that a desired schema spelling out ON DELETE NO ACTION / ON UPDATE NO ACTION
 // converges with the live table. MySQL omits NO ACTION from SHOW CREATE TABLE
