@@ -217,6 +217,24 @@ func (w *ParkedRow) abandon() {
 	w.gate.unpark()
 }
 
+// unparkUnlessFired clears a stale park so the watched change can arrive —
+// unless it already has. The row is armed before this runs, so the reader can
+// dispatch the watched change in between, and Release then parks the gate for
+// this row. Clearing that park would let the reader run past the watched event
+// while the flush and the verifier are still to come: the next change to the
+// key is counted as a rewrite, and the verification returns ErrRowRewritten
+// against a row written by nothing but single-row events. Deciding on w.mu,
+// which observe and Release also hold, means one of the two always happens:
+// either the unpark comes first and Release parks afterwards, or the watch has
+// fired and its park is left alone.
+func (w *ParkedRow) unparkUnlessFired() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if !w.fired {
+		w.gate.unpark()
+	}
+}
+
 // result reports what fired, and whether a later change made it stale.
 func (w *ParkedRow) result() (key, image []any, deleted bool, rewritten bool) {
 	w.mu.Lock()
@@ -348,7 +366,7 @@ func (p *RowParker) Verify(
 
 	// Anything already parked would keep the watched change from ever
 	// arriving, so the reader runs until it fires.
-	p.gate.unpark()
+	row.unparkUnlessFired()
 
 	select {
 	case <-row.ch:
