@@ -953,11 +953,7 @@ func TestForceExecSparesTrafficDuringAnInplaceRebuild(t *testing.T) {
 	db, err := New(testutils.DSN(), config)
 	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
-	// This deadline only bounds how long the rebuild may take to finish. The
-	// timing the test depends on is measured from when the copy starts, so a
-	// slow runner that stretches the copy makes it easier to satisfy, not
-	// harder, and must not fail the test.
-	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logs, nil))
@@ -1000,15 +996,28 @@ func TestForceExecSparesTrafficDuringAnInplaceRebuild(t *testing.T) {
 	require.Equal(t, copying, state, "the rebuild must still be copying when the bystander commits, or the bystander may have blocked it")
 	require.NoError(t, bystander.Commit(), "the bystander's transaction was not killed")
 
+	// This deadline only bounds how long the rebuild may take to finish. The
+	// timing the test depends on is measured from when the copy starts, so a
+	// slow runner that stretches the copy makes it easier to satisfy, not
+	// harder, and must not fail the test.
+	const rebuildDeadline = 2 * time.Minute
 	select {
 	case err := <-rebuildDone:
 		require.NoError(t, err)
-	case <-ctx.Done():
-		// Say what the rebuild was doing, to tell a slow copy from a rebuild
-		// stuck waiting for a lock.
-		var state sql.NullString
-		stateErr := tt.DB.QueryRowContext(t.Context(), "SELECT state FROM information_schema.processlist WHERE info = ?", alterSQL).Scan(&state)
-		t.Fatalf("the rebuild did not complete: state=%q (err=%v)\nForceExec log:\n%s", state.String, stateErr, logs.String())
+	case <-time.After(rebuildDeadline):
+		// Read the rebuild's state while it is still running, to tell a slow
+		// copy from a rebuild stuck waiting for a lock. Then stop it, and wait
+		// for ForceExec to return before reading the log it writes to.
+		state, stateErr := rebuildState()
+		cancel()
+		select {
+		case err := <-rebuildDone:
+			t.Fatalf("the rebuild did not complete within %v: state=%q (err=%v), ForceExec returned %v after cancel\nForceExec log:\n%s",
+				rebuildDeadline, state, stateErr, err, logs.String())
+		case <-time.After(30 * time.Second):
+			t.Fatalf("the rebuild did not complete within %v: state=%q (err=%v), and ForceExec did not return after cancel",
+				rebuildDeadline, state, stateErr)
+		}
 	}
 	require.NotContains(t, logs.String(), "killing locking transaction")
 }
