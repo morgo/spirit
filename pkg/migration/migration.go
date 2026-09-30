@@ -119,10 +119,8 @@ type Migration struct {
 	RespectSentinel bool `name:"respect-sentinel" help:"Look for sentinel table to exist and block if it does" optional:"" default:"true" hidden:""`
 
 	// useTestCutover is a test-only cutover
-	useTestCutover   bool
-	useTestThrottler bool
-	// testThrottler is a test-only copier throttler. When set it is used in
-	// place of the always-throttled mock that useTestThrottler selects.
+	useTestCutover bool
+	// testThrottler is a test-only copier throttler (see WithTestThrottler).
 	testThrottler throttler.Throttler
 }
 

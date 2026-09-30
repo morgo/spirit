@@ -1204,21 +1204,16 @@ func (r *Runner) setThrottlerOnPhases() {
 // Multiple replica DSNs can be specified as a comma-separated list.
 // This is common logic shared between resume and new migration paths.
 func (r *Runner) setupThrottler(ctx context.Context) error {
-	if r.migration.useTestThrottler || r.migration.testThrottler != nil {
-		// We are in tests, add a throttler that always throttles, unless the
-		// test supplied its own.
+	if r.migration.testThrottler != nil {
+		// We are in tests: use the test's throttler (a throttler.Mock).
 		//
 		// Deliberately wired to the copier only, not through
-		// setThrottlerOnPhases. The mock is always-throttled and blocks for a
-		// second per call, so it exists to pace the copy at a known rate.
+		// setThrottlerOnPhases. The mock exists to pace or stall the copy.
 		// Handing it to the checksum as well would add a second per checksum
-		// chunk to every test that uses it — real wall-clock cost, no extra
-		// coverage. Checksum throttling is covered directly in pkg/checksum.
-		testThrottler := r.migration.testThrottler
-		if testThrottler == nil {
-			testThrottler = &throttler.Mock{}
-		}
-		r.setThrottler(testThrottler)
+		// chunk to every test that paces with it — real wall-clock cost, no
+		// extra coverage. Checksum throttling is covered directly in
+		// pkg/checksum.
+		r.setThrottler(r.migration.testThrottler)
 		r.copier.SetThrottler(r.currentThrottler())
 		return r.currentThrottler().Open(ctx)
 	}

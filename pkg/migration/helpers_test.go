@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -218,14 +217,15 @@ func WithStatement(s string) RunnerOption {
 // so the repl client has time to observe events).
 func WithTestThrottler() RunnerOption {
 	return func(m *Migration) {
-		m.useTestThrottler = true
+		m.testThrottler = &throttler.Mock{}
 	}
 }
 
 // WithCopyStalledAfterChunks lets the copier read n chunks and then holds it
-// until the run's context is cancelled. The run can write a checkpoint but
-// cannot finish the copy, so a test that cancels it after waitForCheckpoint
-// always cancels during the copy, never during the cutover (issue #1338).
+// until the run's context is cancelled (throttler.NewStallingMock). The run
+// can write a checkpoint but cannot finish the copy, so a test that cancels it
+// after waitForCheckpoint always cancels during the copy, never during the
+// cutover (issue #1338).
 //
 // The optimistic chunker's watermark needs a chunk with both bounds, and the
 // first chunk has no lower bound, so a checkpoint needs n >= 2. The table must
@@ -233,29 +233,8 @@ func WithTestThrottler() RunnerOption {
 // WithThreads(1): the budget is shared by all read workers.
 func WithCopyStalledAfterChunks(n int64) RunnerOption {
 	return func(m *Migration) {
-		m.testThrottler = &stallAfterCallsThrottler{allowed: n}
+		m.testThrottler = throttler.NewStallingMock(n)
 	}
-}
-
-// stallAfterCallsThrottler returns from the first allowed BlockWait calls at
-// once and blocks every later call until its context is done.
-type stallAfterCallsThrottler struct {
-	allowed int64
-	calls   atomic.Int64
-}
-
-var _ throttler.Throttler = (*stallAfterCallsThrottler)(nil)
-
-func (s *stallAfterCallsThrottler) Open(context.Context) error      { return nil }
-func (s *stallAfterCallsThrottler) Close() error                    { return nil }
-func (s *stallAfterCallsThrottler) IsThrottled() bool               { return s.calls.Load() > s.allowed }
-func (s *stallAfterCallsThrottler) UpdateLag(context.Context) error { return nil }
-
-func (s *stallAfterCallsThrottler) BlockWait(ctx context.Context) {
-	if s.calls.Add(1) <= s.allowed {
-		return
-	}
-	<-ctx.Done()
 }
 
 // WithDeferCutOver enables deferred cutover mode.

@@ -28,6 +28,7 @@ import (
 	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
+	"github.com/block/spirit/pkg/throttler"
 	"github.com/block/spirit/pkg/utils"
 	"github.com/stretchr/testify/require"
 )
@@ -157,14 +158,14 @@ func TestCheckpoint(t *testing.T) {
 
 	preSetup := func() *Runner {
 		r, err := NewRunner(&Migration{
-			Host:             cfg.Addr,
-			Username:         cfg.User,
-			Password:         &cfg.Passwd,
-			Database:         cfg.DBName,
-			Threads:          1,
-			WriteThreads:     1,
-			Statement:        "ALTER TABLE cpt1 ENGINE=InnoDB",
-			useTestThrottler: true,
+			Host:          cfg.Addr,
+			Username:      cfg.User,
+			Password:      &cfg.Passwd,
+			Database:      cfg.DBName,
+			Threads:       1,
+			WriteThreads:  1,
+			Statement:     "ALTER TABLE cpt1 ENGINE=InnoDB",
+			testThrottler: &throttler.Mock{},
 		})
 		require.NoError(t, err)
 		require.Equal(t, "initial", r.status.Get().String())
