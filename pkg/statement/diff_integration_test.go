@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"unicode"
 
 	_ "github.com/block/mysql"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -1044,6 +1046,87 @@ func TestDiffIntegrationDefaultCollation(t *testing.T) {
 	}
 }
 
+// TestDiffIntegrationUtf8mb4ColumnWithoutCollation verifies that a column
+// declaring CHARACTER SET utf8mb4 without a COLLATE matches its live form in a
+// table whose default is another charset or another utf8mb4 collation, in both
+// diff directions. The column takes the server's utf8mb4 default rather than
+// the table's collation, so SHOW CREATE TABLE writes that collation out on it.
+// Before the fix the diff emitted a MODIFY restating the bare charset on every
+// plan, which MySQL applies without changing SHOW CREATE TABLE.
+func TestDiffIntegrationUtf8mb4ColumnWithoutCollation(t *testing.T) {
+	for _, ddl := range []string{
+		"CREATE TABLE diff_utf8mb4_no_collate (id int NOT NULL, b char(4) CHARACTER SET utf8mb4 DEFAULT 'a', PRIMARY KEY (id)) DEFAULT CHARSET=latin1",
+		"CREATE TABLE diff_utf8mb4_no_collate (id int NOT NULL, b char(4) CHARACTER SET utf8mb4 DEFAULT 'a', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin",
+	} {
+		tt := testutils.NewTestTable(t, "diff_utf8mb4_no_collate", ddl)
+
+		// The column must not have inherited the table collation, or SHOW
+		// CREATE TABLE would omit its clauses and this test would not
+		// exercise the spelled-out form.
+		var tableCollation, columnCollation string
+		require.NoError(t, tt.DB.QueryRowContext(t.Context(),
+			"SELECT table_collation FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ?", tt.Name).Scan(&tableCollation))
+		require.NoError(t, tt.DB.QueryRowContext(t.Context(),
+			"SELECT collation_name FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? AND column_name = 'b'", tt.Name).Scan(&columnCollation))
+		require.NotEqual(t, tableCollation, columnCollation, ddl)
+		liveDDL := showCreateTable(t, tt.DB, tt.Name)
+		require.Contains(t, liveDDL, "COLLATE "+columnCollation, ddl)
+
+		desired, err := ParseCreateTable(ddl)
+		require.NoError(t, err)
+		live, err := ParseCreateTable(liveDDL)
+		require.NoError(t, err)
+		stmts, err := live.Diff(desired, nil)
+		require.NoError(t, err)
+		require.Nil(t, stmts, "live.Diff(desired) must converge: %s", ddl)
+		stmts, err = desired.Diff(live, nil)
+		require.NoError(t, err)
+		require.Nil(t, stmts, "desired.Diff(live) must converge: %s", ddl)
+	}
+}
+
+// TestDiffIntegrationUtf8mb4ColumnWithoutCollationDetectsDrift verifies that
+// a live column on a utf8mb4 collation default_collation_for_utf8mb4 cannot
+// hold is MODIFYed onto what the bare CHARACTER SET utf8mb4 declaration
+// creates, and that the MODIFY converges. That variable accepts only
+// utf8mb4_0900_ai_ci and utf8mb4_general_ci, so utf8mb4_bin is never what the
+// declaration creates, on any server.
+func TestDiffIntegrationUtf8mb4ColumnWithoutCollationDetectsDrift(t *testing.T) {
+	for _, tableOpts := range []string{
+		"DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
+		"DEFAULT CHARSET=latin1",
+		// The live column inherits the table's utf8mb4_bin, so SHOW CREATE
+		// TABLE writes no COLLATE on it.
+		"DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin",
+	} {
+		t.Run(tableOpts, func(t *testing.T) {
+			tt := testutils.NewTestTable(t, "diff_utf8mb4_drift",
+				"CREATE TABLE diff_utf8mb4_drift (id int NOT NULL, b varchar(4) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin, PRIMARY KEY (id)) "+tableOpts)
+			desired, err := ParseCreateTable(
+				"CREATE TABLE diff_utf8mb4_drift (id int NOT NULL, b varchar(4) CHARACTER SET utf8mb4, PRIMARY KEY (id)) " + tableOpts)
+			require.NoError(t, err)
+
+			live, err := ParseCreateTable(showCreateTable(t, tt.DB, tt.Name))
+			require.NoError(t, err)
+			stmts, err := live.Diff(desired, nil)
+			require.NoError(t, err)
+			require.Len(t, stmts, 1, "a utf8mb4_bin column is not what CHARACTER SET utf8mb4 creates")
+			testutils.RunSQL(t, stmts[0].Statement)
+
+			var collation string
+			require.NoError(t, tt.DB.QueryRowContext(t.Context(),
+				"SELECT collation_name FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? AND column_name = 'b'", tt.Name).Scan(&collation))
+			require.True(t, utf8mb4ServerDefaultCollations[collation], "column collation %s", collation)
+
+			live, err = ParseCreateTable(showCreateTable(t, tt.DB, tt.Name))
+			require.NoError(t, err)
+			stmts, err = live.Diff(desired, nil)
+			require.NoError(t, err)
+			require.Nil(t, stmts, "the MODIFY must converge")
+		})
+	}
+}
+
 // TestDiffIntegrationTableCharsetSelectsDefaultCollation verifies that a
 // desired DEFAULT CHARSET=latin1 converges a latin1_bin table, including the
 // column that inherits the table default, onto latin1_swedish_ci in one ALTER.
@@ -1444,6 +1527,66 @@ func TestDiffIntegrationBinaryLiteralDefaultsConverge(t *testing.T) {
 	require.Nil(t, stmts, "re-diff after applying the ALTER must converge")
 }
 
+// TestDiffIntegrationZerofillDefaultWidthConverges verifies that a ZEROFILL
+// integer declared without a width resolves to the unsigned default width MySQL
+// stores for it (int zerofill is int(10) unsigned zerofill, not the parser's
+// signed int(11)). The live table starts on widths other than the unsigned
+// default — the signed defaults for tinyint through int, where the two differ,
+// and bigint(21) for bigint, whose signed and unsigned defaults are both 20 and
+// so converged before this rule — so the diff must move every column to the
+// unsigned default, and after the ALTER is applied a re-diff must converge.
+func TestDiffIntegrationZerofillDefaultWidthConverges(t *testing.T) {
+	tt := testutils.NewTestTable(t, "diff_zerofill_width",
+		"CREATE TABLE diff_zerofill_width (id int NOT NULL, a int(11) zerofill, b tinyint(4) zerofill, c smallint(6) zerofill, d mediumint(9) zerofill, e bigint(21) zerofill, PRIMARY KEY (id))")
+	const declaredSQL = "CREATE TABLE diff_zerofill_width (id int NOT NULL, a int zerofill, b tinyint zerofill, c smallint unsigned zerofill, d mediumint zerofill, e bigint zerofill, PRIMARY KEY (id))"
+
+	stmts := diffLiveTable(t, tt.DB, tt.Name, declaredSQL)
+	require.Len(t, stmts, 1)
+	for _, want := range []string{
+		"`a` int(10) unsigned zerofill",
+		"`b` tinyint(3) unsigned zerofill",
+		"`c` smallint(5) unsigned zerofill",
+		"`d` mediumint(8) unsigned zerofill",
+		"`e` bigint(20) unsigned zerofill",
+	} {
+		require.Contains(t, stmts[0].Statement, want)
+	}
+	execStatements(t, tt.DB, stmts)
+
+	liveSQL := showCreateTable(t, tt.DB, tt.Name)
+	for _, want := range []string{
+		"`a` int(10) unsigned zerofill",
+		"`b` tinyint(3) unsigned zerofill",
+		"`c` smallint(5) unsigned zerofill",
+		"`d` mediumint(8) unsigned zerofill",
+		"`e` bigint(20) unsigned zerofill",
+	} {
+		require.Contains(t, liveSQL, want)
+	}
+	requireConverged(t, tt.DB, tt.Name, declaredSQL)
+	requireNoSelfDiff(t, tt.DB, tt.Name)
+}
+
+// TestDiffIntegrationZerofillExplicitWidthKept verifies that an explicit
+// ZEROFILL width equal to the signed default (int(11) zerofill) is kept: MySQL
+// stores it as written, so a table created from that schema diffs clean
+// against it, and against the width-less spelling it does not.
+func TestDiffIntegrationZerofillExplicitWidthKept(t *testing.T) {
+	const declaredSQL = "CREATE TABLE diff_zerofill_explicit (id int NOT NULL, a int(11) zerofill, b tinyint(4) zerofill, PRIMARY KEY (id))"
+	tt := testutils.NewTestTable(t, "diff_zerofill_explicit", declaredSQL)
+
+	liveSQL := showCreateTable(t, tt.DB, tt.Name)
+	require.Contains(t, liveSQL, "`a` int(11) unsigned zerofill")
+	require.Contains(t, liveSQL, "`b` tinyint(4) unsigned zerofill")
+	requireConverged(t, tt.DB, tt.Name, declaredSQL)
+	requireNoSelfDiff(t, tt.DB, tt.Name)
+
+	stmts := diffLiveTable(t, tt.DB, tt.Name, "CREATE TABLE diff_zerofill_explicit (id int NOT NULL, a int zerofill, b tinyint zerofill, PRIMARY KEY (id))")
+	require.Len(t, stmts, 1)
+	require.Contains(t, stmts[0].Statement, "`a` int(10) unsigned zerofill")
+	require.Contains(t, stmts[0].Statement, "`b` tinyint(3) unsigned zerofill")
+}
+
 // TestDiffIntegrationCharUTF8MB4Default verifies that a string default on a
 // utf8mb4 char or varchar column that is not valid utf8mb3 matches its live
 // form, which SHOW CREATE TABLE reports as a hex literal (char(4) DEFAULT '😀'
@@ -1547,4 +1690,291 @@ func TestDiffIntegrationCharUTF8MB4DefaultIgnoreCharsetCollation(t *testing.T) {
 	testutils.RunSQL(t, "INSERT INTO diff_mb4def_ignore_charset (id) VALUES (1)")
 	require.NoError(t, tt.DB.QueryRowContext(t.Context(), "SELECT HEX(b) FROM diff_mb4def_ignore_charset WHERE id = 1").Scan(&stored))
 	require.Equal(t, "D83DDE00", stored, "the utf16 encoding of the character")
+}
+
+// TestDiffIntegrationTinyint1UnsignedConverges verifies that a table created
+// from tinyint(1) unsigned diffs clean against that schema: MySQL keeps the
+// width only on the signed tinyint(1) and stores tinyint unsigned. Under
+// ZEROFILL the width is kept.
+func TestDiffIntegrationTinyint1UnsignedConverges(t *testing.T) {
+	const declaredSQL = "CREATE TABLE diff_tinyint1_unsigned (id int NOT NULL, a tinyint(1) unsigned, b tinyint(1), c tinyint(1) unsigned zerofill, PRIMARY KEY (id))"
+	tt := testutils.NewTestTable(t, "diff_tinyint1_unsigned", declaredSQL)
+
+	liveSQL := showCreateTable(t, tt.DB, tt.Name)
+	require.Contains(t, liveSQL, "`a` tinyint unsigned DEFAULT NULL")
+	require.Contains(t, liveSQL, "`b` tinyint(1) DEFAULT NULL")
+	require.Contains(t, liveSQL, "`c` tinyint(1) unsigned zerofill DEFAULT NULL")
+	requireConverged(t, tt.DB, tt.Name, declaredSQL)
+	requireNoSelfDiff(t, tt.DB, tt.Name)
+}
+
+// TestDiffIntegrationCharDefaultSpaces verifies that a string default on a
+// char(N) column matches its live form, which MySQL reports with every
+// trailing space stripped (char(4) DEFAULT 'a  ' is reported as DEFAULT 'a'),
+// in every charset and collation, NO PAD collations included. A varchar(N)
+// default keeps its trailing spaces, except those past the column's width,
+// which MySQL drops (varchar(4) DEFAULT 'ab      ' is reported as 'ab  ').
+// A hex or bit literal default is reported as the string its bytes form, with
+// the same spaces handling (char(4) DEFAULT x'612020' is reported as 'a').
+// Without the conversion the diff emits a MODIFY that MySQL rewrites to its
+// own form again, on every run.
+func TestDiffIntegrationCharDefaultSpaces(t *testing.T) {
+	for _, tc := range []struct{ name, ddl, live string }{
+		{"diff_charpad_trailing", "CREATE TABLE diff_charpad_trailing (id int NOT NULL, b char(4) DEFAULT 'a  ', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` char(4) DEFAULT 'a'"},
+		{"diff_charpad_only_spaces", "CREATE TABLE diff_charpad_only_spaces (id int NOT NULL, b char(4) NOT NULL DEFAULT '    ', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` char(4) NOT NULL DEFAULT ''"},
+		{"diff_charpad_no_width", "CREATE TABLE diff_charpad_no_width (id int NOT NULL, b char DEFAULT ' ', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` char(1) DEFAULT ''"},
+		{"diff_charpad_leading", "CREATE TABLE diff_charpad_leading (id int NOT NULL, b char(4) DEFAULT ' a ', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` char(4) DEFAULT ' a'"},
+		{"diff_charpad_past_width", "CREATE TABLE diff_charpad_past_width (id int NOT NULL, b char(4) DEFAULT 'abcd  ', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` char(4) DEFAULT 'abcd'"},
+		{"diff_charpad_tab", "CREATE TABLE diff_charpad_tab (id int NOT NULL, b char(4) DEFAULT 'ab\\t  ', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` char(4) DEFAULT 'ab\t'"},
+		{"diff_charpad_nul", "CREATE TABLE diff_charpad_nul (id int NOT NULL, b char(4) DEFAULT 'a\\0 ', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` char(4) DEFAULT 'a\\0'"},
+		{"diff_charpad_introducer", "CREATE TABLE diff_charpad_introducer (id int NOT NULL, b char(4) DEFAULT _latin1'a  ', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` char(4) DEFAULT 'a'"},
+		{"diff_charpad_no_pad", "CREATE TABLE diff_charpad_no_pad (id int NOT NULL, b char(4) COLLATE utf8mb4_0900_bin DEFAULT 'a  ', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` char(4) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin DEFAULT 'a'"},
+		{"diff_charpad_utf16", "CREATE TABLE diff_charpad_utf16 (id int NOT NULL, b char(4) CHARACTER SET utf16 DEFAULT 'abcd  ', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` char(4) CHARACTER SET utf16 COLLATE utf16_general_ci DEFAULT 'abcd'"},
+		{"diff_charpad_latin1_table", "CREATE TABLE diff_charpad_latin1_table (id int NOT NULL, b char(4) DEFAULT 'a  ', PRIMARY KEY (id)) DEFAULT CHARSET=latin1", "`b` char(4) DEFAULT 'a'"},
+		{"diff_charpad_hex", "CREATE TABLE diff_charpad_hex (id int NOT NULL, b char(4) DEFAULT x'612020', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` char(4) DEFAULT 'a'"},
+		{"diff_charpad_hex_past_width", "CREATE TABLE diff_charpad_hex_past_width (id int NOT NULL, b char(4) DEFAULT 0x61202020202020, PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` char(4) DEFAULT 'a'"},
+		{"diff_charpad_bit", "CREATE TABLE diff_charpad_bit (id int NOT NULL, b char(4) DEFAULT b'011000010010000000100000', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` char(4) DEFAULT 'a'"},
+		{"diff_varcharpad_hex_past_width", "CREATE TABLE diff_varcharpad_hex_past_width (id int NOT NULL, b varchar(4) DEFAULT x'61202020202020', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` varchar(4) DEFAULT 'a   '"},
+		{"diff_varcharpad_keeps", "CREATE TABLE diff_varcharpad_keeps (id int NOT NULL, b varchar(4) DEFAULT 'a  ', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` varchar(4) DEFAULT 'a  '"},
+		{"diff_varcharpad_past_width", "CREATE TABLE diff_varcharpad_past_width (id int NOT NULL, b varchar(4) DEFAULT 'ab      ', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` varchar(4) DEFAULT 'ab  '"},
+		{"diff_varcharpad_multibyte", "CREATE TABLE diff_varcharpad_multibyte (id int NOT NULL, b varchar(2) DEFAULT 'é   ', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` varchar(2) DEFAULT 'é '"},
+		{"diff_varcharpad_latin1", "CREATE TABLE diff_varcharpad_latin1 (id int NOT NULL, b varchar(4) CHARACTER SET latin1 NOT NULL DEFAULT 'ab    ', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` varchar(4) CHARACTER SET latin1 COLLATE latin1_swedish_ci NOT NULL DEFAULT 'ab  '"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tt := testutils.NewTestTable(t, tc.name, tc.ddl)
+			liveSQL := showCreateTable(t, tt.DB, tt.Name)
+			require.Contains(t, liveSQL, tc.live, "the reading this case pins")
+			desired, err := ParseCreateTable(tc.ddl)
+			require.NoError(t, err)
+			live, err := ParseCreateTable(liveSQL)
+			require.NoError(t, err)
+			stmts, err := live.Diff(desired, nil)
+			require.NoError(t, err)
+			require.Nil(t, stmts, "a char default must match its live form")
+			stmts, err = desired.Diff(live, nil)
+			require.NoError(t, err)
+			require.Nil(t, stmts, "the live form must match the char default")
+		})
+	}
+}
+
+// TestDiffIntegrationCharDefaultSpacesConverges verifies that the MODIFY
+// emitted for a char or varchar default with trailing spaces round-trips:
+// MySQL applies it and reports the value it carries, after which a re-diff
+// converges to nil.
+func TestDiffIntegrationCharDefaultSpacesConverges(t *testing.T) {
+	tt := testutils.NewTestTable(t, "diff_charpad_converge",
+		"CREATE TABLE diff_charpad_converge (id int NOT NULL, c char(4), v varchar(4), PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci")
+	desired, err := ParseCreateTable(
+		"CREATE TABLE diff_charpad_converge (id int NOT NULL, c char(4) DEFAULT 'a  ', v varchar(4) DEFAULT 'ab      ', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci")
+	require.NoError(t, err)
+
+	live, err := ParseCreateTable(showCreateTable(t, tt.DB, tt.Name))
+	require.NoError(t, err)
+	stmts, err := live.Diff(desired, nil)
+	require.NoError(t, err)
+	require.Len(t, stmts, 1)
+	require.Contains(t, stmts[0].Statement, "`c` char(4) NULL DEFAULT 'a'")
+	require.Contains(t, stmts[0].Statement, "`v` varchar(4) NULL DEFAULT 'ab  '")
+	testutils.RunSQL(t, stmts[0].Statement)
+
+	var stored string
+	testutils.RunSQL(t, "INSERT INTO diff_charpad_converge (id) VALUES (1)")
+	require.NoError(t, tt.DB.QueryRowContext(t.Context(), "SELECT CONCAT('[', c, '][', v, ']') FROM diff_charpad_converge WHERE id = 1").Scan(&stored))
+	require.Equal(t, "[a][ab  ]", stored)
+
+	liveSQL := showCreateTable(t, tt.DB, tt.Name)
+	require.Contains(t, liveSQL, "`c` char(4) DEFAULT 'a'")
+	require.Contains(t, liveSQL, "`v` varchar(4) DEFAULT 'ab  '")
+	live, err = ParseCreateTable(liveSQL)
+	require.NoError(t, err)
+	stmts, err = live.Diff(desired, nil)
+	require.NoError(t, err)
+	require.Nil(t, stmts, "re-diff after applying the ALTER must converge")
+}
+
+// TestDiffIntegrationCharDefaultSpacesPadCharToFullLength verifies that a char
+// default read by a session with the PAD_CHAR_TO_FULL_LENGTH sql_mode, whose
+// SHOW CREATE TABLE reports it padded to the column's width (DEFAULT 'a   '),
+// still matches the declared default. Spirit's own connections never set that
+// mode, but a caller of Diff may read the live table through its own.
+func TestDiffIntegrationCharDefaultSpacesPadCharToFullLength(t *testing.T) {
+	ddl := "CREATE TABLE diff_charpad_full_length (id int NOT NULL, b char(4) DEFAULT 'a  ', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci"
+	tt := testutils.NewTestTable(t, "diff_charpad_full_length", ddl)
+
+	conn, err := tt.DB.Conn(t.Context())
+	require.NoError(t, err)
+	defer func() { require.NoError(t, conn.Close()) }()
+	_, err = conn.ExecContext(t.Context(), "SET SESSION sql_mode = CONCAT(@@sql_mode, ',PAD_CHAR_TO_FULL_LENGTH')")
+	require.NoError(t, err)
+	var name, liveSQL string
+	require.NoError(t, conn.QueryRowContext(t.Context(), "SHOW CREATE TABLE diff_charpad_full_length").Scan(&name, &liveSQL))
+	require.Contains(t, liveSQL, "`b` char(4) DEFAULT 'a   '", "the reading this test pins")
+
+	desired, err := ParseCreateTable(ddl)
+	require.NoError(t, err)
+	live, err := ParseCreateTable(liveSQL)
+	require.NoError(t, err)
+	stmts, err := live.Diff(desired, nil)
+	require.NoError(t, err)
+	require.Nil(t, stmts, "a padded reading must match the char default")
+}
+
+// TestDiffIntegrationEnumSetDefault verifies that a string default on an enum
+// or set column matches its live form, which MySQL reports as the member text
+// the default names: trailing spaces stripped (enum('a','b') DEFAULT 'b ' is
+// reported as DEFAULT 'b'), the member's own case on a _ci collation, and a set
+// default's members once each in definition order. Without the conversion the
+// diff emits a MODIFY that MySQL rewrites to the member again, on every run.
+func TestDiffIntegrationEnumSetDefault(t *testing.T) {
+	for _, tc := range []struct{ name, ddl, live string }{
+		{"diff_enumdef_trailing", "CREATE TABLE diff_enumdef_trailing (id int NOT NULL, b enum('a','b') DEFAULT 'b ', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` enum('a','b') DEFAULT 'b'"},
+		{"diff_enumdef_not_null", "CREATE TABLE diff_enumdef_not_null (id int NOT NULL, b enum('a','b') NOT NULL DEFAULT 'b   ', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` enum('a','b') NOT NULL DEFAULT 'b'"},
+		{"diff_enumdef_member_spaces", "CREATE TABLE diff_enumdef_member_spaces (id int NOT NULL, b enum('a','b ') DEFAULT 'b  ', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` enum('a','b') DEFAULT 'b'"},
+		{"diff_enumdef_empty_member", "CREATE TABLE diff_enumdef_empty_member (id int NOT NULL, b enum('','b') DEFAULT ' ', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` enum('','b') DEFAULT ''"},
+		{"diff_enumdef_introducer", "CREATE TABLE diff_enumdef_introducer (id int NOT NULL, b enum('a','b') DEFAULT _latin1'b ', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` enum('a','b') DEFAULT 'b'"},
+		{"diff_enumdef_no_pad", "CREATE TABLE diff_enumdef_no_pad (id int NOT NULL, b enum('a','b') COLLATE utf8mb4_0900_bin DEFAULT 'b ', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` enum('a','b') CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin DEFAULT 'b'"},
+		{"diff_enumdef_utf16", "CREATE TABLE diff_enumdef_utf16 (id int NOT NULL, b enum('a','b') CHARACTER SET utf16 DEFAULT 'b ', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` enum('a','b') CHARACTER SET utf16 COLLATE utf16_general_ci DEFAULT 'b'"},
+		{"diff_enumdef_case", "CREATE TABLE diff_enumdef_case (id int NOT NULL, b enum('a','B') DEFAULT 'b ', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` enum('a','B') DEFAULT 'B'"},
+		{"diff_enumdef_case_general_ci", "CREATE TABLE diff_enumdef_case_general_ci (id int NOT NULL, b enum('a','B') COLLATE utf8mb4_general_ci DEFAULT 'b', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` enum('a','B') CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT 'B'"},
+		{"diff_enumdef_case_latin1", "CREATE TABLE diff_enumdef_case_latin1 (id int NOT NULL, b enum('a','B') DEFAULT 'b', PRIMARY KEY (id)) DEFAULT CHARSET=latin1", "`b` enum('a','B') DEFAULT 'B'"},
+		{"diff_enumdef_case_non_ascii", "CREATE TABLE diff_enumdef_case_non_ascii (id int NOT NULL, b enum('a','Bé') DEFAULT 'bé ', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` enum('a','Bé') DEFAULT 'Bé'"},
+		{"diff_setdef_trailing", "CREATE TABLE diff_setdef_trailing (id int NOT NULL, b set('a','b') DEFAULT 'b ', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` set('a','b') DEFAULT 'b'"},
+		{"diff_setdef_several", "CREATE TABLE diff_setdef_several (id int NOT NULL, b set('a','b') DEFAULT 'a,b ', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` set('a','b') DEFAULT 'a,b'"},
+		{"diff_setdef_order", "CREATE TABLE diff_setdef_order (id int NOT NULL, b set('a','b','c') DEFAULT 'c,A,b,a ', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` set('a','b','c') DEFAULT 'a,b,c'"},
+		{"diff_enumdef_binary_attr", "CREATE TABLE diff_enumdef_binary_attr (id int NOT NULL, b enum('a','B') BINARY DEFAULT 'B ', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` enum('a','B') CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT 'B'"},
+		{"diff_setdef_duplicate", "CREATE TABLE diff_setdef_duplicate (id int NOT NULL, b set('a','b') DEFAULT 'a,a', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` set('a','b') DEFAULT 'a'"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tt := testutils.NewTestTable(t, tc.name, tc.ddl)
+			liveSQL := showCreateTable(t, tt.DB, tt.Name)
+			require.Contains(t, liveSQL, tc.live, "the reading this case pins")
+			desired, err := ParseCreateTable(tc.ddl)
+			require.NoError(t, err)
+			live, err := ParseCreateTable(liveSQL)
+			require.NoError(t, err)
+			stmts, err := live.Diff(desired, nil)
+			require.NoError(t, err)
+			require.Nil(t, stmts, "an enum or set default must match its live form")
+			stmts, err = desired.Diff(live, nil)
+			require.NoError(t, err)
+			require.Nil(t, stmts, "the live form must match the enum or set default")
+		})
+	}
+}
+
+// TestDiffIntegrationEnumSetDefaultConverges verifies that the MODIFY emitted
+// for an enum or set default written with trailing spaces, another case or out
+// of order round-trips: MySQL applies it and reports the member text it
+// carries, after which a re-diff converges to nil.
+func TestDiffIntegrationEnumSetDefaultConverges(t *testing.T) {
+	tt := testutils.NewTestTable(t, "diff_enumdef_converge",
+		"CREATE TABLE diff_enumdef_converge (id int NOT NULL, e enum('a','B'), s set('a','b','c'), PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci")
+	desired, err := ParseCreateTable(
+		"CREATE TABLE diff_enumdef_converge (id int NOT NULL, e enum('a','B') DEFAULT 'b ', s set('a','b','c') DEFAULT 'c,a ', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci")
+	require.NoError(t, err)
+
+	live, err := ParseCreateTable(showCreateTable(t, tt.DB, tt.Name))
+	require.NoError(t, err)
+	stmts, err := live.Diff(desired, nil)
+	require.NoError(t, err)
+	require.Len(t, stmts, 1)
+	require.Contains(t, stmts[0].Statement, "`e` enum('a','B') NULL DEFAULT 'B'")
+	require.Contains(t, stmts[0].Statement, "`s` set('a','b','c') NULL DEFAULT 'a,c'")
+	testutils.RunSQL(t, stmts[0].Statement)
+
+	var stored string
+	testutils.RunSQL(t, "INSERT INTO diff_enumdef_converge (id) VALUES (1)")
+	require.NoError(t, tt.DB.QueryRowContext(t.Context(), "SELECT CONCAT(e, '/', s) FROM diff_enumdef_converge WHERE id = 1").Scan(&stored))
+	require.Equal(t, "B/a,c", stored)
+
+	liveSQL := showCreateTable(t, tt.DB, tt.Name)
+	require.Contains(t, liveSQL, "`e` enum('a','B') DEFAULT 'B'")
+	require.Contains(t, liveSQL, "`s` set('a','b','c') DEFAULT 'a,c'")
+	live, err = ParseCreateTable(liveSQL)
+	require.NoError(t, err)
+	stmts, err = live.Diff(desired, nil)
+	require.NoError(t, err)
+	require.Nil(t, stmts, "re-diff after applying the ALTER must converge")
+}
+
+// TestDiffIntegrationEnumDefaultContractionKeepsStoredValue verifies that a
+// default the rule leaves alone because the collation does not fold ASCII case
+// keeps the value MySQL stores for the declared DDL. utf8mb4_da_0900_ai_ci
+// reads 'AA' as the contraction 'aa' and not as 'aA', so the table stores
+// 'aa'; folding the default to the first case-insensitive match would emit a
+// MODIFY to 'aA' that MySQL accepts, changing the stored default silently.
+func TestDiffIntegrationEnumDefaultContractionKeepsStoredValue(t *testing.T) {
+	ddl := "CREATE TABLE diff_enumdef_contraction (id int NOT NULL, b enum('aA','aa') COLLATE utf8mb4_da_0900_ai_ci DEFAULT 'AA', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci"
+	tt := testutils.NewTestTable(t, "diff_enumdef_contraction", ddl)
+	liveSQL := showCreateTable(t, tt.DB, tt.Name)
+	require.Contains(t, liveSQL, "DEFAULT 'aa'", "the reading this test pins")
+	desired, err := ParseCreateTable(ddl)
+	require.NoError(t, err)
+	live, err := ParseCreateTable(liveSQL)
+	require.NoError(t, err)
+	stmts, err := live.Diff(desired, nil)
+	require.NoError(t, err)
+	for _, s := range stmts {
+		testutils.RunSQL(t, s.Statement)
+	}
+	testutils.RunSQL(t, "INSERT INTO diff_enumdef_contraction (id) VALUES (1)")
+	var stored string
+	require.NoError(t, tt.DB.QueryRowContext(t.Context(), "SELECT CAST(b AS BINARY) FROM diff_enumdef_contraction WHERE id = 1").Scan(&stored))
+	require.Equal(t, "aa", stored, "the diff must not change the default MySQL stores for the declared DDL")
+}
+
+// TestDiffIntegrationEnumSetDefaultFoldAllowlist checks collationFoldsASCIICase
+// against every collation on the server: each one it accepts must compare
+// every ASCII letter, and every two-letter string, equal to its case variants
+// (the two-letter strings catch contractions such as Danish aa or Czech ch).
+// Tailored collations that break the equivalence are checked too, so the
+// comparison is shown to catch it.
+func TestDiffIntegrationEnumSetDefaultFoldAllowlist(t *testing.T) {
+	tt := testutils.NewTestTable(t, "diff_enumdef_fold_pairs",
+		"CREATE TABLE diff_enumdef_fold_pairs (id int NOT NULL AUTO_INCREMENT, l varchar(3) NOT NULL, v varchar(3) NOT NULL, PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin")
+	var rows []string
+	for x := 'a'; x <= 'z'; x++ {
+		rows = append(rows, fmt.Sprintf("('%c','%c')", x, unicode.ToUpper(x)))
+		for y := 'a'; y <= 'z'; y++ {
+			for _, v := range []string{string([]rune{unicode.ToUpper(x), y}), string([]rune{x, unicode.ToUpper(y)}), string([]rune{unicode.ToUpper(x), unicode.ToUpper(y)})} {
+				rows = append(rows, fmt.Sprintf("('%c%c','%s')", x, y, v))
+			}
+		}
+	}
+	testutils.RunSQL(t, "INSERT INTO diff_enumdef_fold_pairs (l, v) VALUES "+strings.Join(rows, ","))
+
+	unequal := func(cs, collation string) string {
+		var examples sql.NullString
+		query := fmt.Sprintf("SELECT GROUP_CONCAT(CONCAT(l, '/', v) ORDER BY id SEPARATOR ' ') FROM diff_enumdef_fold_pairs WHERE CONVERT(l USING %s) COLLATE %s <> CONVERT(v USING %s) COLLATE %s", cs, collation, cs, collation)
+		require.NoError(t, tt.DB.QueryRowContext(t.Context(), query).Scan(&examples))
+		return examples.String
+	}
+
+	collations, err := tt.DB.QueryContext(t.Context(), "SELECT COLLATION_NAME, CHARACTER_SET_NAME FROM information_schema.COLLATIONS WHERE CHARACTER_SET_NAME <> 'binary'")
+	require.NoError(t, err)
+	defer func() { require.NoError(t, collations.Close()) }()
+	var folding int
+	for collations.Next() {
+		var collation, cs string
+		require.NoError(t, collations.Scan(&collation, &cs))
+		if !collationFoldsASCIICase(cs, collation) {
+			continue
+		}
+		folding++
+		assert.Empty(t, unequal(cs, collation), "%s is taken to fold ASCII case but compares these unequal", collation)
+	}
+	require.NoError(t, collations.Err())
+	require.GreaterOrEqual(t, folding, 30, "the allowlist must match the server's collations")
+
+	for _, c := range []struct{ cs, collation string }{
+		{"utf8mb4", "utf8mb4_da_0900_ai_ci"},
+		{"utf8mb4", "utf8mb4_czech_ci"},
+		{"utf8mb4", "utf8mb4_tr_0900_ai_ci"},
+		{"cp866", "cp866_general_ci"},
+		{"latin7", "latin7_general_ci"},
+	} {
+		assert.NotEmpty(t, unequal(c.cs, c.collation), "%s must be caught not folding ASCII case", c.collation)
+		assert.False(t, collationFoldsASCIICase(c.cs, c.collation), c.collation)
+	}
 }
