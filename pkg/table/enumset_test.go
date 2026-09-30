@@ -1,6 +1,7 @@
 package table
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"math"
@@ -180,13 +181,26 @@ func TestSetInfoStoredEnumSetMembersNeedTemporaryTables(t *testing.T) {
 		e ENUM('😀','a') NOT NULL,
 		p ENUM('c','d') NOT NULL
 	) DEFAULT CHARSET=utf8mb4`)
-	testutils.RunSQL(t, "DROP USER IF EXISTS enumsetnoprivs")
-	testutils.RunSQL(t, "CREATE USER enumsetnoprivs")
-	t.Cleanup(func() { testutils.RunSQL(t, "DROP USER IF EXISTS enumsetnoprivs") })
-	testutils.RunSQL(t, "GRANT SELECT ON test.* TO enumsetnoprivs")
 
+	// Managing users needs privileges the test DSN's user may not have.
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	require.NoError(t, err)
+	cfg.User = "root"
+	rootDB, err := sql.Open("block-mysql", cfg.FormatDSN())
+	require.NoError(t, err)
+	t.Cleanup(func() { utils.CloseAndLog(rootDB) }) // runs after the DROP USER below
+	runAsRoot := func(stmt string) {
+		_, err := rootDB.ExecContext(t.Context(), stmt)
+		require.NoError(t, err)
+	}
+	runAsRoot("DROP USER IF EXISTS enumsetnoprivs")
+	runAsRoot("CREATE USER enumsetnoprivs")
+	t.Cleanup(func() {
+		_, err := rootDB.ExecContext(context.Background(), "DROP USER IF EXISTS enumsetnoprivs")
+		assert.NoError(t, err)
+	})
+	runAsRoot("GRANT SELECT ON test.* TO enumsetnoprivs")
+
 	cfg.User = "enumsetnoprivs"
 	cfg.Passwd = ""
 	db, err := sql.Open("block-mysql", cfg.FormatDSN())
@@ -200,7 +214,7 @@ func TestSetInfoStoredEnumSetMembersNeedTemporaryTables(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "CREATE TEMPORARY TABLES")
 
-	testutils.RunSQL(t, "GRANT CREATE TEMPORARY TABLES ON test.* TO enumsetnoprivs")
+	runAsRoot("GRANT CREATE TEMPORARY TABLES ON test.* TO enumsetnoprivs")
 	require.NoError(t, ti.SetInfo(t.Context()))
 	members, ok := ti.EnumSetMembers("e")
 	require.True(t, ok)
