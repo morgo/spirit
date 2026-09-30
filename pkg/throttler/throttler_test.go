@@ -117,10 +117,12 @@ func TestStallingMockThrottler(t *testing.T) {
 	require.Less(t, time.Since(start), time.Second)
 
 	// Later calls block until the context is done: not for the pacing
-	// mock's 1s, and not forever.
+	// mock's 1s, and not forever. Take start before WithTimeout: the deadline
+	// is fixed when WithTimeout is called, so a start taken afterwards can
+	// measure slightly less than the timeout when the timer fires on time.
+	start = time.Now()
 	ctx, cancel := context.WithTimeout(t.Context(), 1500*time.Millisecond)
 	defer cancel()
-	start = time.Now()
 	stalling.BlockWait(ctx)
 	require.GreaterOrEqual(t, time.Since(start), 1500*time.Millisecond)
 	require.Error(t, ctx.Err())
