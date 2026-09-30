@@ -83,6 +83,9 @@ func TestEnumSetReorderTrailingSpaces(t *testing.T) {
 	t.Run("utf8mb4 enum", func(t *testing.T) {
 		run(t, "enumsp_utf8", "CREATE TABLE enumsp_utf8 (id int PRIMARY KEY, c enum('a','b')) DEFAULT CHARSET=utf8mb4", enumReorderCheck, []tc{
 			{"append with a member written with spaces", "ALTER TABLE enumsp_utf8 MODIFY c enum('a','b  ','c')", ""},
+			// 'a ' is the member MySQL already stores as 'a', not a new
+			// member inserted before 'b'.
+			{"a kept member restated with spaces before another", "ALTER TABLE enumsp_utf8 MODIFY c enum('a ','b')", ""},
 			{"reorder with a member written with spaces", "ALTER TABLE enumsp_utf8 MODIFY c enum('b ','a')", "unsafe ENUM value reorder"},
 		})
 	})

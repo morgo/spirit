@@ -152,6 +152,51 @@ func TestEnumSetMemberSpacesUndeterminedKeepsMember(t *testing.T) {
 	require.Nil(t, stmts)
 }
 
+// TestEnumSetMemberSpacesNoTableDefault: a schema file that omits the
+// table's DEFAULT CHARSET is compared against the live table, which always
+// reports one. The ALTER runs under the live default, so a member written with
+// trailing spaces on a non-binary live table must match its stripped live
+// form.
+func TestEnumSetMemberSpacesNoTableDefault(t *testing.T) {
+	live, err := ParseCreateTable("CREATE TABLE `t` (\n  `id` int NOT NULL,\n  `b` enum('a','b') DEFAULT NULL,\n  `s` set('x','y') DEFAULT NULL,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci")
+	require.NoError(t, err)
+	desired, err := ParseCreateTable("CREATE TABLE t (id int NOT NULL, b enum('a','b '), s set('x','y '), PRIMARY KEY (id))")
+	require.NoError(t, err)
+	stmts, err := live.Diff(desired, nil)
+	require.NoError(t, err)
+	require.Nil(t, stmts)
+}
+
+// TestEnumSetMemberSpacesIgnoreCharsetCollation: with the table-default
+// difference ignored, the ALTER runs under the live binary default, where 'b '
+// is the member MySQL stores. Compared or written as 'b', it would be renamed.
+func TestEnumSetMemberSpacesIgnoreCharsetCollation(t *testing.T) {
+	live, err := ParseCreateTable("CREATE TABLE `t` (\n  `id` int NOT NULL,\n  `b` enum('a','b ') DEFAULT NULL,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=binary")
+	require.NoError(t, err)
+	opts := &DiffOptions{IgnoreCharsetCollation: true}
+
+	desired, err := ParseCreateTable("CREATE TABLE t (id int NOT NULL, b enum('a','b '), PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4")
+	require.NoError(t, err)
+	stmts, err := live.Diff(desired, opts)
+	require.NoError(t, err)
+	require.Nil(t, stmts)
+
+	desired, err = ParseCreateTable("CREATE TABLE t (id int NOT NULL, b enum('a','b ') COMMENT 'x', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4")
+	require.NoError(t, err)
+	stmts, err = live.Diff(desired, opts)
+	require.NoError(t, err)
+	require.Len(t, stmts, 1)
+	require.Contains(t, stmts[0].Statement, "enum('a','b ')")
+
+	// Without the option the ALTER sets the utf8mb4 default, which strips the
+	// member, so Diff must report the change.
+	stmts, err = live.Diff(desired, nil)
+	require.NoError(t, err)
+	require.Len(t, stmts, 1)
+	require.Contains(t, stmts[0].Statement, "enum('a','b')")
+	require.Contains(t, stmts[0].Statement, "DEFAULT CHARSET=utf8mb4")
+}
+
 // TestEnumSetMemberSpacesModifyKeepsBinaryMember: a MODIFY COLUMN emitted for
 // another change to a binary enum column must write the member as MySQL stores
 // it. Written as enum('a','b') it would change the member, and MySQL would

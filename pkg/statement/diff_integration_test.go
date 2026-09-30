@@ -2072,3 +2072,50 @@ func TestDiffIntegrationEnumSetMemberSpacesModify(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, stmts, "re-diff after applying the ALTER must converge")
 }
+
+// TestDiffIntegrationEnumSetMemberSpacesNoTableDefault: a schema file that
+// omits DEFAULT CHARSET is diffed against the live table, which always reports
+// one. The members MySQL stores depend on the database default the table
+// inherited, so a member written with trailing spaces must match the live form
+// in a utf8mb4 database (stripped) and in a binary one (kept). A MODIFY for
+// another change must keep the stored members, and a re-diff converge.
+func TestDiffIntegrationEnumSetMemberSpacesNoTableDefault(t *testing.T) {
+	for _, tc := range []struct{ dbCharset, liveB, liveS string }{
+		{"utf8mb4", "`b` enum('a','b')", "`s` set('x','y')"},
+		{"binary", "`b` enum('a','b ')", "`s` set('x','y ')"},
+	} {
+		t.Run(tc.dbCharset, func(t *testing.T) {
+			dbName, db := testutils.CreateUniqueTestDatabase(t)
+			testutils.RunSQLInDatabase(t, dbName, "ALTER DATABASE `"+dbName+"` CHARACTER SET "+tc.dbCharset)
+			ddl := "CREATE TABLE enumsp (id int NOT NULL, b enum('a','b '), s set('x','y '), PRIMARY KEY (id))"
+			testutils.RunSQLInDatabase(t, dbName, ddl)
+			liveSQL := showCreateTable(t, db, "enumsp")
+			require.Contains(t, liveSQL, tc.liveB+" DEFAULT NULL", "the reading this case pins")
+			require.Contains(t, liveSQL, tc.liveS+" DEFAULT NULL", "the reading this case pins")
+
+			desired, err := ParseCreateTable(ddl)
+			require.NoError(t, err)
+			live, err := ParseCreateTable(liveSQL)
+			require.NoError(t, err)
+			stmts, err := live.Diff(desired, nil)
+			require.NoError(t, err)
+			require.Nil(t, stmts, "a member written with trailing spaces must match its live form")
+
+			desired, err = ParseCreateTable("CREATE TABLE enumsp (id int NOT NULL, b enum('a','b ') COMMENT 'changed', s set('x','y ') COMMENT 'changed', PRIMARY KEY (id))")
+			require.NoError(t, err)
+			stmts, err = live.Diff(desired, nil)
+			require.NoError(t, err)
+			require.Len(t, stmts, 1)
+			testutils.RunSQLInDatabase(t, dbName, stmts[0].Statement)
+			liveSQL = showCreateTable(t, db, "enumsp")
+			require.Contains(t, liveSQL, tc.liveB+" DEFAULT NULL COMMENT 'changed'", "the MODIFY must keep the stored members")
+			require.Contains(t, liveSQL, tc.liveS+" DEFAULT NULL COMMENT 'changed'", "the MODIFY must keep the stored members")
+
+			live, err = ParseCreateTable(liveSQL)
+			require.NoError(t, err)
+			stmts, err = live.Diff(desired, nil)
+			require.NoError(t, err)
+			require.Nil(t, stmts, "re-diff after applying the ALTER must converge")
+		})
+	}
+}

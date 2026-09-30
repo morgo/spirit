@@ -158,6 +158,20 @@ func resolvedCharsetCollation(col *Column, table *CreateTable) (charset, collati
 	return charset, collation
 }
 
+// alterDefaults returns the table whose defaults the ALTER that source.Diff
+// emits runs under: target's when the ALTER sets them, else source's. MySQL
+// applies a DEFAULT CHARSET or COLLATE clause to every column the same ALTER
+// adds or modifies, wherever it is written in the statement. Only whether the
+// result is the binary charset is read from it (see [withMembersUnder]), which
+// a clause the ALTER leaves out because it restates source's value cannot
+// change.
+func alterDefaults(source, target *CreateTable, opts *DiffOptions) *CreateTable {
+	if !opts.IgnoreCharsetCollation && (target.TableOptions.getCharset() != nil || target.TableOptions.getCollation() != nil) {
+		return target
+	}
+	return source
+}
+
 // explicitUnlessTableDefault returns a column-level charset/collation value
 // with the redundant spelling of the owning table's default normalized to
 // nil, so an explicit value that merely restates the table default compares
