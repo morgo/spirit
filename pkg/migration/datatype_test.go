@@ -6,12 +6,12 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
-	"strings"
 	"sync"
 	"testing"
 
 	"github.com/block/spirit/pkg/checksum"
 	"github.com/block/spirit/pkg/migration/check"
+	"github.com/block/spirit/pkg/sentinel"
 	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
@@ -1852,20 +1852,28 @@ func TestEnumSetMembersOutsideUTF8MB3(t *testing.T) {
 // ENGINE=InnoDB copies the table without changing the columns.
 func TestEnumSetEscapedMembersDML(t *testing.T) {
 	t.Parallel()
+	dbName, db := testutils.CreateUniqueTestDatabase(t)
 	tableName := "enumesc_mig"
-	tt := testutils.NewTestTable(t, tableName, fmt.Sprintf(`CREATE TABLE %s (
+	testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf(`CREATE TABLE %s (
 		id int NOT NULL AUTO_INCREMENT PRIMARY KEY,
 		e enum('a\\b','c','nl\nx','cr\rx','nul\0x','q''x') NOT NULL,
 		s set('a\\b','x','nl\nx') NOT NULL
 	) DEFAULT CHARSET=utf8mb4`, tableName))
-	tt.SeedRows(t, fmt.Sprintf("INSERT INTO %s (e, s) SELECT 'c', 'x'", tableName), 200)
+	testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf("INSERT INTO %s (e, s) VALUES ('c','x'), ('c','x'), ('c','x'), ('c','x'), ('c','x')", tableName))
 
+	// The cutover waits for the sentinel to be dropped, and the copy has
+	// finished by then. So each write below happens after the copy and before
+	// the cutover, and reaches the new table only through binlog replay.
 	m := NewTestRunner(t, tableName, "ENGINE=InnoDB",
+		WithDBName(dbName),
 		WithThreads(1),
-		WithTestThrottler(),
+		WithDeferCutOver(),
+		WithRespectSentinel(),
 		WithSkipDropAfterCutover())
+	running := startTestRun(t, m.Run, m.Close)
+	waitForStatus(t, m, status.WaitingOnSentinelTable, running)
 
-	// Each member with an escaped character, and the value MySQL stores it as.
+	// Each member with an escaped character, as a SQL literal.
 	updates := []struct{ e, s string }{
 		{`'a\\b'`, `'a\\b'`},
 		{`'nl\nx'`, `'a\\b,nl\nx'`},
@@ -1873,52 +1881,27 @@ func TestEnumSetEscapedMembersDML(t *testing.T) {
 		{`'nul\0x'`, `'x,nl\nx'`},
 		{`'q''x'`, `'a\\b,x'`},
 	}
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
-	dmlDone := make(chan struct{})
-	go func() {
-		defer close(dmlDone)
-		if !waitForCopyRows(t, ctx, m) {
-			return
-		}
-		for range 10 {
-			for i, u := range updates {
-				if ctx.Err() != nil {
-					return
-				}
-				id := i + 1
-				_, _ = tt.DB.ExecContext(ctx, fmt.Sprintf("UPDATE %s SET e = 'c', s = 'x' WHERE id = %d", tableName, id))
-				_, _ = tt.DB.ExecContext(ctx, fmt.Sprintf("UPDATE %s SET e = %s, s = %s WHERE id = %d", tableName, u.e, u.s, id))
-				_, _ = tt.DB.ExecContext(ctx, fmt.Sprintf("INSERT INTO %s (e, s) VALUES (%s, %s)", tableName, u.e, u.s))
-			}
-		}
-	}()
-
-	require.NoError(t, m.Run(ctx))
-	cancel()
-	<-dmlDone
-	require.NoError(t, m.Close())
-
-	oldName := m.changes[0].oldTableName()
-	t.Cleanup(func() { testutils.RunSQL(t, "DROP TABLE IF EXISTS `"+oldName+"`") })
-	var oldTables int
-	require.NoError(t, tt.DB.QueryRowContext(t.Context(),
-		`SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='test' AND table_name=?`, oldName).Scan(&oldTables))
-	require.Equal(t, 1, oldTables, "the migration must have copied the rows")
-
-	// The checksum passed, so the rows the binlog replayed match the source.
-	// Each statement above writes the seed pair or one of the escaped pairs,
-	// and the load stops at an arbitrary point, so every row must hold one of
-	// them and at least one must hold an escaped member.
-	pairs := []string{"(e = 'c' AND s = 'x')"}
-	for _, u := range updates {
-		pairs = append(pairs, fmt.Sprintf("(e = %s AND s = %s)", u.e, u.s))
+	for i, u := range updates {
+		// Rows 1-5 were copied, so the UPDATE is replayed; rows 6-10 are new.
+		testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf("UPDATE %s SET e = %s, s = %s WHERE id = %d", tableName, u.e, u.s, i+1))
+		testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf("INSERT INTO %s (id, e, s) VALUES (%d, %s, %s)", tableName, i+6, u.e, u.s))
 	}
-	var other, escaped int
-	require.NoError(t, tt.DB.QueryRowContext(t.Context(),
-		fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE NOT (%s)", tableName, strings.Join(pairs, " OR "))).Scan(&other))
-	require.Zero(t, other, "every row must hold the seed pair or one of the escaped pairs")
-	require.NoError(t, tt.DB.QueryRowContext(t.Context(),
-		fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE e <> 'c'", tableName)).Scan(&escaped))
-	require.Positive(t, escaped, "no escaped member was written during the migration — test is vacuous")
+	testutils.RunSQLInDatabase(t, dbName, "DROP TABLE "+sentinel.TableName)
+	require.NoError(t, running.wait(t))
+
+	for i, u := range updates {
+		for _, id := range []int{i + 1, i + 6} {
+			var match int
+			require.NoError(t, db.QueryRowContext(t.Context(),
+				fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE id = %d AND e = %s AND s = %s", tableName, id, u.e, u.s)).Scan(&match))
+			require.Equal(t, 1, match, "row %d must hold e=%s, s=%s", id, u.e, u.s)
+		}
+	}
+	// The source is kept (WithSkipDropAfterCutover), so every row can be
+	// compared with the one it was copied from, by stored bytes.
+	var differ int
+	require.NoError(t, db.QueryRowContext(t.Context(), fmt.Sprintf(
+		"SELECT COUNT(*) FROM %s n LEFT JOIN `%s` o USING (id) WHERE o.id IS NULL OR HEX(n.e) <> HEX(o.e) OR HEX(n.s) <> HEX(o.s)",
+		tableName, m.changes[0].oldTableName())).Scan(&differ))
+	require.Zero(t, differ)
 }
