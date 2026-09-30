@@ -462,9 +462,9 @@ func isTLSUnsupportedByServer(err error) bool {
 }
 
 // pingWithTimeout validates db by opening its first connection, giving up
-// after timeout. See connectTimeout.
-func pingWithTimeout(db *sql.DB, timeout time.Duration) error {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+// after timeout or when ctx is done. See connectTimeout.
+func pingWithTimeout(ctx context.Context, db *sql.DB, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	return db.PingContext(ctx)
 }
@@ -478,12 +478,20 @@ func New(inputDSN string, config *DBConfig) (db *sql.DB, err error) {
 
 // NewWithConnectionType is like New but includes context about the connection type for better error messages
 func NewWithConnectionType(inputDSN string, config *DBConfig, connectionType string) (db *sql.DB, err error) {
-	return newWithConnectTimeout(inputDSN, config, connectionType, connectTimeout)
+	return newWithConnectTimeout(context.Background(), inputDSN, config, connectionType, connectTimeout)
 }
 
-// newWithConnectTimeout is NewWithConnectionType with the ping deadline as a
-// parameter, so tests can shorten it without mutating shared state.
-func newWithConnectTimeout(inputDSN string, config *DBConfig, connectionType string, timeout time.Duration) (db *sql.DB, err error) {
+// NewContext is like New, but the connect-time ping also ends when ctx is
+// done, so a caller that is shutting down is not held for up to
+// connectTimeout by a server that never completes the handshake.
+func NewContext(ctx context.Context, inputDSN string, config *DBConfig) (db *sql.DB, err error) {
+	return newWithConnectTimeout(ctx, inputDSN, config, "main database", connectTimeout)
+}
+
+// newWithConnectTimeout is NewWithConnectionType with the ping's parent
+// context and deadline as parameters, so tests can shorten the deadline
+// without mutating shared state.
+func newWithConnectTimeout(ctx context.Context, inputDSN string, config *DBConfig, connectionType string, timeout time.Duration) (db *sql.DB, err error) {
 	// Normalize the TLS mode once, up front, so every comparison and switch
 	// below (and in newDSN) is case-insensitive. The CLI documents --tls-mode
 	// as case-insensitive, so e.g. "preferred" must behave exactly like
@@ -517,7 +525,7 @@ func newWithConnectTimeout(inputDSN string, config *DBConfig, connectionType str
 		// First try with TLS
 		db, err := sql.Open(DriverName, dsn)
 		if err == nil {
-			if pingErr := pingWithTimeout(db, timeout); pingErr == nil {
+			if pingErr := pingWithTimeout(ctx, db, timeout); pingErr == nil {
 				// TLS connection successful
 				return db, nil
 			} else {
@@ -556,7 +564,7 @@ func newWithConnectTimeout(inputDSN string, config *DBConfig, connectionType str
 		if err != nil {
 			return nil, fmt.Errorf("failed to open fallback %s connection: %w", connectionType, err)
 		}
-		if err := pingWithTimeout(db, timeout); err != nil {
+		if err := pingWithTimeout(ctx, db, timeout); err != nil {
 			_ = db.Close()
 			return nil, fmt.Errorf("[%s-CONNECTION-FALLBACK] ping failed: %w", strings.ToUpper(strings.ReplaceAll(connectionType, " ", "-")), err)
 		}
@@ -568,7 +576,7 @@ func newWithConnectTimeout(inputDSN string, config *DBConfig, connectionType str
 	if err != nil {
 		return nil, fmt.Errorf("failed to open %s connection: %w", connectionType, err)
 	}
-	if err := pingWithTimeout(db, timeout); err != nil {
+	if err := pingWithTimeout(ctx, db, timeout); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("[%s-CONNECTION] ping failed: %w", strings.ToUpper(strings.ReplaceAll(connectionType, " ", "-")), err)
 	}
