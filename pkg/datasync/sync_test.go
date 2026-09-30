@@ -145,6 +145,17 @@ func (h *runHandle) eventually(cond func() bool, timeout time.Duration, what str
 	}
 }
 
+// awaitContinuous blocks until Run has entered the continuous phase. The
+// periodic flush starts before the initial copy, so target row counts can
+// reach their expected values while Run is still copying or restoring
+// deferred indexes. Only the continuous phase turns a cancellation into a nil
+// return, so a test that calls stop must wait here first (issue #1380).
+func (h *runHandle) awaitContinuous(timeout time.Duration) {
+	h.t.Helper()
+	h.eventually(func() bool { return h.runner.Progress().CurrentState == status.ApplyChangeset },
+		timeout, "Run enters the continuous phase")
+}
+
 // stop cancels the run, waits for it to drain, closes the runner, and asserts
 // Run returned no error. A wait that already failed the test with that error
 // does not get to report it a second time: stop runs from a defer in tests
@@ -281,6 +292,7 @@ func TestSyncE2E(t *testing.T) {
 	// Initial copy lands all three rows.
 	h.eventually(func() bool { return countRows() == 3 },
 		30*time.Second, "initial copy should replicate 3 rows")
+	h.awaitContinuous(30 * time.Second)
 
 	// Continuous: an INSERT replicates.
 	testutils.RunSQL(t, `INSERT INTO sync_src.t1 VALUES (4,'four')`)
@@ -1298,6 +1310,7 @@ func TestSyncDeferSecondaryIndexesE2E(t *testing.T) {
 	}, 30*time.Second, "deferred indexes should be restored")
 	require.ElementsMatch(t, []string{"uq_u", "idx_a", "idx_b"},
 		secondaryIndexNames(t, tgt, dest.DBName, "t1"))
+	h.awaitContinuous(30 * time.Second)
 
 	// Continuous replication still works against the now-indexed target.
 	testutils.RunSQL(t, `INSERT INTO sync_deferidx_src.t1 VALUES (4,'four',40,400)`)

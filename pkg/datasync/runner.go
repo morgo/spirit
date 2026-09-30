@@ -271,8 +271,10 @@ func (r *Runner) SetMetricsSink(sink metrics.Sink) {
 }
 
 // Run performs the initial copy and then streams changes continuously
-// until ctx is cancelled. A clean cancellation returns nil; a fatal
-// source event (e.g. DDL) returns an error.
+// until ctx is cancelled. A clean cancellation during the continuous phase
+// returns nil; a cancellation during setup, the initial copy, or the
+// secondary-index restore returns the wrapped context error. A fatal source
+// event (e.g. DDL) returns an error.
 func (r *Runner) Run(ctx context.Context) (retErr error) {
 	ctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
