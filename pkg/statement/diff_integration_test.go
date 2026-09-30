@@ -1256,6 +1256,8 @@ func TestDiffIntegrationBinaryLiteralDefaults(t *testing.T) {
 	for _, tc := range []struct{ name, column, live string }{
 		{"diff_binlit_int_hex", "b int DEFAULT 0x1A", "`b` int DEFAULT '26'"},
 		{"diff_binlit_int_bit", "b int DEFAULT b'1010'", "`b` int DEFAULT '10'"},
+		{"diff_binlit_decimal_hex", "b decimal(5) DEFAULT 0x1A", "`b` decimal(5,0) DEFAULT '26'"},
+		{"diff_binlit_decimal_max", "b decimal(20,0) DEFAULT 0x7FFFFFFFFFFFFFFF", "`b` decimal(20,0) DEFAULT '9223372036854775807'"},
 		{"diff_binlit_int_max", "b bigint unsigned NOT NULL DEFAULT 0xFFFFFFFFFFFFFFFF", "`b` bigint unsigned NOT NULL DEFAULT '18446744073709551615'"},
 		{"diff_binlit_bit_hex", "b bit(8) DEFAULT x'61'", "`b` bit(8) DEFAULT b'1100001'"},
 		{"diff_binlit_bit_hex_zero", "b bit(8) DEFAULT x'0000'", "`b` bit(8) DEFAULT b'0'"},

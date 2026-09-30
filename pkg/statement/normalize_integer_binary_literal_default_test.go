@@ -87,6 +87,10 @@ func TestIntegerBinaryLiteralDefaultConverge(t *testing.T) {
 		{"unsigned bigint at its maximum", "(b bigint unsigned DEFAULT 0xFFFFFFFFFFFFFFFF)", "(b bigint unsigned DEFAULT '18446744073709551615')"},
 		{"a display width", "(b int(11) DEFAULT 0x1A)", "(b int DEFAULT '26')"},
 		{"a bare number on the live side", "(b int DEFAULT 0x1A)", "(b int DEFAULT 26)"},
+		{"an unscaled decimal", "(b decimal(5) DEFAULT 0x1A)", "(b decimal(5,0) DEFAULT '26')"},
+		{"a decimal with no precision", "(b decimal DEFAULT 0x1A)", "(b decimal(10,0) DEFAULT '26')"},
+		{"a decimal with a zero scale and a bit literal", "(b decimal(5,0) DEFAULT b'1010')", "(b decimal(5,0) DEFAULT '10')"},
+		{"a decimal at 2^63-1", "(b decimal(20,0) DEFAULT 0x7FFFFFFFFFFFFFFF)", "(b decimal(20,0) DEFAULT '9223372036854775807')"},
 	})
 }
 
@@ -102,7 +106,9 @@ func TestIntegerBinaryLiteralDefaultLeavesOtherDefaultsAlone(t *testing.T) {
 		{"an empty hex literal, which MySQL rejects", "`b` int DEFAULT x''", "x''", DefaultKindHexLiteral},
 		{"more than 8 bytes, which MySQL rejects", "`b` bigint unsigned DEFAULT 0x00FFFFFFFFFFFFFFFF", "x'00ffffffffffffffff'", DefaultKindHexLiteral},
 		{"an expression default, which MySQL stores as written", "`b` int DEFAULT (0x1A)", "x'1a'", DefaultKindHexLiteral},
-		{"decimal, which pads to its scale", "`b` decimal(5,2) DEFAULT 0x1A", "x'1a'", DefaultKindHexLiteral},
+		{"a scaled decimal, which pads to its scale", "`b` decimal(5,2) DEFAULT 0x1A", "x'1a'", DefaultKindHexLiteral},
+		{"a decimal at 2^63, which MySQL rejects as hex only", "`b` decimal(20,0) DEFAULT 0x8000000000000000", "x'8000000000000000'", DefaultKindHexLiteral},
+		{"double, which formats the value itself", "`b` double DEFAULT 0x1A", "x'1a'", DefaultKindHexLiteral},
 		{"year, which reads the value as a year", "`b` year DEFAULT 0x07", "x'07'", DefaultKindHexLiteral},
 		{"a number, which is already the integer", "`b` int DEFAULT 26", "26", DefaultKindNumber},
 		{"a string", "`b` int DEFAULT '26'", "26", DefaultKindString},

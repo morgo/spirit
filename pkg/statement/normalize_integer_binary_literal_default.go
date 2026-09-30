@@ -2,13 +2,16 @@ package statement
 
 import (
 	"encoding/binary"
+	"math"
 	"strconv"
+	"strings"
 )
 
 func init() { registerNormalizer(integerBinaryLiteralDefaultNormalizer{}) }
 
 // integerBinaryLiteralDefaultNormalizer rewrites a hex or bit literal DEFAULT
-// on an integer column to the decimal integer MySQL stores. MySQL reads the
+// on an integer or unscaled decimal column to the decimal integer MySQL
+// stores. MySQL reads the
 // literal's bytes as a big-endian unsigned integer and SHOW CREATE TABLE
 // reports the result as a number, so `b int DEFAULT 0x1A` comes back as
 // `b int DEFAULT '26'`. Without the rule the literal diffs against the live
@@ -24,6 +27,9 @@ func init() { registerNormalizer(integerBinaryLiteralDefaultNormalizer{}) }
 //	int DEFAULT x'' / b''                         -> error 1067
 //	bigint unsigned DEFAULT 0x00FFFFFFFFFFFFFFFF  -> error 1067 (9 bytes, even with a leading zero)
 //	int DEFAULT (0x1A)                            -> (0x1a)  (an expression is stored as written)
+//	decimal(5) DEFAULT 0x1A                       -> '26'
+//	decimal(3,0) DEFAULT 0x3E8                    -> error 1067 (more digits than the precision)
+//	decimal(20,0) DEFAULT 0x8000000000000000      -> error 1067 (2^63 and above)
 //
 // The value is recorded as a [DefaultKindNumber], which is emitted bare.
 // Quotedness is not part of column identity on a numeric column (see
@@ -34,9 +40,16 @@ func init() { registerNormalizer(integerBinaryLiteralDefaultNormalizer{}) }
 // have with the literal. An empty literal and one longer than 8 bytes are left
 // alone, because they have no integer value (see [binaryLiteralValue]).
 //
-// Only the integer types. decimal pads to its scale (decimal(5,2) DEFAULT 0x1A
-// stores '26.00') and year puts the value through its own interpretation (year
-// DEFAULT 0x07 stores '2007'), so neither stores the plain integer. float and
+// An unscaled decimal stores the plain integer too (decimal(5) DEFAULT 0x1A
+// stores '26'), but only below 2^63: decimal(20,0) DEFAULT 0x8000000000000000
+// is error 1067, though the same value written in decimal is accepted. A
+// literal at or above 2^63 is left alone there, so the rule never turns DDL
+// MySQL rejects into DDL it accepts.
+//
+// Left alone otherwise: a scaled decimal pads to its scale (decimal(5,2)
+// DEFAULT 0x1A stores '26.00') and year puts the value through its own
+// interpretation (year DEFAULT 0x07 stores '2007'), so neither stores the
+// plain integer. float and
 // double store it only while it fits their precision (double DEFAULT 0x1A
 // stores '26'). Past that MySQL rounds it and formats it in its own notation,
 // which this rule does not reproduce: float DEFAULT 0x01000001 stores
@@ -51,11 +64,15 @@ func (integerBinaryLiteralDefaultNormalizer) Name() string {
 func (integerBinaryLiteralDefaultNormalizer) Normalize(ct *CreateTable) *CreateTable {
 	for i := range ct.Columns {
 		c := &ct.Columns[i]
-		if c.Default == nil || c.DefaultIsExpr || !isIntegerColumnType(c.Type) {
+		if c.Default == nil || c.DefaultIsExpr {
+			continue
+		}
+		unscaledDecimal := strings.EqualFold(c.Type, "decimal") && (c.Scale == nil || *c.Scale == 0)
+		if !isIntegerColumnType(c.Type) && !unscaledDecimal {
 			continue
 		}
 		value, ok := binaryLiteralValue(c)
-		if !ok {
+		if !ok || (unscaledDecimal && value > math.MaxInt64) {
 			continue
 		}
 		stored := strconv.FormatUint(value, 10)
