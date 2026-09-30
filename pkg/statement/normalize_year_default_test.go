@@ -65,6 +65,11 @@ func TestYearDefaultLeavesOtherDefaultsAlone(t *testing.T) {
 		{"an exponent", "`a` year DEFAULT 1e1", "1e+01", DefaultKindNumber},
 		{"a string with whitespace", "`a` year DEFAULT ' 0000'", " 0000", DefaultKindString},
 		{"a signed string", "`a` year DEFAULT '+5'", "+5", DefaultKindString},
+		// A sign in a string counts towards the four characters that decide
+		// the string zero, so '-0' is not read as the number -0 (which
+		// utils.CanonicalInteger would canonicalize to 0).
+		{"a negative string zero", "`a` year DEFAULT '-0'", "-0", DefaultKindString},
+		{"a padded negative string zero", "`a` year DEFAULT '-00'", "-00", DefaultKindString},
 		{"a negative number, which MySQL rejects", "`a` year DEFAULT -5", "-5", DefaultKindNumber},
 		{"an expression default, which MySQL stores as written", "`a` year DEFAULT (99)", "99", DefaultKindNumber},
 		{"a two-digit default on a smallint", "`a` smallint DEFAULT 99", "99", DefaultKindNumber},

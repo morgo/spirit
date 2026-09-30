@@ -310,6 +310,14 @@ func TestDiffIntegrationYearDefaultCreatedAsDeclared(t *testing.T) {
 		"kw_true year NOT NULL DEFAULT TRUE, " +
 		"kw_false year NOT NULL DEFAULT FALSE, " +
 		"four_digit year DEFAULT 2024, " +
+		"plus year DEFAULT +5, " +
+		"plus_padded year DEFAULT +0099, " +
+		"neg_zero year DEFAULT -0, " +
+		"neg_zero_padded year DEFAULT -00, " +
+		"low_str year DEFAULT '01901', " +
+		"high_str year DEFAULT '02155', " +
+		"low_hex year DEFAULT 0x076D, " +
+		"high_hex year DEFAULT 0x086B, " +
 		"PRIMARY KEY (id))"
 
 	tt := testutils.NewTestTable(t, "diff_year_default", declaredSQL)
@@ -327,6 +335,14 @@ func TestDiffIntegrationYearDefaultCreatedAsDeclared(t *testing.T) {
 		"`kw_true` year NOT NULL DEFAULT '2001'",
 		"`kw_false` year NOT NULL DEFAULT '0000'",
 		"`four_digit` year DEFAULT '2024'",
+		"`plus` year DEFAULT '2005'",
+		"`plus_padded` year DEFAULT '1999'",
+		"`neg_zero` year DEFAULT '0000'",
+		"`neg_zero_padded` year DEFAULT '0000'",
+		"`low_str` year DEFAULT '1901'",
+		"`high_str` year DEFAULT '2155'",
+		"`low_hex` year DEFAULT '1901'",
+		"`high_hex` year DEFAULT '2155'",
 	} {
 		require.Contains(t, live, want)
 	}
