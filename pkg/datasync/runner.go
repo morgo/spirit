@@ -725,6 +725,9 @@ func (r *Runner) setup(ctx context.Context) error {
 	if err := r.unsupportedNameError(); err != nil {
 		return err
 	}
+	if err := r.unrecreatableTableError(); err != nil {
+		return err
+	}
 	if len(r.sourceTables) == 0 {
 		return nil
 	}
@@ -995,6 +998,21 @@ func (r *Runner) unsupportedNameError() error {
 	}
 	for _, t := range r.sourceTables {
 		if err := utils.UnsupportedIdentifierError("table name", t.TableName); err != nil {
+			return fmt.Errorf("cannot sync table %q: %w", t.TableName, err)
+		}
+	}
+	return nil
+}
+
+// unrecreatableTableError refuses a source table that createTargetTables
+// cannot recreate from its SHOW CREATE TABLE: an ENUM or SET member with a
+// character outside utf8mb3 is reported there as '?', so the target would not
+// have the member (see table.TableInfo.MisreportedEnumSetError). A target
+// that already exists is refused too, since verifyExistingTargetTable
+// compares the same reported definitions and cannot tell the two apart.
+func (r *Runner) unrecreatableTableError() error {
+	for _, t := range r.sourceTables {
+		if err := t.MisreportedEnumSetError(); err != nil {
 			return fmt.Errorf("cannot sync table %q: %w", t.TableName, err)
 		}
 	}

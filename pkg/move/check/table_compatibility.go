@@ -19,8 +19,8 @@ func init() {
 // tableCompatibilityCheck verifies that all source tables are compatible
 // with move operations: no schema or table name may contain a '.' or a
 // backtick, every table needs a primary key, which is required for
-// replication tracking, and that key must not include a FLOAT or a BIT
-// column.
+// replication tracking, that key must not include a FLOAT or a BIT
+// column, and every ENUM and SET member must be reported as MySQL stores it.
 //
 // A '.' in a schema or table name lets two tables share the key the
 // replication client tracks them by (schema + "." + table), so a change to one
@@ -32,6 +32,11 @@ func init() {
 // table.TableInfo.FloatPrimaryKeyError). A BIT key cannot be read back from
 // the table as a number, so the copy cannot compute its chunk boundaries (see
 // table.TableInfo.BitPrimaryKeyError).
+//
+// An ENUM or SET member with a character outside utf8mb3 is reported as '?'
+// by SHOW CREATE TABLE, which the move replays to create the target table, so
+// the target would not have the member (see
+// table.TableInfo.MisreportedEnumSetError).
 //
 // Non-memory-comparable PKs (e.g. VARCHAR with a CI collation) are now
 // supported: bufferedMap routes those subscriptions through its FIFO queue
@@ -50,6 +55,9 @@ func tableCompatibilityCheck(ctx context.Context, r Resources, logger *slog.Logg
 			return fmt.Errorf("table '%s' cannot be moved: %w", tbl.TableName, err)
 		}
 		if err := tbl.BitPrimaryKeyError(); err != nil {
+			return fmt.Errorf("table '%s' cannot be moved: %w", tbl.TableName, err)
+		}
+		if err := tbl.MisreportedEnumSetError(); err != nil {
 			return fmt.Errorf("table '%s' cannot be moved: %w", tbl.TableName, err)
 		}
 	}

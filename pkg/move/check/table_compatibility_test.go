@@ -94,6 +94,32 @@ func TestTableCompatibilityCheckFloatAndBitPK(t *testing.T) {
 	require.NoError(t, tableCompatibilityCheck(t.Context(), Resources{SourceTables: []*table.TableInfo{cols}}, slog.Default()))
 }
 
+// TestTableCompatibilityCheckMisreportedEnumSet checks that a table with an
+// ENUM or SET member that SHOW CREATE TABLE reports as '?' (a character
+// outside utf8mb3) is refused: the move creates the target from that
+// definition, so the target would not have the member. A member that is a '?'
+// is not refused.
+func TestTableCompatibilityCheckMisreportedEnumSet(t *testing.T) {
+	dbName, db := testutils.CreateUniqueTestDatabase(t)
+	testutils.RunSQLInDatabase(t, dbName, "CREATE TABLE enum_4byte (id INT NOT NULL PRIMARY KEY, e ENUM('😀','a')) DEFAULT CHARSET=utf8mb4")
+	testutils.RunSQLInDatabase(t, dbName, "CREATE TABLE set_4byte (id INT NOT NULL PRIMARY KEY, s SET('x','🎉')) DEFAULT CHARSET=utf8mb4")
+	testutils.RunSQLInDatabase(t, dbName, "CREATE TABLE enum_qmark (id INT NOT NULL PRIMARY KEY, e ENUM('?','a'), s SET('?','x')) DEFAULT CHARSET=utf8mb4")
+
+	info := func(name string) *table.TableInfo {
+		ti := table.NewTableInfo(db, dbName, name)
+		require.NoError(t, ti.SetInfo(t.Context()))
+		return ti
+	}
+	enum4, set4, qmark := info("enum_4byte"), info("set_4byte"), info("enum_qmark")
+
+	err := tableCompatibilityCheck(t.Context(), Resources{SourceTables: []*table.TableInfo{qmark, enum4}}, slog.Default())
+	require.ErrorContains(t, err, `table 'enum_4byte' cannot be moved: column "e" of table "enum_4byte" is enum('?','a'), but MySQL stores a member with a character outside utf8mb3 there`)
+	err = tableCompatibilityCheck(t.Context(), Resources{SourceTables: []*table.TableInfo{set4}}, slog.Default())
+	require.ErrorContains(t, err, `table 'set_4byte' cannot be moved: column "s" of table "set_4byte" is set('x','?')`)
+
+	require.NoError(t, tableCompatibilityCheck(t.Context(), Resources{SourceTables: []*table.TableInfo{qmark}}, slog.Default()))
+}
+
 // TestTableCompatibilityCheckRegisteredForResume pins that a resume from
 // checkpoint applies the table requirements too: that path runs the resume
 // checks instead of re-running the post-setup ones.

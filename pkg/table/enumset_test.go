@@ -1,11 +1,16 @@
 package table
 
 import (
+	"database/sql"
 	"fmt"
 	"math"
 	"strings"
 	"testing"
 
+	"github.com/block/mysql"
+	"github.com/block/spirit/pkg/testutils"
+	"github.com/block/spirit/pkg/utils"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -97,4 +102,113 @@ func TestDecodeSetBitmask64Elements(t *testing.T) {
 	got, err = decodeSetBitmask(int64(1)|bit63, elements)
 	require.NoError(t, err)
 	require.Equal(t, "e0,e63", got)
+}
+
+// TestSetInfoReadsStoredEnumSetMembers covers ENUM and SET members with a
+// character outside utf8mb3. information_schema reports each such character
+// as '?', so the binlog decoder, which maps an ordinal or bitmask to member
+// text, wrote '?' in place of the member: the column rejected it, or took
+// the '?' member when there is one. SetInfo reads the members MySQL stores.
+func TestSetInfoReadsStoredEnumSetMembers(t *testing.T) {
+	tt := testutils.NewTestTable(t, "enumset_stored", `CREATE TABLE enumset_stored (
+		id INT NOT NULL PRIMARY KEY,
+		e ENUM('😀','a','?') NOT NULL,
+		s SET('🎉','x','y🎉') NOT NULL,
+		q ENUM('?','b') NOT NULL,
+		p ENUM('c','d') NOT NULL
+	) DEFAULT CHARSET=utf8mb4`)
+
+	ti := NewTableInfo(tt.DB, "test", "enumset_stored")
+	require.NoError(t, ti.SetInfo(t.Context()))
+
+	// The reported members, which SetInfo must not keep.
+	tp, ok := ti.GetColumnMySQLType("e")
+	require.True(t, ok)
+	require.Equal(t, "enum('?','a','?')", tp)
+
+	members, ok := ti.EnumSetMembers("e")
+	require.True(t, ok)
+	assert.Equal(t, []string{"😀", "a", "?"}, members)
+	members, ok = ti.EnumSetMembers("s")
+	require.True(t, ok)
+	assert.Equal(t, []string{"🎉", "x", "y🎉"}, members)
+	// A '?' that is the member itself is read back unchanged.
+	members, ok = ti.EnumSetMembers("q")
+	require.True(t, ok)
+	assert.Equal(t, []string{"?", "b"}, members)
+	members, ok = ti.EnumSetMembers("p")
+	require.True(t, ok)
+	assert.Equal(t, []string{"c", "d"}, members)
+	_, ok = ti.EnumSetMembers("id")
+	assert.False(t, ok)
+
+	row := []any{int32(1), int64(1), int64(5), int64(1), int64(2)}
+	require.NoError(t, ti.DecodeBinlogRow(row))
+	assert.Equal(t, []any{int32(1), "😀", "🎉,y🎉", "?", "d"}, row)
+	row = []any{int32(2), int64(3), int64(2), int64(2), int64(1)}
+	require.NoError(t, ti.DecodeBinlogRow(row))
+	assert.Equal(t, []any{int32(2), "?", "x", "b", "c"}, row)
+
+	err := ti.MisreportedEnumSetError()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `column "e" of table "enumset_stored"`)
+}
+
+// TestMisreportedEnumSetErrorIgnoresQuestionMarkMembers checks that a member
+// that really is a '?' is not mistaken for one MySQL reports as '?'.
+func TestMisreportedEnumSetErrorIgnoresQuestionMarkMembers(t *testing.T) {
+	tt := testutils.NewTestTable(t, "enumset_qmark", `CREATE TABLE enumset_qmark (
+		id INT NOT NULL PRIMARY KEY,
+		q ENUM('?','b?') NOT NULL,
+		s SET('?','x') NOT NULL
+	) DEFAULT CHARSET=utf8mb4`)
+
+	ti := NewTableInfo(tt.DB, "test", "enumset_qmark")
+	require.NoError(t, ti.SetInfo(t.Context()))
+	require.NoError(t, ti.MisreportedEnumSetError())
+	members, ok := ti.EnumSetMembers("q")
+	require.True(t, ok)
+	assert.Equal(t, []string{"?", "b?"}, members)
+}
+
+// TestSetInfoStoredEnumSetMembersNeedTemporaryTables checks that SetInfo
+// fails, naming the privilege, when it cannot read back the members of a
+// column reported with a '?', instead of decoding binlog rows to '?'.
+func TestSetInfoStoredEnumSetMembersNeedTemporaryTables(t *testing.T) {
+	testutils.NewTestTable(t, "enumset_noprivs", `CREATE TABLE enumset_noprivs (
+		id INT NOT NULL PRIMARY KEY,
+		e ENUM('😀','a') NOT NULL,
+		p ENUM('c','d') NOT NULL
+	) DEFAULT CHARSET=utf8mb4`)
+	testutils.RunSQL(t, "DROP USER IF EXISTS enumsetnoprivs")
+	testutils.RunSQL(t, "CREATE USER enumsetnoprivs")
+	t.Cleanup(func() { testutils.RunSQL(t, "DROP USER IF EXISTS enumsetnoprivs") })
+	testutils.RunSQL(t, "GRANT SELECT ON test.* TO enumsetnoprivs")
+
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	cfg.User = "enumsetnoprivs"
+	cfg.Passwd = ""
+	db, err := sql.Open("block-mysql", cfg.FormatDSN())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+	db.SetMaxOpenConns(1)
+
+	ti := NewTableInfo(db, "test", "enumset_noprivs")
+	ti.DisableAnalyze = true // ANALYZE TABLE needs INSERT
+	err = ti.SetInfo(t.Context())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "CREATE TEMPORARY TABLES")
+
+	testutils.RunSQL(t, "GRANT CREATE TEMPORARY TABLES ON test.* TO enumsetnoprivs")
+	require.NoError(t, ti.SetInfo(t.Context()))
+	members, ok := ti.EnumSetMembers("e")
+	require.True(t, ok)
+	assert.Equal(t, []string{"😀", "a"}, members)
+
+	// The probe's temporary table does not outlive SetInfo: its connection is
+	// closed rather than returned to the pool. With one connection allowed,
+	// a reused probe session would still hold the table (error 1050).
+	_, err = db.ExecContext(t.Context(), "CREATE TEMPORARY TABLE "+enumSetProbeTable+" (a INT)")
+	require.NoError(t, err)
 }

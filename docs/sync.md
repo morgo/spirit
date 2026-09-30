@@ -32,8 +32,10 @@ checkpoint rather than re-copying from scratch.
 | Cutover | atomic rename | none |
 | Source | MySQL | MySQL (a pluggable `change.Source` allows other producers) |
 
-`sync` never writes to the source, runs no `ANALYZE`, acquires no source
-locks, and performs no cutover, so it can run against a replica. The exact
+`sync` never writes to the source's tables, runs no `ANALYZE`, acquires no
+source locks, and performs no cutover, so it can run against a replica. (It
+can create a session-local temporary table, which a read-only server allows;
+see [Requirements](#requirements).) The exact
 source privileges depend on the change feed:
 
 - **Built-in MySQL source** (default, from `--source-dsn`): needs `SELECT`
@@ -56,6 +58,11 @@ source privileges depend on the change feed:
   `REPLICATION SLAVE` + `REPLICATION CLIENT` privileges; plus `RELOAD` when
   the source does not have GTIDs enabled (the file+offset reader issues
   `FLUSH BINARY LOGS`)
+- No `ENUM` or `SET` member with a character outside `utf8mb3` (such as a
+  4-byte emoji). MySQL reports each such character as `?` in `SHOW CREATE
+  TABLE`, which sync replays to create the target table, so sync refuses the
+  table. Reading the members MySQL stores needs `CREATE TEMPORARY TABLES` on
+  the source schema whenever a member is reported with a `?`.
 
 A source that cannot grant the built-in feed privileges must use a
 programmatically injected `change.Source`; the CLI no longer has a mode that

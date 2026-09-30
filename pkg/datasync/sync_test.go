@@ -1675,3 +1675,42 @@ func TestSyncRefusesUnsupportedNames(t *testing.T) {
 		})
 	}
 }
+
+// TestSyncRefusesEnumSetMembersOutsideUTF8MB3: SHOW CREATE TABLE reports an
+// ENUM or SET member character outside utf8mb3 as '?', and sync creates the
+// target from it, so the target would not have the member. Sync must refuse
+// such a table before it writes anything to the target.
+func TestSyncRefusesEnumSetMembersOutsideUTF8MB3(t *testing.T) {
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	srcDB, destDB := "sync_enum_4byte_src", "sync_enum_4byte_dest"
+	for _, db := range []string{srcDB, destDB} {
+		testutils.RunSQL(t, "DROP DATABASE IF EXISTS "+db)
+	}
+	testutils.RunSQL(t, "CREATE DATABASE "+srcDB)
+	t.Cleanup(func() {
+		for _, db := range []string{srcDB, destDB} {
+			testutils.RunSQL(t, "DROP DATABASE IF EXISTS "+db)
+		}
+	})
+	testutils.RunSQL(t, "CREATE TABLE "+srcDB+".t1 (id INT PRIMARY KEY, s SET('🎉','x')) DEFAULT CHARSET=utf8mb4")
+	testutils.RunSQL(t, "INSERT INTO "+srcDB+".t1 VALUES (1, 'x')")
+
+	src, dest := cfg.Clone(), cfg.Clone()
+	src.DBName, dest.DBName = srcDB, destDB
+	runner, err := NewRunner(&Sync{SourceDSN: src.FormatDSN(), TargetDSN: dest.FormatDSN(), Threads: 1, WriteThreads: 1})
+	require.NoError(t, err)
+	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+	defer cancel()
+	err = runner.Run(ctx)
+	require.NoError(t, runner.Close())
+	require.ErrorContains(t, err, `cannot sync table "t1": column "s" of table "t1" is set('?','x'), but MySQL stores a member with a character outside utf8mb3 there`)
+
+	db, err := sql.Open("block-mysql", cfg.FormatDSN())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+	var n int
+	require.NoError(t, db.QueryRowContext(t.Context(),
+		"SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = ?", destDB).Scan(&n))
+	require.Zero(t, n, "nothing may be created on the target")
+}

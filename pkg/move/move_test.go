@@ -756,6 +756,47 @@ func TestMoveRefusesFloatAndBitPrimaryKeys(t *testing.T) {
 	}
 }
 
+// TestMoveRefusesEnumSetMembersOutsideUTF8MB3 checks that a source table with
+// an ENUM member that SHOW CREATE TABLE reports as '?' (a character outside
+// utf8mb3) is refused before anything is created on the target. The target
+// is created from that definition, so it would not have the member; with no
+// row using the member, the move used to complete and cut over without it.
+func TestMoveRefusesEnumSetMembersOutsideUTF8MB3(t *testing.T) {
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	srcDB, destDB := "source_enum_4byte", "dest_enum_4byte"
+	for _, db := range []string{srcDB, destDB} {
+		testutils.RunSQL(t, "DROP DATABASE IF EXISTS "+db)
+		testutils.RunSQL(t, "CREATE DATABASE "+db)
+	}
+	t.Cleanup(func() {
+		testutils.RunSQL(t, "DROP DATABASE IF EXISTS "+srcDB)
+		testutils.RunSQL(t, "DROP DATABASE IF EXISTS "+destDB)
+	})
+	testutils.RunSQL(t, "CREATE TABLE "+srcDB+".t1 (id INT NOT NULL PRIMARY KEY, e ENUM('😀','a')) DEFAULT CHARSET=utf8mb4")
+	testutils.RunSQL(t, "INSERT INTO "+srcDB+".t1 VALUES (1, 'a'), (2, 'a')")
+
+	src, dest := cfg.Clone(), cfg.Clone()
+	src.DBName, dest.DBName = srcDB, destDB
+	move := &Move{
+		SourceDSN:    src.FormatDSN(),
+		TargetDSN:    dest.FormatDSN(),
+		Threads:      2,
+		WriteThreads: 2,
+	}
+	err = move.Run()
+	require.ErrorContains(t, err, `column "e" of table "t1" is enum('?','a'), but MySQL stores a member with a character outside utf8mb3 there`)
+	require.NotContains(t, err.Error(), "--force", "the refusal must not suggest --force")
+
+	db, err := sql.Open("block-mysql", dest.FormatDSN())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+	var n int
+	require.NoError(t, db.QueryRowContext(t.Context(),
+		"SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = ?", destDB).Scan(&n))
+	require.Zero(t, n, "nothing may be created on the target")
+}
+
 // TestMoveRefusesUnsupportedNames checks that a move is refused before
 // anything is created on the target when a moved table's name, or the source
 // schema's name, contains a '.' or a backtick. The replication client tracks
