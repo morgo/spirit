@@ -1437,6 +1437,151 @@ func TestDiffIntegrationBinaryCharsetConverges(t *testing.T) {
 	require.Nil(t, stmts, "re-diff after applying the ALTER must converge")
 }
 
+// A TEXT(M) or BLOB(M) column is stored as the smallest type that holds M
+// bytes, so a table created from those declarations must diff clean against
+// them. Without textBlobLengthNormalizer the diff emits `MODIFY COLUMN ...
+// text` (or blob) against the live tinytext: a real type change on a table
+// created exactly as declared.
+func TestDiffIntegrationTextBlobLengthCreatedAsDeclared(t *testing.T) {
+	const declaredSQL = "CREATE TABLE diff_text_blob_length (" +
+		"id int NOT NULL, " +
+		"a text(0), " +
+		"b blob(0), " +
+		"c blob(100), " +
+		"d text(63), " +
+		"e text(100) CHARACTER SET latin1, " +
+		"f text(16384), " +
+		"g blob(70000), " +
+		"PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci"
+
+	tt := testutils.NewTestTable(t, "diff_text_blob_length", declaredSQL)
+
+	live := showCreateTable(t, tt.DB, tt.Name)
+	require.Contains(t, live, "`a` tinytext,")
+	require.Contains(t, live, "`b` tinyblob,")
+	require.Contains(t, live, "`c` tinyblob,")
+	require.Contains(t, live, "`d` tinytext,")
+	require.Contains(t, live, "`e` tinytext CHARACTER SET latin1")
+	require.Contains(t, live, "`f` mediumtext,")
+	require.Contains(t, live, "`g` mediumblob,")
+
+	stmts := diffLiveTable(t, tt.DB, tt.Name, declaredSQL)
+	require.Nil(t, stmts)
+}
+
+// Changing a column to TEXT(M) or BLOB(M) is a real change: the diff is
+// emitted with the resolved type, MySQL stores it, and a re-diff is clean.
+func TestDiffIntegrationTextBlobLengthConverges(t *testing.T) {
+	tt := testutils.NewTestTable(t, "diff_text_blob_length_change",
+		"CREATE TABLE diff_text_blob_length_change (id int NOT NULL, a varchar(10), b varbinary(10), c text, "+
+			"PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci")
+
+	const targetSQL = "CREATE TABLE diff_text_blob_length_change (id int NOT NULL, a text(0), b blob(100), c text(20000), " +
+		"PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci"
+
+	stmts := diffLiveTable(t, tt.DB, tt.Name, targetSQL)
+	require.Len(t, stmts, 1)
+
+	execStatements(t, tt.DB, stmts)
+	live := showCreateTable(t, tt.DB, tt.Name)
+	require.Contains(t, live, "`a` tinytext,")
+	require.Contains(t, live, "`b` tinyblob,")
+	require.Contains(t, live, "`c` mediumtext,")
+
+	requireConverged(t, tt.DB, tt.Name, targetSQL)
+}
+
+// A TEXT(M) in a table that names no charset takes its size from the charset
+// the column gets, which only the live table determines. The diff compares it
+// at the live column's charset and, where the types differ, emits text(M) so
+// MySQL resolves the size: a plain `text` would narrow the utf8mb4 column `d`
+// (text(20000) is mediumtext there) and widen the latin1 column `b` (text(64)
+// is tinytext there).
+func TestDiffIntegrationTextBlobLengthUndeterminedCharset(t *testing.T) {
+	t.Run("utf8mb4", func(t *testing.T) {
+		tt := testutils.NewTestTable(t, "diff_text_length_utf8mb4",
+			"CREATE TABLE diff_text_length_utf8mb4 (id int NOT NULL, a varchar(10), b text, c mediumtext, d text, "+
+				"PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci")
+
+		const targetSQL = "CREATE TABLE diff_text_length_utf8mb4 (id int NOT NULL, " +
+			"a text(20000), b text(100), c text(20000), d text(20000), PRIMARY KEY (id))"
+
+		stmts := diffLiveTable(t, tt.DB, tt.Name, targetSQL)
+		require.Len(t, stmts, 1)
+		require.Contains(t, stmts[0].Statement, "MODIFY COLUMN `a` text(20000) NULL")
+		require.Contains(t, stmts[0].Statement, "MODIFY COLUMN `d` text(20000) NULL")
+		require.NotContains(t, stmts[0].Statement, "`b`")
+		require.NotContains(t, stmts[0].Statement, "`c`")
+
+		execStatements(t, tt.DB, stmts)
+		live := showCreateTable(t, tt.DB, tt.Name)
+		require.Contains(t, live, "`a` mediumtext,")
+		require.Contains(t, live, "`b` text,")
+		require.Contains(t, live, "`c` mediumtext,")
+		require.Contains(t, live, "`d` mediumtext,")
+
+		requireConverged(t, tt.DB, tt.Name, targetSQL)
+	})
+	t.Run("latin1", func(t *testing.T) {
+		tt := testutils.NewTestTable(t, "diff_text_length_latin1",
+			"CREATE TABLE diff_text_length_latin1 (id int NOT NULL, a varchar(10), b text, c tinytext, "+
+				"PRIMARY KEY (id)) DEFAULT CHARSET=latin1")
+
+		const targetSQL = "CREATE TABLE diff_text_length_latin1 (id int NOT NULL, " +
+			"a text(64), b text(64), c text(64), PRIMARY KEY (id))"
+
+		stmts := diffLiveTable(t, tt.DB, tt.Name, targetSQL)
+		require.Len(t, stmts, 1)
+		require.Contains(t, stmts[0].Statement, "MODIFY COLUMN `a` text(64) NULL")
+		require.Contains(t, stmts[0].Statement, "MODIFY COLUMN `b` text(64) NULL")
+		require.NotContains(t, stmts[0].Statement, "`c`")
+
+		execStatements(t, tt.DB, stmts)
+		live := showCreateTable(t, tt.DB, tt.Name)
+		require.Contains(t, live, "`a` tinytext,")
+		require.Contains(t, live, "`b` tinytext,")
+		require.Contains(t, live, "`c` tinytext,")
+
+		requireConverged(t, tt.DB, tt.Name, targetSQL)
+	})
+	// IgnoreCharsetCollation does not change the charset a MODIFY stores the
+	// column at, so the column is still compared at the live table's charset:
+	// text(20000) is text on latin1, whether or not a comment also differs.
+	t.Run("latin1 IgnoreCharsetCollation", func(t *testing.T) {
+		tt := testutils.NewTestTable(t, "diff_text_length_ignore_cs",
+			"CREATE TABLE diff_text_length_ignore_cs (id int NOT NULL, a mediumtext, b text, c mediumtext COMMENT 'x', "+
+				"PRIMARY KEY (id)) DEFAULT CHARSET=latin1")
+
+		const targetSQL = "CREATE TABLE diff_text_length_ignore_cs (id int NOT NULL, " +
+			"a text(20000), b text(20000), c text(20000) COMMENT 'y', PRIMARY KEY (id))"
+		opts := NewDiffOptions()
+		opts.IgnoreCharsetCollation = true
+		diff := func() []*AbstractStatement {
+			source, err := ParseCreateTable(showCreateTable(t, tt.DB, tt.Name))
+			require.NoError(t, err)
+			target, err := ParseCreateTable(targetSQL)
+			require.NoError(t, err)
+			stmts, err := source.Diff(target, opts)
+			require.NoError(t, err)
+			return stmts
+		}
+
+		stmts := diff()
+		require.Len(t, stmts, 1)
+		require.Contains(t, stmts[0].Statement, "MODIFY COLUMN `a` text(20000) NULL")
+		require.Contains(t, stmts[0].Statement, "MODIFY COLUMN `c` text(20000) NULL COMMENT 'y'")
+		require.NotContains(t, stmts[0].Statement, "`b`")
+
+		execStatements(t, tt.DB, stmts)
+		live := showCreateTable(t, tt.DB, tt.Name)
+		require.Contains(t, live, "`a` text,")
+		require.Contains(t, live, "`b` text,")
+		require.Contains(t, live, "`c` text COMMENT 'y',")
+
+		require.Nil(t, diff())
+	})
+}
+
 // binaryDefaultHexReason is why the binary and utf8mb4 default tests that read
 // back a non-utf8mb3 default skip before MySQL 8.0.33: earlier servers' SHOW
 // CREATE TABLE replaces each such byte of a binary default, or character of a
