@@ -47,8 +47,11 @@ const defaultThreads = 2
 // adds the remaining per-table statistics queries on each source pool.
 const minChecksumPhaseReserve = 6
 
-// postCutoverCleanupTimeout bounds the checkpoint drop that runs after the
-// cutover has committed (see run). As in migration.
+// postCutoverCleanupTimeout bounds work that must finish after the traffic
+// switch even if the run is cancelled: the reverse-window post-switch hook
+// (see CutOver.algorithmCutover), the reverse cutover's finalization (see
+// reverseWindow.reverseCutover), and the checkpoint drop after a committed
+// cutover (see run). As in migration.
 const postCutoverCleanupTimeout = 2 * time.Minute
 
 var (

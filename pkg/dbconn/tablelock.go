@@ -17,10 +17,9 @@ import (
 
 const tableUnlockTimeout = 30 * time.Second
 
-// lockedStatementCompletionMargin is how long ExecUnderLock waits for a
-// statement beyond the session's lock_wait_timeout. The server reports a
-// metadata lock wait as ER_LOCK_WAIT_TIMEOUT after lock_wait_timeout, and that
-// error is conclusive, so the client-side bound must be longer.
+// lockedStatementCompletionMargin is how long a statement whose outcome the
+// caller must know is waited for beyond the session's lock_wait_timeout. See
+// DBConfig.StatementCompletionTimeout.
 const lockedStatementCompletionMargin = 30 * time.Second
 
 // ErrStatementOutcomeUnknown marks a statement that ExecUnderLock sent to the
@@ -121,7 +120,7 @@ func NewTableLock(ctx context.Context, db *sql.DB, tables []*table.TableInfo, co
 		db:                db,
 		lockConn:          conn,
 		logger:            logger,
-		completionTimeout: time.Duration(config.LockWaitTimeout)*time.Second + lockedStatementCompletionMargin,
+		completionTimeout: config.StatementCompletionTimeout(),
 	}, nil
 }
 
@@ -142,9 +141,10 @@ func (s *TableLock) DB() *sql.DB {
 // return context.Canceled, but the server can still commit the statement, so
 // the caller could not tell whether it took effect (issue #1338). Each
 // statement instead runs on a context detached from ctx's cancellation and
-// bounded by the session's lock_wait_timeout plus
-// lockedStatementCompletionMargin. If that bound expires, the error wraps
-// ErrStatementOutcomeUnknown.
+// bounded by DBConfig.StatementCompletionTimeout. If that bound expires, the
+// error wraps ErrStatementOutcomeUnknown. The client closes the connection
+// then, but the server may still be running the statement: a read of the
+// server state that shows it did not take effect is not conclusive.
 //
 // A caller that must run its statements even after a cancel, such as the
 // rename that retires a source after a traffic switch, passes

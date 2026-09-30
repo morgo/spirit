@@ -50,11 +50,12 @@ type CutOver struct {
 	// testInjectRenameError is returned. It lets a test cancel the run while
 	// the rename's outcome is unknown.
 	testAfterRenameError func()
-	// testRenameCompletedError is a test-only seam: when non-nil,
-	// renameCompleted returns it instead of reading the server state. It makes
+	// testRenameCompleted is a test-only seam: when non-nil, renameCompleted
+	// returns its result instead of reading the server state. An error makes
 	// the ownership verification unavailable, which is the state that
 	// separates "the cutover failed" from "we cannot tell who owns the table".
-	testRenameCompletedError error
+	// (false, nil) is a read taken before a still-running rename committed.
+	testRenameCompleted func() (bool, error)
 }
 
 // errCutoverRefused marks a cutover attempt refused by a check that ran under
@@ -130,9 +131,15 @@ func (c *CutOver) Run(ctx context.Context) error {
 	// succeeds and reports "not renamed" is conclusive, so it clears this: the
 	// cutover simply failed and the caller may retry the whole migration.
 	renameStateUnverified := false
+	// renameMayStillBeRunning is set when an attempt stopped waiting for its
+	// rename (dbconn.ErrStatementOutcomeUnknown) rather than losing its
+	// connection. The server may still be running that rename, so a read that
+	// shows it has not committed is not conclusive: it can commit after the
+	// read.
+	renameMayStillBeRunning := false
 	confirm := func() bool {
 		completed, verified := c.confirmRenameCompleted(ctx)
-		renameStateUnverified = !verified
+		renameStateUnverified = !verified || (!completed && renameMayStillBeRunning)
 		return completed
 	}
 	fail := func(errs ...error) error {
@@ -218,6 +225,9 @@ func (c *CutOver) Run(ctx context.Context) error {
 				// reported the statement failed, so the normal retry path is
 				// correct.
 				renameMayHaveCommitted = true
+				if errors.Is(err, dbconn.ErrStatementOutcomeUnknown) {
+					renameMayStillBeRunning = true
+				}
 				if confirm() {
 					return nil
 				}
@@ -291,8 +301,8 @@ func (c *CutOver) confirmRenameCompleted(ctx context.Context) (completed, verifi
 // operators renaming or dropping tables out from under a running migration
 // are not a supported scenario.
 func (c *CutOver) renameCompleted(ctx context.Context) (bool, error) {
-	if c.testRenameCompletedError != nil {
-		return false, c.testRenameCompletedError
+	if c.testRenameCompleted != nil {
+		return c.testRenameCompleted()
 	}
 	for _, cfg := range c.config {
 		// The RENAME TABLE statement uses schema-unqualified names, resolved

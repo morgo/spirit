@@ -294,7 +294,9 @@ func TestCutoverConnectionLossWithUnavailableOwnershipCheck(t *testing.T) {
 	cutover, _, _ := newConnectionLossCutover(t, "cutoverconnunknown")
 	ctx, cancel := context.WithCancel(t.Context())
 	cutover.testAfterRenameError = cancel
-	cutover.testRenameCompletedError = errors.New("injected: information_schema unavailable")
+	cutover.testRenameCompleted = func() (bool, error) {
+		return false, errors.New("injected: information_schema unavailable")
+	}
 
 	err := cutover.Run(ctx)
 
@@ -330,6 +332,42 @@ func TestCutoverCancelWhileRenameOutcomeUnknown(t *testing.T) {
 			var count int
 			require.NoError(t, db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM _"+tc.tableName+"_old").Scan(&count))
 			require.Equal(t, 2, count)
+		})
+	}
+}
+
+// TestCutoverCancelAfterUnconfirmedRename covers a cancel after an attempt
+// whose outcome is unknown, where the state check then reads "not renamed".
+// After a lost connection that reading is conclusive, and the run reports a
+// plain cancellation. After an expired completion bound it is not: the server
+// may still be running the rename, which can commit after the read. That run
+// must report ErrOwnershipAmbiguous.
+func TestCutoverCancelAfterUnconfirmedRename(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name          string
+		tableName     string
+		err           error
+		wantAmbiguous bool
+	}{
+		{"connection lost", "cutoverunconfconnloss", mysql.ErrInvalidConn, false},
+		{"completion bound expired", "cutoverunconfbound", fmt.Errorf("%w: %w", dbconn.ErrStatementOutcomeUnknown, context.DeadlineExceeded), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cutover, _, _ := newConnectionLossCutover(t, tc.tableName)
+			cutover.testInjectRenameError = tc.err
+			cutover.testRenameCompleted = func() (bool, error) { return false, nil }
+			ctx, cancel := context.WithCancel(t.Context())
+			cutover.testAfterRenameError = cancel
+
+			err := cutover.Run(ctx)
+			require.ErrorIs(t, err, context.Canceled)
+			if tc.wantAmbiguous {
+				require.ErrorIs(t, err, status.ErrOwnershipAmbiguous)
+			} else {
+				require.NotErrorIs(t, err, status.ErrOwnershipAmbiguous)
+			}
 		})
 	}
 }

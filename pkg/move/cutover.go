@@ -289,6 +289,16 @@ func (c *CutOver) algorithmCutover(ctx context.Context) error {
 		return err
 	}
 
+	// Traffic is now on the target, and the source locks are the only fence
+	// against straggler writes. Everything from here to the end of the source
+	// rename runs even if ctx is cancelled: a cancel that stopped the
+	// post-switch hook, a rename, its retry or a rollback would release the
+	// locks while a source still serves under its live name, or leave the
+	// sources partially renamed. Each statement under lock is bounded by
+	// TableLock.ExecUnderLock, and the post-switch hook by
+	// postCutoverCleanupTimeout.
+	afterSwitch := context.WithoutCancel(ctx)
+
 	// Reverse-window hook: after the traffic switch and before retiring the
 	// sources, persist the captured reverse-feed positions and record that the
 	// move has entered its reverse window. Runs once, under the source locks,
@@ -296,7 +306,10 @@ func (c *CutOver) algorithmCutover(ctx context.Context) error {
 	// routing switch has already succeeded, so (like a rename failure past that
 	// point) Run does not retry from the top and surfaces the error.
 	if c.postSwitch != nil && !c.postSwitchDone {
-		if err := c.postSwitch(ctx); err != nil {
+		hookCtx, cancel := context.WithTimeout(afterSwitch, postCutoverCleanupTimeout)
+		err := c.postSwitch(hookCtx)
+		cancel()
+		if err != nil {
 			return fmt.Errorf("reverse-window post-switch hook failed: %w", err)
 		}
 		c.postSwitchDone = true
@@ -315,13 +328,9 @@ func (c *CutOver) algorithmCutover(ctx context.Context) error {
 			c.logger.Warn("retrying rename while still holding source table locks",
 				"attempt", attempt,
 				"max-retries", c.dbConfig.MaxRetries)
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(renameRetryWait):
-			}
+			time.Sleep(renameRetryWait)
 		}
-		if err = c.renameAllSources(ctx, sourceLocks); err == nil {
+		if err = c.renameAllSources(afterSwitch, sourceLocks); err == nil {
 			// Every source is renamed and the source locks are still held, so no
 			// write can be in flight. Stop the forward feeds inside that window
 			// rather than after the deferred unlock, where the first straggler
@@ -356,14 +365,9 @@ func (c *CutOver) stopSourceFeeds() {
 // failure is wrapped with errRenameRollbackFailed because the sources are
 // then left partially renamed and a retry of the full rename cannot succeed.
 //
-// The renames and rollbacks run even if ctx is cancelled: they are issued on
-// context.WithoutCancel(ctx), and TableLock.ExecUnderLock waits for each
-// statement it starts. By this point the traffic switch may have run, and the
-// locks are the only fence against straggler writes. A cancel that stopped a
-// rename would leave the source serving, and one that stopped a rollback would
-// leave the sources partially renamed.
+// The caller passes a context that is not cancelled once traffic has switched;
+// see algorithmCutover.
 func (c *CutOver) renameAllSources(ctx context.Context, sourceLocks []*dbconn.TableLock) error {
-	ctx = context.WithoutCancel(ctx)
 	var completedRenames []int
 	for i, src := range c.sources {
 		renameFragments := make([]string, 0, len(src.Tables))
