@@ -18,9 +18,12 @@ func TestStripIntegerDisplayWidth(t *testing.T) {
 		{"CREATE TABLE t (a smallint(6))", nil},
 		{"CREATE TABLE t (a mediumint(9))", nil},
 		{"CREATE TABLE t (a tinyint(4))", nil},
-		{"CREATE TABLE t (a tinyint(1))", new(1)},                 // BOOLEAN form, preserved
-		{"CREATE TABLE t (a boolean)", new(1)},                    // folds to tinyint(1)
-		{"CREATE TABLE t (a int(10) unsigned zerofill)", new(10)}, // width kept under zerofill
+		{"CREATE TABLE t (a tinyint(1))", new(1)},       // BOOLEAN form, preserved
+		{"CREATE TABLE t (a boolean)", new(1)},          // folds to tinyint(1)
+		{"CREATE TABLE t (a tinyint(1) unsigned)", nil}, // MySQL keeps the width only on the signed form
+		{"CREATE TABLE t (a int1(1) unsigned)", nil},
+		{"CREATE TABLE t (a tinyint(1) unsigned zerofill)", new(1)}, // width kept under zerofill
+		{"CREATE TABLE t (a int(10) unsigned zerofill)", new(10)},   // width kept under zerofill
 		{"CREATE TABLE t (a int(0))", nil},
 		{"CREATE TABLE t (a tinyint(0))", nil},
 		{"CREATE TABLE t (a int(0) zerofill)", new(10)}, // MySQL substitutes the unsigned default width
@@ -32,6 +35,16 @@ func TestStripIntegerDisplayWidth(t *testing.T) {
 		{"CREATE TABLE t (a tinyint(1) zerofill)", new(1)},
 		{"CREATE TABLE t (a mediumint(3) zerofill)", new(3)},
 		{"CREATE TABLE t (a bigint(25) zerofill)", new(25)},
+		{"CREATE TABLE t (a int zerofill)", new(10)}, // unsigned default, not the parser's int(11)
+		{"CREATE TABLE t (a int unsigned zerofill)", new(10)},
+		{"CREATE TABLE t (a integer zerofill)", new(10)},
+		{"CREATE TABLE t (a tinyint zerofill)", new(3)},
+		{"CREATE TABLE t (a smallint zerofill)", new(5)},
+		{"CREATE TABLE t (a mediumint zerofill)", new(8)},
+		{"CREATE TABLE t (a bigint zerofill)", new(20)},
+		{"CREATE TABLE t (a int(11) zerofill)", new(11)}, // explicit width kept, even the signed default
+		{"CREATE TABLE t (a tinyint(4) zerofill)", new(4)},
+		{"CREATE TABLE t (a bigint(5) zerofill)", new(5)},
 		{"CREATE TABLE t (a varchar(11))", new(11)}, // not an integer type
 	}
 	for _, tc := range tests {
@@ -57,9 +70,30 @@ func TestStripIntegerDisplayWidthConverges(t *testing.T) {
 	assert.Nil(t, stmts, "int(11) should normalize to int and produce no diff")
 }
 
+// TestZerofillDefaultWidthConverges verifies that a ZEROFILL integer declared
+// without a width does not diff against the unsigned default width MySQL
+// stores for it, and that an explicit signed-default width still does.
+func TestZerofillDefaultWidthConverges(t *testing.T) {
+	declared, err := ParseCreateTable("CREATE TABLE t (a int zerofill, b tinyint zerofill, c smallint unsigned zerofill, d mediumint zerofill, e bigint zerofill)")
+	require.NoError(t, err)
+	live, err := ParseCreateTable("CREATE TABLE t (a int(10) unsigned zerofill, b tinyint(3) unsigned zerofill, c smallint(5) unsigned zerofill, d mediumint(8) unsigned zerofill, e bigint(20) unsigned zerofill)")
+	require.NoError(t, err)
+	stmts, err := live.Diff(declared, nil)
+	require.NoError(t, err)
+	assert.Nil(t, stmts)
+
+	explicit, err := ParseCreateTable("CREATE TABLE t (a int(11) zerofill, b tinyint(3) zerofill, c smallint(5) zerofill, d mediumint(8) zerofill, e bigint(20) zerofill)")
+	require.NoError(t, err)
+	stmts, err = live.Diff(explicit, nil)
+	require.NoError(t, err)
+	require.Len(t, stmts, 1)
+	assert.Contains(t, stmts[0].Statement, "`a` int(11) unsigned zerofill")
+	assert.NotContains(t, stmts[0].Statement, "`b`")
+}
+
 // TestZerofillWidthChangeReported verifies that a change between two
-// non-default ZEROFILL widths is still reported: only a zero width is replaced
-// with the type's default.
+// non-default ZEROFILL widths is still reported: only a missing or zero width
+// is replaced with the type's default.
 func TestZerofillWidthChangeReported(t *testing.T) {
 	live, err := ParseCreateTable("CREATE TABLE t (a int(5) unsigned zerofill)")
 	require.NoError(t, err)
