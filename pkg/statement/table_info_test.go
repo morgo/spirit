@@ -115,3 +115,26 @@ func TestToTableInfoEscapedEnumSetMembers(t *testing.T) {
 		assert.Equal(t, member, row[1])
 	}
 }
+
+// TestToTableInfoHexEnumMembers renders the members of a binary-charset ENUM
+// that are not valid utf8mb3 as hex literals, as information_schema does, and
+// reads them back as their bytes.
+func TestToTableInfoHexEnumMembers(t *testing.T) {
+	ct, err := ParseCreateTable("CREATE TABLE `t` (\n" +
+		"  `id` int NOT NULL,\n" +
+		"  `e` enum('\\\\',x'815c','q''x',x'f09f9880','\\0') CHARACTER SET binary NOT NULL,\n" +
+		"  PRIMARY KEY (`id`)\n" +
+		") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4")
+	require.NoError(t, err)
+
+	ti, err := ct.ToTableInfo("mydb")
+	require.NoError(t, err)
+	tp, ok := ti.GetColumnMySQLType("e")
+	require.True(t, ok)
+	assert.Equal(t, `enum('\\',x'815c','q''x',x'f09f9880','\0')`, tp)
+	for ordinal, member := range []string{`\`, "\x81\\", "q'x", "\U0001F600", "\x00"} {
+		row := []any{int32(1), int64(ordinal + 1)}
+		require.NoError(t, ti.DecodeBinlogRow(row))
+		assert.Equal(t, member, row[1])
+	}
+}

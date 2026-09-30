@@ -61,7 +61,23 @@ func TestParseEnumSetElements(t *testing.T) {
 		// double quote.
 		{"enum('tab\tx','cz\x1ax','bk\bx','dq\"x')", []string{"tab\tx", "cz\x1ax", "bk\bx", "dq\"x"}, false},
 
+		// A member that is not valid utf8mb3, which only a binary-charset
+		// column can hold, is written as a hex literal. This is what MySQL
+		// reports for ENUM(x'5c', x'815c', 'q''x', x'f09f9880', x'eda080',
+		// x'00', x'c0af', x'41ff', x'e9', x'0a', x'', x'ffab') CHARACTER SET binary.
+		{`enum('\\',x'815c','q''x')`, []string{`\`, "\x81\\", "q'x"}, false},
+		{`enum('\\',x'815c','q''x',x'f09f9880',x'eda080','\0',x'c0af',x'41ff',x'e9','\n','',x'ffab')`,
+			[]string{`\`, "\x81\\", "q'x", "\U0001F600", "\xed\xa0\x80", "\x00", "\xc0\xaf", "A\xff", "\xe9", "\n", "", "\xff\xab"}, false},
+		{`set(x'815c','x')`, []string{"\x81\\", "x"}, false},
+
 		// Malformed inputs: fail-closed (return error, not partial results).
+		{`enum(x'8')`, nil, true},           // odd number of hex digits
+		{`enum(x'zz')`, nil, true},          // not hex
+		{`enum(x'81`, nil, true},            // unterminated hex literal
+		{`enum(X'81')`, nil, true},          // MySQL writes a lower-case x
+		{`enum(x'81'x'82')`, nil, true},     // no delimiter between elements
+		{`enum(x 'ab')`, nil, true},         // x not followed by a quote
+		{`enum(x'81','a',)`, nil, true},     // trailing comma after a hex literal
 		{`enum('a\tb')`, nil, true},         // escape MySQL does not write in column_type
 		{`enum('a\Zb')`, nil, true},         // likewise
 		{`enum('a\'b')`, nil, true},         // MySQL doubles a quote, it does not escape it
@@ -152,6 +168,12 @@ func TestQuoteEnumSetMember(t *testing.T) {
 		`dq"x`:     `'dq"x'`,
 		`\%`:       `'\\%'`,
 		"a,b":      "'a,b'",
+		// Not valid utf8mb3: a hex literal.
+		"\x81\\":       "x'815c'",
+		"\U0001F600":   "x'f09f9880'",
+		"\xed\xa0\x80": "x'eda080'", // an encoded surrogate
+		"\xc0\xaf":     "x'c0af'",   // an overlong encoding
+		"A\xff":        "x'41ff'",
 	} {
 		assert.Equal(t, want, QuoteEnumSetMember(member), "member %q", member)
 	}

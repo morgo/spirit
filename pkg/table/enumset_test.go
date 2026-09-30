@@ -345,3 +345,37 @@ func TestDecodeBinlogRowEscapedMembers(t *testing.T) {
 		assert.Equal(t, []any{int32(i), member, "a\\b,nl\nx"}, row)
 	}
 }
+
+// TestSetInfoBinaryEnumHexMember reads an ENUM of a binary-charset column
+// whose members are not all valid utf8mb3. information_schema reports such a
+// member as a hex literal (x'815c'), which the parser refused, so SetInfo
+// failed and no schema change could run on the table.
+func TestSetInfoBinaryEnumHexMember(t *testing.T) {
+	tt := testutils.NewTestTable(t, "enumset_hex_member", `CREATE TABLE enumset_hex_member (
+		id INT NOT NULL PRIMARY KEY,
+		e ENUM(x'5c', x'815c', 'q''x', x'f09f9880', x'eda080', x'00', x'c0af', x'41FF', x'e9', x'0a', x'', x'ffab') CHARACTER SET binary NOT NULL
+	)`)
+	ti := NewTableInfo(tt.DB, "test", "enumset_hex_member")
+	require.NoError(t, ti.SetInfo(t.Context()))
+	tp, ok := ti.GetColumnMySQLType("e")
+	require.True(t, ok)
+	require.Equal(t, `enum('\\',x'815c','q''x',x'f09f9880',x'eda080','\0',x'c0af',x'41ff',x'e9','\n','',x'ffab')`, tp)
+
+	want := []string{`\`, "\x81\\", "q'x", "\U0001F600", "\xed\xa0\x80", "\x00", "\xc0\xaf", "A\xff", "\xe9", "\n", "", "\xff\xab"}
+	members, ok := ti.EnumSetMembers("e")
+	require.True(t, ok)
+	assert.Equal(t, want, members)
+
+	// QuoteEnumSetMember writes each member as MySQL does.
+	quoted := make([]string, len(want))
+	for i, member := range want {
+		quoted[i] = utils.QuoteEnumSetMember(member)
+	}
+	assert.Equal(t, tp, "enum("+strings.Join(quoted, ",")+")")
+
+	for i, member := range want {
+		row := []any{int32(i), int64(i + 1)}
+		require.NoError(t, ti.DecodeBinlogRow(row))
+		assert.Equal(t, member, row[1])
+	}
+}

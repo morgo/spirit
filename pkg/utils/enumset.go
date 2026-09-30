@@ -1,8 +1,10 @@
 package utils
 
 import (
+	"encoding/hex"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 )
 
 // IsEnumType reports whether a MySQL column type string (as reported by
@@ -27,8 +29,8 @@ func IsEnumOrSetType(mysqlType string) bool {
 // reports it in COLUMNS.COLUMN_TYPE.
 //
 // It uses a small state machine to correctly handle values containing
-// commas and the characters MySQL escapes in that text (see
-// QuoteEnumSetMember).
+// commas, the characters MySQL escapes in that text, and the hex literals it
+// writes for members that are not valid utf8mb3 (see QuoteEnumSetMember).
 //
 // It is fail-closed: any unexpected characters or malformed structure returns
 // an error so that callers (safety checks, the binlog ENUM/SET decoder) are
@@ -56,12 +58,25 @@ func ParseEnumSetElements(mysqlType string) ([]string, error) {
 }
 
 // QuoteEnumSetMember renders an ENUM or SET member the way MySQL writes it in
-// information_schema.COLUMNS.COLUMN_TYPE (and SHOW CREATE TABLE): in single
-// quotes, with a single quote doubled and a backslash, newline, carriage
-// return and NUL backslash-escaped. No other character is escaped: a tab,
-// Ctrl-Z, backspace or double quote is written as itself. This is MySQL's
-// append_unescaped(), and parseSQLQuotedList decodes exactly these escapes.
+// information_schema.COLUMNS.COLUMN_TYPE (and SHOW CREATE TABLE).
+//
+// A member that is valid utf8mb3 is written in single quotes, with a single
+// quote doubled and a backslash, newline, carriage return and NUL
+// backslash-escaped. No other character is escaped: a tab, Ctrl-Z, backspace
+// or double quote is written as itself. This is MySQL's append_unescaped().
+//
+// Any other member is written as a hex literal of its bytes, e.g. x'815c':
+// invalid UTF-8, and a character outside utf8mb3 (a 4-byte UTF-8 character).
+// Only a binary-charset column can hold such bytes, and MySQL writes its
+// members this way. (A column of any other charset holds a 4-byte character
+// only in utf8mb4, and MySQL reports that character as '?'. Spirit writes the
+// member instead, so that it reads back unchanged.)
+//
+// parseSQLQuotedList decodes exactly these forms.
 func QuoteEnumSetMember(member string) string {
+	if !isUTF8MB3(member) {
+		return "x'" + hex.EncodeToString([]byte(member)) + "'"
+	}
 	var buf strings.Builder
 	buf.Grow(len(member) + 2)
 	buf.WriteByte('\'')
@@ -85,9 +100,18 @@ func QuoteEnumSetMember(member string) string {
 	return buf.String()
 }
 
+// isUTF8MB3 reports whether s is valid UTF-8 with no character outside the
+// Basic Multilingual Plane, which is what utf8mb3 can hold.
+func isUTF8MB3(s string) bool {
+	if !utf8.ValidString(s) {
+		return false
+	}
+	return strings.IndexFunc(s, func(r rune) bool { return r > 0xFFFF }) < 0
+}
+
 // parseSQLQuotedList parses a comma-separated list of single-quoted SQL
-// strings, correctly handling embedded commas and the escapes
-// QuoteEnumSetMember writes.
+// strings and x'<hex>' literals, correctly handling embedded commas and the
+// escapes QuoteEnumSetMember writes.
 //
 // It is fail-closed: any unexpected character outside of quotes, and any
 // backslash escape MySQL does not write in COLUMN_TYPE, causes the parser to
@@ -116,6 +140,22 @@ func parseSQLQuotedList(s string) ([]string, error) {
 					return nil, fmt.Errorf("empty quoted list %q", s)
 				}
 				return nil, fmt.Errorf("trailing delimiter in quoted list %q", s)
+			}
+			if s[i] == 'x' && i+1 < n && s[i+1] == '\'' {
+				// A hex literal: MySQL writes a member that is not valid
+				// utf8mb3 this way (see QuoteEnumSetMember).
+				end := strings.IndexByte(s[i+2:], '\'')
+				if end < 0 {
+					return nil, fmt.Errorf("unterminated hex literal at position %d in quoted list %q", i, s)
+				}
+				b, err := hex.DecodeString(s[i+2 : i+2+end])
+				if err != nil {
+					return nil, fmt.Errorf("invalid hex literal at position %d in quoted list %q: %w", i, s, err)
+				}
+				elems = append(elems, string(b))
+				i += 2 + end + 1
+				expectValue = false
+				continue
 			}
 			if s[i] != '\'' {
 				return nil, fmt.Errorf("unexpected character %q at position %d in quoted list %q", s[i], i, s)
