@@ -1425,6 +1425,66 @@ func TestDiffIntegrationBinaryLiteralDefaultsConverge(t *testing.T) {
 	require.Nil(t, stmts, "re-diff after applying the ALTER must converge")
 }
 
+// TestDiffIntegrationZerofillDefaultWidthConverges verifies that a ZEROFILL
+// integer declared without a width resolves to the unsigned default width MySQL
+// stores for it (int zerofill is int(10) unsigned zerofill, not the parser's
+// signed int(11)). The live table starts on widths other than the unsigned
+// default — the signed defaults for tinyint through int, where the two differ,
+// and bigint(21) for bigint, whose signed and unsigned defaults are both 20 and
+// so converged before this rule — so the diff must move every column to the
+// unsigned default, and after the ALTER is applied a re-diff must converge.
+func TestDiffIntegrationZerofillDefaultWidthConverges(t *testing.T) {
+	tt := testutils.NewTestTable(t, "diff_zerofill_width",
+		"CREATE TABLE diff_zerofill_width (id int NOT NULL, a int(11) zerofill, b tinyint(4) zerofill, c smallint(6) zerofill, d mediumint(9) zerofill, e bigint(21) zerofill, PRIMARY KEY (id))")
+	const declaredSQL = "CREATE TABLE diff_zerofill_width (id int NOT NULL, a int zerofill, b tinyint zerofill, c smallint unsigned zerofill, d mediumint zerofill, e bigint zerofill, PRIMARY KEY (id))"
+
+	stmts := diffLiveTable(t, tt.DB, tt.Name, declaredSQL)
+	require.Len(t, stmts, 1)
+	for _, want := range []string{
+		"`a` int(10) unsigned zerofill",
+		"`b` tinyint(3) unsigned zerofill",
+		"`c` smallint(5) unsigned zerofill",
+		"`d` mediumint(8) unsigned zerofill",
+		"`e` bigint(20) unsigned zerofill",
+	} {
+		require.Contains(t, stmts[0].Statement, want)
+	}
+	execStatements(t, tt.DB, stmts)
+
+	liveSQL := showCreateTable(t, tt.DB, tt.Name)
+	for _, want := range []string{
+		"`a` int(10) unsigned zerofill",
+		"`b` tinyint(3) unsigned zerofill",
+		"`c` smallint(5) unsigned zerofill",
+		"`d` mediumint(8) unsigned zerofill",
+		"`e` bigint(20) unsigned zerofill",
+	} {
+		require.Contains(t, liveSQL, want)
+	}
+	requireConverged(t, tt.DB, tt.Name, declaredSQL)
+	requireNoSelfDiff(t, tt.DB, tt.Name)
+}
+
+// TestDiffIntegrationZerofillExplicitWidthKept verifies that an explicit
+// ZEROFILL width equal to the signed default (int(11) zerofill) is kept: MySQL
+// stores it as written, so a table created from that schema diffs clean
+// against it, and against the width-less spelling it does not.
+func TestDiffIntegrationZerofillExplicitWidthKept(t *testing.T) {
+	const declaredSQL = "CREATE TABLE diff_zerofill_explicit (id int NOT NULL, a int(11) zerofill, b tinyint(4) zerofill, PRIMARY KEY (id))"
+	tt := testutils.NewTestTable(t, "diff_zerofill_explicit", declaredSQL)
+
+	liveSQL := showCreateTable(t, tt.DB, tt.Name)
+	require.Contains(t, liveSQL, "`a` int(11) unsigned zerofill")
+	require.Contains(t, liveSQL, "`b` tinyint(4) unsigned zerofill")
+	requireConverged(t, tt.DB, tt.Name, declaredSQL)
+	requireNoSelfDiff(t, tt.DB, tt.Name)
+
+	stmts := diffLiveTable(t, tt.DB, tt.Name, "CREATE TABLE diff_zerofill_explicit (id int NOT NULL, a int zerofill, b tinyint zerofill, PRIMARY KEY (id))")
+	require.Len(t, stmts, 1)
+	require.Contains(t, stmts[0].Statement, "`a` int(10) unsigned zerofill")
+	require.Contains(t, stmts[0].Statement, "`b` tinyint(3) unsigned zerofill")
+}
+
 // TestDiffIntegrationCharUTF8MB4Default verifies that a string default on a
 // utf8mb4 char or varchar column that is not valid utf8mb3 matches its live
 // form, which SHOW CREATE TABLE reports as a hex literal (char(4) DEFAULT '😀'
@@ -1528,6 +1588,22 @@ func TestDiffIntegrationCharUTF8MB4DefaultIgnoreCharsetCollation(t *testing.T) {
 	testutils.RunSQL(t, "INSERT INTO diff_mb4def_ignore_charset (id) VALUES (1)")
 	require.NoError(t, tt.DB.QueryRowContext(t.Context(), "SELECT HEX(b) FROM diff_mb4def_ignore_charset WHERE id = 1").Scan(&stored))
 	require.Equal(t, "D83DDE00", stored, "the utf16 encoding of the character")
+}
+
+// TestDiffIntegrationTinyint1UnsignedConverges verifies that a table created
+// from tinyint(1) unsigned diffs clean against that schema: MySQL keeps the
+// width only on the signed tinyint(1) and stores tinyint unsigned. Under
+// ZEROFILL the width is kept.
+func TestDiffIntegrationTinyint1UnsignedConverges(t *testing.T) {
+	const declaredSQL = "CREATE TABLE diff_tinyint1_unsigned (id int NOT NULL, a tinyint(1) unsigned, b tinyint(1), c tinyint(1) unsigned zerofill, PRIMARY KEY (id))"
+	tt := testutils.NewTestTable(t, "diff_tinyint1_unsigned", declaredSQL)
+
+	liveSQL := showCreateTable(t, tt.DB, tt.Name)
+	require.Contains(t, liveSQL, "`a` tinyint unsigned DEFAULT NULL")
+	require.Contains(t, liveSQL, "`b` tinyint(1) DEFAULT NULL")
+	require.Contains(t, liveSQL, "`c` tinyint(1) unsigned zerofill DEFAULT NULL")
+	requireConverged(t, tt.DB, tt.Name, declaredSQL)
+	requireNoSelfDiff(t, tt.DB, tt.Name)
 }
 
 // TestDiffIntegrationCharDefaultSpaces verifies that a string default on a
