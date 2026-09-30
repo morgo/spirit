@@ -38,7 +38,9 @@ const syncCheckpointTableName = "_spirit_sync_checkpoint"
 
 // shutdownFlushTimeout bounds the best-effort final flush on a clean shutdown,
 // and shutdownCheckpointTimeout bounds the final checkpoint write (kept
-// independent so a slow flush can't starve the checkpoint). Both are short so
+// independent so a slow flush can't starve the checkpoint). A write the server
+// has not answered by then is killed, which checkpoint.Table.Write bounds
+// separately. Both are short so
 // Ctrl-C / SIGTERM exits promptly even against a busy source whose change feed
 // never fully catches up; unflushed changes are re-applied on the next run from
 // the checkpoint.
@@ -519,6 +521,13 @@ func (r *Runner) runContinuous(ctx context.Context) error {
 	// copier watermark + change-feed position that let a restart resume instead
 	// of re-copying, so a slow or timed-out final flush above must not starve
 	// it of a shared deadline.
+	//
+	// Join the periodic dumper first (it stops on the same canceled ctx), so a
+	// periodic REPLACE still in flight cannot land after this one and roll the
+	// row back to an older watermark and position.
+	if ctx.Err() != nil && r.watchTaskWait != nil {
+		r.watchTaskWait()
+	}
 	cpCtx, cancelCp := context.WithTimeout(context.WithoutCancel(ctx), shutdownCheckpointTimeout)
 	defer cancelCp()
 	if err := r.dumpCheckpoint(cpCtx); err != nil {
@@ -713,7 +722,8 @@ func (r *Runner) ChecksumStats() checksum.LocklessCheckerStats {
 // feed-specific requirements itself (the MySQL binlog client checks
 // REPLICATION privileges + ROW binlog format on Start; a VStream
 // authenticates over gRPC). A table without a primary key surfaces a clear
-// error from getTables (SetInfo). The only target-side gate is that, for a
+// error from getTables (SetInfo); a FLOAT or BIT primary key is refused by
+// unsupportedPrimaryKeyError. The only target-side gate is that, for a
 // fresh sync, the target tables must be empty.
 func (r *Runner) setup(ctx context.Context) error {
 	r.logger.Info("Fetching source table list")
@@ -723,6 +733,9 @@ func (r *Runner) setup(ctx context.Context) error {
 	}
 	r.sourceTables = tables
 	if err := r.unsupportedNameError(); err != nil {
+		return err
+	}
+	if err := r.unsupportedPrimaryKeyError(); err != nil {
 		return err
 	}
 	if len(r.sourceTables) == 0 {
@@ -995,6 +1008,24 @@ func (r *Runner) unsupportedNameError() error {
 	}
 	for _, t := range r.sourceTables {
 		if err := utils.UnsupportedIdentifierError("table name", t.TableName); err != nil {
+			return fmt.Errorf("cannot sync table %q: %w", t.TableName, err)
+		}
+	}
+	return nil
+}
+
+// unsupportedPrimaryKeyError refuses a table whose primary key includes a
+// FLOAT or a BIT column before anything is written, as move does. A FLOAT key
+// cannot be located by its text form, so a replayed DELETE matches nothing
+// (see table.TableInfo.FloatPrimaryKeyError). A BIT key cannot be read back
+// from the table as a number, so chunk boundaries cannot be computed (see
+// table.TableInfo.BitPrimaryKeyError).
+func (r *Runner) unsupportedPrimaryKeyError() error {
+	for _, t := range r.sourceTables {
+		if err := t.FloatPrimaryKeyError(); err != nil {
+			return fmt.Errorf("cannot sync table %q: %w", t.TableName, err)
+		}
+		if err := t.BitPrimaryKeyError(); err != nil {
 			return fmt.Errorf("cannot sync table %q: %w", t.TableName, err)
 		}
 	}
