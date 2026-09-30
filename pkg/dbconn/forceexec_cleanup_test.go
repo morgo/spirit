@@ -953,7 +953,11 @@ func TestForceExecSparesTrafficDuringAnInplaceRebuild(t *testing.T) {
 	db, err := New(testutils.DSN(), config)
 	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
-	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	// This deadline only bounds how long the rebuild may take to finish. The
+	// timing the test depends on is measured from when the copy starts, so a
+	// slow runner that stretches the copy makes it easier to satisfy, not
+	// harder, and must not fail the test.
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
 	defer cancel()
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logs, nil))
@@ -1000,7 +1004,11 @@ func TestForceExecSparesTrafficDuringAnInplaceRebuild(t *testing.T) {
 	case err := <-rebuildDone:
 		require.NoError(t, err)
 	case <-ctx.Done():
-		t.Fatal("the rebuild did not complete")
+		// Say what the rebuild was doing, to tell a slow copy from a rebuild
+		// stuck waiting for a lock.
+		var state sql.NullString
+		stateErr := tt.DB.QueryRowContext(t.Context(), "SELECT state FROM information_schema.processlist WHERE info = ?", alterSQL).Scan(&state)
+		t.Fatalf("the rebuild did not complete: state=%q (err=%v)\nForceExec log:\n%s", state.String, stateErr, logs.String())
 	}
 	require.NotContains(t, logs.String(), "killing locking transaction")
 }
