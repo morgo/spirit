@@ -31,6 +31,12 @@ func TestDefaultCollationOrderIndependent(t *testing.T) {
 		{"CREATE TABLE t (c varchar(3) CHARACTER SET latin1) DEFAULT CHARSET=utf8mb4", "latin1_swedish_ci"},
 		{"CREATE TABLE t (c varchar(3) CHARACTER SET latin1 BINARY COLLATE latin1_general_ci) DEFAULT CHARSET=utf8mb4", "latin1_general_ci"},
 		{"CREATE TABLE t (c varchar(3) BINARY) DEFAULT CHARSET=ascii", "ascii_bin"},
+		{"CREATE TABLE t (c enum('a','b') CHARACTER SET binary) DEFAULT CHARSET=utf8mb4", "binary"},
+		{"CREATE TABLE t (c set('a','b') CHARACTER SET binary) DEFAULT CHARSET=utf8mb4", "binary"},
+		{"CREATE TABLE t (c enum('a','b') CHARACTER SET binary) DEFAULT CHARSET=binary", "binary"},
+		{"CREATE TABLE t (c varchar(3) CHARACTER SET binary) DEFAULT CHARSET=utf8mb4", "binary"},
+		{"CREATE TABLE t (c text CHARACTER SET binary) DEFAULT CHARSET=utf8mb4", "binary"},
+		{"CREATE TABLE t (c char CHARACTER SET binary) DEFAULT CHARSET=utf8mb4", "binary"},
 	} {
 		t.Run(tc.sql, func(t *testing.T) {
 			for _, order := range [][]Normalizer{registered, reversed(registered)} {

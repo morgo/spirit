@@ -20,8 +20,9 @@ func init() { registerNormalizer(enumSetDefaultNormalizer{}) }
 // MySQL strips the trailing spaces (U+0020 only) from the default, then looks
 // the rest up in the member list under the column's collation. A set default
 // is split on commas after the strip, each element is looked up on its own,
-// and the members are reported once each in definition order. The parser
-// already strips trailing spaces from the members themselves, as MySQL does.
+// and the members are reported once each in definition order. MySQL strips
+// trailing spaces from the members themselves too (see
+// [enumSetMemberSpacesNormalizer]).
 // Verified against MySQL 8.0.28, 8.0.43, 8.4 and 9.7, which agree on every
 // case:
 //
@@ -93,16 +94,19 @@ func (enumSetDefaultNormalizer) Normalize(ct *CreateTable) *CreateTable {
 		}
 		foldCase := !selectsBinCollation(c) && collationFoldsASCIICase(cs, collation)
 		value := strings.TrimRight(*c.Default, " ")
+		// Match against the members as MySQL stores them, stripped of their
+		// trailing spaces on this non-binary column, whether or not
+		// enumSetMemberSpacesNormalizer has run yet.
 		var resolved string
 		var ok bool
 		switch strings.ToLower(c.Type) {
 		case "enum":
-			resolved, ok = matchMember(value, c.EnumValues, foldCase)
+			resolved, ok = matchMember(value, stripMemberSpaces(c.EnumValues), foldCase)
 		case "set":
 			if value == "" && *c.Default != "" {
 				continue // MySQL rejects a set default of only spaces
 			}
-			resolved, ok = resolveSetDefault(value, c.SetValues, foldCase)
+			resolved, ok = resolveSetDefault(value, stripMemberSpaces(c.SetValues), foldCase)
 		}
 		if ok {
 			c.Default = &resolved

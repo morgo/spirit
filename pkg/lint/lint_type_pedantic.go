@@ -206,11 +206,23 @@ func tpParseSeverity(value, key string) (Severity, error) {
 // (varbinary, blob), and are compared separately by tpEffectiveCollation so
 // that an undeterminable collation can be skipped rather than mistaken for a
 // difference.
+//
+// The members of an enum or set come from the normalized column, which holds
+// them as MySQL stores them (a non-binary member loses its trailing spaces).
+// The AST keeps them as written.
 func tpCanonicalType(col *statement.Column) string {
-	if col.Raw != nil && col.Raw.Tp != nil {
-		return col.Raw.Tp.InfoSchemaStr()
+	if col.Raw == nil || col.Raw.Tp == nil {
+		return col.Type
 	}
-	return col.Type
+	tp := col.Raw.Tp
+	if members := col.EnumValues; members != nil || col.SetValues != nil {
+		if members == nil {
+			members = col.SetValues
+		}
+		tp = tp.Clone() // the AST is shared, so set the members on a copy
+		tp.SetElems(members)
+	}
+	return tp.InfoSchemaStr()
 }
 
 // tpEffectiveCollation returns the charset and collation a text column

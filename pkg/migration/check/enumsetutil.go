@@ -1,11 +1,13 @@
 package check
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 
 	"github.com/block/spirit/pkg/parser/ast"
 	"github.com/block/spirit/pkg/parser/mysql"
+	"github.com/block/spirit/pkg/statement"
 )
 
 // requireCurrentColumnTypes reports whether Resources carries the table metadata
@@ -28,6 +30,41 @@ func requireCurrentColumnTypes(r Resources, logger *slog.Logger, checkName strin
 		return false, nil
 	}
 	return false, fmt.Errorf("check %s cannot run: the table's current column types were not loaded", checkName)
+}
+
+// storedNewMembers returns the members MySQL stores for col's redeclared ENUM
+// or SET definition, which is what the current members must be compared
+// against. MySQL strips each member's trailing spaces unless the column's
+// charset is binary, where 'b ' and 'b' are different members (see
+// statement.StoredEnumSetMembers).
+//
+// Only a member that ends in a space needs the charset. When the column
+// inherits the table default and the table metadata does not carry it — a
+// TableInfo populated by SetInfo does not — the default is read from
+// information_schema. A charset that still cannot be resolved fails the check
+// with cannotClassify rather than guessing.
+func storedNewMembers(ctx context.Context, r Resources, col modifiedColumn) ([]string, error) {
+	tableDefault := statement.CharsetCollation{Charset: r.Table.DefaultCharset, Collation: r.Table.DefaultCollation}
+	members, determined, err := r.Statement.StoredEnumSetMembers(col.ColDef, tableDefault)
+	if err != nil {
+		return nil, err
+	}
+	if !determined && tableDefault == (statement.CharsetCollation{}) && r.DB != nil {
+		var collation string
+		// Read the table SetInfo read, which it finds by DATABASE().
+		if err := r.DB.QueryRowContext(ctx, "SELECT IFNULL(table_collation, '') FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name=?",
+			r.Table.TableName).Scan(&collation); err != nil {
+			return nil, cannotClassify("unable to read the default collation of table %q: %w", r.Table.TableName, err)
+		}
+		members, determined, err = r.Statement.StoredEnumSetMembers(col.ColDef, statement.CharsetCollation{Collation: collation})
+		if err != nil {
+			return nil, err
+		}
+	}
+	if !determined {
+		return nil, cannotClassify("unable to validate the members of column %q: whether MySQL keeps their trailing spaces depends on the table's default charset, which is not known", col.LookupName)
+	}
+	return members, nil
 }
 
 // isPrefix returns true if oldElems is a prefix of newElems.
