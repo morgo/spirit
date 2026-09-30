@@ -21,7 +21,11 @@ func TestEnumSetMemberSpaces(t *testing.T) {
 		sql  string
 		want []string
 	}{
-		{"CREATE TABLE t (b enum('a','b '))", []string{"a", "b"}},
+		{"CREATE TABLE t (b enum('a','b ')) DEFAULT CHARSET=utf8mb4", []string{"a", "b"}},
+		// No charset anywhere: the database default decides, and it may be
+		// binary, so the member is left as written.
+		{"CREATE TABLE t (b enum('a','b '))", []string{"a", "b "}},
+		{"CREATE TABLE t (b enum('a','b ') BINARY)", []string{"a", "b "}},
 		{"CREATE TABLE t (b enum('a','b   ')) DEFAULT CHARSET=utf8mb4", []string{"a", "b"}},
 		{"CREATE TABLE t (b enum('a','b ') BINARY) DEFAULT CHARSET=utf8mb4", []string{"a", "b"}},
 		{"CREATE TABLE t (b enum('a',x'6220')) DEFAULT CHARSET=utf8mb4", []string{"a", "b"}},
@@ -50,7 +54,9 @@ func TestEnumSetMemberSpaces(t *testing.T) {
 		sql  string
 		want []string
 	}{
-		{"CREATE TABLE t (b set('a','b '))", []string{"a", "b"}},
+		{"CREATE TABLE t (b set('a','b ')) DEFAULT CHARSET=utf8mb4", []string{"a", "b"}},
+		{"CREATE TABLE t (b set('a','b ') COLLATE utf8mb4_bin)", []string{"a", "b"}},
+		{"CREATE TABLE t (b set('a','b '))", []string{"a", "b "}},
 		{"CREATE TABLE t (b set('a','b ') CHARACTER SET binary)", []string{"a", "b "}},
 		{"CREATE TABLE t (b set('a','b ') COLLATE binary)", []string{"a", "b "}},
 		{"CREATE TABLE t (b set('a','b ')) DEFAULT CHARSET=binary", []string{"a", "b "}},
@@ -69,7 +75,7 @@ func TestEnumSetMemberSpaces(t *testing.T) {
 // TestEnumSetMemberSpacesLeavesRaw: the members are shared with the parsed
 // AST, which a normalizer must not modify.
 func TestEnumSetMemberSpacesLeavesRaw(t *testing.T) {
-	ct, err := ParseCreateTable("CREATE TABLE t (b enum('a','b '))")
+	ct, err := ParseCreateTable("CREATE TABLE t (b enum('a','b ')) DEFAULT CHARSET=utf8mb4")
 	require.NoError(t, err)
 	require.Equal(t, []string{"a", "b"}, ct.Columns[0].EnumValues)
 	require.Equal(t, []string{"a", "b "}, ct.Columns[0].Raw.Tp.GetElems())
@@ -130,6 +136,20 @@ func TestEnumSetMemberSpacesConverge(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestEnumSetMemberSpacesUndeterminedKeepsMember: a declared column with no
+// charset anywhere inherits the database default. In a binary database the
+// live member keeps its space, so stripping the declared one would emit a
+// MODIFY COLUMN that rewrites the stored member.
+func TestEnumSetMemberSpacesUndeterminedKeepsMember(t *testing.T) {
+	live, err := ParseCreateTable("CREATE TABLE t (`b` enum('a','b '), `s` set('x','y ')) DEFAULT CHARSET=binary")
+	require.NoError(t, err)
+	declared, err := ParseCreateTable("CREATE TABLE t (b enum('a','b '), s set('x','y '))")
+	require.NoError(t, err)
+	stmts, err := live.Diff(declared, nil)
+	require.NoError(t, err)
+	require.Nil(t, stmts)
 }
 
 // TestEnumSetMemberSpacesModifyKeepsBinaryMember: a MODIFY COLUMN emitted for

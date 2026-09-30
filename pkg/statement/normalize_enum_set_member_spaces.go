@@ -33,9 +33,12 @@ func init() { registerNormalizer(enumSetMemberSpacesNormalizer{}) }
 // written with trailing spaces, and a MODIFY COLUMN emitted for a binary one
 // would silently change the member.
 //
-// A column whose charset the definition does not determine (no charset of its
-// own and no table default, which only hand-written DDL can reach) is taken to
-// be non-binary, as the server default charset is.
+// A column whose charset the definition does not determine (no charset or
+// collation of its own and no table default, which only hand-written DDL can
+// reach) is left as written. It inherits the database default, which may be
+// binary. Stripping it there would make Diff emit a MODIFY COLUMN that rewrites
+// the member MySQL stores. Left as written, the worst case on a non-binary
+// database is a MODIFY that restates the member, which MySQL strips again.
 //
 // Every other rule that writes a column's charset or collation leaves whether
 // it is binary unchanged: binaryCharsetNormalizer rewrites no enum or set
@@ -53,20 +56,17 @@ func (enumSetMemberSpacesNormalizer) Normalize(ct *CreateTable) *CreateTable {
 		if len(c.EnumValues) == 0 && len(c.SetValues) == 0 {
 			continue
 		}
-		if columnCharsetIsBinary(c, ct) {
+		cs, collation := resolvedCharsetCollation(c, ct)
+		if cs == "" && collation == "" {
+			continue // the database default decides; it may be binary
+		}
+		if cs == charset.CharsetBin || collation == charset.CollationBin {
 			continue // trailing spaces are data
 		}
 		c.EnumValues = stripMemberSpaces(c.EnumValues)
 		c.SetValues = stripMemberSpaces(c.SetValues)
 	}
 	return ct
-}
-
-// columnCharsetIsBinary reports whether col's charset resolves to binary: its
-// own CHARACTER SET or COLLATE, or the table default when it declares neither.
-func columnCharsetIsBinary(col *Column, ct *CreateTable) bool {
-	cs, collation := resolvedCharsetCollation(col, ct)
-	return cs == charset.CharsetBin || collation == charset.CollationBin
 }
 
 // stripMemberSpaces returns members with the trailing spaces of each removed.
