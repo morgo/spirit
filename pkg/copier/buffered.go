@@ -96,7 +96,7 @@ func (c *buffered) CopyChunk(ctx context.Context, chunk *table.Chunk) error {
 	if err != nil {
 		return fmt.Errorf("failed to read chunk data: %w", err)
 	}
-	chunk.ActualBytes = rowsByteSize(rows)
+	chunk.ActualBytes = utils.EstimateRenderedChunkSize(rows)
 	chunk.SourceRows = uint64(len(rows))
 	// The callback runs on the applier's feedback coordinator goroutine; done
 	// closes only after feedback and metrics are sent, so both have completed
@@ -186,48 +186,19 @@ func (c *buffered) readChunkData(ctx context.Context, chunk *table.Chunk) ([][]a
 	return rowDataList, nil
 }
 
-// rowsByteSize estimates the in-memory footprint of a chunk's rows, for the
-// memory-based dynamic chunker. It is an approximation of payload size (the
-// scanned column values), not exact Go heap accounting — good enough to servo
-// chunk row-count toward a byte budget, and cheap because the rows are already
-// in hand. database/sql scans into `any`, so the concrete types are whatever
-// the driver yields (go-sql-driver/mysql: []byte, string, int64, float64,
-// bool, time.Time, or nil).
-func rowsByteSize(rows [][]any) uint64 {
-	var total uint64
-	for _, row := range rows {
-		for _, v := range row {
-			total += datumByteSize(v)
-		}
+// cancellationErr returns nil while ctx is live. Once ctx is done it returns
+// ctx.Err(), wrapped together with context.Cause(ctx) when the caller supplied
+// a distinct cause, so the result matches both errors.Is(err, context.Canceled)
+// (how spirit classifies a phase as cancelled rather than failed) and the cause.
+func cancellationErr(ctx context.Context) error {
+	err := ctx.Err()
+	if err == nil {
+		return nil
 	}
-	return total
-}
-
-// datumByteSize returns the approximate byte size of a single scanned value.
-// Variable-length values are sized by their contents; fixed-width scalars use a
-// nominal width. The exact constants matter little: the servo cares about the
-// relative size of chunks, and any consistent measure converges.
-//
-// Every value counts as at least 1 byte, even an empty string or []byte. This
-// keeps the whole-chunk sum non-zero for any chunk that has rows, so a
-// zero-byte total unambiguously means an empty (gap) chunk — which is how the
-// byte sizer detects and skips gaps (see dynamicChunkSizer.feedbackBytes).
-// Without the floor, a chunk of entirely empty variable-length values would sum
-// to zero and be misread as a gap.
-func datumByteSize(v any) uint64 {
-	switch t := v.(type) {
-	case nil:
-		return 1
-	case []byte:
-		return max(1, uint64(len(t)))
-	case string:
-		return max(1, uint64(len(t)))
-	case time.Time:
-		return 16
-	default:
-		// int64, float64, bool, and other fixed-width scalars.
-		return 8
+	if cause := context.Cause(ctx); !errors.Is(cause, err) {
+		return fmt.Errorf("%w: %w", err, cause)
 	}
+	return err
 }
 
 func (c *buffered) isHealthy(ctx context.Context) bool {
@@ -244,7 +215,9 @@ func (c *buffered) StartTime() time.Time {
 }
 
 // Run copies all rows from the source to the target table, blocking until
-// the copy completes or fails. Run must not be called more than once per
+// the copy completes or fails. If ctx is cancelled before the read workers
+// finish, Run returns a non-nil error: the recorded copy error if there is one,
+// otherwise ctx.Err() wrapped with context.Cause(ctx). Run must not be called more than once per
 // copier instance: it resets the read-worker pool state that SetReadWorkers
 // reconciles against, so a second concurrent Run would corrupt the first's
 // pool accounting.
@@ -308,6 +281,14 @@ func (c *buffered) Run(ctx context.Context) error {
 	// than returned through an errgroup, so pick them up here. They take
 	// precedence over applier.Wait/Stop errors below, as before.
 	err := c.getFirstErr()
+
+	// Readers that observe a cancelled context exit without recording an
+	// error, and applier.Wait returns nil when nothing is pending (e.g. every
+	// reader was parked in BlockWait). Without this check a cancelled copy
+	// would return nil and look identical to a completed one.
+	if err == nil {
+		err = cancellationErr(ctx)
+	}
 
 	// Wait for the applier to finish processing all pending work
 	// This ensures all callbacks have been invoked before we return
@@ -394,7 +375,7 @@ func (c *buffered) readWorker(ctx context.Context, quit <-chan struct{}) error {
 		// more chunk against a dead copy.
 		if !c.isHealthy(ctx) {
 			c.logger.Debug("readWorker unhealthy after BlockWait, exiting")
-			return nil
+			return cancellationErr(ctx)
 		}
 
 		c.logger.Debug("readWorker calling chunker.Next()")
@@ -423,7 +404,7 @@ func (c *buffered) readWorker(ctx context.Context, quit <-chan struct{}) error {
 		// Record the in-memory size of the rows we just read so the chunker can
 		// size the next chunk against a byte budget (memory-based dynamic
 		// chunking). Harmless when the chunker is in time mode — it ignores it.
-		chunk.ActualBytes = rowsByteSize(rows)
+		chunk.ActualBytes = utils.EstimateRenderedChunkSize(rows)
 		chunk.SourceRows = uint64(len(rows))
 
 		// Handle empty chunks immediately
@@ -489,7 +470,9 @@ func (c *buffered) readWorker(ctx context.Context, quit <-chan struct{}) error {
 	}
 
 	c.logger.Debug("readWorker exiting main loop")
-	return nil
+	// nil unless the loop ended because ctx was cancelled. An invalidated copy
+	// also returns nil here: its error was already recorded by setInvalid.
+	return cancellationErr(ctx)
 }
 
 // SetReadWorkers reconciles the live read-worker count to n, spawning new
@@ -562,9 +545,10 @@ func (c *buffered) spawnReadWorkerLocked() {
 	go func() {
 		defer c.readerExited(quit)
 		if err := c.readWorker(ctx, quit); err != nil {
-			// The error itself was already recorded by setInvalid inside
-			// readWorker; cancelling the shared reader context aborts sibling
-			// readers' in-flight reads promptly (errgroup parity).
+			// A copy error was already recorded by setInvalid inside readWorker.
+			// A cancellation is not recorded; Run picks it up from ctx. Either
+			// way, cancelling the shared reader context aborts sibling readers'
+			// in-flight reads promptly (errgroup parity).
 			cancel()
 		}
 	}()
@@ -655,8 +639,7 @@ func (c *buffered) GetETAState() status.ETA {
 	c.Lock()
 	defer c.Unlock()
 	copiedRows, totalRows, pct := c.getCopyStats()
-	estimate, st := etaEstimate(copiedRows, totalRows, pct, c.rowsPerSecond.Load(), c.startTime)
-	return status.ETA{State: st, Duration: estimate}
+	return status.EstimateETA(copiedRows, totalRows, pct, c.rowsPerSecond.Load(), c.startTime)
 }
 
 func (c *buffered) estimateRowsPerSecondLoop(ctx context.Context) {

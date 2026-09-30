@@ -149,10 +149,10 @@ func TestRepairBatchesBoundedByBytes(t *testing.T) {
 		// batch is at or over it, and without its last row it was under it.
 		var size int
 		for _, row := range batch {
-			size += applier.EstimateRowSize(row)
+			size += utils.EstimateRenderedRowSize(row)
 		}
 		require.GreaterOrEqual(t, size, repairBatchBytes, "batch %d was cut before reaching the byte budget", i)
-		require.Less(t, size-applier.EstimateRowSize(batch[len(batch)-1]), repairBatchBytes,
+		require.Less(t, size-utils.EstimateRenderedRowSize(batch[len(batch)-1]), repairBatchBytes,
 			"batch %d should have been cut one row earlier", i)
 	}
 	require.Equal(t, 16, totalRows, "every source row must be written exactly once")

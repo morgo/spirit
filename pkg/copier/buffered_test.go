@@ -2,7 +2,9 @@ package copier
 
 import (
 	"context"
+	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -401,10 +403,13 @@ func TestBufferedCopierGeometry(t *testing.T) {
 // gateThrottler gives tests deterministic control over where read workers
 // park. BlockWait blocks until either one token is received on allow (waking
 // exactly one reader for one loop iteration) or open is closed (the gate is
-// permanently open and BlockWait returns immediately from then on).
+// permanently open and BlockWait returns immediately from then on). If
+// entered is non-nil, BlockWait sends on it first, so a test can wait until a
+// reader is actually parked rather than merely spawned.
 type gateThrottler struct {
-	allow chan struct{}
-	open  chan struct{}
+	allow   chan struct{}
+	open    chan struct{}
+	entered chan struct{}
 }
 
 func (g *gateThrottler) Open(_ context.Context) error      { return nil }
@@ -412,6 +417,12 @@ func (g *gateThrottler) Close() error                      { return nil }
 func (g *gateThrottler) IsThrottled() bool                 { return false }
 func (g *gateThrottler) UpdateLag(_ context.Context) error { return nil }
 func (g *gateThrottler) BlockWait(ctx context.Context) {
+	if g.entered != nil {
+		select {
+		case g.entered <- struct{}{}:
+		case <-ctx.Done():
+		}
+	}
 	select {
 	case <-g.allow:
 	case <-g.open:
@@ -538,4 +549,294 @@ func TestBufferedCopierReadWorkerScaling(t *testing.T) {
 	require.NoError(t, db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM readscalesrc").Scan(&srcRows))
 	require.NoError(t, db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM readscaledst").Scan(&dstRows))
 	require.Equal(t, srcRows, dstRows)
+}
+
+// feedbackRecorder wraps a chunker and counts Feedback calls, so tests can
+// pin CopyChunk's contract — feedback has been delivered by the time it
+// returns — at the moment of return rather than inferring it from
+// downstream state.
+type feedbackRecorder struct {
+	table.Chunker
+	feedbacks atomic.Int32
+}
+
+func (f *feedbackRecorder) Feedback(chunk *table.Chunk, d time.Duration, actualRows uint64) {
+	f.feedbacks.Add(1)
+	f.Chunker.Feedback(chunk, d, actualRows)
+}
+
+// TestCopyChunkContract pins the ChunkCopier guarantees that the migration
+// package's stepping tests (checkpoint watermarks, binlog interleaving) are
+// built on: chunker feedback is delivered before CopyChunk returns, for
+// row-carrying and empty chunks alike, so nothing about the chunk is still
+// pending asynchronously when the caller regains control.
+func TestCopyChunkContract(t *testing.T) {
+	testutils.RunSQL(t, "DROP TABLE IF EXISTS chunkcontract1, chunkcontract2")
+	testutils.RunSQL(t, "CREATE TABLE chunkcontract1 (a INT NOT NULL AUTO_INCREMENT, b INT, PRIMARY KEY (a))")
+	testutils.RunSQL(t, "CREATE TABLE chunkcontract2 (a INT NOT NULL AUTO_INCREMENT, b INT, PRIMARY KEY (a))")
+	testutils.RunSQL(t, "INSERT INTO chunkcontract1 (b) VALUES (1),(2),(3),(4),(5)")
+
+	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	t1 := table.NewTableInfo(db, "test", "chunkcontract1")
+	require.NoError(t, t1.SetInfo(t.Context()))
+	t2 := table.NewTableInfo(db, "test", "chunkcontract2")
+	require.NoError(t, t2.SetInfo(t.Context()))
+
+	cfg := bufferedConfig(t, db)
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2, TargetChunkTime: time.Second, Logger: cfg.Logger})
+	require.NoError(t, err)
+	require.NoError(t, chunker.Open())
+	recorder := &feedbackRecorder{Chunker: chunker}
+
+	c, err := NewCopier(recorder, cfg)
+	require.NoError(t, err)
+	stepper, ok := c.(ChunkCopier)
+	require.True(t, ok)
+	// CopyChunk auto-starts the applier and deliberately never stops it (the
+	// runner's Close does that in production); stop it here so its write
+	// workers don't outlive the test (goleak).
+	defer func() { require.NoError(t, cfg.Applier.Stop()) }()
+
+	// The optimistic chunker's first chunk (`a < 1`) is empty: the applier
+	// short-circuits zero rows, and feedback must still arrive synchronously.
+	chunk1, err := recorder.Next()
+	require.NoError(t, err)
+	require.NoError(t, stepper.CopyChunk(t.Context(), chunk1))
+	require.Equal(t, int32(1), recorder.feedbacks.Load())
+
+	// The second chunk carries all five rows. By the time CopyChunk returns,
+	// the rows are in the target and feedback has been sent.
+	chunk2, err := recorder.Next()
+	require.NoError(t, err)
+	require.NoError(t, stepper.CopyChunk(t.Context(), chunk2))
+	require.Equal(t, int32(2), recorder.feedbacks.Load())
+
+	var count int
+	require.NoError(t, db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM chunkcontract2").Scan(&count))
+	require.Equal(t, 5, count)
+
+	// Both chunks completed contiguously from the start of the table, so the
+	// low watermark is queryable immediately — no polling. This is the exact
+	// property the checkpoint stepping tests rely on.
+	_, err = recorder.GetLowWatermark()
+	require.NoError(t, err)
+}
+
+// TestCopyChunkApplyError pins the error half of the contract: when the
+// apply fails, CopyChunk returns the error and sends NO feedback — the chunk
+// must stay incomplete so a checkpoint cannot advance past it.
+func TestCopyChunkApplyError(t *testing.T) {
+	testutils.RunSQL(t, "DROP TABLE IF EXISTS chunkerr1, chunkerr2")
+	testutils.RunSQL(t, "CREATE TABLE chunkerr1 (a INT NOT NULL AUTO_INCREMENT, b INT, PRIMARY KEY (a))")
+	testutils.RunSQL(t, "CREATE TABLE chunkerr2 (a INT NOT NULL AUTO_INCREMENT, b INT, PRIMARY KEY (a))")
+	testutils.RunSQL(t, "INSERT INTO chunkerr1 (b) VALUES (1),(2),(3)")
+
+	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	t1 := table.NewTableInfo(db, "test", "chunkerr1")
+	require.NoError(t, t1.SetInfo(t.Context()))
+	t2 := table.NewTableInfo(db, "test", "chunkerr2")
+	require.NoError(t, t2.SetInfo(t.Context()))
+
+	cfg := bufferedConfig(t, db)
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2, TargetChunkTime: time.Second, Logger: cfg.Logger})
+	require.NoError(t, err)
+	require.NoError(t, chunker.Open())
+	recorder := &feedbackRecorder{Chunker: chunker}
+
+	c, err := NewCopier(recorder, cfg)
+	require.NoError(t, err)
+	stepper, ok := c.(ChunkCopier)
+	require.True(t, ok)
+	defer func() { require.NoError(t, cfg.Applier.Stop()) }()
+
+	// Sabotage the apply: the write side targets chunkerr2, which no longer
+	// exists. The read side (chunkerr1) is untouched.
+	testutils.RunSQL(t, "DROP TABLE chunkerr2")
+
+	// Step past the empty first chunk (`a < 1`): zero rows never reach the
+	// target table, so it succeeds even with the target gone.
+	chunk, err := recorder.Next()
+	require.NoError(t, err)
+	require.NoError(t, stepper.CopyChunk(t.Context(), chunk))
+	feedbacksBefore := recorder.feedbacks.Load()
+
+	// The second chunk carries rows, so the applier's REPLACE hits the
+	// missing table and the error must surface synchronously, with no
+	// feedback recorded for the failed chunk.
+	chunk, err = recorder.Next()
+	require.NoError(t, err)
+	err = stepper.CopyChunk(t.Context(), chunk)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "chunkerr2") // the injected failure, not something incidental
+	require.Equal(t, feedbacksBefore, recorder.feedbacks.Load(), "a failed chunk must not send feedback")
+}
+
+// byteRecorder sums the ActualBytes of every chunk fed back to the chunker.
+type byteRecorder struct {
+	table.Chunker
+	bytes atomic.Uint64
+}
+
+func (b *byteRecorder) Feedback(chunk *table.Chunk, d time.Duration, actualRows uint64) {
+	b.bytes.Add(chunk.ActualBytes)
+	b.Chunker.Feedback(chunk, d, actualRows)
+}
+
+// TestCopierReportsRenderedChunkBytes pins that both copy paths (CopyChunk and
+// the Run read worker) report each chunk's rows to the chunker as
+// utils.EstimateRenderedChunkSize, which the byte-budget sizer servos on.
+// The driver scans INT as int64 (a flat 10) and VARCHAR as []byte, so five
+// rows of (INT, 'abc') estimate at 2 + (10+2) + (5+2) = 21 bytes each: 105 in
+// total.
+func TestCopierReportsRenderedChunkBytes(t *testing.T) {
+	const want = 5 * 21
+	require.Equal(t, uint64(21), utils.EstimateRenderedChunkSize([][]any{{int64(1), []byte("abc")}}))
+
+	setup := func(t *testing.T) (*byteRecorder, Copier, *CopierConfig) {
+		testutils.RunSQL(t, "DROP TABLE IF EXISTS rbytes1, rbytes2")
+		testutils.RunSQL(t, "CREATE TABLE rbytes1 (a INT NOT NULL AUTO_INCREMENT, b VARCHAR(10), PRIMARY KEY (a))")
+		testutils.RunSQL(t, "CREATE TABLE rbytes2 (a INT NOT NULL AUTO_INCREMENT, b VARCHAR(10), PRIMARY KEY (a))")
+		testutils.RunSQL(t, "INSERT INTO rbytes1 (b) VALUES ('abc'),('abc'),('abc'),('abc'),('abc')")
+		db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+		require.NoError(t, err)
+		t.Cleanup(func() { utils.CloseAndLog(db) })
+		t1 := table.NewTableInfo(db, "test", "rbytes1")
+		require.NoError(t, t1.SetInfo(t.Context()))
+		t2 := table.NewTableInfo(db, "test", "rbytes2")
+		require.NoError(t, t2.SetInfo(t.Context()))
+		cfg := bufferedConfig(t, db)
+		chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2, TargetChunkBytes: table.DefaultTargetChunkBytes, Logger: cfg.Logger})
+		require.NoError(t, err)
+		require.NoError(t, chunker.Open())
+		rec := &byteRecorder{Chunker: chunker}
+		c, err := NewCopier(rec, cfg)
+		require.NoError(t, err)
+		return rec, c, cfg
+	}
+
+	t.Run("CopyChunk", func(t *testing.T) {
+		rec, c, cfg := setup(t)
+		defer func() { require.NoError(t, cfg.Applier.Stop()) }()
+		stepper, ok := c.(ChunkCopier)
+		require.True(t, ok)
+		for range 2 { // the empty `a < 1` chunk, then the five rows
+			chunk, err := rec.Next()
+			require.NoError(t, err)
+			require.NoError(t, stepper.CopyChunk(t.Context(), chunk))
+		}
+		require.Equal(t, uint64(want), rec.bytes.Load())
+	})
+
+	t.Run("Run", func(t *testing.T) {
+		rec, c, _ := setup(t)
+		require.NoError(t, c.Run(t.Context()))
+		require.Equal(t, uint64(want), rec.bytes.Load())
+	})
+}
+
+// newParkedCopier starts Run on a two-reader copier whose throttler gate
+// never opens, and returns once both readers are parked in BlockWait.
+func newParkedCopier(t *testing.T, src, dst string) (*buffered, context.CancelCauseFunc, <-chan error) {
+	t.Helper()
+	testutils.RunSQL(t, "DROP TABLE IF EXISTS "+src+", "+dst)
+	testutils.RunSQL(t, "CREATE TABLE "+src+" (id INT NOT NULL AUTO_INCREMENT PRIMARY KEY, pad VARBINARY(64) NOT NULL)")
+	testutils.RunSQL(t, "CREATE TABLE "+dst+" (id INT NOT NULL AUTO_INCREMENT PRIMARY KEY, pad VARBINARY(64) NOT NULL)")
+	testutils.RunSQL(t, "INSERT INTO "+src+" (pad) VALUES (RANDOM_BYTES(64)), (RANDOM_BYTES(64)), (RANDOM_BYTES(64))")
+
+	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	t.Cleanup(func() { utils.CloseAndLog(db) })
+
+	t1 := table.NewTableInfo(db, "test", src)
+	require.NoError(t, t1.SetInfo(t.Context()))
+	t2 := table.NewTableInfo(db, "test", dst)
+	require.NoError(t, t2.SetInfo(t.Context()))
+
+	const readers = 2
+	gate := &gateThrottler{
+		allow:   make(chan struct{}),
+		open:    make(chan struct{}),
+		entered: make(chan struct{}, readers),
+	}
+	cfg := NewCopierDefaultConfig()
+	cfg.Concurrency = readers
+	cfg.Throttler = gate
+	cfg.Applier, err = applier.New([]applier.Target{{DB: db}}, applier.NewApplierDefaultConfig())
+	require.NoError(t, err)
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{
+		NewTable:        t2,
+		TargetChunkTime: time.Second,
+		Logger:          cfg.Logger,
+	})
+	require.NoError(t, err)
+	require.NoError(t, chunker.Open())
+
+	copier, err := NewCopier(chunker, cfg)
+	require.NoError(t, err)
+	b := copier.(*buffered)
+
+	ctx, cancel := context.WithCancelCause(t.Context())
+	t.Cleanup(func() { cancel(nil) })
+	runErr := make(chan error, 1)
+	go func() {
+		runErr <- b.Run(ctx)
+	}()
+
+	for range readers {
+		select {
+		case <-gate.entered:
+		case err := <-runErr:
+			t.Fatalf("Run returned before the readers parked: %v", err)
+		case <-time.After(10 * time.Second):
+			t.Fatal("readers did not park in BlockWait")
+		}
+	}
+	return b, cancel, runErr
+}
+
+func waitRun(t *testing.T, runErr <-chan error) error {
+	t.Helper()
+	select {
+	case err := <-runErr:
+		return err
+	case <-time.After(30 * time.Second):
+		t.Fatal("Run did not return after cancellation")
+		return nil
+	}
+}
+
+// TestBufferedCopierCancelWhileThrottled cancels the copy while every read
+// worker is parked in throttler.BlockWait. Run must report the cancellation
+// rather than returning nil: a nil return is indistinguishable from a
+// completed copy, so callers would record the copy as successful and only
+// notice the cancellation in a later step. The error must match both the
+// caller's cause and context.Canceled, which is how the status tracker
+// classifies a phase as cancelled rather than failed.
+func TestBufferedCopierCancelWhileThrottled(t *testing.T) {
+	b, cancel, runErr := newParkedCopier(t, "cancelthrottledsrc", "cancelthrottleddst")
+	errAbort := errors.New("copy aborted by test")
+	cancel(errAbort)
+	err := waitRun(t, runErr)
+	require.ErrorIs(t, err, errAbort)
+	require.ErrorIs(t, err, context.Canceled)
+	require.False(t, b.chunker.IsRead(), "no chunk should have been claimed while throttled")
+}
+
+// TestBufferedCopierRecordedErrorBeatsCancel checks that a copy error recorded
+// before the caller cancels wins over the cancellation, so a real read failure
+// is not reported as a cancellation.
+func TestBufferedCopierRecordedErrorBeatsCancel(t *testing.T) {
+	b, cancel, runErr := newParkedCopier(t, "cancelprecsrc", "cancelprecdst")
+	errRead := errors.New("failed to read chunk data")
+	b.setInvalid(errRead)
+	cancel(errors.New("copy aborted by test"))
+	err := waitRun(t, runErr)
+	require.ErrorIs(t, err, errRead)
+	require.NotErrorIs(t, err, context.Canceled)
 }

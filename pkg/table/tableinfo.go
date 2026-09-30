@@ -50,6 +50,7 @@ type TableInfo struct {
 	enumSetElements             map[int][]string  // parsed ENUM/SET element list, keyed by column ordinal; only present for ENUM/SET columns
 	binaryColumnWidths          map[int]int       // declared width of BINARY(N) columns, keyed by column ordinal; only present for fixed-width BINARY columns
 	floatColumns                []int             // ordinals of FLOAT columns, whose binlog values DecodeBinlogRow widens to float64
+	binlogCharsets              map[string]string // map from column name to the charset of the string bytes a binlog row image carries; only present for string columns whose charset is not utf8mb4/utf8mb3 (see BinlogColumnType)
 	KeyColumns                  []string          // the column names of the primaryKey
 	keyColumnsMySQLTp           []string          // the MySQL types of the primaryKey
 	KeyIsAutoInc                bool              // if pk[0] is an auto_increment column
@@ -308,6 +309,7 @@ func (t *TableInfo) resetColumns() {
 	t.enumSetElements = nil
 	t.binaryColumnWidths = nil
 	t.floatColumns = nil
+	t.binlogCharsets = nil
 }
 
 // addColumn records one column's metadata, caching the parsed ENUM/SET element
@@ -322,6 +324,17 @@ func (t *TableInfo) addColumn(col ColumnMeta) error {
 	charset := canonicalCharsetName(col.Charset)
 	if charset == "" && collation != "" {
 		charset, _, _ = strings.Cut(collation, "_")
+	}
+	if charset != "" && !isCharsetName(charset) {
+		// The charset is spliced into SQL as an introducer or a CONVERT
+		// target (see BinlogColumnType), so a name that is not one is
+		// refused rather than emitted.
+		return fmt.Errorf("column %s.%s.%s has unexpected charset name %q", t.SchemaName, t.TableName, name, charset)
+	}
+	if collation != "" && !isCollationName(collation) {
+		// The collation is spliced into SQL as a COLLATE clause (see the
+		// lockless checksum's image values), so it is checked the same way.
+		return fmt.Errorf("column %s.%s.%s has unexpected collation name %q", t.SchemaName, t.TableName, name, collation)
 	}
 	switch {
 	case col.CollationUnknown && charset == "":
@@ -359,7 +372,49 @@ func (t *TableInfo) addColumn(col ColumnMeta) error {
 	if isFloatColumnType(mysqlType) {
 		t.floatColumns = append(t.floatColumns, ordinal)
 	}
+	if cs := t.columnCharsets[name]; needsCharsetIntroducer(cs) && !utils.IsEnumOrSetType(mysqlType) {
+		if t.binlogCharsets == nil {
+			t.binlogCharsets = make(map[string]string)
+		}
+		t.binlogCharsets[name] = cs
+	}
 	return nil
+}
+
+// needsCharsetIntroducer reports whether string bytes in charset must be
+// labelled with it to reach MySQL unchanged over a utf8mb4 connection.
+// utf8mb3 is a subset of utf8mb4 and binary strings are emitted as hex
+// literals, so only the other charsets need it.
+func needsCharsetIntroducer(charset string) bool {
+	switch charset {
+	case "", "utf8mb4", "utf8mb3", "binary":
+		return false
+	}
+	return true
+}
+
+// isCharsetName reports whether charset is safe to splice into SQL, as an
+// introducer (_charset) or in CONVERT(... USING charset). MySQL charset names
+// are lower-case letters and digits.
+func isCharsetName(charset string) bool {
+	for _, r := range charset {
+		if (r < 'a' || r > 'z') && (r < '0' || r > '9') {
+			return false
+		}
+	}
+	return charset != ""
+}
+
+// isCollationName reports whether collation is lower-case letters, digits and
+// underscores, as every MySQL collation name is once canonicalCollationName
+// has lower-cased it.
+func isCollationName(collation string) bool {
+	for _, r := range collation {
+		if (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '_' {
+			return false
+		}
+	}
+	return collation != ""
 }
 
 // DescIndex describes the columns in an index.
@@ -524,7 +579,7 @@ func (t *TableInfo) setPrimaryKey(ctx context.Context) error {
 			t.KeyIsAutoInc = (extra == "auto_increment")
 		}
 	}
-	return t.FloatPrimaryKeyError()
+	return nil
 }
 
 // FloatPrimaryKeyError returns an error if a primary key column is a FLOAT,
@@ -537,13 +592,36 @@ func (t *TableInfo) setPrimaryKey(ctx context.Context) error {
 // during the migration is still in the table after cutover; and a chunk
 // boundary on a value shared by many rows never advances.
 //
-// The table is refused on setup, before MySQL's native DDL is attempted, so
-// the refusal holds for every statement on every server.
+// SetInfo does not call it: a TableInfo describes any table, and refusing one
+// is for the caller to decide. The migration and move checks refuse such a
+// table with it.
 func (t *TableInfo) FloatPrimaryKeyError() error {
 	for _, col := range t.KeyColumns {
 		if tp, ok := t.GetColumnMySQLType(col); ok && isFloatColumnType(tp) {
 			return fmt.Errorf("primary key column %q of table %q is a FLOAT, which is not supported: "+
 				"a FLOAT does not compare equal to its text form, so rows cannot be located by key", col, t.TableName)
+		}
+	}
+	return nil
+}
+
+// BitPrimaryKeyError returns an error if a primary key column is a BIT, which
+// Spirit does not support.
+//
+// Spirit handles a BIT key value as an unsigned integer: binlog rows carry it
+// as one, and it is written into chunk predicates and DELETEs as a numeric
+// literal. But the chunkers read chunk boundaries and the key range back from
+// the table with plain SELECTs, which return a BIT as raw big-endian bytes that
+// cannot be parsed as a number, so the copy failed on its first chunk, after
+// the migration had already set up its tables.
+//
+// SetInfo does not call it: a TableInfo describes any table, and refusing one
+// is for the caller to decide. The migration and move checks refuse such a
+// table with it.
+func (t *TableInfo) BitPrimaryKeyError() error {
+	for _, col := range t.KeyColumns {
+		if tp, ok := t.GetColumnMySQLType(col); ok && isBITType(tp) {
+			return fmt.Errorf("primary key column %q of table %q is a BIT, which is not supported", col, t.TableName)
 		}
 	}
 	return nil
@@ -567,8 +645,9 @@ func (t *TableInfo) PrimaryKeyIsMemoryComparable() error {
 	// returns BIT as raw big-endian bytes, and the chunker's
 	// newDatumFromMySQL path parses those as decimal strings — which
 	// fails or produces wrong bounds. Until the min/max read path knows
-	// how to decode BIT bytes, reject BIT PKs upfront with the same error
-	// they returned before BIT got its own datumTp.
+	// how to decode BIT bytes, reject BIT PKs with the same error they
+	// returned before BIT got its own datumTp. The migration and move
+	// checks refuse them before any copy (see BitPrimaryKeyError).
 	if slices.ContainsFunc(t.keyColumnsMySQLTp, isBITType) {
 		return ErrUnsupportedPKType
 	}
@@ -586,9 +665,10 @@ func (t *TableInfo) setMinMax(ctx context.Context) error {
 	// BIT is classified as unsignedType so the applier emits the value as
 	// a numeric literal, but `SELECT min(bit_col)` returns raw big-endian
 	// bytes that newDatumFromMySQL can't parse as decimal. BIT primary
-	// keys are rejected upfront by PrimaryKeyIsMemoryComparable; skip
-	// here so SetInfo can complete and the rejection can fire on a
-	// well-formed TableInfo.
+	// keys are rejected by PrimaryKeyIsMemoryComparable, and by the
+	// migration and move checks (see BitPrimaryKeyError); skip here so
+	// SetInfo can complete and the rejection can fire on a well-formed
+	// TableInfo.
 	if isBITType(t.keyColumnsMySQLTp[0]) {
 		return nil
 	}
@@ -720,6 +800,35 @@ func (t *TableInfo) GetColumnMySQLType(col string) (string, bool) {
 	return tp, ok
 }
 
+// BinlogColumnType resolves col for NewDatumFromValueWithType when the
+// values come from a binlog row image rather than from a query.
+//
+// The two differ for a string column whose charset is not utf8mb4 or
+// utf8mb3 (latin1, gbk, utf16, ...). A query returns the value converted to
+// the connection charset, utf8mb4. A binlog row image carries the column's
+// own bytes, which must be emitted with the column's charset introducer:
+// quoted, MySQL would read them as utf8mb4 and convert them into a different
+// value. For every other column the result is NewColumnType's.
+func (t *TableInfo) BinlogColumnType(col string) (ColumnType, error) {
+	tp, ok := t.columnsMySQLTps[col]
+	if !ok {
+		return ColumnType{}, fmt.Errorf("column %q not found in table %s", col, t.TableName)
+	}
+	ct := NewColumnType(tp)
+	ct.charset = t.binlogCharsets[col]
+	return ct, nil
+}
+
+// BinlogCharset returns the charset of the string bytes a binlog row image
+// carries for col, when they must be labelled with it to be read correctly
+// over a utf8mb4 connection (see BinlogColumnType). It is empty for any
+// other column: one that is not a string, an ENUM or SET (decoded to its
+// element text by DecodeBinlogRow), a utf8mb4 or utf8mb3 column, or one whose
+// charset the table definition does not determine.
+func (t *TableInfo) BinlogCharset(col string) string {
+	return t.binlogCharsets[col]
+}
+
 // GetColumnCollation returns the collation a column compares under, lower
 // cased and with the legacy utf8_ prefix spelled utf8mb3_, as MySQL 8.0 names
 // it. It is empty for a column that carries no charset. ok is false when the
@@ -736,7 +845,8 @@ func (t *TableInfo) GetColumnCollation(col string) (collation string, ok bool) {
 }
 
 // GetColumnCharset returns the charset a column carries, spelled as
-// GetColumnCollation spells collations. It is empty for a column that carries
+// GetColumnCollation spells collations. It is only ever lower-case letters and
+// digits, so it is safe to splice into SQL. It is empty for a column that carries
 // no charset. ok is false when the table has no such column, or when the
 // definition the table was built from does not determine the column's charset.
 // A column's charset can be known when its collation is not.
