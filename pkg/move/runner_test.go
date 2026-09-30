@@ -410,13 +410,20 @@ func TestMoveFailsGracefullyWithMinimalRBR(t *testing.T) {
 	require.Equal(t, int64(1), affected, "the minimal-image UPDATE must change a row to produce a rows event")
 
 	// The sentinel wait limit bounds Run, so this timeout is only a backstop.
-	// It does not wait for Run to return: that is what it guards against.
+	// When it fires, give Run a bounded time to honour the cancel before
+	// failing, so the deferred Close does not race a still-running Run and
+	// goleak does not bury this failure under a leak report.
 	var runErr error
 	select {
 	case runErr = <-done:
 	case <-time.After(2 * time.Minute):
 		cancel()
-		t.Fatal("move did not return after a minimal RBR event was committed")
+		select {
+		case <-done:
+			t.Fatal("move did not return after a minimal RBR event was committed")
+		case <-time.After(30 * time.Second):
+			t.Fatal("move did not return after a minimal RBR event was committed, nor within 30s of being cancelled")
+		}
 	}
 
 	// The runtime check detects the minimal row image while a buffered
