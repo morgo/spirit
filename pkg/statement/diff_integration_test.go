@@ -1036,6 +1036,9 @@ func TestDiffIntegrationUtf8mb4ColumnWithoutCollationDetectsDrift(t *testing.T) 
 	for _, tableOpts := range []string{
 		"DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
 		"DEFAULT CHARSET=latin1",
+		// The live column inherits the table's utf8mb4_bin, so SHOW CREATE
+		// TABLE writes no COLLATE on it.
+		"DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin",
 	} {
 		t.Run(tableOpts, func(t *testing.T) {
 			tt := testutils.NewTestTable(t, "diff_utf8mb4_drift",

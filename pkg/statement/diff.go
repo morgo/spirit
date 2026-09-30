@@ -226,17 +226,25 @@ func charsetCollationEqual(a, b *Column, source, target *CreateTable, opts *Diff
 		return sourceCollation == targetCollation
 	}
 	// A column that names utf8mb4 without a COLLATE takes the server's
-	// default_collation_for_utf8mb4, not the table's collation, so it matches
-	// either collation that variable can hold. The written-value comparison
-	// below cannot see this: the live form spells the server's choice out as
-	// a COLLATE, which differs from the table default whenever the table uses
-	// another charset or collation, and a MODIFY restating the bare charset
-	// would never converge against it. Any other collation is one the bare
-	// column can never have, so it falls through and is reported. The charset
-	// was compared above, and both server defaults are utf8mb4 collations.
-	if (takesServerUTF8MB4Default(a) && utf8mb4ServerDefaultCollations[comparedCollation(b, targetCollation)]) ||
-		(takesServerUTF8MB4Default(b) && utf8mb4ServerDefaultCollations[comparedCollation(a, sourceCollation)]) {
-		return true
+	// default_collation_for_utf8mb4, not the table's collation, so when the
+	// other side's collation is known it matches exactly the collations that
+	// variable can hold. The written-value comparison below cannot decide
+	// this: the live form spells the server's choice out as a COLLATE, which
+	// differs from the table default whenever the table uses another charset
+	// or collation, so a MODIFY restating the bare charset would never
+	// converge against it; and a live column that inherits a table default
+	// the bare column can never take (utf8mb4_bin) writes no COLLATE at all,
+	// so the two would compare equal. The charset was compared above, and
+	// both server defaults are utf8mb4 collations.
+	if takesServerUTF8MB4Default(a) {
+		if other := comparedCollation(b, targetCollation); other != "" {
+			return utf8mb4ServerDefaultCollations[other]
+		}
+	}
+	if takesServerUTF8MB4Default(b) {
+		if other := comparedCollation(a, sourceCollation); other != "" {
+			return utf8mb4ServerDefaultCollations[other]
+		}
 	}
 	return ptrEqual(
 		explicitUnlessTableDefault(a.Collation, source.TableOptions.getCollation()),
