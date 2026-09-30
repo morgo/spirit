@@ -177,6 +177,11 @@ func TestTextBlobLengthUndeterminedComparesAtOtherCharset(t *testing.T) {
 		{"both unresolved, same length", "a text(20000)", "CREATE TABLE `t` (`a` text(20000))", ""},
 		{"both unresolved, other length", "a text(20000)", "CREATE TABLE `t` (`a` text(30000))",
 			"ALTER TABLE `t` MODIFY COLUMN `a` text(20000) NULL"},
+		// Lengths that give the same size at every width are the same type:
+		// text at 1 to 3 bytes per character, mediumtext at 4.
+		{"both unresolved, same size at every width", "a text(20000)", "CREATE TABLE `t` (`a` text(20001))", ""},
+		{"both unresolved, differ only at 3 bytes", "a text(21845)", "CREATE TABLE `t` (`a` text(21846))",
+			"ALTER TABLE `t` MODIFY COLUMN `a` text(21845) NULL"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -204,6 +209,51 @@ func TestTextBlobLengthUndeterminedComparesAtOtherCharset(t *testing.T) {
 				modifiesA = modifiesA || strings.Contains(s.Statement, "MODIFY COLUMN `a`")
 			}
 			assert.Equal(t, tc.want != "", modifiesA)
+		})
+	}
+}
+
+// TestTextBlobLengthUndeterminedIgnoreCharsetCollation checks that an
+// unresolved TEXT(M) is still compared at the live column's charset when
+// charset differences are not diffed: the option does not change the charset a
+// MODIFY stores the column at, so a MODIFY emitted for any other attribute
+// would otherwise resize it.
+func TestTextBlobLengthUndeterminedIgnoreCharsetCollation(t *testing.T) {
+	const utf8mb4 = " ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci"
+	const latin1 = " ENGINE=InnoDB DEFAULT CHARSET=latin1"
+	tests := []struct {
+		name     string
+		declared string // column definition; the table names no charset
+		live     string // the live CREATE TABLE
+		want     string // the live-to-declared ALTER, "" for none
+	}{
+		{"utf8mb4 medium", "a text(20000)", "CREATE TABLE `t` (`a` mediumtext)" + utf8mb4, ""},
+		{"latin1 plain", "a text(20000)", "CREATE TABLE `t` (`a` text)" + latin1, ""},
+		// text(20000) is text on latin1, so a live mediumtext differs.
+		{"latin1 medium", "a text(20000)", "CREATE TABLE `t` (`a` mediumtext)" + latin1,
+			"ALTER TABLE `t` MODIFY COLUMN `a` text(20000) NULL"},
+		{"utf8mb4 plain", "a text(20000)", "CREATE TABLE `t` (`a` text)" + utf8mb4,
+			"ALTER TABLE `t` MODIFY COLUMN `a` text(20000) NULL"},
+		{"latin1 comment only", "a text(20000) COMMENT 'y'", "CREATE TABLE `t` (`a` text COMMENT 'x')" + latin1,
+			"ALTER TABLE `t` MODIFY COLUMN `a` text(20000) NULL COMMENT 'y'"},
+	}
+	opts := NewDiffOptions()
+	opts.IgnoreCharsetCollation = true
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			declared, err := ParseCreateTable("CREATE TABLE t (" + tc.declared + ")")
+			require.NoError(t, err)
+			live, err := ParseCreateTable(tc.live)
+			require.NoError(t, err)
+
+			stmts, err := live.Diff(declared, opts)
+			require.NoError(t, err)
+			if tc.want == "" {
+				assert.Nil(t, stmts)
+				return
+			}
+			require.Len(t, stmts, 1)
+			assert.Equal(t, tc.want, stmts[0].Statement)
 		})
 	}
 }

@@ -2043,7 +2043,7 @@ func (ct *CreateTable) columnsEqualWithContext(a, b *Column, target *CreateTable
 	if !strings.EqualFold(a.Name, b.Name) {
 		return false
 	}
-	if equal, handled := textLengthTypeEqual(a, b, ct, target, opts); handled {
+	if equal, handled := textLengthTypeEqual(a, b, ct, target); handled {
 		if !equal {
 			return false
 		}

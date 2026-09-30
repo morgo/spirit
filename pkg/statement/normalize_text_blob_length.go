@@ -90,10 +90,10 @@ func (textBlobLengthNormalizer) Normalize(ct *CreateTable) *CreateTable {
 	return ct
 }
 
-// textLengthTypeEqual compares the types of two columns when one of them is a
-// TEXT(M) that textBlobLengthNormalizer left unresolved (Type `text` with
-// Column.Length set) and the other is not. It reports handled=false otherwise,
-// and the caller compares Type and Length directly.
+// textLengthTypeEqual compares the types of two columns when either of them is
+// a TEXT(M) that textBlobLengthNormalizer left unresolved (Type `text` with
+// Column.Length set). It reports handled=false otherwise, and the caller
+// compares Type and Length directly.
 //
 // The unresolved column's size depends on the charset it gets, which its own
 // statement does not name. The other column's charset decides it: when the two
@@ -101,16 +101,32 @@ func (textBlobLengthNormalizer) Normalize(ct *CreateTable) *CreateTable {
 // difference, and the emitted `MODIFY COLUMN ... text(M)` is resolved by MySQL
 // at the charset the column ends up with. So the types are equal when the
 // other column's type is the size text(M) takes at the other column's charset.
-// When that charset is not determined either (or charset resolution is
-// ignored), the types are equal when the other column's type is a size
-// text(M) takes at any charset (1 to 4 bytes per character), in keeping with
-// charsetCollationEqual, which treats an unexpressed preference as a match
-// rather than guessing at it.
-func textLengthTypeEqual(a, b *Column, source, target *CreateTable, opts *DiffOptions) (equal, handled bool) {
+// This holds with IgnoreCharsetCollation too: that option stops charset
+// differences from being diffed, but a MODIFY still stores the column at a
+// real charset, so comparing at any other width would let a MODIFY emitted
+// for another attribute resize the column. When the other column's charset is
+// not determined either, the types are equal when the other column's type is a
+// size text(M) takes at any charset (1 to 4 bytes per character), in keeping
+// with charsetCollationEqual, which treats an unexpressed preference as a
+// match rather than guessing at it.
+//
+// When both columns are unresolved, neither determines the charset, and the
+// types are equal when the two lengths give the same size at every width:
+// text(20000) and text(20001) are text at 1 to 3 bytes per character and
+// mediumtext at 4.
+func textLengthTypeEqual(a, b *Column, source, target *CreateTable) (equal, handled bool) {
 	aLength, aUnresolved := unresolvedTextLength(a)
 	bLength, bUnresolved := unresolvedTextLength(b)
-	if aUnresolved == bUnresolved {
+	if !aUnresolved && !bUnresolved {
 		return false, false
+	}
+	if aUnresolved && bUnresolved {
+		for width := uint64(1); width <= 4; width++ {
+			if lobSizePrefix(aLength*width) != lobSizePrefix(bLength*width) {
+				return false, true
+			}
+		}
+		return true, true
 	}
 	length, other, otherTable := aLength, b, target
 	if bUnresolved {
@@ -119,10 +135,7 @@ func textLengthTypeEqual(a, b *Column, source, target *CreateTable, opts *DiffOp
 	if other.Length != nil {
 		return false, true
 	}
-	minWidth, maxWidth := uint64(1), uint64(4)
-	if !opts.IgnoreCharsetCollation {
-		minWidth, maxWidth = textCharWidths(other, otherTable)
-	}
+	minWidth, maxWidth := textCharWidths(other, otherTable)
 	otherType := strings.ToLower(other.Type)
 	for width := minWidth; width <= maxWidth; width++ {
 		if otherType == lobSizePrefix(length*width)+"text" {

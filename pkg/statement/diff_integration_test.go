@@ -1506,6 +1506,42 @@ func TestDiffIntegrationTextBlobLengthUndeterminedCharset(t *testing.T) {
 
 		requireConverged(t, tt.DB, tt.Name, targetSQL)
 	})
+	// IgnoreCharsetCollation does not change the charset a MODIFY stores the
+	// column at, so the column is still compared at the live table's charset:
+	// text(20000) is text on latin1, whether or not a comment also differs.
+	t.Run("latin1 IgnoreCharsetCollation", func(t *testing.T) {
+		tt := testutils.NewTestTable(t, "diff_text_length_ignore_cs",
+			"CREATE TABLE diff_text_length_ignore_cs (id int NOT NULL, a mediumtext, b text, c mediumtext COMMENT 'x', "+
+				"PRIMARY KEY (id)) DEFAULT CHARSET=latin1")
+
+		const targetSQL = "CREATE TABLE diff_text_length_ignore_cs (id int NOT NULL, " +
+			"a text(20000), b text(20000), c text(20000) COMMENT 'y', PRIMARY KEY (id))"
+		opts := NewDiffOptions()
+		opts.IgnoreCharsetCollation = true
+		diff := func() []*AbstractStatement {
+			source, err := ParseCreateTable(showCreateTable(t, tt.DB, tt.Name))
+			require.NoError(t, err)
+			target, err := ParseCreateTable(targetSQL)
+			require.NoError(t, err)
+			stmts, err := source.Diff(target, opts)
+			require.NoError(t, err)
+			return stmts
+		}
+
+		stmts := diff()
+		require.Len(t, stmts, 1)
+		require.Contains(t, stmts[0].Statement, "MODIFY COLUMN `a` text(20000) NULL")
+		require.Contains(t, stmts[0].Statement, "MODIFY COLUMN `c` text(20000) NULL COMMENT 'y'")
+		require.NotContains(t, stmts[0].Statement, "`b`")
+
+		execStatements(t, tt.DB, stmts)
+		live := showCreateTable(t, tt.DB, tt.Name)
+		require.Contains(t, live, "`a` text,")
+		require.Contains(t, live, "`b` text,")
+		require.Contains(t, live, "`c` text COMMENT 'y',")
+
+		require.Nil(t, diff())
+	})
 }
 
 // binaryDefaultHexReason is why the binary and utf8mb4 default tests that read
