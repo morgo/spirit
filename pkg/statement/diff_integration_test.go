@@ -1254,6 +1254,42 @@ func TestDiffIntegrationEnumSetBinaryCharset(t *testing.T) {
 	require.Nil(t, stmts, "the live form must match an enum/set column with the binary charset")
 }
 
+// TestDiffIntegrationEnumSetBareUTF8MB4ConvergesThroughRestore applies the
+// diff's MODIFY through the parser-restored alter the runner executes, and
+// requires the re-diff to be empty. A declared ENUM/SET naming CHARACTER SET
+// utf8mb4 without a COLLATE takes the server default, so against a column
+// inheriting a utf8mb4_bin or latin1 table default the diff emits a MODIFY. If
+// the restore drops the charset, the MODIFY is a no-op and the plan never
+// converges.
+func TestDiffIntegrationEnumSetBareUTF8MB4ConvergesThroughRestore(t *testing.T) {
+	for i, tc := range []struct{ tableDefault, colType string }{
+		{"DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin", "enum('x','y')"},
+		{"DEFAULT CHARSET=latin1", "set('x','y')"},
+	} {
+		t.Run(fmt.Sprint(i), func(t *testing.T) {
+			tbl := fmt.Sprintf("enum_set_bare_utf8mb4_%d", i)
+			tt := testutils.NewTestTable(t, tbl, fmt.Sprintf("CREATE TABLE %s (id int NOT NULL PRIMARY KEY, c %s) %s", tbl, tc.colType, tc.tableDefault))
+			desired, err := ParseCreateTable(fmt.Sprintf("CREATE TABLE %s (id int NOT NULL PRIMARY KEY, c %s CHARACTER SET utf8mb4) %s", tbl, tc.colType, tc.tableDefault))
+			require.NoError(t, err)
+
+			live, err := ParseCreateTable(showCreateTable(t, tt.DB, tt.Name))
+			require.NoError(t, err)
+			plan, err := live.Diff(desired, nil)
+			require.NoError(t, err)
+			require.Len(t, plan, 1)
+			stmts, err := New(plan[0].Statement)
+			require.NoError(t, err)
+			testutils.RunSQL(t, fmt.Sprintf("ALTER TABLE `%s` %s", tt.Name, stmts[0].Alter))
+
+			live, err = ParseCreateTable(showCreateTable(t, tt.DB, tt.Name))
+			require.NoError(t, err)
+			plan, err = live.Diff(desired, nil)
+			require.NoError(t, err)
+			require.Nil(t, plan, "restored alter %q did not converge", stmts[0].Alter)
+		})
+	}
+}
+
 // binaryDefaultHexReason is why the binary and utf8mb4 default tests that read
 // back a non-utf8mb3 default skip before MySQL 8.0.33: earlier servers' SHOW
 // CREATE TABLE replaces each such byte of a binary default, or character of a

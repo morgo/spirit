@@ -1245,6 +1245,12 @@ func TestColumnEnumSetCharset(t *testing.T) {
 		{"ALTER TABLE t MODIFY b SET('x','y') CHARACTER SET latin1", true, "ALTER TABLE `t` MODIFY COLUMN `b` SET('x','y') CHARACTER SET LATIN1"},
 		// No charset: nothing is written, the table default applies.
 		{"CREATE TABLE t (a ENUM('x','y'))", true, "CREATE TABLE `t` (`a` ENUM('x','y'))"},
+		// A routine parameter or return type carries its COLLATE on the
+		// type itself (a column carries it as a column option), so this is
+		// the path that restores an ENUM/SET type-level collation.
+		{"CREATE PROCEDURE p(a ENUM('x','y') CHARACTER SET latin1 COLLATE latin1_bin) BEGIN END", true, "CREATE PROCEDURE `p`(IN `a` ENUM('x','y') CHARACTER SET LATIN1 COLLATE latin1_bin) BEGIN END"},
+		{"CREATE PROCEDURE p(a SET('x','y') COLLATE utf8mb4_bin) BEGIN END", true, "CREATE PROCEDURE `p`(IN `a` SET('x','y') COLLATE utf8mb4_bin) BEGIN END"},
+		{"CREATE PROCEDURE p(a ENUM('x','y') CHARACTER SET binary COLLATE binary) BEGIN END", true, "CREATE PROCEDURE `p`(IN `a` ENUM('x','y') CHARACTER SET BINARY) BEGIN END"},
 	}
 	RunTest(t, table, false)
 }
