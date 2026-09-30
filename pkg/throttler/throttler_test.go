@@ -110,17 +110,19 @@ func TestStallingMockThrottler(t *testing.T) {
 	stalling := NewStallingMock(2)
 	require.True(t, stalling.IsThrottled())
 
-	// The first two calls pass at once.
-	start := time.Now()
-	stalling.BlockWait(t.Context())
-	stalling.BlockWait(t.Context())
-	require.Less(t, time.Since(start), time.Second)
+	// The first two calls pass at once. Bound them so a call that stalls
+	// instead fails here rather than hanging until the package timeout.
+	passCtx, passCancel := context.WithTimeout(t.Context(), time.Second)
+	defer passCancel()
+	stalling.BlockWait(passCtx)
+	stalling.BlockWait(passCtx)
+	require.NoError(t, passCtx.Err(), "a pass-first call blocked instead of returning at once")
 
 	// Later calls block until the context is done: not for the pacing
 	// mock's 1s, and not forever. Take start before WithTimeout: the deadline
 	// is fixed when WithTimeout is called, so a start taken afterwards can
 	// measure slightly less than the timeout when the timer fires on time.
-	start = time.Now()
+	start := time.Now()
 	ctx, cancel := context.WithTimeout(t.Context(), 1500*time.Millisecond)
 	defer cancel()
 	stalling.BlockWait(ctx)
