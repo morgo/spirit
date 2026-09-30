@@ -218,6 +218,53 @@ func TestSetInfoStoredEnumSetMembersRequirePrimaryKey(t *testing.T) {
 	assert.Equal(t, []string{"😀", "?"}, members)
 }
 
+// TestSetInfoStoredMembersOf64MemberSet: a SET can have 64 members, and the
+// top one is bit 63. The members read back must stay in declaration order,
+// so that DecodeBinlogRow maps each bit to its own member. Sorting the probe's
+// rows by the value (col+0) put bit 63 first, since it is compared as a
+// double and 1<<63 overflows to a negative number.
+func TestSetInfoStoredMembersOf64MemberSet(t *testing.T) {
+	want := make([]string, 64)
+	quoted := make([]string, 64)
+	for i := range want {
+		want[i] = fmt.Sprintf("m%d", i)
+	}
+	want[1] = "?" // a real '?' member: reported and stored alike
+	for i, m := range want {
+		quoted[i] = "'" + m + "'"
+	}
+	tt := testutils.NewTestTable(t, "enumset_set64", fmt.Sprintf(`CREATE TABLE enumset_set64 (
+		id INT NOT NULL PRIMARY KEY,
+		s SET(%s) NOT NULL
+	) DEFAULT CHARSET=utf8mb4`, strings.Join(quoted, ",")))
+
+	ti := NewTableInfo(tt.DB, "test", "enumset_set64")
+	require.NoError(t, ti.SetInfo(t.Context()))
+	members, ok := ti.EnumSetMembers("s")
+	require.True(t, ok)
+	assert.Equal(t, want, members)
+	require.NoError(t, ti.MisreportedEnumSetError())
+
+	row := []any{int32(1), int64(1)}
+	require.NoError(t, ti.DecodeBinlogRow(row))
+	assert.Equal(t, []any{int32(1), "m0"}, row)
+}
+
+// TestSetInfoStoredEnumSetMembersProbeKeyClash checks the probe on a column
+// that has the name of the probe table's key column.
+func TestSetInfoStoredEnumSetMembersProbeKeyClash(t *testing.T) {
+	tt := testutils.NewTestTable(t, "enumset_keyclash", "CREATE TABLE enumset_keyclash (\n"+
+		"		id INT NOT NULL PRIMARY KEY,\n"+
+		"		`"+enumSetProbeIDColumn+"` ENUM('😀','?') NOT NULL\n"+
+		"	) DEFAULT CHARSET=utf8mb4")
+
+	ti := NewTableInfo(tt.DB, "test", "enumset_keyclash")
+	require.NoError(t, ti.SetInfo(t.Context()))
+	members, ok := ti.EnumSetMembers(enumSetProbeIDColumn)
+	require.True(t, ok)
+	assert.Equal(t, []string{"😀", "?"}, members)
+}
+
 // TestSetInfoStoredEnumSetMembersNeedTemporaryTables checks that SetInfo
 // fails, naming the privilege, when it cannot read back the members of a
 // column reported with a '?', instead of decoding binlog rows to '?'.

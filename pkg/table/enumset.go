@@ -136,22 +136,25 @@ func readStoredEnumSetMembers(ctx context.Context, db *sql.DB, tableName, column
 		sqlescape.EscapeIdentifier(enumSetProbeTable), sqlescape.EscapeIdentifier(idColumn), quotedColumn, sqlescape.EscapeIdentifier(tableName))); err != nil {
 		return nil, err
 	}
+	// Each row's key is its member's ordinal, which orders the rows read back.
+	// The value itself cannot: a SET value is compared as a double, and bit 63
+	// (1<<63) overflows to a negative number, so it would sort first.
 	values := make([]string, count)
 	for i := range count {
+		value := strconv.Itoa(i + 1)
 		if isSet {
-			values[i] = "(" + strconv.FormatUint(uint64(1)<<i, 10) + ")"
-		} else {
-			values[i] = "(" + strconv.Itoa(i+1) + ")"
+			value = strconv.FormatUint(uint64(1)<<i, 10)
 		}
+		values[i] = "(" + strconv.Itoa(i+1) + "," + value + ")"
 	}
 	if count > 0 {
-		if _, err := conn.ExecContext(ctx, fmt.Sprintf("INSERT INTO %s (%s) VALUES %s",
-			sqlescape.EscapeIdentifier(enumSetProbeTable), quotedColumn, strings.Join(values, ","))); err != nil {
+		if _, err := conn.ExecContext(ctx, fmt.Sprintf("INSERT INTO %s (%s, %s) VALUES %s",
+			sqlescape.EscapeIdentifier(enumSetProbeTable), sqlescape.EscapeIdentifier(idColumn), quotedColumn, strings.Join(values, ","))); err != nil {
 			return nil, err
 		}
 	}
-	rows, err := conn.QueryContext(ctx, fmt.Sprintf("SELECT %s FROM %s ORDER BY %s+0",
-		quotedColumn, sqlescape.EscapeIdentifier(enumSetProbeTable), quotedColumn))
+	rows, err := conn.QueryContext(ctx, fmt.Sprintf("SELECT %s FROM %s ORDER BY %s",
+		quotedColumn, sqlescape.EscapeIdentifier(enumSetProbeTable), sqlescape.EscapeIdentifier(idColumn)))
 	if err != nil {
 		return nil, err
 	}
