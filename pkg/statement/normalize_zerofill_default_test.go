@@ -1,6 +1,7 @@
 package statement
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -57,12 +58,55 @@ func TestZerofillDefault(t *testing.T) {
 		{"a int(4) zerofill DEFAULT ' 5 '", new("0005"), DefaultKindString},
 		{"a int(4) zerofill DEFAULT '007'", new("0007"), DefaultKindString},
 		{"a int(4) zerofill DEFAULT +7", new("0007"), DefaultKindString},
+		// A string skips leading spaces and tabs and ignores trailing
+		// whitespace.
+		{"a int(4) zerofill DEFAULT '\t 5'", new("0005"), DefaultKindString},
+		{"a int(4) zerofill DEFAULT '5 \t\n\r'", new("0005"), DefaultKindString},
+		// Negative zero: a decimal only if exactly zero, a float or a string
+		// if it rounds to zero.
+		{"a int(4) zerofill DEFAULT -0", new("0000"), DefaultKindString},
+		{"a int(4) zerofill DEFAULT -0.0", new("0000"), DefaultKindString},
+		{"a int(4) zerofill DEFAULT -.0", new("0000"), DefaultKindString},
+		{"a int(4) zerofill DEFAULT -0e0", new("0000"), DefaultKindString},
+		{"a int(4) zerofill DEFAULT -0.4e0", new("0000"), DefaultKindString},
+		{"a int(4) zerofill DEFAULT -0.5e0", new("0000"), DefaultKindString},
+		{"a int(4) zerofill DEFAULT '-0'", new("0000"), DefaultKindString},
+		{"a int(4) zerofill DEFAULT '-0.4'", new("0000"), DefaultKindString},
+		{"a int(4) zerofill DEFAULT '-0.49'", new("0000"), DefaultKindString},
+		{"a int(4) zerofill DEFAULT '-0e0'", new("0000"), DefaultKindString},
+		{"a int(4) zerofill DEFAULT '-.4'", new("0000"), DefaultKindString},
+		{"a int(4) zerofill DEFAULT ' -0 '", new("0000"), DefaultKindString},
+		// Far past 10^-64 the value is still zero, and far past 10^64 it
+		// still is if every digit is zero.
+		{"a int(4) zerofill DEFAULT '5e-65'", new("0000"), DefaultKindString},
+		{"a int(4) zerofill DEFAULT '-1e-100'", new("0000"), DefaultKindString},
+		{"a int(4) zerofill DEFAULT 1e-100", new("0000"), DefaultKindString},
+		{"a int(4) zerofill DEFAULT '0e100'", new("0000"), DefaultKindString},
+		// A 65-digit mantissa scaled back into range by its exponent.
+		{"a int(4) zerofill DEFAULT '" + strings.Repeat("0", 64) + "7e-65'", new("0000"), DefaultKindString},
+		{"a int(4) zerofill DEFAULT '7" + strings.Repeat("0", 65) + "e-65'", new("0007"), DefaultKindString},
+		{"a int(4) zerofill DEFAULT '7" + strings.Repeat("0", 66) + "e-65'", new("0070"), DefaultKindString},
+		// A float is the exact value of the double; a decimal string is exact.
+		{"a bigint(20) zerofill DEFAULT 1234567890123456789e0", new("01234567890123456768"), DefaultKindString},
+		{"a bigint(20) zerofill DEFAULT 9007199254740993e0", new("00009007199254740992"), DefaultKindString},
+		{"a bigint(20) zerofill DEFAULT 123456789012345678.5e0", new("00123456789012345680"), DefaultKindString},
+		{"a bigint(20) zerofill DEFAULT 1e19", new("10000000000000000000"), DefaultKindString},
+		{"a bigint(20) zerofill DEFAULT '1234567890123456789e0'", new("01234567890123456789"), DefaultKindString},
+		{"a bigint(20) zerofill DEFAULT '123456789012345678.5e0'", new("00123456789012345679"), DefaultKindString},
 		// Left alone.
 		{"a int(4) zerofill DEFAULT (5)", new("5"), DefaultKindNumber},
 		{"a int(4) zerofill DEFAULT NULL", new("NULL"), DefaultKindUnknown},
 		{"a int(4) zerofill", nil, DefaultKindUnknown},
 		{"a int(4) zerofill DEFAULT 'abc'", new("abc"), DefaultKindString},
-		{"a int(4) zerofill DEFAULT '-0.4'", new("-0.4"), DefaultKindString},
+		{"a int(4) zerofill DEFAULT -5", new("-5"), DefaultKindNumber},
+		{"a int(4) zerofill DEFAULT -0.4", new("-0.4"), DefaultKindNumber},
+		{"a int(4) zerofill DEFAULT -0.6e0", new("-6e-01"), DefaultKindNumber},
+		{"a int(4) zerofill DEFAULT '-0.5'", new("-0.5"), DefaultKindString},
+		{"a int(4) zerofill DEFAULT '-5'", new("-5"), DefaultKindString},
+		{"a int(4) zerofill DEFAULT '-+0'", new("-+0"), DefaultKindString},
+		{"a int(4) zerofill DEFAULT '\n5'", new("\n5"), DefaultKindString},
+		{"a int(4) zerofill DEFAULT '\r5'", new("\r5"), DefaultKindString},
+		{"a bigint(20) zerofill DEFAULT 18446744073709551615e0", new("1.8446744073709552e+19"), DefaultKindNumber},
 		{"a int(4) zerofill DEFAULT '0x10'", new("0x10"), DefaultKindString},
 		{"a int(4) zerofill DEFAULT '1e100'", new("1e100"), DefaultKindString},
 		{"a decimal(6,2) zerofill DEFAULT 1.5", new("1.5"), DefaultKindNumber},
@@ -116,6 +160,38 @@ func TestZerofillDefaultConverges(t *testing.T) {
 	stmts, err = declared.Diff(live, nil)
 	require.NoError(t, err)
 	assert.Nil(t, stmts)
+}
+
+// TestZerofillDefaultConvergesInEitherOrder checks that each literal form
+// converges on the padded value MySQL reports whether this rule runs before or
+// after the rules that fold hex, bit, TRUE/FALSE and the width-less display
+// width.
+func TestZerofillDefaultConvergesInEitherOrder(t *testing.T) {
+	requireDefaultsConverge(t, []defaultPair{
+		{"hex", "(a int(4) zerofill DEFAULT 0x10)", "(`a` int(4) unsigned zerofill DEFAULT '0016')"},
+		{"bit", "(a int(4) zerofill DEFAULT b'101')", "(`a` int(4) unsigned zerofill DEFAULT '0005')"},
+		{"true", "(a int(4) zerofill DEFAULT TRUE)", "(`a` int(4) unsigned zerofill DEFAULT '0001')"},
+		{"false", "(a int(4) zerofill DEFAULT FALSE)", "(`a` int(4) unsigned zerofill DEFAULT '0000')"},
+		{"no width", "(a int zerofill DEFAULT 5)", "(`a` int(10) unsigned zerofill DEFAULT '0000000005')"},
+		{"zero width", "(a int(0) zerofill DEFAULT 5)", "(`a` int(10) unsigned zerofill DEFAULT '0000000005')"},
+	})
+}
+
+// TestZerofillDefaultNegativeZeroAndWhitespace checks the negative defaults
+// that round to zero, and the strings with surrounding tabs or trailing
+// newlines, that MySQL accepts on a ZEROFILL column and reports as the padded
+// zero or value.
+func TestZerofillDefaultNegativeZeroAndWhitespace(t *testing.T) {
+	requireDefaultsConverge(t, []defaultPair{
+		{"minus zero", "(a int(4) zerofill DEFAULT -0)", "(`a` int(4) unsigned zerofill DEFAULT '0000')"},
+		{"minus zero decimal", "(a int(4) zerofill DEFAULT -0.0)", "(`a` int(4) unsigned zerofill DEFAULT '0000')"},
+		{"minus float rounds to zero", "(a int(4) zerofill DEFAULT -0.5e0)", "(`a` int(4) unsigned zerofill DEFAULT '0000')"},
+		{"quoted minus zero", "(a int(4) zerofill DEFAULT '-0')", "(`a` int(4) unsigned zerofill DEFAULT '0000')"},
+		{"quoted rounds to zero", "(a int(4) zerofill DEFAULT '-0.49')", "(`a` int(4) unsigned zerofill DEFAULT '0000')"},
+		{"leading tab", "(a int(4) zerofill DEFAULT '\t5')", "(`a` int(4) unsigned zerofill DEFAULT '0005')"},
+		{"trailing newline", "(a int(4) zerofill DEFAULT '5\n')", "(`a` int(4) unsigned zerofill DEFAULT '0005')"},
+		{"large float", "(a bigint(20) zerofill DEFAULT 1234567890123456789e0)", "(`a` bigint(20) unsigned zerofill DEFAULT '01234567890123456768')"},
+	})
 }
 
 // A changed default is still a change after padding.

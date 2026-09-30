@@ -773,9 +773,8 @@ func TestDiffIntegrationBooleanKeywordDefaultOnExcludedTypes(t *testing.T) {
 // zerofillDefaultNormalizer the diff emits `MODIFY ... DEFAULT 5` against the
 // live '0000000005' on every run.
 //
-// Every column writes its width. A width-less ZEROFILL column is stored with
-// the unsigned default width, which integerDisplayWidthNormalizer resolves, not
-// this rule; int(0) is included because that rule already resolves it.
+// A width that is unwritten or 0 is stored as the type's unsigned default
+// width, and the default is padded to it.
 func TestDiffIntegrationZerofillDefaultCreatedAsDeclared(t *testing.T) {
 	const declaredSQL = "CREATE TABLE diff_zerofill_default (" +
 		"id int NOT NULL, " +
@@ -791,6 +790,18 @@ func TestDiffIntegrationZerofillDefaultCreatedAsDeclared(t *testing.T) {
 		"i int(4) zerofill DEFAULT 2.5e0, " +
 		"j int(4) zerofill DEFAULT '2.5e0', " +
 		"k int(4) zerofill DEFAULT ' 5 ', " +
+		"l int(4) zerofill DEFAULT '\\t5\\n', " +
+		"m int(4) zerofill DEFAULT -0.0, " +
+		"n int(4) zerofill DEFAULT -0.5e0, " +
+		"o int(4) zerofill DEFAULT '-0.49', " +
+		"p int(4) zerofill DEFAULT '5e-65', " +
+		"q bigint(20) zerofill DEFAULT 1234567890123456789e0, " +
+		"w1 int zerofill DEFAULT 5, " +
+		"w2 tinyint zerofill DEFAULT 5, " +
+		"w3 smallint zerofill DEFAULT 5, " +
+		"w4 mediumint zerofill DEFAULT 5, " +
+		"w5 bigint zerofill DEFAULT 5, " +
+		"w6 int unsigned zerofill DEFAULT 5, " +
 		"PRIMARY KEY (id))"
 
 	tt := testutils.NewTestTable(t, "diff_zerofill_default", declaredSQL)
@@ -802,6 +813,10 @@ func TestDiffIntegrationZerofillDefaultCreatedAsDeclared(t *testing.T) {
 	require.Contains(t, live, "`h` int(4) unsigned zerofill DEFAULT '0003'")
 	require.Contains(t, live, "`i` int(4) unsigned zerofill DEFAULT '0002'")
 	require.Contains(t, live, "`j` int(4) unsigned zerofill DEFAULT '0003'")
+	require.Contains(t, live, "`m` int(4) unsigned zerofill DEFAULT '0000'")
+	require.Contains(t, live, "`q` bigint(20) unsigned zerofill DEFAULT '01234567890123456768'")
+	require.Contains(t, live, "`w1` int(10) unsigned zerofill DEFAULT '0000000005'")
+	require.Contains(t, live, "`w5` bigint(20) unsigned zerofill DEFAULT '00000000000000000005'")
 
 	stmts := diffLiveTable(t, tt.DB, tt.Name, declaredSQL)
 	require.Nil(t, stmts)
