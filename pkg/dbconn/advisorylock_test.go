@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -370,7 +371,7 @@ func failableConnFactory(refresh time.Duration) (option func(*AdvisoryLock), fai
 	failedAttempts = &atomic.Int64{}
 	option = func(lock *AdvisoryLock) {
 		lock.refreshInterval = refresh
-		lock.newDBConn = func() (*sql.DB, error) {
+		lock.newDBConn = func(context.Context) (*sql.DB, error) {
 			if fail.Load() {
 				failedAttempts.Add(1)
 				return nil, errors.New("simulated connection failure")
@@ -476,6 +477,60 @@ func TestAdvisoryLockCloseDuringOutage(t *testing.T) {
 		require.NoError(t, err)
 	case <-time.After(30 * time.Second):
 		t.Fatal("AdvisoryLock.Close did not return during a connection outage")
+	}
+}
+
+// TestAdvisoryLockCloseDuringStalledReconnect checks that Close interrupts a
+// reconnect that is stuck in the handshake. The reconnect goes to a server
+// that accepts the TCP connection but never greets, so its ping can only end
+// at connectTimeout or when its context is done. The refresh loop must pass
+// its own context to the reconnect, so that the cancel in Close ends the
+// attempt instead of Close waiting out connectTimeout.
+func TestAdvisoryLockCloseDuringStalledReconnect(t *testing.T) {
+	lockTableInfo := table.TableInfo{SchemaName: "test", TableName: "reconnect-stalled-close"}
+	lockTables := []*table.TableInfo{&lockTableInfo}
+	logger := slog.Default()
+
+	stalledDSN := fmt.Sprintf("spirit:spirit@tcp(%s)/test", stalledServer(t))
+	var stall atomic.Bool
+	reconnecting := make(chan struct{})
+	var reconnectingOnce sync.Once
+	option := func(lock *AdvisoryLock) {
+		lock.refreshInterval = 100 * time.Millisecond
+		lock.newDBConn = func(ctx context.Context) (*sql.DB, error) {
+			if !stall.Load() {
+				return NewContext(ctx, testutils.DSN(), NewDBConfig())
+			}
+			reconnectingOnce.Do(func() { close(reconnecting) })
+			return NewContext(ctx, stalledDSN, NewDBConfig())
+		}
+	}
+	lock, err := NewAdvisoryLock(t.Context(), testutils.DSN(), lockTables, NewDBConfig(), logger, option)
+	require.NoError(t, err)
+	require.NotNil(t, lock)
+
+	// Force a reconnect to the stalled server (see
+	// TestAdvisoryLockRefreshSurvivesReconnectFailure: reading lock.db is safe
+	// until the first induced refresh failure below).
+	db := lock.db
+	stall.Store(true)
+	require.NoError(t, db.Close())
+	select {
+	case <-reconnecting:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the refresh loop did not attempt a reconnect")
+	}
+	// Give the reconnect time to connect and start waiting for the greeting,
+	// so Close cancels a ping in progress rather than one not yet started.
+	time.Sleep(200 * time.Millisecond)
+
+	closed := make(chan error, 1)
+	go func() { closed <- lock.Close() }()
+	select {
+	case err := <-closed:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatalf("AdvisoryLock.Close did not interrupt a stalled reconnect (connectTimeout is %s)", connectTimeout)
 	}
 }
 

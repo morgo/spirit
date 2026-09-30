@@ -455,7 +455,7 @@ func TestNewStalledHandshakeTimesOut(t *testing.T) {
 			cfg.TLSMode = tlsMode
 			const timeout = 200 * time.Millisecond
 			start := time.Now()
-			db, err := newWithConnectTimeout(dsn, cfg, "main database", timeout)
+			db, err := newWithConnectTimeout(t.Context(), dsn, cfg, "main database", timeout)
 			elapsed := time.Since(start)
 			require.Error(t, err)
 			require.Nil(t, db)
@@ -478,7 +478,7 @@ func TestNewPreferredFallbackStalledHandshakeTimesOut(t *testing.T) {
 	cfg.TLSMode = "PREFERRED"
 	const timeout = 200 * time.Millisecond
 	start := time.Now()
-	db, err := newWithConnectTimeout(fmt.Sprintf("spirit:spirit@tcp(%s)/test", addr), cfg, "main database", timeout)
+	db, err := newWithConnectTimeout(t.Context(), fmt.Sprintf("spirit:spirit@tcp(%s)/test", addr), cfg, "main database", timeout)
 	elapsed := time.Since(start)
 	require.Nil(t, db)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
@@ -495,7 +495,7 @@ func TestNewHonorsLongerDSNTimeout(t *testing.T) {
 	cfg.TLSMode = "DISABLED"
 	const dsnTimeout = time.Second
 	start := time.Now()
-	db, err := newWithConnectTimeout(fmt.Sprintf("spirit:spirit@tcp(%s)/test?timeout=%s", addr, dsnTimeout), cfg, "main database", 100*time.Millisecond)
+	db, err := newWithConnectTimeout(t.Context(), fmt.Sprintf("spirit:spirit@tcp(%s)/test?timeout=%s", addr, dsnTimeout), cfg, "main database", 100*time.Millisecond)
 	elapsed := time.Since(start)
 	require.Nil(t, db)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
