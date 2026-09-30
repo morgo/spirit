@@ -1345,6 +1345,7 @@ func TestDiffIntegrationCharUTF8MB4Default(t *testing.T) {
 		{"diff_mb4def_varchar_spaces", "CREATE TABLE diff_mb4def_varchar_spaces (id int NOT NULL, b varchar(4) DEFAULT '😀 ', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` varchar(4) DEFAULT 0xF09F988020"},
 		{"diff_mb4def_escapes", "CREATE TABLE diff_mb4def_escapes (id int NOT NULL, b varchar(4) DEFAULT '''\\\\😀', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` varchar(4) DEFAULT 0x275CF09F9880"},
 		{"diff_mb4def_introducer", "CREATE TABLE diff_mb4def_introducer (id int NOT NULL, b char(4) DEFAULT _utf8mb4'😀', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` char(4) DEFAULT 0xF09F9880"},
+		{"diff_mb4def_binary_introducer", "CREATE TABLE diff_mb4def_binary_introducer (id int NOT NULL, b char(4) DEFAULT _binary'😀', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` char(4) DEFAULT 0xF09F9880"},
 		{"diff_mb4def_column_charset", "CREATE TABLE diff_mb4def_column_charset (id int NOT NULL, b char(4) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT '😀', PRIMARY KEY (id)) DEFAULT CHARSET=latin1", "`b` char(4) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT 0xF09F9880"},
 		{"diff_mb4def_utf8mb3_string", "CREATE TABLE diff_mb4def_utf8mb3_string (id int NOT NULL, b char(4) DEFAULT 'é', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` char(4) DEFAULT 'é'"},
 	} {

@@ -5,7 +5,9 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/block/spirit/pkg/parser/ast"
 	"github.com/block/spirit/pkg/parser/charset"
+	"github.com/block/spirit/pkg/parser/mysql"
 	"github.com/block/spirit/pkg/utils"
 )
 
@@ -24,6 +26,8 @@ func init() { registerNormalizer(charUTF8MB4DefaultNormalizer{}) }
 //	char(4) DEFAULT '😀'                     -> 0xF09F9880
 //	varchar(4) DEFAULT 'a😀'                 -> 0x61F09F9880
 //	char(4) DEFAULT _utf8mb4'😀'             -> 0xF09F9880
+//	char(4) DEFAULT _binary'😀'              -> 0xF09F9880
+//	char(8) DEFAULT _latin1'😀'              -> 'ðŸ˜€'        (the bytes read as latin1)
 //	char(4) DEFAULT '😀 '                    -> 0xF09F9880    (char strips trailing spaces)
 //	varchar(4) DEFAULT '😀 '                 -> 0xF09F988020
 //	char(4) DEFAULT 'é'                      -> 'é'           (valid utf8mb3)
@@ -50,6 +54,10 @@ func init() { registerNormalizer(charUTF8MB4DefaultNormalizer{}) }
 //     string stores the intended character on any charset that can hold it.
 //   - enum and set. SHOW CREATE TABLE reports a member that is not valid
 //     utf8mb3 as '?', so the column diffs whatever its default.
+//   - a string with a charset introducer other than _utf8mb4 or _binary.
+//     MySQL reads the bytes in the introducer's charset and converts them to
+//     the column's, so _latin1'😀' is the four characters 'ðŸ˜€', which this
+//     rule does not reproduce.
 //   - a value longer than the column's width, which MySQL rejects.
 //   - an expression default, which MySQL stores as an expression.
 //
@@ -82,8 +90,34 @@ func (charUTF8MB4DefaultNormalizer) Normalize(ct *CreateTable) *CreateTable {
 		if cs, _ := resolvedCharsetCollation(c, ct); NormalizeCharsetName(cs) != charset.CharsetUTF8MB4 {
 			continue
 		}
+		switch defaultIntroducer(c) {
+		case "", charset.CharsetUTF8MB4, charset.CharsetBin:
+		default:
+			continue
+		}
 		hexLiteral := "x'" + hex.EncodeToString([]byte(value)) + "'"
 		c.Default, c.DefaultKind = &hexLiteral, DefaultKindHexLiteral
 	}
 	return ct
+}
+
+// defaultIntroducer returns the charset introducer written on a column's
+// string DEFAULT (utf8mb4 for _utf8mb4'...'), or "" when it has none. The
+// parsed default keeps only the string, so the introducer is read off the AST.
+func defaultIntroducer(c *Column) string {
+	if c.Raw == nil {
+		return ""
+	}
+	var introducer string
+	for _, opt := range c.Raw.Options {
+		if opt.Tp != ast.ColumnOptionDefaultValue || opt.Expr == nil {
+			continue
+		}
+		// The last DEFAULT wins, as it does when the column is parsed.
+		introducer = ""
+		if v, ok := opt.Expr.(*ast.ValueExpr); ok && v.Type.GetFlag()&mysql.UnderScoreCharsetFlag != 0 {
+			introducer = strings.ToLower(v.Type.GetCharset())
+		}
+	}
+	return introducer
 }
