@@ -7,7 +7,6 @@ import (
 	"log/slog"
 
 	"github.com/block/mysql"
-	"github.com/block/spirit/pkg/dbconn"
 	parsermysql "github.com/block/spirit/pkg/parser/mysql"
 )
 
@@ -70,11 +69,21 @@ func configurationCheck(ctx context.Context, r Resources, logger *slog.Logger) e
 		} else if binlogTransactionCompression != "0" {
 			return fmt.Errorf("source %d: binlog_transaction_compression must be OFF for move operations", i)
 		}
-		// partial_revokes=ON lets a REVOKE remove a global grant for one
-		// schema, which the privileges check does not read (see
-		// dbconn.CheckPartialRevokesOff).
-		if err := dbconn.CheckPartialRevokesOff(ctx, src.DB); err != nil {
-			return fmt.Errorf("source %d: %w", i, err)
+		// partial_revokes=ON lets SHOW GRANTS print a REVOKE line that
+		// removes a global grant for one schema, and makes MySQL read the
+		// database name in a grant literally rather than as a pattern. The
+		// privileges check reads SHOW GRANTS as additive GRANT lines, so it
+		// would pass for a user that cannot act on the schema. The variable
+		// only exists on MySQL 8.0.16+; an older server cannot have partial
+		// revokes, so unknown-variable passes.
+		var partialRevokes string
+		err = src.DB.QueryRowContext(ctx, `SELECT @@global.partial_revokes`).Scan(&partialRevokes)
+		if err != nil {
+			if myErr, ok := errors.AsType[*mysql.MySQLError](err); !ok || myErr.Number != parsermysql.ErrUnknownSystemVariable {
+				return fmt.Errorf("source %d: %w", i, err)
+			}
+		} else if partialRevokes != "0" {
+			return fmt.Errorf("source %d: partial_revokes must be OFF for move operations", i)
 		}
 		if logBin != "1" {
 			return fmt.Errorf("source %d: log_bin must be enabled", i)
