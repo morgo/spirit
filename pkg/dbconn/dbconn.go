@@ -11,7 +11,6 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/block/mysql"
@@ -396,27 +395,35 @@ func backoff(attempt int) {
 
 // ForceExec is like Exec but it has some added logic to force kill
 // any connections that are holding up metadata locks preventing this from
-// succeeding. Like Exec, stmt is a sqlescape format string: embed raw user
-// SQL (such as an ALTER clause) with the %r verb and a sqlescape.RawSQL
-// argument, never by concatenating it into stmt.
+// succeeding. It kills only while the statement is waiting for a table
+// metadata lock, never while it holds its locks and runs. The statement holds
+// one connection from db while the checks and the kill run over others, so db
+// must be able to supply a second connection: a check that cannot get one in
+// time fails, and a failed check kills nothing. Like Exec, stmt is a sqlescape
+// format string: embed raw user SQL (such as an ALTER clause) with the %r verb
+// and a sqlescape.RawSQL argument, never by concatenating it into stmt.
 func ForceExec(ctx context.Context, db *sql.DB, tables []*table.TableInfo, dbConfig *DBConfig, logger *slog.Logger, stmt string, args ...any) error {
-	// Escape before the kill timer below is armed: a bad format string must
-	// fail fast here, not while a timer that kills other connections is
+	// Escape before the kill worker below starts: a bad format string must
+	// fail fast here, not while a worker that kills other connections is
 	// already pending.
 	stmt, err := sqlescape.EscapeSQL(stmt, args...)
 	if err != nil {
 		return err
 	}
-	return forceExec(ctx, db, dbConfig, logger, stmt, func(ctx context.Context, connID int) ([]int, error) {
+	waiting := func(ctx context.Context, connID int) (bool, error) {
+		return statementIsWaitingForTableLock(ctx, db, tables, logger, connID)
+	}
+	return forceExec(ctx, db, dbConfig, logger, stmt, waiting, func(ctx context.Context, connID int) ([]int, error) {
 		return killLockingTransactions(ctx, db, tables, dbConfig, logger, []int{connID})
 	}, waitForKilledTransactions, nil)
 }
 
-// forceExec receives the kill and cleanup operations so tests can control their
-// failures while exercising the statement and retry against real MySQL.
+// forceExec receives the waiting check and the kill and cleanup operations so
+// tests can control their outcomes while exercising the statement and retry
+// against real MySQL.
 // afterExec, when provided by a test, observes the first client-side statement
 // result before the kill-worker join; production callers leave it nil.
-func forceExec(ctx context.Context, db *sql.DB, dbConfig *DBConfig, logger *slog.Logger, stmt string, kill func(context.Context, int) ([]int, error), waitForCleanup func(context.Context, *sql.DB, []int) error, afterExec func(error)) error {
+func forceExec(ctx context.Context, db *sql.DB, dbConfig *DBConfig, logger *slog.Logger, stmt string, waiting func(context.Context, int) (bool, error), kill func(context.Context, int) ([]int, error), waitForCleanup func(context.Context, *sql.DB, []int) error, afterExec func(error)) error {
 	if err := dbConfig.ValidateForceKillAfter(); err != nil {
 		return err
 	}
@@ -433,15 +440,23 @@ func forceExec(ctx context.Context, db *sql.DB, dbConfig *DBConfig, logger *slog
 		return err
 	}
 
-	// Each attempt arms its own kill timer. A single retry with no timer is
+	// Each attempt runs its own kill worker. A single retry with no kill is
 	// only as good as the first kill: a blocker that rolls back slowly, or a
 	// fresh blocker that arrives between attempts, makes the retry time out
 	// too and sends the migration into a table copy. Bound the loop with
 	// MaxRetries, the same budget cutover uses for its LOCK TABLES attempts.
 	attempts := max(1, dbConfig.MaxRetries)
 	for attempt := 1; ; attempt++ {
-		result := execWithKillTimer(ctx, conn, connID, dbConfig.forceKillDelay(), stmt, kill, afterExec)
-		if !shouldRetryForceExecAfterKill(result.err, result.killTimerFired) || attempt == attempts {
+		result := execWithKillWorker(ctx, conn, connID, dbConfig.forceKillDelay(), stmt, waiting, kill, logger, afterExec)
+		if !shouldRetryForceExecAfterKill(result.err, result.killAttempted) || attempt == attempts {
+			if result.skippedKillAfterFailedCheck() {
+				logger.Warn("not retrying statement after lock wait timeout: a check of whether it was waiting for a metadata lock failed, and nothing was killed",
+					"attempt", attempt,
+					"max_attempts", attempts,
+					"error", result.err,
+					"check_error", result.checkErr,
+				)
+			}
 			return result.err
 		}
 		// The kill step never ends a LOCK TABLES session, so another attempt
@@ -471,7 +486,7 @@ func forceExec(ctx context.Context, db *sql.DB, dbConfig *DBConfig, logger *slog
 				logger.Warn("killed-session cleanup failed; retrying statement anyway", "pids", result.killed, "error", cleanupErr)
 			}
 		}
-		logger.Warn("retrying statement after lock wait timeout because force-kill timer fired",
+		logger.Warn("retrying statement after lock wait timeout: it waited for its lock for the kill delay, so the kill ran",
 			"attempt", attempt,
 			"max_attempts", attempts,
 			"error", result.err,
@@ -479,49 +494,153 @@ func forceExec(ctx context.Context, db *sql.DB, dbConfig *DBConfig, logger *slog
 	}
 }
 
-// forceExecAttempt is the outcome of one statement execution under a kill timer.
+// forceExecAttempt is the outcome of one statement execution under a kill worker.
 type forceExecAttempt struct {
-	err            error
-	killTimerFired bool
-	killed         []int
-	killErr        error
+	err           error
+	killAttempted bool
+	killed        []int
+	killErr       error
+	// checkErr is the first error from a check of whether the statement was
+	// waiting for a metadata lock.
+	checkErr error
 }
 
-// execWithKillTimer runs stmt on conn once. If it has not returned after delay,
-// kill is invoked for the blockers of connID. The kill worker is always joined
-// before returning, so a late kill can never target sessions that a later
-// attempt or the caller is already using.
-func execWithKillTimer(ctx context.Context, conn *sql.Conn, connID int, delay time.Duration, stmt string, kill func(context.Context, int) ([]int, error), afterExec func(error)) forceExecAttempt {
+// skippedKillAfterFailedCheck reports whether the statement timed out waiting
+// for a lock while a failed check was keeping its blockers alive. The caller
+// returns the timeout without retrying, so this is what tells an operator the
+// retries were skipped rather than used up.
+func (a forceExecAttempt) skippedKillAfterFailedCheck() bool {
+	return a.checkErr != nil && !a.killAttempted && isLockWaitTimeout(a.err)
+}
+
+// killPollInterval is how often, while the statement runs, the kill worker
+// checks whether it is waiting for a metadata lock.
+const killPollInterval = 100 * time.Millisecond
+
+// waitingCheckTimeout bounds each check, so a check that cannot get a
+// connection fails and is logged instead of stalling the worker. It is longer
+// than the poll interval, so a connection redial or a slow read still counts.
+const waitingCheckTimeout = time.Second
+
+// execWithKillWorker runs stmt on conn once. It kills the blockers of connID,
+// but only once the statement has been waiting for a table metadata lock for
+// at least delay. A statement that holds its locks and is still executing,
+// such as a table rebuild, is not blocked: the sessions holding locks on the
+// table beside it are concurrent traffic, and killing them would end
+// application transactions that never blocked anything. The worker checks from
+// the start of the statement until it returns, so a statement that starts
+// waiting part-way through, such as a rebuild upgrading its lock to finish,
+// still has its blockers killed, and only once they have blocked it for the
+// delay. The kill worker is always joined before returning, so a late kill can
+// never target sessions that a later attempt or the caller is already using.
+func execWithKillWorker(ctx context.Context, conn *sql.Conn, connID int, delay time.Duration, stmt string, waiting func(context.Context, int) (bool, error), kill func(context.Context, int) ([]int, error), logger *slog.Logger, afterExec func(error)) forceExecAttempt {
 	var wg sync.WaitGroup
-	var killTimerFired atomic.Bool
-	var killed []int
-	var killErr error
-	wg.Add(1)
-	timer := time.AfterFunc(delay, func() {
-		defer wg.Done()
-		killTimerFired.Store(true)
-		killed, killErr = kill(ctx, connID)
+	var attempt forceExecAttempt
+	// stmtCtx ends when the statement returns, so a check still waiting for a
+	// connection from the pool gives up rather than holding up the join.
+	stmtCtx, stmtDone := context.WithCancel(ctx)
+	defer stmtDone()
+	started := time.Now()
+	wg.Go(func() {
+		attempt = killWhenWaiting(ctx, stmtCtx, connID, started, delay, waiting, kill, logger)
 	})
 	_, err := conn.ExecContext(ctx, stmt)
+	stmtDone()
 	if afterExec != nil {
 		afterExec(err)
 	}
-	if timer.Stop() {
-		// Timer was stopped before it fired, so the goroutine never started.
-		// We need to manually decrement the WaitGroup.
-		wg.Done()
-	}
-	// Wait for the kill goroutine to finish if it was already running.
-	// This prevents a race where the goroutine kills connections that
-	// are now being used for subsequent operations.
+	// Wait for the kill worker to finish. This prevents a race where it kills
+	// connections that are now being used for subsequent operations.
 	wg.Wait()
-	return forceExecAttempt{err: err, killTimerFired: killTimerFired.Load(), killed: killed, killErr: killErr}
+	attempt.err = err
+	return attempt
 }
 
-func shouldRetryForceExecAfterKill(err error, killTimerFired bool) bool {
-	if !killTimerFired {
-		return false
+// killWhenWaiting checks, every poll interval until stmtCtx ends, whether the
+// statement on connID is waiting for a metadata lock, and kills its blockers
+// once it has waited at least delay. The wait is measured from the end of the
+// last check that did not see the statement waiting (or from started), to the
+// start of the check that sees it waiting. A check is also scheduled for the
+// moment the delay would be reached, or at once when a check that saw the
+// statement waiting ends past it, so the blockers get between the delay less
+// one poll interval and the delay, plus the time a check takes. A check that
+// fails does not kill, because it cannot tell blockers from concurrent traffic.
+// A single failed check leaves a wait the last successful check saw in
+// progress, so one slow check cannot push the kill past the lock wait timeout.
+// A second failure in a row restarts the wait: over a longer stretch the
+// statement could have got its lock and started a new wait, and its blockers
+// must get the full delay from then.
+// The kill runs on ctx, so it finishes even if the statement returns while it
+// runs.
+func killWhenWaiting(ctx, stmtCtx context.Context, connID int, started time.Time, delay time.Duration, waiting func(context.Context, int) (bool, error), kill func(context.Context, int) ([]int, error), logger *slog.Logger) forceExecAttempt {
+	var attempt forceExecAttempt
+	lastNotWaiting := started
+	sawWaiting := false
+	lastCheckFailed := false
+	// A statement can be queued from its start, so the first check is due by
+	// the delay even before any check has seen it waiting.
+	next := time.NewTimer(untilNextCheck(started, lastNotWaiting, delay, true))
+	defer next.Stop()
+	for {
+		select {
+		case <-stmtCtx.Done():
+			return attempt
+		case <-next.C:
+		}
+		checkStarted := time.Now()
+		checkCtx, cancel := context.WithTimeout(stmtCtx, waitingCheckTimeout)
+		isWaiting, err := waiting(checkCtx, connID)
+		cancel()
+		switch {
+		case stmtCtx.Err() != nil:
+			// The statement returned during the check, so its answer, or its
+			// failure to get one, no longer matters.
+			return attempt
+		case err != nil:
+			if attempt.checkErr == nil {
+				logger.Warn("could not tell whether the statement is waiting for a metadata lock; not killing until a check succeeds", "error", err)
+				attempt.checkErr = err
+			}
+			if !sawWaiting || lastCheckFailed {
+				sawWaiting = false
+				lastNotWaiting = time.Now()
+			}
+		case !isWaiting:
+			sawWaiting = false
+			lastNotWaiting = time.Now()
+		case checkStarted.Sub(lastNotWaiting) >= delay:
+			attempt.killAttempted = true
+			attempt.killed, attempt.killErr = kill(ctx, connID)
+			return attempt
+		default:
+			sawWaiting = true
+		}
+		lastCheckFailed = err != nil
+		next.Reset(untilNextCheck(time.Now(), lastNotWaiting, delay, sawWaiting))
 	}
+}
+
+// untilNextCheck is how long the kill worker waits before its next check: one
+// poll interval, or less when the statement is waiting and would reach the
+// delay sooner, and no time at all when it has already reached it, so the kill
+// lands at the delay rather than on the next poll.
+// Without that, a delay just under the lock wait timeout could fall between two
+// polls, and the statement would time out before any kill. A statement last
+// seen running keeps the poll interval, so a short delay never turns the polls
+// into a busy loop.
+func untilNextCheck(now, lastNotWaiting time.Time, delay time.Duration, waiting bool) time.Duration {
+	untilDelay := lastNotWaiting.Add(delay).Sub(now)
+	if waiting && untilDelay < killPollInterval {
+		return max(untilDelay, 0)
+	}
+	return killPollInterval
+}
+
+func shouldRetryForceExecAfterKill(err error, killAttempted bool) bool {
+	return killAttempted && isLockWaitTimeout(err)
+}
+
+func isLockWaitTimeout(err error) bool {
 	val, ok := errors.AsType[*mysql.MySQLError](err)
 	return ok && val.Number == errLockWaitTimeout
 }
