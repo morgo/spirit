@@ -38,7 +38,9 @@ const syncCheckpointTableName = "_spirit_sync_checkpoint"
 
 // shutdownFlushTimeout bounds the best-effort final flush on a clean shutdown,
 // and shutdownCheckpointTimeout bounds the final checkpoint write (kept
-// independent so a slow flush can't starve the checkpoint). Both are short so
+// independent so a slow flush can't starve the checkpoint). A write the server
+// has not answered by then is killed, which checkpoint.Table.Write bounds
+// separately. Both are short so
 // Ctrl-C / SIGTERM exits promptly even against a busy source whose change feed
 // never fully catches up; unflushed changes are re-applied on the next run from
 // the checkpoint.
@@ -519,6 +521,13 @@ func (r *Runner) runContinuous(ctx context.Context) error {
 	// copier watermark + change-feed position that let a restart resume instead
 	// of re-copying, so a slow or timed-out final flush above must not starve
 	// it of a shared deadline.
+	//
+	// Join the periodic dumper first (it stops on the same canceled ctx), so a
+	// periodic REPLACE still in flight cannot land after this one and roll the
+	// row back to an older watermark and position.
+	if ctx.Err() != nil && r.watchTaskWait != nil {
+		r.watchTaskWait()
+	}
 	cpCtx, cancelCp := context.WithTimeout(context.WithoutCancel(ctx), shutdownCheckpointTimeout)
 	defer cancelCp()
 	if err := r.dumpCheckpoint(cpCtx); err != nil {
