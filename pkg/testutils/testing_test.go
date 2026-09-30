@@ -2,10 +2,12 @@ package testutils
 
 import (
 	"math"
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestCompareMySQLVersions(t *testing.T) {
@@ -56,4 +58,28 @@ func TestUniqueDatabaseName(t *testing.T) {
 	// replaced.
 	e := uniqueDatabaseName("TestFoo/sub-test#01", 12345, 7)
 	assert.Regexp(t, `^t_testfoo_sub_test_01_[0-9a-f]{8}_12345_7$`, e)
+}
+
+// TestCreateUniqueTestDatabaseRefusesExistingName: if the generated name
+// already exists (a live database from another process, or one left behind
+// by a killed run whose pid has been reused), the helper must not hand that
+// database to this test.
+func TestCreateUniqueTestDatabaseRefusesExistingName(t *testing.T) {
+	next := uniqueDatabaseName(t.Name(), os.Getpid(), dbCounter.Load()+1)
+	RunSQL(t, "CREATE DATABASE "+next)
+	t.Cleanup(func() { RunSQL(t, "DROP DATABASE IF EXISTS "+next) })
+	RunSQL(t, "CREATE TABLE "+next+".left_behind (id INT PRIMARY KEY)")
+
+	name, db := CreateUniqueTestDatabase(t)
+	assert.NotEqual(t, next, name)
+	var n int
+	require.NoError(t, db.QueryRowContext(t.Context(),
+		"SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = ?", name).Scan(&n))
+	require.Zero(t, n, "CreateUniqueTestDatabase returned %s, which already held another run's tables", name)
+}
+
+func TestSanitizeIdentifier(t *testing.T) {
+	assert.Equal(t, "testfoo_sub_test_01", SanitizeIdentifier("TestFoo/sub-test#01"))
+	assert.Equal(t, "a_b_c", SanitizeIdentifier("a b.c"))
+	assert.Equal(t, "_", SanitizeIdentifier("é"))
 }
