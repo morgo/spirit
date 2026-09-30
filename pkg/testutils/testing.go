@@ -5,7 +5,9 @@ package testutils
 import (
 	"cmp"
 	"context"
+	"crypto/sha1"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -51,22 +53,45 @@ func DSNForDatabase(dbName string) string {
 	return baseDSN
 }
 
+// uniqueDatabaseName returns t_<test name>_<hash>_<pid>_<counter>. The pid
+// keeps concurrent go test processes (one per package) apart on a shared
+// server, and the counter keeps calls within one process apart. MySQL limits
+// database names to 64 characters, so only the test-name part is truncated:
+// the suffix must survive, or two long names that share a prefix (such as
+// the same test defined in two packages) produce the same database, and the
+// first test to finish drops it while the other is still using it. The hash
+// of the full name keeps truncated names identifiable in logs.
+func uniqueDatabaseName(testName string, pid int, counter uint64) string {
+	sum := sha1.Sum([]byte(testName))
+	suffix := fmt.Sprintf("_%s_%d_%d", hex.EncodeToString(sum[:])[:8], pid, counter)
+
+	// CreateUniqueTestDatabase does not quote the name, so keep it to
+	// characters that need no quoting. Subtest names can contain others,
+	// e.g. the #01 go test appends to a duplicate subtest name.
+	var b strings.Builder
+	b.WriteString("t_")
+	for _, r := range strings.ToLower(testName) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '_':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('_')
+		}
+	}
+	prefix := b.String()
+	if maxPrefix := 64 - len(suffix); len(prefix) > maxPrefix {
+		prefix = prefix[:maxPrefix]
+	}
+	return prefix + suffix
+}
+
 // CreateUniqueTestDatabase creates a unique database for a test and returns
 // both the database name and a *sql.DB connection scoped to that database.
 // The connection and database are automatically cleaned up when the test finishes.
 func CreateUniqueTestDatabase(t *testing.T) (string, *sql.DB) {
 	t.Helper()
 
-	// Create a unique database name based on test name and an atomic counter.
-	// The counter ensures uniqueness when called multiple times within the same test.
-	// MySQL limits database names to 64 characters, so we truncate if needed.
-	dbName := fmt.Sprintf("t_%s_%d_%d",
-		strings.ReplaceAll(strings.ToLower(t.Name()), "/", "_"),
-		os.Getpid(),
-		dbCounter.Add(1))
-	if len(dbName) > 64 {
-		dbName = dbName[:64]
-	}
+	dbName := uniqueDatabaseName(t.Name(), os.Getpid(), dbCounter.Add(1))
 	t.Log("test database:", dbName)
 
 	// Connect to MySQL without specifying a database
