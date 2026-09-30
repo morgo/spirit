@@ -944,12 +944,18 @@ func TestForceExecSparesTrafficDuringAnInplaceRebuild(t *testing.T) {
 		KEY pad_idx (pad),
 		KEY tenant_pad_idx (tenant, pad)
 	)`)
-	// Enough rows, with random indexed values, that the rebuild copies for
-	// several times as long as the bystander's transaction stays open.
+	// Enough rows, with random indexed values, that the rebuild is still
+	// copying when the bystander commits, ForceKillAfter + 2*killPollInterval
+	// (300ms) after the copy starts. On an idle host the copy takes about
+	// 0.5-0.7s, roughly twice that window. A loaded host only lengthens it.
 	tt.SeedRows(t, "INSERT INTO forceexec_inplace (pad, tenant) SELECT RANDOM_BYTES(64), FLOOR(RAND() * 1000)", 1<<18)
 	config := NewDBConfig()
 	config.LockWaitTimeout = 2
-	config.ForceKillAfter = 200 * time.Millisecond
+	// A short delay keeps the bystander's window short. It must still outlast
+	// the few milliseconds the rebuild takes to reach its copy: a kill that
+	// wrongly counted the running rebuild as waiting fires at the delay after
+	// the rebuild starts, and catches that only if the bystander is open.
+	config.ForceKillAfter = 100 * time.Millisecond
 	db, err := New(testutils.DSN(), config)
 	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
