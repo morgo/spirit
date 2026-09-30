@@ -1128,6 +1128,12 @@ func TestForceExecKillsRightAfterACheckThatRunsPastTheDelay(t *testing.T) {
 	// the slow check returned. Half an interval leaves room for scheduling
 	// delays.
 	require.Less(t, killedAt.Sub(slowCheckReturned), killPollInterval/2, "the kill must follow the slow check, not wait for the next poll")
+	// The slow check ends past the delay, so the check right after it kills.
+	// The slow check kills itself only if polls drifted enough that it started
+	// past the delay. A kill that lands late, after a run of checks that each
+	// follow the last at once, would come from a later check and still be
+	// within half an interval of the slow check.
+	require.LessOrEqual(t, checks, slowCheck+1, "the kill must come from the check right after the slow one")
 }
 
 // The kill worker checks at the moment the delay is reached, not only on its
@@ -1180,6 +1186,11 @@ func TestForceExecKillsAtTheDelayBetweenPolls(t *testing.T) {
 	require.GreaterOrEqual(t, len(checksReturned), 2)
 	lastPoll := checksReturned[len(checksReturned)-2]
 	require.Less(t, killedAt.Sub(lastPoll), killPollInterval, "the kill must land at the delay, not on the next poll")
+	// The poll before the kill must be a regular one, a full interval after the
+	// check before it. Otherwise a kill that lands late, after a run of checks
+	// that each follow the last at once, is within an interval of the last one.
+	require.GreaterOrEqual(t, len(checksReturned), 3)
+	require.GreaterOrEqual(t, lastPoll.Sub(checksReturned[len(checksReturned)-3]), killPollInterval, "the poll before the kill must be a regular poll")
 }
 
 // A statement that holds its locks and runs is checked once per poll interval,
