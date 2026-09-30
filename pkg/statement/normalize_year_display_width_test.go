@@ -44,3 +44,17 @@ func TestYearDisplayWidthConverges(t *testing.T) {
 	require.NoError(t, err)
 	assert.Nil(t, stmts)
 }
+
+// TestYearDisplayWidthOtherWidthsRejected pins the premise the rule rests on.
+// yearDisplayWidthNormalizer clears the width on every YEAR column, which is
+// only equivalent to MySQL because the parser rejects every width but 4, as
+// MySQL 8.0 does (ERROR 1818 "Invalid display width. Use YEAR instead.").
+// If the grammar is ever relaxed to accept another width, the rule would
+// quietly rewrite a width the server rejects to a bare `year`; this test
+// fails first.
+func TestYearDisplayWidthOtherWidthsRejected(t *testing.T) {
+	for _, ty := range []string{"year(0)", "year(1)", "year(2)", "year(3)", "year(5)"} {
+		_, err := ParseCreateTable("CREATE TABLE t (a " + ty + ")")
+		require.ErrorContains(t, err, "Supports only YEAR or YEAR(4) column", ty)
+	}
+}

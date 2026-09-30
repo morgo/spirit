@@ -5,8 +5,10 @@ import "strings"
 func init() { registerNormalizer(yearDisplayWidthNormalizer{}) }
 
 // yearDisplayWidthNormalizer drops the display width from a YEAR column.
-// YEAR(4) is the only width MySQL 8.0 still accepts (YEAR(2) is rejected, by
-// the server and by the parser), and it is deprecated: MySQL stores the column
+// YEAR(4) is the only width MySQL 8.0 still accepts (every other width is
+// rejected, by the server with ERROR 1818 and by the parser; clearing Length
+// unconditionally relies on that, and TestYearDisplayWidthOtherWidthsRejected
+// pins it), and it is deprecated: MySQL stores the column
 // as a plain `year`, so SHOW CREATE TABLE never reports a width. Verified
 // against MySQL 8.0.43:
 //
