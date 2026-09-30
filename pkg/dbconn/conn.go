@@ -1,6 +1,7 @@
 package dbconn
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"database/sql"
@@ -47,6 +48,16 @@ const (
 // the advisory lock's GET_LOCK) are deliberately exempted from this limit —
 // see NewAdvisoryLock.
 var maxConnLifetime = time.Minute * 3
+
+// connectTimeout bounds the ping that New uses to validate a new pool. That
+// ping opens the first connection, so it covers the whole connection phase:
+// dial, TLS, authentication and the session variables set from the DSN. The
+// driver's own timeout= and readTimeout= DSN options are off unless the DSN
+// sets them, and timeout= only covers the dial, so without this a server that
+// accepts the TCP connection but never completes the handshake blocks New
+// forever. A live server completes the handshake in milliseconds, so 30s
+// only fires on a server that is stalled or unreachable.
+const connectTimeout = 30 * time.Second
 
 // sessionWaitTimeout is the wait_timeout, in seconds, set on every spirit
 // connection. The server default is 8 hours, so a spirit process that froze or
@@ -448,6 +459,14 @@ func isTLSUnsupportedByServer(err error) bool {
 	return errors.Is(err, mysql.ErrNoTLS)
 }
 
+// pingWithTimeout validates db by opening its first connection, giving up
+// after timeout. See connectTimeout.
+func pingWithTimeout(db *sql.DB, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return db.PingContext(ctx)
+}
+
 // New is similar to sql.Open except we take the inputDSN and
 // append additional options to it to standardize the connection.
 // It will also ping the connection to ensure it is valid.
@@ -457,6 +476,12 @@ func New(inputDSN string, config *DBConfig) (db *sql.DB, err error) {
 
 // NewWithConnectionType is like New but includes context about the connection type for better error messages
 func NewWithConnectionType(inputDSN string, config *DBConfig, connectionType string) (db *sql.DB, err error) {
+	return newWithConnectTimeout(inputDSN, config, connectionType, connectTimeout)
+}
+
+// newWithConnectTimeout is NewWithConnectionType with the ping deadline as a
+// parameter, so tests can shorten it without mutating shared state.
+func newWithConnectTimeout(inputDSN string, config *DBConfig, connectionType string, timeout time.Duration) (db *sql.DB, err error) {
 	// Normalize the TLS mode once, up front, so every comparison and switch
 	// below (and in newDSN) is case-insensitive. The CLI documents --tls-mode
 	// as case-insensitive, so e.g. "preferred" must behave exactly like
@@ -483,8 +508,7 @@ func NewWithConnectionType(inputDSN string, config *DBConfig, connectionType str
 		// First try with TLS
 		db, err := sql.Open(DriverName, dsn)
 		if err == nil {
-			//nolint: noctx // requires too much refactoring
-			if pingErr := db.Ping(); pingErr == nil {
+			if pingErr := pingWithTimeout(db, timeout); pingErr == nil {
 				// TLS connection successful
 				return db, nil
 			} else {
@@ -523,8 +547,7 @@ func NewWithConnectionType(inputDSN string, config *DBConfig, connectionType str
 		if err != nil {
 			return nil, fmt.Errorf("failed to open fallback %s connection: %w", connectionType, err)
 		}
-		//nolint: noctx // requires too much refactoring
-		if err := db.Ping(); err != nil {
+		if err := pingWithTimeout(db, timeout); err != nil {
 			_ = db.Close()
 			return nil, fmt.Errorf("[%s-CONNECTION-FALLBACK] ping failed: %w", strings.ToUpper(strings.ReplaceAll(connectionType, " ", "-")), err)
 		}
@@ -536,8 +559,7 @@ func NewWithConnectionType(inputDSN string, config *DBConfig, connectionType str
 	if err != nil {
 		return nil, fmt.Errorf("failed to open %s connection: %w", connectionType, err)
 	}
-	//nolint: noctx // requires too much refactoring
-	if err := db.Ping(); err != nil {
+	if err := pingWithTimeout(db, timeout); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("[%s-CONNECTION] ping failed: %w", strings.ToUpper(strings.ReplaceAll(connectionType, " ", "-")), err)
 	}

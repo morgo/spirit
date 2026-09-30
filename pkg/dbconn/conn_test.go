@@ -4,7 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"net"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/block/mysql"
 	"github.com/block/spirit/pkg/testutils"
@@ -377,4 +380,61 @@ func TestValidCertificateBundle(t *testing.T) {
 	require.NotNil(t, custom)
 	require.NotNil(t, custom.RootCAs, "empty certData produced no root pool")
 	require.NotEmpty(t, custom.RootCAs.Subjects(), "empty certData produced an empty root pool") //nolint:staticcheck // SA1019: see above
+}
+
+// stalledServer accepts TCP connections and never sends the MySQL handshake,
+// the way a server too starved to service a new connection behaves. It
+// returns the listener's address.
+func stalledServer(t *testing.T) string {
+	t.Helper()
+	ln, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	var mu sync.Mutex
+	var conns []net.Conn
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return // listener closed
+			}
+			mu.Lock()
+			conns = append(conns, conn)
+			mu.Unlock()
+		}
+	})
+	t.Cleanup(func() {
+		_ = ln.Close()
+		wg.Wait()
+		mu.Lock()
+		defer mu.Unlock()
+		for _, conn := range conns {
+			_ = conn.Close()
+		}
+	})
+	return ln.Addr().String()
+}
+
+// TestNewStalledHandshakeTimesOut checks that New gives up on a server that
+// accepts the connection but never completes the handshake. The ping used to
+// have no deadline, so New blocked forever; the driver's dial timeout does not
+// help here because the dial itself succeeds.
+func TestNewStalledHandshakeTimesOut(t *testing.T) {
+	addr := stalledServer(t)
+	dsn := fmt.Sprintf("spirit:spirit@tcp(%s)/test", addr)
+	for _, tlsMode := range []string{"DISABLED", "PREFERRED", "REQUIRED"} {
+		t.Run(tlsMode, func(t *testing.T) {
+			cfg := NewDBConfig()
+			cfg.TLSMode = tlsMode
+			const timeout = 200 * time.Millisecond
+			start := time.Now()
+			db, err := newWithConnectTimeout(dsn, cfg, "main database", timeout)
+			elapsed := time.Since(start)
+			require.Error(t, err)
+			require.Nil(t, db)
+			require.ErrorIs(t, err, context.DeadlineExceeded)
+			require.GreaterOrEqual(t, elapsed, timeout)
+			require.Less(t, elapsed, 10*time.Second, "the ping deadline did not bound the handshake")
+		})
+	}
 }
