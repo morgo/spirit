@@ -41,8 +41,7 @@ func setReorderCheck(ctx context.Context, r Resources, logger *slog.Logger) erro
 			continue // handled by enumReorderCheck
 		}
 
-		newElems := col.ColDef.Tp.GetElems()
-		if len(newElems) == 0 {
+		if len(col.ColDef.Tp.GetElems()) == 0 {
 			continue
 		}
 
@@ -65,6 +64,10 @@ func setReorderCheck(ctx context.Context, r Resources, logger *slog.Logger) erro
 		}
 		if len(existingElems) == 0 {
 			continue
+		}
+		newElems, err := storedNewMembers(ctx, r, col)
+		if err != nil {
+			return err
 		}
 
 		if !isPrefix(existingElems, newElems) {

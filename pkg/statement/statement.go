@@ -4,11 +4,13 @@ package statement
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/block/spirit/pkg/dbconn/sqlescape"
 	"github.com/block/spirit/pkg/parser"
 	"github.com/block/spirit/pkg/parser/ast"
+	"github.com/block/spirit/pkg/parser/charset"
 	"github.com/block/spirit/pkg/parser/format"
 	"github.com/block/spirit/pkg/parser/mysql"
 )
@@ -732,4 +734,45 @@ func (a *AbstractStatement) ColumnCollationChange(column string, current, tableD
 		return change, determined, nil
 	}
 	return change, true, nil
+}
+
+// StoredEnumSetMembers returns the members MySQL stores for an ENUM or SET
+// column definition in this ALTER TABLE: as written when the column's charset
+// resolves to binary, and with the trailing spaces of each stripped otherwise
+// (see enumSetMemberSpacesNormalizer). The charset resolves the way
+// ColumnCollationChange resolves it, with one difference MySQL makes: CONVERT
+// TO CHARACTER SET does not convert a column that declares the binary charset,
+// so its members keep their spaces.
+//
+// tableDefault is the table's current default, the zero value when it is not
+// known. determined is false when a member ends in a space and the column's
+// charset is not decided: it inherits a table default that neither
+// tableDefault nor the statement carries, or the statement converts the table
+// with CONVERT TO CHARACTER SET DEFAULT, which takes the schema's default.
+func (a *AbstractStatement) StoredEnumSetMembers(colDef *ast.ColumnDef, tableDefault CharsetCollation) (members []string, determined bool, err error) {
+	alter, ok := a.AsAlterTable()
+	if !ok {
+		return nil, false, ErrNotAlterTable
+	}
+	written := colDef.Tp.GetElems()
+	if !slices.ContainsFunc(written, func(m string) bool { return strings.HasSuffix(m, " ") }) {
+		return written, true, nil // nothing for the charset to decide
+	}
+	defaults, convert := alteredTableDefaults(alter, tableDefault.normalized())
+	ct := &CreateTable{TableOptions: tableOptionsFor(defaults)}
+	col := ct.parseColumn(colDef)
+	cs, _ := resolvedCharsetCollation(&col, ct)
+	switch {
+	case cs == charset.CharsetBin:
+		return written, true, nil
+	case convert:
+		cs = defaults.Charset
+	}
+	if cs == "" {
+		return nil, false, nil
+	}
+	if cs == charset.CharsetBin {
+		return written, true, nil
+	}
+	return stripMemberSpaces(written), true, nil
 }

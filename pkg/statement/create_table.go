@@ -1553,8 +1553,12 @@ func (ct *CreateTable) diffColumns(target *CreateTable, opts *DiffOptions) []str
 
 	// Generate the ALTER clauses in target order
 	var prevColumn string
+	defaults := alterDefaults(ct, target, opts)
 	for i, targetCol := range target.Columns {
 		sourceCol, existsInSource := sourceColumns[strings.ToLower(targetCol.Name)]
+		// Compare and write an enum or set column with the members the ALTER
+		// stores, which depend on the table default it runs under.
+		targetCol = withMembersUnder(targetCol, defaults)
 
 		if !existsInSource {
 			// ADD new column

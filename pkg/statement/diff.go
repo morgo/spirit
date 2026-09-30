@@ -126,7 +126,9 @@ func charsetOfCollation(collation string) string {
 // charset but no collation uses utf8mb4's default collation, and a table with
 // neither option uses the server defaults — both depend on server version
 // and configuration. Every other charset's default collation is fixed, and
-// defaultCollationNormalizer has already filled it in.
+// defaultCollationNormalizer has already filled it in — except binary's, which
+// is the charset's only collation and is resolved here, because a binary table
+// default is canonicalized without a COLLATE (see binaryCharsetNormalizer).
 func resolvedCharsetCollation(col *Column, table *CreateTable) (charset, collation string) {
 	switch {
 	case col.Collation != nil:
@@ -150,7 +152,24 @@ func resolvedCharsetCollation(col *Column, table *CreateTable) (charset, collati
 			charset = charsetOfCollation(collation)
 		}
 	}
+	if charset == "binary" && collation == "" {
+		collation = "binary"
+	}
 	return charset, collation
+}
+
+// alterDefaults returns the table whose defaults the ALTER that source.Diff
+// emits runs under: target's when the ALTER sets them, else source's. MySQL
+// applies a DEFAULT CHARSET or COLLATE clause to every column the same ALTER
+// adds or modifies, wherever it is written in the statement. Only whether the
+// result is the binary charset is read from it (see [withMembersUnder]), which
+// a clause the ALTER leaves out because it restates source's value cannot
+// change.
+func alterDefaults(source, target *CreateTable, opts *DiffOptions) *CreateTable {
+	if !opts.IgnoreCharsetCollation && (target.TableOptions.getCharset() != nil || target.TableOptions.getCollation() != nil) {
+		return target
+	}
+	return source
 }
 
 // explicitUnlessTableDefault returns a column-level charset/collation value
