@@ -248,6 +248,29 @@ func TestExtractFromStatementPreservesDefaultParens(t *testing.T) {
 	require.Equal(t, "ALTER COLUMN `j` SET DEFAULT (_UTF8MB4'{}')", abstractStmt[0].Alter)
 }
 
+// TestExtractFromStatementPreservesEnumSetCharset checks that the restored
+// alter keeps an explicit charset on an ENUM or SET column. The migration
+// runner executes this text, so a dropped charset would create the column in
+// the table's default charset. ENUM and SET have no binary type name (as
+// VARBINARY is for VARCHAR), so the binary charset has to be written too.
+func TestExtractFromStatementPreservesEnumSetCharset(t *testing.T) {
+	for _, tc := range []struct{ stmt, alter string }{
+		{"ALTER TABLE t ADD COLUMN b enum('a','b') CHARACTER SET binary", "ADD COLUMN `b` ENUM('a','b') CHARACTER SET BINARY"},
+		{"ALTER TABLE t ADD COLUMN b enum('a','b') CHARACTER SET latin1", "ADD COLUMN `b` ENUM('a','b') CHARACTER SET LATIN1"},
+		{"ALTER TABLE t ADD COLUMN b enum('a','b') BYTE", "ADD COLUMN `b` ENUM('a','b') CHARACTER SET BINARY"},
+		{"ALTER TABLE t ADD COLUMN b enum('a','b') ASCII", "ADD COLUMN `b` ENUM('a','b') CHARACTER SET LATIN1"},
+		{"ALTER TABLE t ADD COLUMN b enum('a','b') CHARACTER SET latin1 BINARY", "ADD COLUMN `b` ENUM('a','b') BINARY CHARACTER SET LATIN1"},
+		{"ALTER TABLE t MODIFY b set('a','b') CHARACTER SET binary DEFAULT 'a'", "MODIFY COLUMN `b` SET('a','b') CHARACTER SET BINARY DEFAULT _UTF8MB4'a'"},
+		{"ALTER TABLE t CHANGE b c set('a','b') CHARACTER SET latin1 COLLATE latin1_bin", "CHANGE COLUMN `b` `c` SET('a','b') CHARACTER SET LATIN1 COLLATE latin1_bin"},
+		// A charset on a char type is carried by the type name as before.
+		{"ALTER TABLE t ADD COLUMN b varchar(3) CHARACTER SET binary", "ADD COLUMN `b` VARBINARY(3)"},
+	} {
+		abstractStmt, err := New(tc.stmt)
+		require.NoError(t, err, tc.stmt)
+		require.Equal(t, tc.alter, abstractStmt[0].Alter, tc.stmt)
+	}
+}
+
 func TestAlgorithmInplaceConsideredSafe(t *testing.T) {
 	var test = func(stmt string) error {
 		return MustNew("ALTER TABLE `t1` " + stmt)[0].AlgorithmInplaceConsideredSafe()

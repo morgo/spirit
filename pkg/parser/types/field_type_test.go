@@ -273,6 +273,37 @@ func TestEnumSetFlen(t *testing.T) {
 	}
 }
 
+// TestEnumSetBinaryCharset checks that an ENUM or SET column declared with the
+// binary charset (CHARACTER SET binary or BYTE) parses with the binary
+// collation, which is what MySQL stores, and without the binary flag: unlike
+// CHAR/VARCHAR/TEXT there is no binary type name for the flag to select.
+func TestEnumSetBinaryCharset(t *testing.T) {
+	p := parser.New()
+	cases := []struct {
+		sql     string
+		charset string
+		collate string
+		binFlag bool
+	}{
+		{"enum('a') CHARACTER SET binary", charset.CharsetBin, charset.CollationBin, false},
+		{"enum('a') BYTE", charset.CharsetBin, charset.CollationBin, false},
+		{"set('a') CHARACTER SET binary", charset.CharsetBin, charset.CollationBin, false},
+		{"set('a') BYTE", charset.CharsetBin, charset.CollationBin, false},
+		{"enum('a') CHARACTER SET latin1", charset.CharsetLatin1, "", false},
+		{"enum('a') BINARY", "", "", true},
+		{"set('a') CHARACTER SET latin1 BINARY", charset.CharsetLatin1, "", true},
+		{"enum('a')", "", "", false},
+	}
+	for _, ca := range cases {
+		stmt, err := p.ParseOneStmt(fmt.Sprintf("create table t (e %v)", ca.sql), "", "")
+		require.NoError(t, err, ca.sql)
+		tp := stmt.(*ast.CreateTableStmt).Cols[0].Tp
+		require.Equal(t, ca.charset, tp.GetCharset(), ca.sql)
+		require.Equal(t, ca.collate, tp.GetCollate(), ca.sql)
+		require.Equal(t, ca.binFlag, mysql.HasBinaryFlag(tp.GetFlag()), ca.sql)
+	}
+}
+
 func TestFieldTypeEqual(t *testing.T) {
 	// tp not equal
 	ft1 := NewFieldType(mysql.TypeDouble)

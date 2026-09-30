@@ -633,6 +633,61 @@ func TestEnumToSet(t *testing.T) {
 	require.Zero(t, bad)
 }
 
+// TestEnumSetExplicitCharset verifies that a migration creates an ENUM or SET
+// column in the charset the statement names, not the table's utf8mb4 default.
+// The runner executes the parser's restored statement text for the INSTANT
+// attempt and for the shadow table's ALTER, and the restore used to drop an
+// ENUM/SET charset (always for binary, which has no ENUM/SET type name to
+// carry it). ADD COLUMN exercises the INSTANT path. A charset-only MODIFY of
+// an ENUM/SET is INSTANT too, so the MODIFY cases add ENGINE=InnoDB to force a
+// rebuild and exercise the shadow table.
+//
+// information_schema.columns reports CHARACTER_SET_NAME as NULL for an ENUM
+// or SET in the binary charset, so the binary cases expect NULL.
+func TestEnumSetExplicitCharset(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, alter string
+		instant     bool
+		charset     sql.NullString
+	}{
+		{"enumcs_add_latin1", "ADD COLUMN c ENUM('a','b') CHARACTER SET latin1", true, sql.NullString{String: "latin1", Valid: true}},
+		{"enumcs_add_binary", "ADD COLUMN c ENUM('a','b') CHARACTER SET binary", true, sql.NullString{}},
+		{"enumcs_mod_latin1", "MODIFY COLUMN s SET('a','b') CHARACTER SET latin1 NOT NULL, ENGINE=InnoDB", false, sql.NullString{String: "latin1", Valid: true}},
+		{"enumcs_mod_binary", "MODIFY COLUMN s SET('a','b') CHARACTER SET binary NOT NULL, ENGINE=InnoDB", false, sql.NullString{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tt := testutils.NewTestTable(t, tc.name, fmt.Sprintf(`CREATE TABLE %s (
+				id int NOT NULL AUTO_INCREMENT PRIMARY KEY,
+				s SET('a','b') NOT NULL
+			) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci`, tc.name))
+			tt.SeedRows(t, fmt.Sprintf("INSERT INTO %s (s) SELECT 'a,b'", tc.name), 100)
+
+			m := NewTestRunner(t, tc.name, tc.alter, WithThreads(1))
+			require.NoError(t, m.Run(t.Context()))
+			require.Equal(t, tc.instant, m.usedInstantDDL)
+			require.False(t, m.usedInplaceDDL)
+			require.NoError(t, m.Close())
+
+			column := "c"
+			if !tc.instant {
+				column = "s"
+			}
+			var cs sql.NullString
+			require.NoError(t, tt.DB.QueryRowContext(t.Context(),
+				`SELECT character_set_name FROM information_schema.columns
+				 WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?`,
+				tc.name, column).Scan(&cs))
+			require.Equal(t, tc.charset, cs)
+
+			var bad int
+			require.NoError(t, tt.DB.QueryRowContext(t.Context(),
+				fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE s <> 'a,b'", tc.name)).Scan(&bad))
+			require.Zero(t, bad)
+		})
+	}
+}
+
 // TestBufferedMigrationFailsGracefullyWithMinimalRBR verifies that a buffered
 // migration fails gracefully when it receives minimal RBR events from a rogue session.
 func TestBufferedMigrationFailsGracefullyWithMinimalRBR(t *testing.T) {

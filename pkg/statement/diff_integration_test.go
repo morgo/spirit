@@ -1102,6 +1102,75 @@ func TestDiffIntegrationBinaryCharsetConverges(t *testing.T) {
 	require.Nil(t, stmts, "re-diff after applying the ALTER must converge")
 }
 
+// TestIntegrationEnumSetCharsetRestoredAlter runs the restored alter of an
+// ENUM or SET column with an explicit charset against MySQL, and checks the
+// column has that charset rather than the table's utf8mb4 default. The
+// migration runner executes this restored text (for the INSTANT and INPLACE
+// attempts and for the shadow table), so a dropped charset silently changes
+// the schema.
+//
+// information_schema.columns reports CHARACTER_SET_NAME and COLLATION_NAME as
+// NULL for an ENUM or SET in the binary charset, so the binary cases expect
+// NULL. The bug being guarded against yields 'utf8mb4'.
+func TestIntegrationEnumSetCharsetRestoredAlter(t *testing.T) {
+	for _, tc := range []struct {
+		name, alter string
+		charset     sql.NullString
+		collation   sql.NullString
+	}{
+		{"add_enum_binary", "ALTER TABLE t ADD COLUMN c enum('a','b') CHARACTER SET binary", sql.NullString{}, sql.NullString{}},
+		{"add_enum_byte", "ALTER TABLE t ADD COLUMN c enum('a','b') BYTE", sql.NullString{}, sql.NullString{}},
+		{"add_enum_latin1", "ALTER TABLE t ADD COLUMN c enum('a','b') CHARACTER SET latin1", sql.NullString{String: "latin1", Valid: true}, sql.NullString{String: "latin1_swedish_ci", Valid: true}},
+		{"add_enum_ascii", "ALTER TABLE t ADD COLUMN c enum('a','b') ASCII", sql.NullString{String: "latin1", Valid: true}, sql.NullString{String: "latin1_swedish_ci", Valid: true}},
+		{"add_enum_latin1_binary_attr", "ALTER TABLE t ADD COLUMN c enum('a','b') CHARACTER SET latin1 BINARY", sql.NullString{String: "latin1", Valid: true}, sql.NullString{String: "latin1_bin", Valid: true}},
+		{"modify_set_binary", "ALTER TABLE t MODIFY c set('a','b') CHARACTER SET binary DEFAULT 'a'", sql.NullString{}, sql.NullString{}},
+		{"modify_set_latin1", "ALTER TABLE t MODIFY c set('a','b') CHARACTER SET latin1", sql.NullString{String: "latin1", Valid: true}, sql.NullString{String: "latin1_swedish_ci", Valid: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tbl := "enum_set_charset_" + tc.name
+			ddl := "CREATE TABLE " + tbl + " (id int NOT NULL PRIMARY KEY) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci"
+			if strings.Contains(tc.alter, "MODIFY") {
+				ddl = "CREATE TABLE " + tbl + " (id int NOT NULL PRIMARY KEY, c set('a','b')) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci"
+			}
+			tt := testutils.NewTestTable(t, tbl, ddl)
+
+			stmts, err := New(tc.alter)
+			require.NoError(t, err)
+			testutils.RunSQL(t, fmt.Sprintf("ALTER TABLE `%s` %s", tt.Name, stmts[0].Alter))
+
+			var cs, coll sql.NullString
+			require.NoError(t, tt.DB.QueryRowContext(t.Context(),
+				"SELECT character_set_name, collation_name FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? AND column_name = 'c'",
+				tt.Name).Scan(&cs, &coll))
+			require.Equal(t, tc.charset, cs, "restored alter: %s", stmts[0].Alter)
+			require.Equal(t, tc.collation, coll, "restored alter: %s", stmts[0].Alter)
+			if !tc.charset.Valid {
+				require.Contains(t, showCreateTable(t, tt.DB, tt.Name), "CHARACTER SET binary COLLATE binary")
+			}
+		})
+	}
+}
+
+// TestDiffIntegrationEnumSetBinaryCharset verifies that an ENUM or SET column
+// declared with the binary charset (CHARACTER SET binary or BYTE) matches its
+// live form, which MySQL reports as CHARACTER SET binary COLLATE binary.
+// Without the binary collation on the declared side, the diff emits a MODIFY
+// that MySQL stores as the same column again, on every run.
+func TestDiffIntegrationEnumSetBinaryCharset(t *testing.T) {
+	ddl := "CREATE TABLE diff_enum_set_binary (id int NOT NULL, a enum('x','y') CHARACTER SET binary, b set('x','y') CHARACTER SET binary DEFAULT 'x', c enum('x','y') BYTE, d set('x','y') BYTE, e enum('x','y') CHARACTER SET binary COLLATE binary, PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci"
+	tt := testutils.NewTestTable(t, "diff_enum_set_binary", ddl)
+	desired, err := ParseCreateTable(ddl)
+	require.NoError(t, err)
+	live, err := ParseCreateTable(showCreateTable(t, tt.DB, tt.Name))
+	require.NoError(t, err)
+	stmts, err := live.Diff(desired, nil)
+	require.NoError(t, err)
+	require.Nil(t, stmts, "an enum/set column with the binary charset must match its live form")
+	stmts, err = desired.Diff(live, nil)
+	require.NoError(t, err)
+	require.Nil(t, stmts, "the live form must match an enum/set column with the binary charset")
+}
+
 // binaryDefaultHexReason is why the binary and utf8mb4 default tests that read
 // back a non-utf8mb3 default skip before MySQL 8.0.33: earlier servers' SHOW
 // CREATE TABLE replaces each such byte of a binary default, or character of a
