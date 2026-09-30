@@ -339,10 +339,17 @@ func TestMoveWithNewTableCreation(t *testing.T) {
 // The minimal-image UPDATE is committed only once the move is parked at the
 // sentinel (DeferCutOver), so the change feed is already streaming and the
 // move cannot cut over before the event reaches it. The move then ends either
-// through the UPDATE or through this package's sentinel wait limit (TestMain
-// shrinks sentinel.WaitLimit to 10s), and the assertions below reject the
-// latter. See https://github.com/block/spirit/issues/1344.
+// through the UPDATE or through the sentinel wait limit, and the assertions
+// below reject the latter. See https://github.com/block/spirit/issues/1344.
 func TestMoveFailsGracefullyWithMinimalRBR(t *testing.T) {
+	// TestMain shrinks sentinel.WaitLimit to 10s for this package. Give the
+	// change feed a minute to read the event instead, so a slow feed (for
+	// example a streamer recreate on a loaded -race runner) cannot fail the
+	// test on a sentinel timeout.
+	oldWaitLimit := sentinel.WaitLimit
+	sentinel.WaitLimit = time.Minute
+	t.Cleanup(func() { sentinel.WaitLimit = oldWaitLimit })
+
 	sourceDSN := testutils.DSNForDatabase("source_minrbr")
 	targetDSN := testutils.DSNForDatabase("dest_minrbr")
 
@@ -407,7 +414,7 @@ func TestMoveFailsGracefullyWithMinimalRBR(t *testing.T) {
 	var runErr error
 	select {
 	case runErr = <-done:
-	case <-time.After(time.Minute):
+	case <-time.After(2 * time.Minute):
 		cancel()
 		t.Fatal("move did not return after a minimal RBR event was committed")
 	}
