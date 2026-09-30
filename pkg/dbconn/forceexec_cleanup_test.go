@@ -1087,21 +1087,27 @@ func TestForceExecKillsRightAfterACheckThatRunsPastTheDelay(t *testing.T) {
 	tbl := table.NewTableInfo(db, "test", "forceexec_slow_check")
 	started := time.Now()
 	// The statement really is waiting. Every check says so at once, except
-	// the one that starts shortly before the delay, which ends 30ms after it.
-	const slowCheckEnds = 880 * time.Millisecond
-	var killedAt, slowCheckReturned time.Time
-	attempts := 0
+	// the last one that starts before the delay, which ends 30ms after it.
+	// The slow check is picked by count, not by time since started: the
+	// worker's clock starts later, once forceExec has a connection and its ID.
+	// While the delay is more than a poll away, each check starts a full poll
+	// after the one before it returned, so the slow check starts at least
+	// 800ms into the worker's wait and returns at least 880ms into it.
+	slowCheck := int(config.ForceKillAfter / killPollInterval)
+	const slowCheckTakes = 80 * time.Millisecond
+	var killedAt, slowCheckReturned, lastCheckStarted time.Time
+	checks, attempts := 0, 0
 	err = forceExec(ctx, db, config, slog.Default(),
 		"ALTER TABLE forceexec_slow_check ADD COLUMN c INT, ALGORITHM=INSTANT",
 		func(ctx context.Context, _ int) (bool, error) {
-			if elapsed := time.Since(started); elapsed >= 750*time.Millisecond && elapsed < config.ForceKillAfter {
+			lastCheckStarted = time.Now()
+			checks++
+			if checks == slowCheck {
 				select {
-				case <-time.After(time.Until(started.Add(slowCheckEnds))):
+				case <-time.After(slowCheckTakes):
 				case <-ctx.Done():
 					return false, ctx.Err()
 				}
-				// The timer can wake late, so measure the kill from when the
-				// check really returned rather than from slowCheckEnds.
 				slowCheckReturned = time.Now()
 			}
 			return true, nil
@@ -1114,9 +1120,13 @@ func TestForceExecKillsRightAfterACheckThatRunsPastTheDelay(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, attempts)
 	require.False(t, slowCheckReturned.IsZero(), "the slow check must have run")
-	require.GreaterOrEqual(t, killedAt.Sub(started), slowCheckEnds)
+	// The check that killed must have started at the delay or later. The
+	// worker starts its clock after started, so this bound never fails a
+	// correct kill.
+	require.GreaterOrEqual(t, lastCheckStarted.Sub(started), config.ForceKillAfter, "the kill must not come before the delay")
 	// Waiting for the next poll would put the kill a full poll interval after
-	// the slow check. Half an interval leaves room for scheduling delays.
+	// the slow check returned. Half an interval leaves room for scheduling
+	// delays.
 	require.Less(t, killedAt.Sub(slowCheckReturned), killPollInterval/2, "the kill must follow the slow check, not wait for the next poll")
 }
 
