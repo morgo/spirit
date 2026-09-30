@@ -265,6 +265,60 @@ func TestEmptyDatabaseMove(t *testing.T) {
 	require.NoError(t, runner.Close())
 }
 
+// TestMoveCancelAfterCutoverReportsSuccess covers issue #1338 for move: a
+// cancel that arrives after the traffic switch must not stop the source rename
+// or the checkpoint drop, so the committed move is reported as a success.
+func TestMoveCancelAfterCutoverReportsSuccess(t *testing.T) {
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	src := cfg.Clone()
+	src.DBName = "source_cancel_after_cutover"
+	dest := cfg.Clone()
+	dest.DBName = "dest_cancel_after_cutover"
+	testutils.RunSQL(t, `DROP DATABASE IF EXISTS source_cancel_after_cutover`)
+	testutils.RunSQL(t, `CREATE DATABASE source_cancel_after_cutover`)
+	testutils.RunSQL(t, `DROP DATABASE IF EXISTS dest_cancel_after_cutover`)
+	testutils.RunSQL(t, `CREATE DATABASE dest_cancel_after_cutover`)
+	t.Cleanup(func() {
+		testutils.RunSQL(t, `DROP DATABASE IF EXISTS source_cancel_after_cutover`)
+		testutils.RunSQL(t, `DROP DATABASE IF EXISTS dest_cancel_after_cutover`)
+	})
+	testutils.RunSQL(t, `CREATE TABLE source_cancel_after_cutover.t1 (id INT NOT NULL PRIMARY KEY, val VARCHAR(10))`)
+	testutils.RunSQL(t, `INSERT INTO source_cancel_after_cutover.t1 VALUES (1, 'a'), (2, 'b')`)
+
+	runner, err := NewRunner(&Move{
+		SourceDSN:    src.FormatDSN(),
+		TargetDSN:    dest.FormatDSN(),
+		Threads:      2,
+		WriteThreads: 2,
+	})
+	require.NoError(t, err)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	runner.SetCutover(func(context.Context) error {
+		cancel() // the operator stops the move right after the switch
+		return nil
+	})
+
+	require.NoError(t, runner.Run(ctx), "a committed move must be reported as success")
+	require.ErrorIs(t, ctx.Err(), context.Canceled)
+	require.NoError(t, runner.Close())
+
+	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+	var sourceTables string
+	require.NoError(t, db.QueryRowContext(t.Context(),
+		"SELECT GROUP_CONCAT(table_name ORDER BY table_name) FROM information_schema.tables WHERE table_schema = ?",
+		"source_cancel_after_cutover").Scan(&sourceTables))
+	require.Equal(t, "t1_old", sourceTables, "the source table must have been retired")
+	var count int
+	require.NoError(t, db.QueryRowContext(t.Context(),
+		"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = ? AND table_name = ?",
+		"dest_cancel_after_cutover", checkpointTableName).Scan(&count))
+	require.Zero(t, count, "the checkpoint table must be dropped")
+}
+
 // TestMoveReservedWordPK is a regression test for issue #828. Moving a
 // table whose primary key contains columns named with MySQL reserved
 // words used to fail because the chunker_composite prefetch query joined
