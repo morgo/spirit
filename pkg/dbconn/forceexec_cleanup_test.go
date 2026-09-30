@@ -46,22 +46,32 @@ func TestForceExecWaitsForKilledSessionCleanup(t *testing.T) {
 	require.NoError(t, blocker.QueryRowContext(t.Context(), "SELECT CONNECTION_ID()").Scan(&pid))
 	_, err = blocker.ExecContext(ctx, "SELECT * FROM forceexec_delayed_cleanup")
 	require.NoError(t, err)
-	calls, blockerAliveOnRetryKill := 0, 0
+	calls, blockerAliveOnRetry := 0, 0
+	isWaiting := waitingOn(tt.DB)
 	err = forceExec(ctx, db, config, slog.Default(),
 		"ALTER TABLE forceexec_delayed_cleanup ADD COLUMN c INT, ALGORITHM=INSTANT",
-		waitingOn(tt.DB),
+		func(ctx context.Context, connID int) (bool, error) {
+			// An attempt's kill worker stops at its kill, so every check
+			// after the first kill belongs to a retry. A retry that started
+			// before the killed blocker exited is still waiting on it at its
+			// first check, one poll interval in, however soon the blocker
+			// exits after that.
+			if calls > 0 {
+				var remaining int
+				if err := tt.DB.QueryRowContext(ctx, "SELECT COUNT(*) FROM performance_schema.threads WHERE processlist_id = ?", pid).Scan(&remaining); err != nil {
+					return false, err
+				}
+				blockerAliveOnRetry += remaining
+			}
+			return isWaiting(ctx, connID)
+		},
 		func(ctx context.Context, _ int) ([]int, error) {
 			calls++
 			if calls > 1 {
 				// Each retry runs its own kill worker, which kills when the
 				// retry waits for its lock for the kill delay. That can be an
 				// unrelated session's metadata lock on a shared server, so a
-				// later kill is not itself a failure. A retry that started
-				// before the killed blocker exited would wait on the blocker,
-				// so it must be gone by any later kill.
-				var remaining int
-				assert.NoError(t, tt.DB.QueryRowContext(ctx, "SELECT COUNT(*) FROM performance_schema.threads WHERE processlist_id = ?", pid).Scan(&remaining))
-				blockerAliveOnRetryKill += remaining
+				// later kill is not itself a failure.
 				return nil, nil
 			}
 			workers.Go(func() {
@@ -77,7 +87,7 @@ func TestForceExecWaitsForKilledSessionCleanup(t *testing.T) {
 		}, waitForKilledTransactions, nil)
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, calls, 1)
-	require.Zero(t, blockerAliveOnRetryKill, "the retry must not start until the killed blocker has exited")
+	require.Zero(t, blockerAliveOnRetry, "the retry must not start until the killed blocker has exited")
 	var column string
 	require.NoError(t, tt.DB.QueryRowContext(t.Context(), "SELECT COLUMN_NAME FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'forceexec_delayed_cleanup' AND column_name = 'c'").Scan(&column))
 	require.Equal(t, "c", column)
