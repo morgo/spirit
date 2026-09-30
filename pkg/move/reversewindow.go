@@ -410,13 +410,13 @@ func (w *reverseWindow) reverseCutover(ctx context.Context) error {
 	//    fencing straggler writes after the switch, mirroring the forward
 	//    cutover's source rename. _revert (not _old) marks these as revert
 	//    artifacts, so a later move can safely drop them. Traffic is back on
-	//    the source, so each rename runs to completion even if ctx is
-	//    cancelled: an interrupted one would leave its outcome unknown.
+	//    the source, so the renames run even if ctx is cancelled
+	//    (context.WithoutCancel): a stopped one would leave a target serving.
 	for i := range r.targets {
 		for _, t := range r.sourceTables {
 			revertName := check.RevertRetiredName(t.TableName)
 			stmt := sqlescape.MustEscapeSQL("RENAME TABLE %n TO %n", t.TableName, revertName)
-			if err := locks[i].ExecUnderLockToCompletion(ctx, stmt); err != nil {
+			if err := locks[i].ExecUnderLock(context.WithoutCancel(ctx), stmt); err != nil {
 				if dbconn.IsOutcomeUnknown(err) {
 					return fmt.Errorf("%w: reverse cutover: retire target %d table %q, outcome unknown: %w",
 						status.ErrOwnershipAmbiguous, i, t.TableName, err)

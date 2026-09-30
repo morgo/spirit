@@ -273,9 +273,11 @@ func TestTableLockCleanup(t *testing.T) {
 				cleanupCtx, cancelCleanup = context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
 				defer cancelCleanup()
 			case "cancel_inflight_query":
-				queryCtx, cancelQuery := context.WithTimeout(t.Context(), 100*time.Millisecond)
-				err = lock.ExecUnderLock(queryCtx, "SELECT SLEEP(10)")
-				cancelQuery()
+				// A cancel does not interrupt a started statement; the
+				// completion bound does.
+				lock.completionTimeout = 100 * time.Millisecond
+				err = lock.ExecUnderLock(t.Context(), "SELECT SLEEP(10)")
+				require.ErrorIs(t, err, ErrStatementOutcomeUnknown)
 				require.ErrorIs(t, err, context.DeadlineExceeded)
 			case "lost_connection":
 				_, err = tt.DB.ExecContext(t.Context(), fmt.Sprintf("KILL CONNECTION %d", before))
@@ -375,11 +377,11 @@ func TestTableLockCloseDuringExecUnderLock(t *testing.T) {
 	require.Zero(t, db.Stats().InUse)
 }
 
-// TestExecUnderLockToCompletion checks that a statement started under the lock
-// is not interrupted by a cancel of the caller's context (issue #1338), and
-// that a statement still running when the completion bound expires is reported
-// as having an unknown outcome.
-func TestExecUnderLockToCompletion(t *testing.T) {
+// TestExecUnderLockCancellation checks that a statement started under the lock
+// is not interrupted by a cancel of the caller's context (issue #1338), that no
+// statement starts after a cancel, and that a statement still running when the
+// completion bound expires is reported as having an unknown outcome.
+func TestExecUnderLockCancellation(t *testing.T) {
 	cfg := testConfig()
 	cfg.ForceKill = false
 
@@ -396,15 +398,16 @@ func TestExecUnderLockToCompletion(t *testing.T) {
 		timer := time.AfterFunc(200*time.Millisecond, cancel)
 		defer timer.Stop()
 		start := time.Now()
-		err = lock.ExecUnderLockToCompletion(ctx, "INSERT INTO tablelock_tocompletion (id, colb) SELECT 1, SLEEP(1)")
-		require.NoError(t, err, "the statement must finish although ctx was cancelled while it ran")
-		require.ErrorIs(t, ctx.Err(), context.Canceled)
-		require.GreaterOrEqual(t, time.Since(start), time.Second)
+		err = lock.ExecUnderLock(ctx,
+			"INSERT INTO tablelock_tocompletion (id, colb) SELECT 1, SLEEP(1)",
+			"INSERT INTO tablelock_tocompletion (id, colb) VALUES (2, 2)")
+		require.ErrorIs(t, err, context.Canceled, "the second statement must not start after the cancel")
+		require.GreaterOrEqual(t, time.Since(start), time.Second, "the first statement must finish although ctx was cancelled while it ran")
 		require.NoError(t, lock.Close(ctx))
 
 		var count int
 		require.NoError(t, tt.DB.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM tablelock_tocompletion").Scan(&count))
-		require.Equal(t, 1, count, "the statement's write must be committed")
+		require.Equal(t, 1, count, "only the first statement's write must be committed")
 	})
 
 	t.Run("completion bound expires", func(t *testing.T) {
@@ -416,7 +419,7 @@ func TestExecUnderLockToCompletion(t *testing.T) {
 		require.NoError(t, err)
 		lock.completionTimeout = 200 * time.Millisecond
 
-		err = lock.ExecUnderLockToCompletion(t.Context(), "DO SLEEP(2)")
+		err = lock.ExecUnderLock(t.Context(), "DO SLEEP(2)")
 		require.ErrorIs(t, err, ErrStatementOutcomeUnknown)
 		require.True(t, IsOutcomeUnknown(err))
 		require.False(t, IsOutcomeUnknown(context.Canceled), "a cancel before the statement is sent is conclusive")

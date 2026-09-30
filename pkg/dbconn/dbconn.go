@@ -152,7 +152,7 @@ func IsConnectionLossError(err error) bool {
 
 // IsOutcomeUnknown reports whether err leaves the outcome of the statement
 // unknown: the connection was lost (see IsConnectionLossError), or
-// TableLock.ExecUnderLockToCompletion stopped waiting for the reply
+// TableLock.ExecUnderLock stopped waiting for the reply
 // (ErrStatementOutcomeUnknown). The caller must check the server state before
 // it treats the statement as failed.
 func IsOutcomeUnknown(err error) bool {

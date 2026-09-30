@@ -356,12 +356,14 @@ func (c *CutOver) stopSourceFeeds() {
 // failure is wrapped with errRenameRollbackFailed because the sources are
 // then left partially renamed and a retry of the full rename cannot succeed.
 //
-// The renames and rollbacks run to completion even if ctx is cancelled
-// (TableLock.ExecUnderLockToCompletion). By this point the traffic switch may
-// have run, and the locks are the only fence against straggler writes. A
-// cancel that interrupted a rename would leave its outcome unknown, and one
-// that interrupted a rollback would leave the sources partially renamed.
+// The renames and rollbacks run even if ctx is cancelled: they are issued on
+// context.WithoutCancel(ctx), and TableLock.ExecUnderLock waits for each
+// statement it starts. By this point the traffic switch may have run, and the
+// locks are the only fence against straggler writes. A cancel that stopped a
+// rename would leave the source serving, and one that stopped a rollback would
+// leave the sources partially renamed.
 func (c *CutOver) renameAllSources(ctx context.Context, sourceLocks []*dbconn.TableLock) error {
+	ctx = context.WithoutCancel(ctx)
 	var completedRenames []int
 	for i, src := range c.sources {
 		renameFragments := make([]string, 0, len(src.Tables))
@@ -372,7 +374,7 @@ func (c *CutOver) renameAllSources(ctx context.Context, sourceLocks []*dbconn.Ta
 			)
 		}
 		renameStatement := "RENAME TABLE " + strings.Join(renameFragments, ", ")
-		if err := sourceLocks[i].ExecUnderLockToCompletion(ctx, renameStatement); err != nil {
+		if err := sourceLocks[i].ExecUnderLock(ctx, renameStatement); err != nil {
 			// Rollback completed renames. Log failures since callers need to know
 			// if rollback was incomplete for manual intervention.
 			var rollbackErrors []string
@@ -385,7 +387,7 @@ func (c *CutOver) renameAllSources(ctx context.Context, sourceLocks []*dbconn.Ta
 					)
 				}
 				undoStatement := "RENAME TABLE " + strings.Join(undoFragments, ", ")
-				if undoErr := sourceLocks[j].ExecUnderLockToCompletion(ctx, undoStatement); undoErr != nil {
+				if undoErr := sourceLocks[j].ExecUnderLock(ctx, undoStatement); undoErr != nil {
 					c.logger.Error("rollback rename failed", "source", j, "error", undoErr)
 					rollbackErrors = append(rollbackErrors, fmt.Sprintf("source %d: %v", j, undoErr))
 				}

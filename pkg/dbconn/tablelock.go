@@ -17,14 +17,14 @@ import (
 
 const tableUnlockTimeout = 30 * time.Second
 
-// lockedStatementCompletionMargin is how long ExecUnderLockToCompletion waits
-// for a statement beyond the session's lock_wait_timeout. The server reports a
+// lockedStatementCompletionMargin is how long ExecUnderLock waits for a
+// statement beyond the session's lock_wait_timeout. The server reports a
 // metadata lock wait as ER_LOCK_WAIT_TIMEOUT after lock_wait_timeout, and that
 // error is conclusive, so the client-side bound must be longer.
 const lockedStatementCompletionMargin = 30 * time.Second
 
-// ErrStatementOutcomeUnknown marks a statement that ExecUnderLockToCompletion
-// sent to the server but stopped waiting for. The server may have committed
+// ErrStatementOutcomeUnknown marks a statement that ExecUnderLock sent to the
+// server but stopped waiting for. The server may have committed
 // it: the caller must check the server state before it acts on the failure.
 var ErrStatementOutcomeUnknown = errors.New("statement outcome unknown")
 
@@ -33,7 +33,7 @@ type TableLock struct {
 	mu       sync.Mutex
 	lockConn *sql.Conn
 	logger   *slog.Logger
-	// completionTimeout bounds a statement run by ExecUnderLockToCompletion.
+	// completionTimeout bounds each statement run by ExecUnderLock.
 	completionTimeout time.Duration
 }
 
@@ -134,7 +134,21 @@ func (s *TableLock) DB() *sql.DB {
 	return s.db
 }
 
-// ExecUnderLock executes a set of statements under a table lock.
+// ExecUnderLock executes statements on the locking session, in order.
+//
+// It does not start a statement once ctx is done. A statement it has started
+// runs to completion even if ctx is then cancelled: with a cancellable
+// context, a cancel during the statement would close the connection and
+// return context.Canceled, but the server can still commit the statement, so
+// the caller could not tell whether it took effect (issue #1338). Each
+// statement instead runs on a context detached from ctx's cancellation and
+// bounded by the session's lock_wait_timeout plus
+// lockedStatementCompletionMargin. If that bound expires, the error wraps
+// ErrStatementOutcomeUnknown.
+//
+// A caller that must run its statements even after a cancel, such as the
+// rename that retires a source after a traffic switch, passes
+// context.WithoutCancel(ctx).
 func (s *TableLock) ExecUnderLock(ctx context.Context, stmts ...string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -145,36 +159,21 @@ func (s *TableLock) ExecUnderLock(ctx context.Context, stmts ...string) error {
 		if stmt == "" {
 			continue
 		}
-		_, err := s.lockConn.ExecContext(ctx, stmt)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		execCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.completionTimeout)
+		_, err := s.lockConn.ExecContext(execCtx, stmt)
+		expired := execCtx.Err() != nil
+		cancel()
 		if err != nil {
+			if expired {
+				return fmt.Errorf("%w: %w", ErrStatementOutcomeUnknown, err)
+			}
 			return err
 		}
 	}
 	return nil
-}
-
-// ExecUnderLockToCompletion runs stmt on the locking session and waits for the
-// server's reply even if ctx is cancelled. Use it for a statement whose outcome
-// the caller must know, such as a cutover RENAME TABLE.
-//
-// With a cancellable context, a cancel that arrives while the statement runs
-// closes the connection and returns context.Canceled, but the server can still
-// commit the statement. The caller then cannot tell whether it took effect.
-// Here the statement runs on a context detached from ctx's cancellation and
-// bounded by the session's lock_wait_timeout plus
-// lockedStatementCompletionMargin. If that bound expires, the error wraps
-// ErrStatementOutcomeUnknown.
-//
-// It does not check ctx before it starts. A caller that must not start the
-// statement after a cancel checks ctx.Err() first.
-func (s *TableLock) ExecUnderLockToCompletion(ctx context.Context, stmt string) error {
-	execCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.completionTimeout)
-	defer cancel()
-	err := s.ExecUnderLock(execCtx, stmt)
-	if err != nil && execCtx.Err() != nil {
-		return fmt.Errorf("%w: %w", ErrStatementOutcomeUnknown, err)
-	}
-	return err
 }
 
 // Close releases the table lock even if the caller's context has expired.

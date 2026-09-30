@@ -378,15 +378,11 @@ func (c *CutOver) executeRenameUnderLock(ctx context.Context, tablesToLock []*ta
 		return err
 	}
 
-	// Do not start the rename after a cancel. Once it has started, let it
-	// finish: a cancel during the statement would close the connection and
-	// report context.Canceled for a rename the server may still commit, so
-	// neither this attempt nor Run could tell whether the tables were swapped.
-	if err := ctx.Err(); err != nil {
-		return err
-	}
+	// ExecUnderLock does not start the rename after a cancel, and lets it
+	// finish once started, so this attempt always knows whether the tables
+	// were swapped unless the completion bound expires.
 	renameStatement := "RENAME TABLE " + strings.Join(renameFragments, ", ")
-	if err := tableLock.ExecUnderLockToCompletion(ctx, renameStatement); err != nil {
+	if err := tableLock.ExecUnderLock(ctx, renameStatement); err != nil {
 		return err
 	}
 	// The tables are swapped and the lock is still held, so no application
