@@ -150,6 +150,15 @@ func IsConnectionLossError(err error) bool {
 	}
 }
 
+// IsOutcomeUnknown reports whether err leaves the outcome of the statement
+// unknown: the connection was lost (see IsConnectionLossError), or
+// TableLock.ExecUnderLockToCompletion stopped waiting for the reply
+// (ErrStatementOutcomeUnknown). The caller must check the server state before
+// it treats the statement as failed.
+func IsOutcomeUnknown(err error) bool {
+	return IsConnectionLossError(err) || errors.Is(err, ErrStatementOutcomeUnknown)
+}
+
 // UnsafeWarningError reports a warning that MySQL raised on a statement Spirit
 // executed without error, and that Spirit treats as fatal. Statements such as
 // INSERT IGNORE succeed while discarding rows, so the warning is the only

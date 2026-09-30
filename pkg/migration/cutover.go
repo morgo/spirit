@@ -25,6 +25,10 @@ const (
 	// the source of contention time to clear.
 	cutoverInitialBackoff = 100 * time.Millisecond
 	cutoverMaxBackoff     = 10 * time.Second
+	// renameVerifyTimeout bounds each check of whether the cutover rename
+	// committed. The check runs on a context detached from the run's, so it
+	// can still read the server state after the run has been cancelled.
+	renameVerifyTimeout = 30 * time.Second
 )
 
 type CutOver struct {
@@ -43,10 +47,14 @@ type CutOver struct {
 	// client read the OK packet.
 	testInjectRenameError error
 	// testAfterRenameError is a test-only seam that runs immediately before
-	// testInjectRenameError is returned. It lets a test make the subsequent
-	// ownership verification unavailable, which is the state that separates
-	// "the cutover failed" from "we cannot tell who owns the table".
+	// testInjectRenameError is returned. It lets a test cancel the run while
+	// the rename's outcome is unknown.
 	testAfterRenameError func()
+	// testRenameCompletedError is a test-only seam: when non-nil,
+	// renameCompleted returns it instead of reading the server state. It makes
+	// the ownership verification unavailable, which is the state that
+	// separates "the cutover failed" from "we cannot tell who owns the table".
+	testRenameCompletedError error
 }
 
 // errCutoverRefused marks a cutover attempt refused by a check that ran under
@@ -109,12 +117,13 @@ func (c *CutOver) Run(ctx context.Context) error {
 	// than just whatever happened on the last try.
 	var attemptErrs []error
 	backoff := cutoverInitialBackoff
-	// renameMayHaveCommitted is set when an attempt fails with a
-	// connection-loss error. RENAME TABLE is atomic server-side, but if the
-	// connection dies after the server commits the rename and before the
-	// client reads the OK packet, the client observes a connection error for
-	// a rename that actually succeeded. Once set, every subsequent decision
-	// point first verifies the server state instead of blindly retrying.
+	// renameMayHaveCommitted is set when an attempt fails with an error that
+	// leaves the rename's outcome unknown (dbconn.IsOutcomeUnknown). RENAME
+	// TABLE is atomic server-side, but if the connection dies after the server
+	// commits the rename and before the client reads the OK packet, the client
+	// observes an error for a rename that actually succeeded. Once set, every
+	// subsequent decision point, including a return because ctx is done, first
+	// verifies the server state instead of blindly retrying.
 	renameMayHaveCommitted := false
 	// renameStateUnverified is set when an ambiguous attempt could not be
 	// resolved because the *verification* itself failed. A verification that
@@ -133,9 +142,18 @@ func (c *CutOver) Run(ctx context.Context) error {
 		}
 		return errors.Join(all...)
 	}
+	// cancelled returns for a done ctx. If an earlier attempt's rename may
+	// have committed, it checks first: a cancel must not turn a committed
+	// cutover into a reported failure.
+	cancelled := func() error {
+		if renameMayHaveCommitted && confirm() {
+			return nil
+		}
+		return fail(ctx.Err())
+	}
 	for i := range max(1, c.dbConfig.MaxRetries) {
 		if ctx.Err() != nil {
-			return fail(ctx.Err())
+			return cancelled()
 		}
 		if i > 0 {
 			// Exponential backoff between attempts. Without this a
@@ -146,7 +164,7 @@ func (c *CutOver) Run(ctx context.Context) error {
 			select {
 			case <-ctx.Done():
 				timer.Stop()
-				return fail(ctx.Err())
+				return cancelled()
 			case <-timer.C:
 			}
 			backoff *= 2
@@ -189,11 +207,12 @@ func (c *CutOver) Run(ctx context.Context) error {
 				c.logger.Error("cutover refused under the table lock", "error", err.Error())
 				return fail()
 			}
-			if dbconn.IsConnectionLossError(err) {
-				// Ambiguous failure: the connection died, so the client
-				// cannot know whether the server committed the rename before
-				// the OK packet was lost. Verify the actual server state on a
-				// fresh connection before treating this as a failure.
+			if dbconn.IsOutcomeUnknown(err) {
+				// Ambiguous failure: the connection died, or the client
+				// stopped waiting for the reply, so the client cannot know
+				// whether the server committed the rename. Verify the actual
+				// server state on a fresh connection before treating this as
+				// a failure.
 				// Deterministic SQL errors (lock wait timeout, deadlock, ...)
 				// deliberately skip this: for those the server positively
 				// reported the statement failed, so the normal retry path is
@@ -224,13 +243,20 @@ func (c *CutOver) Run(ctx context.Context) error {
 }
 
 // confirmRenameCompleted wraps renameCompleted with logging for use in the
-// retry loop after an ambiguous connection-loss failure. completed is true
-// only if the server-side state proves the cutover rename was committed.
-// verified reports whether the server state could be read at all: when it is
-// false the outcome of the dying rename is still unknown, which is what makes
-// a subsequent failure ownership-ambiguous rather than merely failed.
+// retry loop after an ambiguous failure. completed is true only if the
+// server-side state proves the cutover rename was committed. verified reports
+// whether the server state could be read at all: when it is false the outcome
+// of the dying rename is still unknown, which is what makes a subsequent
+// failure ownership-ambiguous rather than merely failed.
+//
+// The check runs on a context detached from ctx's cancellation, bounded by
+// renameVerifyTimeout. A cancelled run must still learn whether its rename
+// committed; with ctx itself the check would fail at once and report the
+// outcome as unknown.
 func (c *CutOver) confirmRenameCompleted(ctx context.Context) (completed, verified bool) {
-	completed, err := c.renameCompleted(ctx)
+	verifyCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), renameVerifyTimeout)
+	defer cancel()
+	completed, err := c.renameCompleted(verifyCtx)
 	if err != nil {
 		c.logger.Warn("could not verify whether the cutover rename was committed after a connection failure; continuing to retry",
 			"error", err.Error())
@@ -265,6 +291,9 @@ func (c *CutOver) confirmRenameCompleted(ctx context.Context) (completed, verifi
 // operators renaming or dropping tables out from under a running migration
 // are not a supported scenario.
 func (c *CutOver) renameCompleted(ctx context.Context) (bool, error) {
+	if c.testRenameCompletedError != nil {
+		return false, c.testRenameCompletedError
+	}
 	for _, cfg := range c.config {
 		// The RENAME TABLE statement uses schema-unqualified names, resolved
 		// against the connection's default database — the schema the
@@ -349,8 +378,15 @@ func (c *CutOver) executeRenameUnderLock(ctx context.Context, tablesToLock []*ta
 		return err
 	}
 
+	// Do not start the rename after a cancel. Once it has started, let it
+	// finish: a cancel during the statement would close the connection and
+	// report context.Canceled for a rename the server may still commit, so
+	// neither this attempt nor Run could tell whether the tables were swapped.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	renameStatement := "RENAME TABLE " + strings.Join(renameFragments, ", ")
-	if err := tableLock.ExecUnderLock(ctx, renameStatement); err != nil {
+	if err := tableLock.ExecUnderLockToCompletion(ctx, renameStatement); err != nil {
 		return err
 	}
 	// The tables are swapped and the lock is still held, so no application

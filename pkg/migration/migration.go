@@ -14,6 +14,7 @@ import (
 	"github.com/block/spirit/pkg/migration/check"
 	"github.com/block/spirit/pkg/statement"
 	"github.com/block/spirit/pkg/table"
+	"github.com/block/spirit/pkg/throttler"
 	"github.com/block/spirit/pkg/utils"
 )
 
@@ -120,6 +121,9 @@ type Migration struct {
 	// useTestCutover is a test-only cutover
 	useTestCutover   bool
 	useTestThrottler bool
+	// testThrottler is a test-only copier throttler. When set it is used in
+	// place of the always-throttled mock that useTestThrottler selects.
+	testThrottler throttler.Throttler
 }
 
 // minPoolSize is the smallest --max-connections a migration can complete on.

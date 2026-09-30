@@ -174,6 +174,56 @@ func TestCutOverSingleSource(t *testing.T) {
 	require.Error(t, err, "t1 should not exist after rename")
 }
 
+// TestCutOverCancelAfterSwitchStillRenamesSource checks that a cancel which
+// arrives after the traffic switch does not stop the source rename (issue
+// #1338). The rename is the only fence against straggler writes to the source
+// once the locks are released, so it runs to completion and the cutover
+// succeeds.
+func TestCutOverCancelAfterSwitchStillRenamesSource(t *testing.T) {
+	srcName, srcDB := testutils.CreateUniqueTestDatabase(t)
+	testutils.RunSQLInDatabase(t, srcName, `CREATE TABLE t1 (
+		id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+		val VARCHAR(255)
+	)`)
+	testutils.RunSQLInDatabase(t, srcName, "INSERT INTO t1 (id, val) VALUES (1, 'a'), (2, 'b')")
+
+	dbConfig := dbconn.NewDBConfig()
+	logger := slog.Default()
+	srcDSN := testutils.DSNForDatabase(srcName)
+	srcConfig, err := mysql.ParseDSN(srcDSN)
+	require.NoError(t, err)
+	replDB, err := dbconn.New(srcDSN, dbConfig)
+	require.NoError(t, err)
+	defer utils.CloseAndLog(replDB)
+	cfg := change.NewClientDefaultConfig()
+	cfg.CancelFunc = func(change.FatalReason) bool { return false }
+	replClient := change.NewBinlogClient(replDB, srcConfig.Addr, srcConfig.User, srcConfig.Passwd, nil, cfg)
+	require.NoError(t, replClient.Start(t.Context()))
+	defer replClient.Close()
+
+	cutoverTbl := table.NewTableInfo(srcDB, srcName, "t1")
+	require.NoError(t, cutoverTbl.SetInfo(t.Context()))
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	cutover, err := NewCutOver([]CutOverSource{{
+		DB:         srcDB,
+		ReplClient: replClient,
+		Tables:     []*table.TableInfo{cutoverTbl},
+	}}, func(context.Context) error {
+		cancel() // the operator stops the move right after the switch
+		return nil
+	}, dbConfig, logger)
+	require.NoError(t, err)
+
+	require.NoError(t, cutover.Run(ctx))
+	require.ErrorIs(t, ctx.Err(), context.Canceled)
+
+	var count int
+	require.NoError(t, srcDB.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM t1_old").Scan(&count))
+	require.Equal(t, 2, count, "t1 must have been renamed to t1_old")
+}
+
 // TestCutOverFuncCalledOnceAcrossRenameRetry verifies that the caller-supplied
 // cutoverFunc (the traffic switch, e.g. a Vitess routing change) is invoked
 // exactly once even when the RENAME TABLE step fails and has to be retried.

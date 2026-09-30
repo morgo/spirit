@@ -355,6 +355,12 @@ func (c *CutOver) stopSourceFeeds() {
 // rolling back the completed renames if a later source fails. A rollback
 // failure is wrapped with errRenameRollbackFailed because the sources are
 // then left partially renamed and a retry of the full rename cannot succeed.
+//
+// The renames and rollbacks run to completion even if ctx is cancelled
+// (TableLock.ExecUnderLockToCompletion). By this point the traffic switch may
+// have run, and the locks are the only fence against straggler writes. A
+// cancel that interrupted a rename would leave its outcome unknown, and one
+// that interrupted a rollback would leave the sources partially renamed.
 func (c *CutOver) renameAllSources(ctx context.Context, sourceLocks []*dbconn.TableLock) error {
 	var completedRenames []int
 	for i, src := range c.sources {
@@ -366,7 +372,7 @@ func (c *CutOver) renameAllSources(ctx context.Context, sourceLocks []*dbconn.Ta
 			)
 		}
 		renameStatement := "RENAME TABLE " + strings.Join(renameFragments, ", ")
-		if err := sourceLocks[i].ExecUnderLock(ctx, renameStatement); err != nil {
+		if err := sourceLocks[i].ExecUnderLockToCompletion(ctx, renameStatement); err != nil {
 			// Rollback completed renames. Log failures since callers need to know
 			// if rollback was incomplete for manual intervention.
 			var rollbackErrors []string
@@ -379,7 +385,7 @@ func (c *CutOver) renameAllSources(ctx context.Context, sourceLocks []*dbconn.Ta
 					)
 				}
 				undoStatement := "RENAME TABLE " + strings.Join(undoFragments, ", ")
-				if undoErr := sourceLocks[j].ExecUnderLock(ctx, undoStatement); undoErr != nil {
+				if undoErr := sourceLocks[j].ExecUnderLockToCompletion(ctx, undoStatement); undoErr != nil {
 					c.logger.Error("rollback rename failed", "source", j, "error", undoErr)
 					rollbackErrors = append(rollbackErrors, fmt.Sprintf("source %d: %v", j, undoErr))
 				}
@@ -388,9 +394,9 @@ func (c *CutOver) renameAllSources(ctx context.Context, sourceLocks []*dbconn.Ta
 				return fmt.Errorf("%w: rename failed on source %d and rollback also failed (%s): %w",
 					errRenameRollbackFailed, i, strings.Join(rollbackErrors, "; "), err)
 			}
-			if dbconn.IsConnectionLossError(err) {
-				// The connection died, so the server may have committed this
-				// source's rename before the OK packet was lost. The earlier
+			if dbconn.IsOutcomeUnknown(err) {
+				// The connection died or the client stopped waiting, so the
+				// server may have committed this source's rename. The earlier
 				// sources have definitively been rolled back, but this one's
 				// state is unknown: retrying the whole rename could retire a
 				// source that is already retired.
