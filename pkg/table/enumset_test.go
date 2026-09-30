@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/block/spirit/pkg/testutils"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -97,4 +99,30 @@ func TestDecodeSetBitmask64Elements(t *testing.T) {
 	got, err = decodeSetBitmask(int64(1)|bit63, elements)
 	require.NoError(t, err)
 	require.Equal(t, "e0,e63", got)
+}
+
+// TestDecodeBinlogRowEscapedMembers decodes ENUM and SET members that
+// information_schema reports escaped in column_type (a backslash as \\, a
+// newline as \n). The decoder wrote the escaped text: MySQL rejected it as not
+// a member (warning 1265), or took a different member that the escaped text
+// happens to spell, as ordinal 1 below did with member 2.
+func TestDecodeBinlogRowEscapedMembers(t *testing.T) {
+	tt := testutils.NewTestTable(t, "enumset_escaped_decode", `CREATE TABLE enumset_escaped_decode (
+		id INT NOT NULL PRIMARY KEY,
+		e ENUM('a\\b','a\\\\b','nl\nx','cr\rx','nul\0x','q''x') NOT NULL,
+		s SET('a\\b','x','nl\nx') NOT NULL
+	) DEFAULT CHARSET=utf8mb4`)
+
+	ti := NewTableInfo(tt.DB, "test", "enumset_escaped_decode")
+	require.NoError(t, ti.SetInfo(t.Context()))
+	tp, ok := ti.GetColumnMySQLType("e")
+	require.True(t, ok)
+	require.Equal(t, `enum('a\\b','a\\\\b','nl\nx','cr\rx','nul\0x','q''x')`, tp)
+
+	want := []string{`a\b`, `a\\b`, "nl\nx", "cr\rx", "nul\x00x", "q'x"}
+	for i, member := range want {
+		row := []any{int32(i), int64(i + 1), int64(5)}
+		require.NoError(t, ti.DecodeBinlogRow(row))
+		assert.Equal(t, []any{int32(i), member, "a\\b,nl\nx"}, row)
+	}
 }

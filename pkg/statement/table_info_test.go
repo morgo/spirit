@@ -87,3 +87,31 @@ func TestToTableInfoEscapedEnumValues(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "enum('a,b','it''s','plain')", tp)
 }
+
+// TestToTableInfoEscapedEnumSetMembers renders ENUM and SET members the way
+// information_schema reports them in column_type, which escapes a backslash,
+// newline, carriage return and NUL and doubles a quote, and reads them back.
+func TestToTableInfoEscapedEnumSetMembers(t *testing.T) {
+	ct, err := ParseCreateTable("CREATE TABLE `t` (\n" +
+		"  `id` int NOT NULL,\n" +
+		"  `e` enum('a\\\\b','nl\\nx','cr\\rx','nul\\0x','q''x','tab\tx') NOT NULL,\n" +
+		"  `s` set('a\\\\b','x') NOT NULL,\n" +
+		"  PRIMARY KEY (`id`)\n" +
+		") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4")
+	require.NoError(t, err)
+
+	ti, err := ct.ToTableInfo("mydb")
+	require.NoError(t, err)
+	tp, ok := ti.GetColumnMySQLType("e")
+	require.True(t, ok)
+	assert.Equal(t, "enum('a\\\\b','nl\\nx','cr\\rx','nul\\0x','q''x','tab\tx')", tp)
+
+	row := []any{int32(1), int64(1), int64(3)}
+	require.NoError(t, ti.DecodeBinlogRow(row))
+	assert.Equal(t, []any{int32(1), `a\b`, `a\b,x`}, row)
+	for ordinal, member := range []string{"nl\nx", "cr\rx", "nul\x00x", "q'x", "tab\tx"} {
+		row = []any{int32(1), int64(ordinal + 2), int64(2)}
+		require.NoError(t, ti.DecodeBinlogRow(row))
+		assert.Equal(t, member, row[1])
+	}
+}

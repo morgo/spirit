@@ -23,10 +23,12 @@ func IsEnumOrSetType(mysqlType string) bool {
 }
 
 // ParseEnumSetElements extracts the element values from a MySQL type string
-// like "enum('a','b','c')" or "set('x','y','z')".
+// like "enum('a','b','c')" or "set('x','y','z')", as information_schema
+// reports it in COLUMNS.COLUMN_TYPE.
 //
 // It uses a small state machine to correctly handle values containing
-// commas and escaped (doubled) single quotes within enum/set elements.
+// commas and the characters MySQL escapes in that text (see
+// QuoteEnumSetMember).
 //
 // It is fail-closed: any unexpected characters or malformed structure returns
 // an error so that callers (safety checks, the binlog ENUM/SET decoder) are
@@ -53,11 +55,43 @@ func ParseEnumSetElements(mysqlType string) ([]string, error) {
 	return parseSQLQuotedList(inner)
 }
 
+// QuoteEnumSetMember renders an ENUM or SET member the way MySQL writes it in
+// information_schema.COLUMNS.COLUMN_TYPE (and SHOW CREATE TABLE): in single
+// quotes, with a single quote doubled and a backslash, newline, carriage
+// return and NUL backslash-escaped. No other character is escaped: a tab,
+// Ctrl-Z, backspace or double quote is written as itself. This is MySQL's
+// append_unescaped(), and parseSQLQuotedList decodes exactly these escapes.
+func QuoteEnumSetMember(member string) string {
+	var buf strings.Builder
+	buf.Grow(len(member) + 2)
+	buf.WriteByte('\'')
+	for i := 0; i < len(member); i++ {
+		switch c := member[i]; c {
+		case 0:
+			buf.WriteString(`\0`)
+		case '\n':
+			buf.WriteString(`\n`)
+		case '\r':
+			buf.WriteString(`\r`)
+		case '\\':
+			buf.WriteString(`\\`)
+		case '\'':
+			buf.WriteString(`''`)
+		default:
+			buf.WriteByte(c)
+		}
+	}
+	buf.WriteByte('\'')
+	return buf.String()
+}
+
 // parseSQLQuotedList parses a comma-separated list of single-quoted SQL
-// strings, correctly handling embedded commas and escaped (doubled) quotes.
+// strings, correctly handling embedded commas and the escapes
+// QuoteEnumSetMember writes.
 //
-// It is fail-closed: any unexpected character outside of quotes causes the
-// parser to return an error rather than silently producing a partial result.
+// It is fail-closed: any unexpected character outside of quotes, and any
+// backslash escape MySQL does not write in COLUMN_TYPE, causes the parser to
+// return an error rather than silently producing a partial or wrong result.
 func parseSQLQuotedList(s string) ([]string, error) {
 	var elems []string
 	i := 0
@@ -103,6 +137,25 @@ func parseSQLQuotedList(s string) ([]string, error) {
 					i++
 					closed = true
 					break
+				}
+				if s[i] == '\\' {
+					if i+1 >= n {
+						return nil, fmt.Errorf("unterminated escape sequence at position %d in quoted list %q", i, s)
+					}
+					switch s[i+1] {
+					case '0':
+						buf.WriteByte(0)
+					case 'n':
+						buf.WriteByte('\n')
+					case 'r':
+						buf.WriteByte('\r')
+					case '\\':
+						buf.WriteByte('\\')
+					default:
+						return nil, fmt.Errorf("unexpected escape sequence %q at position %d in quoted list %q", s[i:i+2], i, s)
+					}
+					i += 2
+					continue
 				}
 				buf.WriteByte(s[i])
 				i++
