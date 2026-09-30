@@ -54,6 +54,8 @@ func TestCharDefaultSpacesConverge(t *testing.T) {
 		{"a hex literal of spaces", "(b char(4) DEFAULT x'20202020') DEFAULT CHARSET=utf8mb4", "(b char(4) DEFAULT '') DEFAULT CHARSET=utf8mb4"},
 		{"a hex literal longer than the width", "(b char(4) DEFAULT x'61202020202020') DEFAULT CHARSET=utf8mb4", "(b char(4) DEFAULT 'a') DEFAULT CHARSET=utf8mb4"},
 		{"a latin1 hex literal", "(b char(4) CHARACTER SET latin1 DEFAULT x'612020')", "(b char(4) CHARACTER SET latin1 COLLATE latin1_swedish_ci DEFAULT 'a')"},
+		{"a default that is not utf8mb3 is stripped before it is reported as hex", "(b char(4) DEFAULT 'a😀  ') DEFAULT CHARSET=utf8mb4", "(b char(4) DEFAULT 0x61F09F9880) DEFAULT CHARSET=utf8mb4"},
+		{"varchar: a default that is not utf8mb3 is cut before it is reported as hex", "(b varchar(2) DEFAULT 'a😀   ') DEFAULT CHARSET=utf8mb4", "(b varchar(2) DEFAULT 0x61F09F9880) DEFAULT CHARSET=utf8mb4"},
 		{"varchar: a hex literal keeps its spaces", "(b varchar(4) DEFAULT x'612020') DEFAULT CHARSET=utf8mb4", "(b varchar(4) DEFAULT 'a  ') DEFAULT CHARSET=utf8mb4"},
 		{"varchar: a hex literal longer than the width", "(b varchar(4) DEFAULT x'61202020202020') DEFAULT CHARSET=utf8mb4", "(b varchar(4) DEFAULT 'a   ') DEFAULT CHARSET=utf8mb4"},
 		{"varchar: latin1", "(b varchar(4) CHARACTER SET latin1 DEFAULT 'ab    ')", "(b varchar(4) CHARACTER SET latin1 COLLATE latin1_swedish_ci DEFAULT 'ab  ')"},
