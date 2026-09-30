@@ -157,3 +157,23 @@ func readStoredEnumSetMembers(ctx context.Context, db *sql.DB, tableName, column
 	}
 	return members, nil
 }
+
+// MisreportedEnumSetErrorForTable returns TableInfo.MisreportedEnumSetError
+// for the table tableName in db's schema (schemaName names it in errors),
+// reading only its columns and not the rest of what SetInfo reads.
+//
+// It is for a table that exists already on a target, which a caller accepts
+// by comparing its SHOW CREATE TABLE with the source's: both report each
+// member character outside utf8mb3 as '?', so the two can compare equal while
+// storing different members. When neither table misreports a member, the
+// reported members are the stored ones and the comparison is exact.
+func MisreportedEnumSetErrorForTable(ctx context.Context, db *sql.DB, schemaName, tableName string) error {
+	t := NewTableInfo(db, schemaName, tableName)
+	if err := t.setColumns(ctx); err != nil {
+		return err
+	}
+	if err := t.setStoredEnumSetMembers(ctx); err != nil {
+		return err
+	}
+	return t.MisreportedEnumSetError()
+}

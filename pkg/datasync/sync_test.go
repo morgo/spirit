@@ -1714,3 +1714,42 @@ func TestSyncRefusesEnumSetMembersOutsideUTF8MB3(t *testing.T) {
 		"SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = ?", destDB).Scan(&n))
 	require.Zero(t, n, "nothing may be created on the target")
 }
+
+// TestSyncRefusesMisreportedEnumSetTarget: a target table that exists already
+// is accepted by comparing its SHOW CREATE TABLE with the source's. A source
+// member that really is '?' and a target member such as '😀' are both
+// reported as '?', so sync must also examine the target's stored members.
+func TestSyncRefusesMisreportedEnumSetTarget(t *testing.T) {
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	srcDB, destDB := "sync_enum_4byte_tgt_src", "sync_enum_4byte_tgt_dest"
+	for _, db := range []string{srcDB, destDB} {
+		testutils.RunSQL(t, "DROP DATABASE IF EXISTS "+db)
+		testutils.RunSQL(t, "CREATE DATABASE "+db)
+	}
+	t.Cleanup(func() {
+		for _, db := range []string{srcDB, destDB} {
+			testutils.RunSQL(t, "DROP DATABASE IF EXISTS "+db)
+		}
+	})
+	testutils.RunSQL(t, "CREATE TABLE "+srcDB+".t1 (id INT PRIMARY KEY, e ENUM('?','a')) DEFAULT CHARSET=utf8mb4")
+	testutils.RunSQL(t, "INSERT INTO "+srcDB+".t1 VALUES (1, 'a')")
+	testutils.RunSQL(t, "CREATE TABLE "+destDB+".t1 (id INT PRIMARY KEY, e ENUM('😀','a')) DEFAULT CHARSET=utf8mb4")
+
+	src, dest := cfg.Clone(), cfg.Clone()
+	src.DBName, dest.DBName = srcDB, destDB
+	runner, err := NewRunner(&Sync{SourceDSN: src.FormatDSN(), TargetDSN: dest.FormatDSN(), Threads: 1, WriteThreads: 1})
+	require.NoError(t, err)
+	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+	defer cancel()
+	err = runner.Run(ctx)
+	require.NoError(t, runner.Close())
+	require.ErrorContains(t, err, `table t1 already exists on the target (`+destDB+`) but cannot be compared with the source: column "e" of table "t1" is enum('?','a'), but MySQL stores a member with a character outside utf8mb3 there`)
+
+	db, err := sql.Open("block-mysql", cfg.FormatDSN())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+	var n int
+	require.NoError(t, db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM "+destDB+".t1").Scan(&n))
+	require.Zero(t, n, "nothing may be copied into the target")
+}

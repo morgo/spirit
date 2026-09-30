@@ -36,7 +36,9 @@ func init() {
 // An ENUM or SET member with a character outside utf8mb3 is reported as '?'
 // by SHOW CREATE TABLE, which the move replays to create the target table, so
 // the target would not have the member (see
-// table.TableInfo.MisreportedEnumSetError).
+// table.TableInfo.MisreportedEnumSetError). This holds for the tables of every
+// source, not only the first. A target table that exists already is examined
+// by target_state and resume_state instead.
 //
 // Non-memory-comparable PKs (e.g. VARCHAR with a CI collation) are now
 // supported: bufferedMap routes those subscriptions through its FIFO queue
@@ -59,6 +61,16 @@ func tableCompatibilityCheck(ctx context.Context, r Resources, logger *slog.Logg
 		}
 		if err := tbl.MisreportedEnumSetError(); err != nil {
 			return fmt.Errorf("table '%s' cannot be moved: %w", tbl.TableName, err)
+		}
+	}
+	// Every other source is compared with the first by its reported
+	// definition (source_schema_consistency), which cannot tell a misreported
+	// member from a '?', so each source's tables are examined too.
+	for i, src := range r.Sources {
+		for _, tbl := range src.Tables {
+			if err := tbl.MisreportedEnumSetError(); err != nil {
+				return fmt.Errorf("table '%s' on source %d cannot be moved: %w", tbl.TableName, i, err)
+			}
 		}
 	}
 	return nil

@@ -1007,9 +1007,12 @@ func (r *Runner) unsupportedNameError() error {
 // unrecreatableTableError refuses a source table that createTargetTables
 // cannot recreate from its SHOW CREATE TABLE: an ENUM or SET member with a
 // character outside utf8mb3 is reported there as '?', so the target would not
-// have the member (see table.TableInfo.MisreportedEnumSetError). A target
-// that already exists is refused too, since verifyExistingTargetTable
-// compares the same reported definitions and cannot tell the two apart.
+// have the member (see table.TableInfo.MisreportedEnumSetError).
+//
+// verifyExistingTargetTable compares a target that exists already with the
+// source by the same reported definitions, which cannot tell a misreported
+// member from a '?'. This refusal covers the source side of that comparison;
+// createTargetTables examines the target side.
 func (r *Runner) unrecreatableTableError() error {
 	for _, t := range r.sourceTables {
 		if err := t.MisreportedEnumSetError(); err != nil {
@@ -1229,6 +1232,12 @@ func (r *Runner) createTargetTables(ctx context.Context) error {
 			}
 			if err := r.verifyExistingTargetTable(t.TableName, createStmt, targetCreateStmt); err != nil {
 				return err
+			}
+			// verifyExistingTargetTable compares reported definitions, which
+			// cannot tell a misreported ENUM or SET member from a '?'
+			// (see unrecreatableTableError).
+			if err := table.MisreportedEnumSetErrorForTable(ctx, r.target.DB, r.target.Config.DBName, t.TableName); err != nil {
+				return fmt.Errorf("table %s already exists on the target (%s) but cannot be compared with the source: %w", t.TableName, r.target.Config.DBName, err)
 			}
 			r.logger.Info("target table already exists and passed schema verification, skipping creation",
 				"table", t.TableName, "database", r.target.Config.DBName)

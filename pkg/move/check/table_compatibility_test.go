@@ -2,6 +2,7 @@ package check
 
 import (
 	"context"
+	"database/sql"
 	"log/slog"
 	"slices"
 	"testing"
@@ -118,6 +119,33 @@ func TestTableCompatibilityCheckMisreportedEnumSet(t *testing.T) {
 	require.ErrorContains(t, err, `table 'set_4byte' cannot be moved: column "s" of table "set_4byte" is set('x','?')`)
 
 	require.NoError(t, tableCompatibilityCheck(t.Context(), Resources{SourceTables: []*table.TableInfo{qmark}}, slog.Default()))
+}
+
+// TestTableCompatibilityCheckMisreportedEnumSetOnLaterSource checks that a
+// misreported member is refused on every source, not only the first. Each
+// source is compared with the first by SHOW CREATE TABLE, where
+// ENUM('?','a') and ENUM('😀','a') are both reported as enum('?','a').
+func TestTableCompatibilityCheckMisreportedEnumSetOnLaterSource(t *testing.T) {
+	name0, db0 := createW3DDatabase(t)
+	name1, db1 := createW3DDatabase(t)
+	testutils.RunSQLInDatabase(t, name0, "CREATE TABLE t (id INT NOT NULL PRIMARY KEY, e ENUM('?','a')) DEFAULT CHARSET=utf8mb4")
+	testutils.RunSQLInDatabase(t, name1, "CREATE TABLE t (id INT NOT NULL PRIMARY KEY, e ENUM('😀','a')) DEFAULT CHARSET=utf8mb4")
+	info := func(db *sql.DB, schema string) *table.TableInfo {
+		ti := table.NewTableInfo(db, schema, "t")
+		require.NoError(t, ti.SetInfo(t.Context()))
+		return ti
+	}
+	t0, t1 := info(db0, name0), info(db1, name1)
+
+	r := Resources{
+		Sources:      []SourceResource{{DB: db0, Tables: []*table.TableInfo{t0}}, {DB: db1, Tables: []*table.TableInfo{t1}}},
+		SourceTables: []*table.TableInfo{t0},
+	}
+	err := tableCompatibilityCheck(t.Context(), r, slog.Default())
+	require.ErrorContains(t, err, `table 't' on source 1 cannot be moved: column "e" of table "t" is enum('?','a'), but MySQL stores a member with a character outside utf8mb3 there`)
+
+	r.Sources = r.Sources[:1]
+	require.NoError(t, tableCompatibilityCheck(t.Context(), r, slog.Default()))
 }
 
 // TestTableCompatibilityCheckRegisteredForResume pins that a resume from

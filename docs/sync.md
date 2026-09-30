@@ -61,8 +61,9 @@ source privileges depend on the change feed:
 - No `ENUM` or `SET` member with a character outside `utf8mb3` (such as a
   4-byte emoji). MySQL reports each such character as `?` in `SHOW CREATE
   TABLE`, which sync replays to create the target table, so sync refuses the
-  table. Reading the members MySQL stores needs `CREATE TEMPORARY TABLES` on
-  the source schema whenever a member is reported with a `?`.
+  table. A target table that exists already and stores such a member is
+  refused too. Reading the members MySQL stores needs `CREATE TEMPORARY
+  TABLES` on the schema whenever a member is reported with a `?`.
 
 A source that cannot grant the built-in feed privileges must use a
 programmatically injected `change.Source`; the CLI no longer has a mode that
