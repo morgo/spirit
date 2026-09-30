@@ -1239,3 +1239,80 @@ func TestDiffIntegrationBinaryDefaultBytesHexConverges(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, stmts, "re-diff after applying the ALTER must converge")
 }
+
+// TestDiffIntegrationEnumSetDefault verifies that a string default on an enum
+// or set column matches its live form, which MySQL reports as the member text
+// the default names: trailing spaces stripped (enum('a','b') DEFAULT 'b ' is
+// reported as DEFAULT 'b'), the member's own case on a _ci collation, and a set
+// default's members once each in definition order. Without the conversion the
+// diff emits a MODIFY that MySQL rewrites to the member again, on every run.
+func TestDiffIntegrationEnumSetDefault(t *testing.T) {
+	for _, tc := range []struct{ name, ddl, live string }{
+		{"diff_enumdef_trailing", "CREATE TABLE diff_enumdef_trailing (id int NOT NULL, b enum('a','b') DEFAULT 'b ', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` enum('a','b') DEFAULT 'b'"},
+		{"diff_enumdef_not_null", "CREATE TABLE diff_enumdef_not_null (id int NOT NULL, b enum('a','b') NOT NULL DEFAULT 'b   ', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` enum('a','b') NOT NULL DEFAULT 'b'"},
+		{"diff_enumdef_member_spaces", "CREATE TABLE diff_enumdef_member_spaces (id int NOT NULL, b enum('a','b ') DEFAULT 'b  ', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` enum('a','b') DEFAULT 'b'"},
+		{"diff_enumdef_empty_member", "CREATE TABLE diff_enumdef_empty_member (id int NOT NULL, b enum('','b') DEFAULT ' ', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` enum('','b') DEFAULT ''"},
+		{"diff_enumdef_introducer", "CREATE TABLE diff_enumdef_introducer (id int NOT NULL, b enum('a','b') DEFAULT _latin1'b ', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` enum('a','b') DEFAULT 'b'"},
+		{"diff_enumdef_no_pad", "CREATE TABLE diff_enumdef_no_pad (id int NOT NULL, b enum('a','b') COLLATE utf8mb4_0900_bin DEFAULT 'b ', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` enum('a','b') CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin DEFAULT 'b'"},
+		{"diff_enumdef_utf16", "CREATE TABLE diff_enumdef_utf16 (id int NOT NULL, b enum('a','b') CHARACTER SET utf16 DEFAULT 'b ', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` enum('a','b') CHARACTER SET utf16 COLLATE utf16_general_ci DEFAULT 'b'"},
+		{"diff_enumdef_case", "CREATE TABLE diff_enumdef_case (id int NOT NULL, b enum('a','B') DEFAULT 'b ', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` enum('a','B') DEFAULT 'B'"},
+		{"diff_enumdef_case_general_ci", "CREATE TABLE diff_enumdef_case_general_ci (id int NOT NULL, b enum('a','B') COLLATE utf8mb4_general_ci DEFAULT 'b', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` enum('a','B') CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT 'B'"},
+		{"diff_enumdef_case_latin1", "CREATE TABLE diff_enumdef_case_latin1 (id int NOT NULL, b enum('a','B') DEFAULT 'b', PRIMARY KEY (id)) DEFAULT CHARSET=latin1", "`b` enum('a','B') DEFAULT 'B'"},
+		{"diff_enumdef_case_non_ascii", "CREATE TABLE diff_enumdef_case_non_ascii (id int NOT NULL, b enum('a','Bé') DEFAULT 'bé ', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` enum('a','Bé') DEFAULT 'Bé'"},
+		{"diff_setdef_trailing", "CREATE TABLE diff_setdef_trailing (id int NOT NULL, b set('a','b') DEFAULT 'b ', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` set('a','b') DEFAULT 'b'"},
+		{"diff_setdef_several", "CREATE TABLE diff_setdef_several (id int NOT NULL, b set('a','b') DEFAULT 'a,b ', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` set('a','b') DEFAULT 'a,b'"},
+		{"diff_setdef_order", "CREATE TABLE diff_setdef_order (id int NOT NULL, b set('a','b','c') DEFAULT 'c,A,b,a ', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` set('a','b','c') DEFAULT 'a,b,c'"},
+		{"diff_setdef_duplicate", "CREATE TABLE diff_setdef_duplicate (id int NOT NULL, b set('a','b') DEFAULT 'a,a', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` set('a','b') DEFAULT 'a'"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tt := testutils.NewTestTable(t, tc.name, tc.ddl)
+			liveSQL := showCreateTable(t, tt.DB, tt.Name)
+			require.Contains(t, liveSQL, tc.live, "the reading this case pins")
+			desired, err := ParseCreateTable(tc.ddl)
+			require.NoError(t, err)
+			live, err := ParseCreateTable(liveSQL)
+			require.NoError(t, err)
+			stmts, err := live.Diff(desired, nil)
+			require.NoError(t, err)
+			require.Nil(t, stmts, "an enum or set default must match its live form")
+			stmts, err = desired.Diff(live, nil)
+			require.NoError(t, err)
+			require.Nil(t, stmts, "the live form must match the enum or set default")
+		})
+	}
+}
+
+// TestDiffIntegrationEnumSetDefaultConverges verifies that the MODIFY emitted
+// for an enum or set default written with trailing spaces, another case or out
+// of order round-trips: MySQL applies it and reports the member text it
+// carries, after which a re-diff converges to nil.
+func TestDiffIntegrationEnumSetDefaultConverges(t *testing.T) {
+	tt := testutils.NewTestTable(t, "diff_enumdef_converge",
+		"CREATE TABLE diff_enumdef_converge (id int NOT NULL, e enum('a','B'), s set('a','b','c'), PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci")
+	desired, err := ParseCreateTable(
+		"CREATE TABLE diff_enumdef_converge (id int NOT NULL, e enum('a','B') DEFAULT 'b ', s set('a','b','c') DEFAULT 'c,a ', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci")
+	require.NoError(t, err)
+
+	live, err := ParseCreateTable(showCreateTable(t, tt.DB, tt.Name))
+	require.NoError(t, err)
+	stmts, err := live.Diff(desired, nil)
+	require.NoError(t, err)
+	require.Len(t, stmts, 1)
+	require.Contains(t, stmts[0].Statement, "`e` enum('a','B') NULL DEFAULT 'B'")
+	require.Contains(t, stmts[0].Statement, "`s` set('a','b','c') NULL DEFAULT 'a,c'")
+	testutils.RunSQL(t, stmts[0].Statement)
+
+	var stored string
+	testutils.RunSQL(t, "INSERT INTO diff_enumdef_converge (id) VALUES (1)")
+	require.NoError(t, tt.DB.QueryRowContext(t.Context(), "SELECT CONCAT(e, '/', s) FROM diff_enumdef_converge WHERE id = 1").Scan(&stored))
+	require.Equal(t, "B/a,c", stored)
+
+	liveSQL := showCreateTable(t, tt.DB, tt.Name)
+	require.Contains(t, liveSQL, "`e` enum('a','B') DEFAULT 'B'")
+	require.Contains(t, liveSQL, "`s` set('a','b','c') DEFAULT 'a,c'")
+	live, err = ParseCreateTable(liveSQL)
+	require.NoError(t, err)
+	stmts, err = live.Diff(desired, nil)
+	require.NoError(t, err)
+	require.Nil(t, stmts, "re-diff after applying the ALTER must converge")
+}
