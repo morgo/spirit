@@ -47,6 +47,13 @@ const defaultThreads = 2
 // adds the remaining per-table statistics queries on each source pool.
 const minChecksumPhaseReserve = 6
 
+// postCutoverCleanupTimeout bounds work that must finish after the traffic
+// switch even if the run is cancelled: the reverse-window post-switch hook
+// (see CutOver.algorithmCutover), the reverse cutover's finalization (see
+// reverseWindow.reverseCutover), and the checkpoint drop after a committed
+// cutover (see run). As in migration.
+const postCutoverCleanupTimeout = 2 * time.Minute
+
 var (
 	tableStatUpdateInterval = 5 * time.Minute
 	// checkpointTableName is deliberately distinct from migration's shared
@@ -1648,9 +1655,15 @@ func (r *Runner) Run(ctx context.Context) (retErr error) {
 		return err
 	}
 
-	// Delete checkpoint table from targets[0].
+	// Delete checkpoint table from targets[0]. The cutover has committed, so
+	// the move has succeeded even if ctx is cancelled from here on. Drop on a
+	// detached, bounded context: with ctx, a cancel that arrived during the
+	// cutover would report the committed move as failed and leave a
+	// checkpoint for a move that is already done (issue #1338).
+	cleanupCtx, cancelCleanup := context.WithTimeout(context.WithoutCancel(ctx), postCutoverCleanupTimeout)
+	defer cancelCleanup()
 	tgt0 := &r.targets[0]
-	if err := dbconn.Exec(ctx, tgt0.DB, "DROP TABLE IF EXISTS %n", checkpointTableName); err != nil {
+	if err := dbconn.Exec(cleanupCtx, tgt0.DB, "DROP TABLE IF EXISTS %n", checkpointTableName); err != nil {
 		return err
 	}
 	r.logger.Info("Move operation complete.")
@@ -1921,6 +1934,7 @@ func (r *Runner) checkResources() check.Resources {
 			DB:     r.sources[i].db,
 			Config: r.sources[i].config,
 			DSN:    r.sources[i].dsn,
+			Tables: r.sources[i].tables,
 		}
 	}
 	return check.Resources{
