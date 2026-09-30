@@ -32,6 +32,12 @@ import (
 	"github.com/block/spirit/pkg/utils"
 )
 
+// postCutoverCleanupTimeout bounds the cleanup that runs after the cutover
+// has committed (see run). Each statement's metadata lock wait is already
+// bounded by the session's lock_wait_timeout; this also covers a server that
+// stops responding.
+const postCutoverCleanupTimeout = 2 * time.Minute
+
 // These are really consts, but set to var for testing.
 var (
 	tableStatUpdateInterval = 5 * time.Minute
@@ -133,6 +139,10 @@ type Runner struct {
 	// Correctness evidence from the most recent Run invocation.
 	durableMutation   atomic.Bool
 	terminalOwnership atomic.Uint32
+
+	// testAfterCutover is a test-only seam that runs after the cutover has
+	// committed and before the post-cutover cleanup.
+	testAfterCutover func()
 }
 
 var (
@@ -625,10 +635,23 @@ func (r *Runner) Run(ctx context.Context) (retErr error) {
 			return fmt.Errorf("cutover failed: %w", err)
 		}
 		r.durableMutation.Store(true)
+		if r.testAfterCutover != nil {
+			r.testAfterCutover()
+		}
 		return nil
 	}); err != nil {
 		return err
 	}
+	// The cutover has committed, so the migration has succeeded even if ctx
+	// is cancelled from here on. The cleanup below that decides that outcome
+	// runs on a detached, bounded context: with ctx, a cancel that arrived
+	// during the cutover would fail it, report the committed migration as
+	// failed, and leave a checkpoint that the next run tries to resume from
+	// without a _new table (issue #1338). Dropping _old stays on ctx: it can
+	// be slow on a large table, a cancel should not wait for it, and its
+	// failure is only logged.
+	cleanupCtx, cancelCleanup := context.WithTimeout(context.WithoutCancel(ctx), postCutoverCleanupTimeout)
+	defer cancelCleanup()
 	if !r.migration.SkipDropAfterCutover {
 		for _, change := range r.changes {
 			if err := change.dropOldTable(ctx); err != nil {
@@ -658,13 +681,13 @@ func (r *Runner) Run(ctx context.Context) (retErr error) {
 	)
 	// cleanup all the tables
 	for _, change := range r.changes {
-		if err := change.cleanup(ctx); err != nil {
+		if err := change.cleanup(cleanupCtx); err != nil {
 			return err
 		}
 	}
 	// drop the checkpoint table
 	if r.checkpointTable != nil {
-		if err := r.checkpointTbl().Drop(ctx); err != nil {
+		if err := r.checkpointTbl().Drop(cleanupCtx); err != nil {
 			return err
 		}
 	}
@@ -1255,16 +1278,16 @@ func (r *Runner) setThrottlerOnPhases() {
 // Multiple replica DSNs can be specified as a comma-separated list.
 // This is common logic shared between resume and new migration paths.
 func (r *Runner) setupThrottler(ctx context.Context) error {
-	if r.migration.useTestThrottler {
-		// We are in tests, add a throttler that always throttles.
+	if r.migration.testThrottler != nil {
+		// We are in tests: use the test's throttler (a throttler.Mock).
 		//
 		// Deliberately wired to the copier only, not through
-		// setThrottlerOnPhases. The mock is always-throttled and blocks for a
-		// second per call, so it exists to pace the copy at a known rate.
+		// setThrottlerOnPhases. The mock exists to pace or stall the copy.
 		// Handing it to the checksum as well would add a second per checksum
-		// chunk to every test that uses it — real wall-clock cost, no extra
-		// coverage. Checksum throttling is covered directly in pkg/checksum.
-		r.setThrottler(&throttler.Mock{})
+		// chunk to every test that paces with it — real wall-clock cost, no
+		// extra coverage. Checksum throttling is covered directly in
+		// pkg/checksum.
+		r.setThrottler(r.migration.testThrottler)
 		r.copier.SetThrottler(r.currentThrottler())
 		return r.currentThrottler().Open(ctx)
 	}
