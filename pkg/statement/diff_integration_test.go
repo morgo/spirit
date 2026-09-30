@@ -1102,6 +1102,60 @@ func TestDiffIntegrationBinaryCharsetConverges(t *testing.T) {
 	require.Nil(t, stmts, "re-diff after applying the ALTER must converge")
 }
 
+// A TEXT(M) or BLOB(M) column is stored as the smallest type that holds M
+// bytes, so a table created from those declarations must diff clean against
+// them. Without textBlobLengthNormalizer the diff emits `MODIFY COLUMN ...
+// text` (or blob) against the live tinytext: a real type change on a table
+// created exactly as declared.
+func TestDiffIntegrationTextBlobLengthCreatedAsDeclared(t *testing.T) {
+	const declaredSQL = "CREATE TABLE diff_text_blob_length (" +
+		"id int NOT NULL, " +
+		"a text(0), " +
+		"b blob(0), " +
+		"c blob(100), " +
+		"d text(63), " +
+		"e text(100) CHARACTER SET latin1, " +
+		"f text(16384), " +
+		"g blob(70000), " +
+		"PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci"
+
+	tt := testutils.NewTestTable(t, "diff_text_blob_length", declaredSQL)
+
+	live := showCreateTable(t, tt.DB, tt.Name)
+	require.Contains(t, live, "`a` tinytext,")
+	require.Contains(t, live, "`b` tinyblob,")
+	require.Contains(t, live, "`c` tinyblob,")
+	require.Contains(t, live, "`d` tinytext,")
+	require.Contains(t, live, "`e` tinytext CHARACTER SET latin1")
+	require.Contains(t, live, "`f` mediumtext,")
+	require.Contains(t, live, "`g` mediumblob,")
+
+	stmts := diffLiveTable(t, tt.DB, tt.Name, declaredSQL)
+	require.Nil(t, stmts)
+}
+
+// Changing a column to TEXT(M) or BLOB(M) is a real change: the diff is
+// emitted with the resolved type, MySQL stores it, and a re-diff is clean.
+func TestDiffIntegrationTextBlobLengthConverges(t *testing.T) {
+	tt := testutils.NewTestTable(t, "diff_text_blob_length_change",
+		"CREATE TABLE diff_text_blob_length_change (id int NOT NULL, a varchar(10), b varbinary(10), c text, "+
+			"PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci")
+
+	const targetSQL = "CREATE TABLE diff_text_blob_length_change (id int NOT NULL, a text(0), b blob(100), c text(20000), " +
+		"PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci"
+
+	stmts := diffLiveTable(t, tt.DB, tt.Name, targetSQL)
+	require.Len(t, stmts, 1)
+
+	execStatements(t, tt.DB, stmts)
+	live := showCreateTable(t, tt.DB, tt.Name)
+	require.Contains(t, live, "`a` tinytext,")
+	require.Contains(t, live, "`b` tinyblob,")
+	require.Contains(t, live, "`c` mediumtext,")
+
+	requireConverged(t, tt.DB, tt.Name, targetSQL)
+}
+
 // binaryDefaultHexReason is why the binary and utf8mb4 default tests that read
 // back a non-utf8mb3 default skip before MySQL 8.0.33: earlier servers' SHOW
 // CREATE TABLE replaces each such byte of a binary default, or character of a
