@@ -80,13 +80,12 @@ func TestWriteWaitsForServerAfterCancel(t *testing.T) {
 }
 
 // TestWriteCancelGraceBound checks that a canceled Write still returns once
-// writeCancelGrace has elapsed, even if the server never answers.
+// writeCancelGrace has elapsed if the server never answers, and that the
+// abandoned REPLACE does not commit after Write has returned.
 func TestWriteCancelGraceBound(t *testing.T) {
 	const name = "_ckpt_test_cancel_grace"
-	old := writeCancelGrace
-	writeCancelGrace = 200 * time.Millisecond
-	t.Cleanup(func() { writeCancelGrace = old })
-	db, tbl, _ := blockCheckpointRow(t, name)
+	setWriteCancelGrace(t, 200*time.Millisecond)
+	db, tbl, release := blockCheckpointRow(t, name)
 
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)
@@ -96,8 +95,109 @@ func TestWriteCancelGraceBound(t *testing.T) {
 	cancel()
 	select {
 	case err := <-done:
+		require.ErrorIs(t, err, ErrWriteAbandoned)
 		require.ErrorIs(t, err, context.Canceled)
-	case <-time.After(5 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("canceled Write did not return after writeCancelGrace")
 	}
+	release()
+	requireRowNeverChanges(t, tbl, "old")
+}
+
+// TestWriteDeadlineKillsWrite checks that ctx's deadline still bounds Write,
+// and that the REPLACE it gave up on does not commit later.
+func TestWriteDeadlineKillsWrite(t *testing.T) {
+	const name = "_ckpt_test_deadline"
+	db, tbl, release := blockCheckpointRow(t, name)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- tbl.Write(ctx, Record{Position: "new"}) }()
+	waitForBlockedReplace(t, db, name)
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, ErrWriteAbandoned)
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+	case <-time.After(10 * time.Second):
+		t.Fatal("Write did not return at its deadline")
+	}
+	release()
+	requireRowNeverChanges(t, tbl, "old")
+}
+
+// TestWriteGraceExpiryDoesNotCommitLater covers a REPLACE queued behind a
+// metadata lock. MDL waits run to lock_wait_timeout (30s), not
+// innodb_lock_wait_timeout, so they outlive writeCancelGrace. Once Write gives
+// up, the statement must not commit later.
+func TestWriteGraceExpiryDoesNotCommitLater(t *testing.T) {
+	const name = "_ckpt_test_grace_mdl"
+	setWriteCancelGrace(t, 200*time.Millisecond)
+	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	tbl := NewTable(db, name, Transient)
+	require.NoError(t, tbl.Create(t.Context()))
+	t.Cleanup(func() { _ = tbl.Drop(context.Background()) })
+	require.NoError(t, tbl.Write(t.Context(), Record{Position: "old"}))
+
+	locker, err := db.Conn(t.Context())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = locker.Close() })
+	_, err = locker.ExecContext(t.Context(), "LOCK TABLES `"+name+"` READ")
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- tbl.Write(ctx, Record{Position: "new"}) }()
+	waitForBlockedReplace(t, db, name)
+	cancel()
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, ErrWriteAbandoned)
+	case <-time.After(10 * time.Second):
+		t.Fatal("canceled Write did not return after writeCancelGrace")
+	}
+
+	// Write has returned, so the caller (Runner.Close) has moved on.
+	_, err = locker.ExecContext(t.Context(), "UNLOCK TABLES")
+	require.NoError(t, err)
+	requireRowNeverChanges(t, tbl, "old")
+}
+
+// TestWriteWithCanceledContextDoesNotWrite checks that a Write whose context
+// is already done sends nothing, since nothing is in flight to wait for.
+func TestWriteWithCanceledContextDoesNotWrite(t *testing.T) {
+	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	tbl := NewTable(db, "_ckpt_test_precancel", Transient)
+	require.NoError(t, tbl.Create(t.Context()))
+	t.Cleanup(func() { _ = tbl.Drop(context.Background()) })
+	require.NoError(t, tbl.Write(t.Context(), Record{Position: "old"}))
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	require.ErrorIs(t, tbl.Write(ctx, Record{Position: "new"}), context.Canceled)
+
+	rec, err := tbl.ReadLatest(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, "old", rec.Position)
+}
+
+func setWriteCancelGrace(t *testing.T, d time.Duration) {
+	t.Helper()
+	old := writeCancelGrace
+	writeCancelGrace = d
+	t.Cleanup(func() { writeCancelGrace = old })
+}
+
+// requireRowNeverChanges checks that the checkpoint row keeps position want
+// for long enough that a late commit would have landed.
+func requireRowNeverChanges(t *testing.T, tbl *Table, want string) {
+	t.Helper()
+	require.Never(t, func() bool {
+		rec, err := tbl.ReadLatest(t.Context())
+		return err != nil || rec.Position != want
+	}, 500*time.Millisecond, 20*time.Millisecond, "the abandoned REPLACE committed after Write returned")
 }

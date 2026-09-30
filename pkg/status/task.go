@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"sync"
 	"time"
+
+	"github.com/block/spirit/pkg/checkpoint"
 )
 
 var (
@@ -83,6 +85,12 @@ func continuallyDumpCheckpoint(ctx context.Context, task Task, logger *slog.Logg
 				// so check the context itself — going fatal here would Cancel()
 				// the very task that is shutting us down cleanly.
 				if ctx.Err() != nil || errors.Is(err, context.Canceled) {
+					// An abandoned write was killed, so it is not pending, but
+					// the row may hold the previous checkpoint rather than this
+					// one. Record that, since nothing else will.
+					if errors.Is(err, checkpoint.ErrWriteAbandoned) {
+						logger.Warn("checkpoint write abandoned during shutdown", "error", err)
+					}
 					return
 				}
 				if task.Progress().CurrentState >= CutOver {
