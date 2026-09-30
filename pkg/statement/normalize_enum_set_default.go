@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/block/spirit/pkg/parser/charset"
+	"github.com/block/spirit/pkg/parser/mysql"
 )
 
 func init() { registerNormalizer(enumSetDefaultNormalizer{}) }
@@ -28,7 +29,7 @@ func init() { registerNormalizer(enumSetDefaultNormalizer{}) }
 //	enum('','b') DEFAULT ' '                            -> ''
 //	enum('a','b') COLLATE utf8mb4_0900_bin DEFAULT 'b ' -> 'b'   (NO PAD too)
 //	enum('a','b') CHARACTER SET utf16 DEFAULT 'b '      -> 'b'
-//	enum('a','B') DEFAULT 'b' (any _ci collation)       -> 'B'
+//	enum('a','B') DEFAULT 'b' (utf8mb4_0900_ai_ci)      -> 'B'
 //	enum('a','B') COLLATE utf8mb4_0900_as_cs / _bin DEFAULT 'b' -> error 1067
 //	enum('a','I') COLLATE utf8mb4_tr_0900_ai_ci DEFAULT 'i'     -> error 1067
 //	enum('a','e') DEFAULT 'é' (utf8mb4_0900_ai_ci)      -> 'e'
@@ -43,29 +44,35 @@ func init() { registerNormalizer(enumSetDefaultNormalizer{}) }
 //
 // Modelling the collation in full is out of reach here, so the rule resolves
 // a default only where the answer does not depend on it: a member equal to
-// the stripped default byte for byte, or, on a case-insensitive (_ci)
-// collation, a member that differs from it only in the case of ASCII letters.
-// MySQL rejects an enum or set whose members are duplicates under the
-// collation (error 1291), so at most one member can match and the one found
-// is the one MySQL stores. The Turkish and Azerbaijani collations are not
-// taken to fold case, since there I and i are different letters. A column
-// whose collation the table does not determine is taken to use its charset's
-// default collation, or utf8mb4's when the charset is not determined either,
-// as the server default is; every such default is _ci except latin5's, which
-// is Turkish.
+// the stripped default byte for byte, or, on a collation known to fold ASCII
+// case (see [collationFoldsASCIICase]), a member that differs from it only in
+// the case of ASCII letters. MySQL rejects an enum or set whose members are
+// duplicates under the collation (error 1291), so at most one member can
+// match and the one found is the one MySQL stores. Being _ci is not enough to
+// fold: a tailored collation can compare an ASCII case pair unequal, e.g.
+// utf8mb4_da_0900_ai_ci reads 'AA' as the contraction 'aa' but not 'aA', so
+// enum('aA','aa') DEFAULT 'AA' stores 'aa'.
 //
 // Left alone:
 //
 //   - a column whose charset or collation is binary, where trailing spaces
 //     are data.
+//   - a column whose charset and collation the definition does not determine.
+//     It inherits the database default, which may be binary or case-sensitive.
 //   - a set default of only spaces, which MySQL rejects even though an enum
 //     default of only spaces names the empty member.
+//   - a set default that names the empty member (a member written as an
+//     empty string). SHOW CREATE TABLE reports a set holding only that member
+//     and the empty set alike, as an empty string, so the text cannot say
+//     which one is stored.
 //   - a default that no member matches by the test above: one MySQL rejects,
 //     or one it matches through its collation alone (an accent, a non-ASCII
-//     case pair, an ignorable character). A default written that way keeps
-//     diffing, as it did before this rule.
+//     case pair, an ignorable character, a contraction). A default written
+//     that way keeps diffing, as it did before this rule.
 //   - a numeric or TRUE/FALSE default, which MySQL reads as a member index
 //     (see [booleanKeywordDefaultNormalizer] for how that differs by version).
+//   - a hex or bit literal default (x'62', 0x62, b'1100010'), which MySQL
+//     stores as the member its bytes spell. It keeps diffing, as before.
 //   - an expression default, which MySQL stores as written.
 type enumSetDefaultNormalizer struct{}
 
@@ -78,10 +85,13 @@ func (enumSetDefaultNormalizer) Normalize(ct *CreateTable) *CreateTable {
 			continue
 		}
 		cs, collation := resolvedCharsetCollation(c, ct)
+		if cs == "" && collation == "" {
+			continue // the database default decides; it may be binary or _cs
+		}
 		if cs == charset.CharsetBin || collation == charset.CollationBin {
 			continue // trailing spaces are data
 		}
-		foldCase := collationFoldsASCIICase(cs, collation)
+		foldCase := !selectsBinCollation(c) && collationFoldsASCIICase(cs, collation)
 		value := strings.TrimRight(*c.Default, " ")
 		var resolved string
 		var ok bool
@@ -121,7 +131,7 @@ func matchMember(value string, members []string, foldCase bool) (string, bool) {
 
 // resolveSetDefault returns a stripped set default as MySQL reports it: each
 // member it names once, in definition order, joined by commas. It returns
-// false when any element matches no member.
+// false when any element matches no member, or names the empty member.
 func resolveSetDefault(value string, members []string, foldCase bool) (string, bool) {
 	if value == "" {
 		return "", true
@@ -129,7 +139,7 @@ func resolveSetDefault(value string, members []string, foldCase bool) (string, b
 	named := make(map[string]bool)
 	for elem := range strings.SplitSeq(value, ",") {
 		m, ok := matchMember(elem, members, foldCase)
-		if !ok {
+		if !ok || m == "" {
 			return "", false
 		}
 		named[m] = true
@@ -144,28 +154,54 @@ func resolveSetDefault(value string, members []string, foldCase bool) (string, b
 	return strings.Join(resolved, ","), true
 }
 
-// collationFoldsASCIICase reports whether a collation treats two strings that
-// differ only in the case of ASCII letters as equal. A collation that is not
-// determined is taken to be its charset's default, and a charset that is not
-// determined to be utf8mb4, as the server default is.
+// selectsBinCollation reports whether a column's legacy BINARY attribute
+// selects its charset's _bin collation, which binaryAttributeNormalizer
+// records once it runs. Reading the attribute here keeps the rule's answer the
+// same whichever of the two runs first. A column that declares both a charset
+// and a collation keeps its COLLATE instead (see binaryAttributeNormalizer).
+func selectsBinCollation(c *Column) bool {
+	if c.Raw == nil || !mysql.HasBinaryFlag(c.Raw.Tp.GetFlag()) {
+		return false
+	}
+	if c.Raw.Tp.GetCharset() == charset.CharsetBin {
+		return false
+	}
+	return c.Charset == nil || c.Collation == nil || strings.HasSuffix(strings.ToLower(*c.Collation), "_bin")
+}
+
+// collationFoldsASCIICase reports whether a collation is known to treat two
+// strings that differ only in the case of ASCII letters as equal. A collation
+// that is not determined is taken to be its charset's default.
+//
+// The list names collations that apply no language tailoring to ASCII
+// letters: utf8mb4_0900_ai_ci and utf8mb4_0900_as_ci, latin1_swedish_ci, and
+// the _general_ci, _general_mysql500_ci, _unicode_ci and _unicode_520_ci
+// families. cp866_general_ci (j/J) and latin7_general_ci (t/T) are excluded:
+// they compare a single ASCII case pair unequal. Every other collation is
+// taken not to fold, including the language-tailored ones, whose contractions
+// (Danish aa, Czech ch, Hungarian cs, Croatian lj, ...) and Turkish dotless i
+// break the equivalence. TestDiffIntegrationEnumSetDefaultFoldAllowlist checks
+// the list against every collation on the server.
 func collationFoldsASCIICase(cs, collation string) bool {
 	if collation == "" {
-		if cs == "" {
-			cs = charset.CharsetUTF8MB4
-		}
 		var ok bool
 		if collation, ok = charset.MySQLDefaultCollation(cs); !ok {
 			return false
 		}
 	}
-	collation = strings.ToLower(collation)
-	if !strings.HasSuffix(collation, "_ci") {
+	collation = normalizeCollationName(strings.ToLower(collation))
+	switch collation {
+	case "utf8mb4_0900_ai_ci", "utf8mb4_0900_as_ci", "latin1_swedish_ci":
+		return true
+	case "cp866_general_ci", "latin7_general_ci":
 		return false
 	}
-	// I and i are different letters in Turkish and Azerbaijani.
-	return !strings.Contains(collation, "turkish") &&
-		!strings.Contains(collation, "_tr_") &&
-		!strings.Contains(collation, "_az_")
+	for _, family := range []string{"_general_ci", "_general_mysql500_ci", "_unicode_ci", "_unicode_520_ci"} {
+		if strings.HasSuffix(collation, family) {
+			return true
+		}
+	}
+	return false
 }
 
 // equalFoldASCII reports whether a and b are equal once ASCII letters are

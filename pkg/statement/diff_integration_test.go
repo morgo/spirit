@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"unicode"
 
 	_ "github.com/block/mysql"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -1457,6 +1459,7 @@ func TestDiffIntegrationEnumSetDefault(t *testing.T) {
 		{"diff_setdef_trailing", "CREATE TABLE diff_setdef_trailing (id int NOT NULL, b set('a','b') DEFAULT 'b ', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` set('a','b') DEFAULT 'b'"},
 		{"diff_setdef_several", "CREATE TABLE diff_setdef_several (id int NOT NULL, b set('a','b') DEFAULT 'a,b ', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` set('a','b') DEFAULT 'a,b'"},
 		{"diff_setdef_order", "CREATE TABLE diff_setdef_order (id int NOT NULL, b set('a','b','c') DEFAULT 'c,A,b,a ', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` set('a','b','c') DEFAULT 'a,b,c'"},
+		{"diff_enumdef_binary_attr", "CREATE TABLE diff_enumdef_binary_attr (id int NOT NULL, b enum('a','B') BINARY DEFAULT 'B ', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` enum('a','B') CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT 'B'"},
 		{"diff_setdef_duplicate", "CREATE TABLE diff_setdef_duplicate (id int NOT NULL, b set('a','b') DEFAULT 'a,a', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci", "`b` set('a','b') DEFAULT 'a'"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1510,4 +1513,85 @@ func TestDiffIntegrationEnumSetDefaultConverges(t *testing.T) {
 	stmts, err = live.Diff(desired, nil)
 	require.NoError(t, err)
 	require.Nil(t, stmts, "re-diff after applying the ALTER must converge")
+}
+
+// TestDiffIntegrationEnumDefaultContractionKeepsStoredValue verifies that a
+// default the rule leaves alone because the collation does not fold ASCII case
+// keeps the value MySQL stores for the declared DDL. utf8mb4_da_0900_ai_ci
+// reads 'AA' as the contraction 'aa' and not as 'aA', so the table stores
+// 'aa'; folding the default to the first case-insensitive match would emit a
+// MODIFY to 'aA' that MySQL accepts, changing the stored default silently.
+func TestDiffIntegrationEnumDefaultContractionKeepsStoredValue(t *testing.T) {
+	ddl := "CREATE TABLE diff_enumdef_contraction (id int NOT NULL, b enum('aA','aa') COLLATE utf8mb4_da_0900_ai_ci DEFAULT 'AA', PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci"
+	tt := testutils.NewTestTable(t, "diff_enumdef_contraction", ddl)
+	liveSQL := showCreateTable(t, tt.DB, tt.Name)
+	require.Contains(t, liveSQL, "DEFAULT 'aa'", "the reading this test pins")
+	desired, err := ParseCreateTable(ddl)
+	require.NoError(t, err)
+	live, err := ParseCreateTable(liveSQL)
+	require.NoError(t, err)
+	stmts, err := live.Diff(desired, nil)
+	require.NoError(t, err)
+	for _, s := range stmts {
+		testutils.RunSQL(t, s.Statement)
+	}
+	testutils.RunSQL(t, "INSERT INTO diff_enumdef_contraction (id) VALUES (1)")
+	var stored string
+	require.NoError(t, tt.DB.QueryRowContext(t.Context(), "SELECT CAST(b AS BINARY) FROM diff_enumdef_contraction WHERE id = 1").Scan(&stored))
+	require.Equal(t, "aa", stored, "the diff must not change the default MySQL stores for the declared DDL")
+}
+
+// TestDiffIntegrationEnumSetDefaultFoldAllowlist checks collationFoldsASCIICase
+// against every collation on the server: each one it accepts must compare
+// every ASCII letter, and every two-letter string, equal to its case variants
+// (the two-letter strings catch contractions such as Danish aa or Czech ch).
+// Tailored collations that break the equivalence are checked too, so the
+// comparison is shown to catch it.
+func TestDiffIntegrationEnumSetDefaultFoldAllowlist(t *testing.T) {
+	tt := testutils.NewTestTable(t, "diff_enumdef_fold_pairs",
+		"CREATE TABLE diff_enumdef_fold_pairs (id int NOT NULL AUTO_INCREMENT, l varchar(3) NOT NULL, v varchar(3) NOT NULL, PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin")
+	var rows []string
+	for x := 'a'; x <= 'z'; x++ {
+		rows = append(rows, fmt.Sprintf("('%c','%c')", x, unicode.ToUpper(x)))
+		for y := 'a'; y <= 'z'; y++ {
+			for _, v := range []string{string([]rune{unicode.ToUpper(x), y}), string([]rune{x, unicode.ToUpper(y)}), string([]rune{unicode.ToUpper(x), unicode.ToUpper(y)})} {
+				rows = append(rows, fmt.Sprintf("('%c%c','%s')", x, y, v))
+			}
+		}
+	}
+	testutils.RunSQL(t, "INSERT INTO diff_enumdef_fold_pairs (l, v) VALUES "+strings.Join(rows, ","))
+
+	unequal := func(cs, collation string) string {
+		var examples sql.NullString
+		query := fmt.Sprintf("SELECT GROUP_CONCAT(CONCAT(l, '/', v) ORDER BY id SEPARATOR ' ') FROM diff_enumdef_fold_pairs WHERE CONVERT(l USING %s) COLLATE %s <> CONVERT(v USING %s) COLLATE %s", cs, collation, cs, collation)
+		require.NoError(t, tt.DB.QueryRowContext(t.Context(), query).Scan(&examples))
+		return examples.String
+	}
+
+	collations, err := tt.DB.QueryContext(t.Context(), "SELECT COLLATION_NAME, CHARACTER_SET_NAME FROM information_schema.COLLATIONS WHERE CHARACTER_SET_NAME <> 'binary'")
+	require.NoError(t, err)
+	defer func() { require.NoError(t, collations.Close()) }()
+	var folding int
+	for collations.Next() {
+		var collation, cs string
+		require.NoError(t, collations.Scan(&collation, &cs))
+		if !collationFoldsASCIICase(cs, collation) {
+			continue
+		}
+		folding++
+		assert.Empty(t, unequal(cs, collation), "%s is taken to fold ASCII case but compares these unequal", collation)
+	}
+	require.NoError(t, collations.Err())
+	require.GreaterOrEqual(t, folding, 30, "the allowlist must match the server's collations")
+
+	for _, c := range []struct{ cs, collation string }{
+		{"utf8mb4", "utf8mb4_da_0900_ai_ci"},
+		{"utf8mb4", "utf8mb4_czech_ci"},
+		{"utf8mb4", "utf8mb4_tr_0900_ai_ci"},
+		{"cp866", "cp866_general_ci"},
+		{"latin7", "latin7_general_ci"},
+	} {
+		assert.NotEmpty(t, unequal(c.cs, c.collation), "%s must be caught not folding ASCII case", c.collation)
+		assert.False(t, collationFoldsASCIICase(c.cs, c.collation), c.collation)
+	}
 }
