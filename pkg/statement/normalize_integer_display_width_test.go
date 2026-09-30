@@ -28,6 +28,10 @@ func TestStripIntegerDisplayWidth(t *testing.T) {
 		{"CREATE TABLE t (a smallint(0) zerofill)", new(5)},
 		{"CREATE TABLE t (a mediumint(0) zerofill)", new(8)},
 		{"CREATE TABLE t (a bigint(0) zerofill)", new(20)},
+		{"CREATE TABLE t (a int(5) zerofill)", new(5)}, // a non-zero zerofill width is kept as declared
+		{"CREATE TABLE t (a tinyint(1) zerofill)", new(1)},
+		{"CREATE TABLE t (a mediumint(3) zerofill)", new(3)},
+		{"CREATE TABLE t (a bigint(25) zerofill)", new(25)},
 		{"CREATE TABLE t (a varchar(11))", new(11)}, // not an integer type
 	}
 	for _, tc := range tests {
@@ -51,4 +55,18 @@ func TestStripIntegerDisplayWidthConverges(t *testing.T) {
 	stmts, err := authored.Diff(live, nil)
 	require.NoError(t, err)
 	assert.Nil(t, stmts, "int(11) should normalize to int and produce no diff")
+}
+
+// TestZerofillWidthChangeReported verifies that a change between two
+// non-default ZEROFILL widths is still reported: only a zero width is replaced
+// with the type's default.
+func TestZerofillWidthChangeReported(t *testing.T) {
+	live, err := ParseCreateTable("CREATE TABLE t (a int(5) unsigned zerofill)")
+	require.NoError(t, err)
+	declared, err := ParseCreateTable("CREATE TABLE t (a int(8) zerofill)")
+	require.NoError(t, err)
+	stmts, err := live.Diff(declared, nil)
+	require.NoError(t, err)
+	require.Len(t, stmts, 1)
+	assert.Equal(t, "ALTER TABLE `t` MODIFY COLUMN `a` int(8) unsigned zerofill NULL", stmts[0].Statement)
 }
