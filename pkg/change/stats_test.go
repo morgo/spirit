@@ -164,7 +164,7 @@ func TestGTIDCountRotation(t *testing.T) {
 // The GTID client's FeedStats is plumbed the same way as the binlog client's,
 // minus forced rotations: it never issues FLUSH BINARY LOGS.
 func TestGTIDFeedStats(t *testing.T) {
-	c := &gtidClient{subs: newSubscriptionRegistry()}
+	c := &gtidClient{feedCore: feedCore{subs: newSubscriptionRegistry()}}
 	require.Equal(t, "rotations=0 (0 forced)  parks=0 is-parked=false  never flushed", StatusRow(c))
 
 	c.rotations.Store(2)

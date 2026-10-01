@@ -70,8 +70,10 @@ func TestBufferedMapSwapPairFlushesViaReplace(t *testing.T) {
 	require.NoError(t, err)
 
 	client := &binlogClient{
+		feedCore: feedCore{
+			logger: slog.Default(),
+		},
 		db:       db,
-		logger:   slog.Default(),
 		dbConfig: dbconn.NewDBConfig(),
 	}
 

@@ -381,7 +381,7 @@ func TestFeedStatsReportsSubscriptionParks(t *testing.T) {
 	sub.softLimitChanges = limit
 	sub.softLimitBytes = 0
 
-	c := &gtidClient{subs: newSubscriptionRegistry()}
+	c := &gtidClient{feedCore: feedCore{subs: newSubscriptionRegistry()}}
 	require.True(t, c.subs.Add("test.t1", sub))
 	require.Contains(t, StatusRow(c), "parks=0 is-parked=false")
 
