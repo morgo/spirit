@@ -226,7 +226,7 @@ The initial checksum is the correctness gate for cutover. There are two checkers
 | Consistency | Compares source and `_new` at one consistent point, using `REPEATABLE READ` snapshots opened under a table lock | Optimistic `READ COMMITTED` reads with retries; hot ranges are split |
 | Locks | Briefly takes `LOCK TABLES <table> WRITE, _<table>_new WRITE` to open the snapshots. This is repeated on each yield, retry and continuous pass | No table lock, no long-lived snapshot |
 | Long-running snapshots | Yields every `--checksum-yield-timeout` (default 24h) to limit undo-log (history list) growth | None |
-| Known limitation | — | Rows updated continuously may never verify; see [docs/migrate.md](../../docs/migrate.md#enable-experimental-lockless-checksum) |
+| Hot rows | Compared at one snapshot, so concurrent writes do not matter | A row that keeps changing is settled against the change stream: Spirit waits for its next change and compares `_new` to that event's row image. See [Continuously updated hot rows](../checksum/README.md#continuously-updated-hot-rows) |
 
 The rest is the same for both:
 

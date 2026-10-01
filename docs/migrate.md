@@ -182,18 +182,7 @@ Cutover still requires a complete clean pass. Hot ranges are split. Small unreso
 snapshot drain: read target keys first, freeze source PK/CRC32 images once, and
 retry target reads until each frozen image has matched and every observed
 target-only key is absent. Later inserts do not expand the frozen work set, so
-an append-heavy tail can converge. There are no stream-backed or soft passes.
-**Current limitation:** workloads that continuously update the same rows are not
-currently supported reliably by the lockless algorithm. Splitting down to a
-single row does not resolve this: its frozen source image may be superseded
-before a target read observes it. A source row deleted before its image can be
-verified can remain unresolved for the same reason. The snapshot fallback helps
-append-heavy tails, but does not guarantee convergence for these hot-row workloads.
-
-Replication-applier integration is planned to address this limitation by using
-change-stream row images and their application to reconcile unresolved rows.
-That support is not implemented; the current checker requires matching target
-reads and does not accept unverified rows to complete the checksum.
+an append-heavy tail can converge.
 
 Each side is limited to 128 rows, with a combined 64 KiB key-data budget;
 oversized ranges stay on normal splitting/retries. Snapshot reads have a
@@ -205,8 +194,18 @@ deferring a hot range does not authorize cutover. As with the default checker,
 a stable divergence found by the initial checksum is repaired from the source and
 re-verified on a later pass, while one found by the continuous checksum during
 the sentinel wait aborts the migration. The initial checksum gives up after 10
-passes without a clean one and fails the migration. Persistently hot workloads
-can therefore prevent completion; resume with the default checker.
+passes without a clean one and fails the migration; resuming with the default
+checker is the fallback.
+
+Rows that are updated continuously are verified against the change stream
+rather than by reading the source again. A range that keeps changing is
+*settled* one row at a time: Spirit waits for the row's next change event,
+applies it to the shadow table, and compares the shadow row to that event's
+row image. The more often a row is written, the sooner its next event arrives.
+A row is deferred to the next pass only when no change arrives within its
+budget, it is written again before the shadow row can be read, or the buffered
+changes cannot be fully applied. See
+[Continuously updated hot rows](../pkg/checksum/README.md#continuously-updated-hot-rows).
 
 This is optimistic verification, not a comparison at one common source/target
 snapshot. Use it to evaluate the experimental algorithm before adopting it
