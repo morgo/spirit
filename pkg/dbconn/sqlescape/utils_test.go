@@ -17,7 +17,6 @@ package sqlescape
 import (
 	"encoding/json"
 	"math"
-	"strings"
 	"testing"
 	"time"
 
@@ -409,24 +408,18 @@ func TestEscapeSQL(t *testing.T) {
 	}
 	for _, v := range tests {
 		t.Run(v.name, func(t *testing.T) {
-			r3 := new(strings.Builder)
 			r1, e1 := escapeSQL(v.input, v.params...)
 			r2, e2 := EscapeSQL(v.input, v.params...)
-			e3 := FormatSQL(r3, v.input, v.params...)
 			if v.err == "" {
 				require.NoError(t, e1)
 				require.Equal(t, v.output, string(r1))
 				require.NoError(t, e2)
 				require.Equal(t, v.output, r2)
-				require.NoError(t, e3)
-				require.Equal(t, v.output, r3.String())
 			} else {
 				require.Error(t, e1)
 				require.Regexp(t, v.err, e1.Error())
 				require.Error(t, e2)
 				require.Regexp(t, v.err, e2.Error())
-				require.Error(t, e3)
-				require.Regexp(t, v.err, e3.Error())
 			}
 		})
 	}
@@ -462,13 +455,6 @@ func TestMustUtils(t *testing.T) {
 		MustEscapeSQL("%?")
 	})
 
-	require.PanicsWithError(t, "missing arguments, need 1-th arg, but only got 0 args", func() {
-		sql := new(strings.Builder)
-		MustFormatSQL(sql, "%?")
-	})
-
-	sql := new(strings.Builder)
-	MustFormatSQL(sql, "t")
 	MustEscapeSQL("tt")
 }
 

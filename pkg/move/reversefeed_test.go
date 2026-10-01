@@ -173,17 +173,29 @@ func TestReverseFeedIdempotentReplay(t *testing.T) {
 	assertConverged(t, uDB2)
 }
 
-// TestReverseFeedWindowHoldsAndReturns: Run opens the feeds, holds for the
-// window, and returns nil (feeds healthy, no fatal). The window-loop skeleton
-// the eventual cutover integration will drive.
+// TestReverseFeedWindowHoldsAndReturns: the feeds stay healthy (no fatal) while
+// held open across a window with writes landing on the sources, and the final
+// drain at the end of the window leaves U converged.
 func TestReverseFeedWindowHoldsAndReturns(t *testing.T) {
 	setupFanIn(t)
-	feed, _ := newFanInFeed(t, nil)
+	feed, uDB := newFanInFeed(t, nil)
 	defer feed.Close()
+	require.NoError(t, feed.Start(t.Context()))
 
-	start := time.Now()
-	require.NoError(t, feed.Run(t.Context(), 500*time.Millisecond))
-	require.GreaterOrEqual(t, time.Since(start), 450*time.Millisecond, "Run must hold for ~the window")
+	testutils.RunSQL(t, "INSERT INTO poc_rf_s0.t1 VALUES (7,'seven')")
+	testutils.RunSQL(t, "UPDATE poc_rf_s1.t1 SET val='TWO' WHERE id=2")
+
+	// Hold the window; the periodic flush runs in the background throughout.
+	// A feed that died mid-window would report it through Err, which is what
+	// the window driver polls.
+	time.Sleep(500 * time.Millisecond)
+	require.NoError(t, feed.Err(), "reverse feed must stay healthy across the window")
+
+	// Window elapsed normally: final drain so U reflects everything written to
+	// the sources during the window.
+	require.NoError(t, feed.Flush(t.Context()))
+	require.True(t, feed.AllChangesFlushed())
+	assertConverged(t, uDB)
 }
 
 // TestReverseFeedStartCleanupOnPartialFailure: when Start fails partway (here

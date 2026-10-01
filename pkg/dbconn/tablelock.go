@@ -91,7 +91,7 @@ func NewTableLock(ctx context.Context, db *sql.DB, tables []*table.TableInfo, co
 		timer := time.AfterFunc(threshold, func() {
 			defer wg.Done()
 			killTableLockBlockers(ctx, lockCtx, logger, func(ctx context.Context) error {
-				return KillLockingTransactions(ctx, db, tables, config, logger, []int{pid})
+				return KillLockingTransactions(ctx, db, tables, logger, []int{pid})
 			})
 		})
 		defer func() {

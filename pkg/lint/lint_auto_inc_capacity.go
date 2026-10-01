@@ -59,7 +59,7 @@ func (l *AutoIncCapacityLinter) Lint(existingTables []*statement.CreateTable, ch
 	if l.threshold == 0 {
 		// A zero threshold means this linter was constructed directly
 		// (e.g. &AutoIncCapacityLinter{}) without calling Configure, or the
-		// field was manually reset. Instances obtained via Get() always carry
+		// field was manually reset. Registered instances always carry
 		// the non-zero default registered in init(), and Configure rejects a
 		// zero threshold, so this only guards against direct construction.
 		// Fall back to the default configuration in that case.

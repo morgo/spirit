@@ -69,7 +69,7 @@ import (
 // Config holds linter configuration
 type Config struct {
 	// Enabled maps linter names to whether they are enabled
-	// If a linter is not in this map, it uses its default enabled state
+	// If a linter is not in this map, it runs
 	Enabled map[string]bool
 
 	// Settings maps linter names to their configuration as map[string]string
@@ -84,36 +84,10 @@ type Config struct {
 	IgnoreTables map[string]bool
 }
 
-// IsEnabled checks the config as well as the registry to see if
-// a given linter is enabled in either place. If the linter doesn't exist,
-// false is returned because a non-existent linter can't be enabled.
-func (c *Config) IsEnabled(linterName string) bool {
-	enabled, ok := c.Enabled[linterName]
-	if !ok {
-		// Not explicitly set - use default
-		lock.RLock()
-		defer lock.RUnlock()
-
-		linter, exists := linters[linterName]
-		if !exists {
-			return false
-		}
-
-		return linter.enabled
-	}
-
-	return enabled
-}
-
 // RunLinters runs all enabled linters and returns any violations found.
 // Linters are executed in an undefined order.
 //
-// A linter is executed if:
-//   - It is enabled by default (set during Register), AND
-//   - It is not explicitly disabled in config.Enabled
-//
-// OR:
-//   - It is explicitly enabled in config.Enabled
+// Every registered linter runs unless config.Enabled maps its name to false.
 //
 // If a linter implements ConfigurableLinter and has settings in config.Settings,
 // those settings are applied before running the linter.
@@ -129,19 +103,8 @@ func RunLinters(existingSchema []*statement.CreateTable, changes []*statement.Ab
 	var violations []Violation
 
 	for name, linter := range linters {
-		// Check if linter is explicitly disabled in config
+		// Skip a linter the config explicitly disables
 		if enabled, ok := config.Enabled[name]; ok && !enabled {
-			continue
-		}
-
-		// Check if linter is explicitly enabled in config
-		explicitlyEnabled := false
-		if enabled, ok := config.Enabled[name]; ok && enabled {
-			explicitlyEnabled = true
-		}
-
-		// Skip if not enabled by default and not explicitly enabled
-		if !linter.enabled && !explicitlyEnabled {
 			continue
 		}
 
@@ -175,10 +138,7 @@ func RunLinters(existingSchema []*statement.CreateTable, changes []*statement.Ab
 	// we may remove the violations that pertain to tables which are unchanged.
 	if config.LintOnlyChanges {
 		var filtered []Violation
-		tables, err := extractTablesFromChanges(changes)
-		if err != nil {
-			return nil, err
-		}
+		tables := extractTablesFromChanges(changes)
 		for _, v := range violations {
 			if v.Location != nil {
 				if _, ok := tables[v.Location.Table]; ok {
@@ -202,12 +162,12 @@ func RunLinters(existingSchema []*statement.CreateTable, changes []*statement.Ab
 	return violations, errors.Join(errs...)
 }
 
-func extractTablesFromChanges(changes []*statement.AbstractStatement) (map[string]struct{}, error) {
+func extractTablesFromChanges(changes []*statement.AbstractStatement) map[string]struct{} {
 	tables := make(map[string]struct{})
 	for _, stmt := range changes {
 		tables[stmt.Table] = struct{}{}
 	}
-	return tables, nil
+	return tables
 }
 
 // HasErrors returns true if any violations have ERROR severity.
@@ -219,30 +179,6 @@ func HasErrors(violations []Violation) bool {
 	}
 
 	return false
-}
-
-// HasWarnings returns true if any violations have WARNING severity.
-func HasWarnings(violations []Violation) bool {
-	for _, v := range violations {
-		if v.Severity == SeverityWarning {
-			return true
-		}
-	}
-
-	return false
-}
-
-// FilterByLinter returns only violations from the specified linter.
-func FilterByLinter(violations []Violation, linterName string) []Violation {
-	var filtered []Violation
-
-	for _, v := range violations {
-		if v.Linter.Name() == linterName {
-			filtered = append(filtered, v)
-		}
-	}
-
-	return filtered
 }
 
 // AlterTableTypeToString converts an AlterTableType constant to a human-readable string

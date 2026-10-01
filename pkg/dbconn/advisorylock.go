@@ -266,15 +266,6 @@ func (m *AdvisoryLock) Close() error {
 	return <-m.closeCh
 }
 
-func (m *AdvisoryLock) CloseDBConnection(logger *slog.Logger) error {
-	// Closes the database connection for the AdvisoryLock
-	logger.Info("about to close advisory lock database connection")
-	if m.db != nil {
-		return m.db.Close()
-	}
-	return nil
-}
-
 // WithMultiTableSchemaLock adds a schema-scoped lock to the AdvisoryLock so that
 // only one atomic multi-table migration runs per schema at a time. Multi-table
 // migrations all coordinate through a single shared _spirit_checkpoint (and

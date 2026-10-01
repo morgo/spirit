@@ -438,6 +438,6 @@ func TestDatetimeIndexPositionLinter_Registered(t *testing.T) {
 	resetForTest(t)
 	Register(&DatetimeIndexPositionLinter{})
 
-	found := slices.Contains(List(), "datetime_index_position")
+	found := slices.Contains(registeredLinterNames(), "datetime_index_position")
 	require.True(t, found, "datetime_index_position linter should be registered")
 }
