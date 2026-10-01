@@ -36,8 +36,8 @@ func TestSyncerConfigDecodeOptions(t *testing.T) {
 	// RowsEventDecodeFunc closes over it, so a nil registry here would make
 	// the wiring under test unrepresentative (and the func a latent panic).
 	configs := map[string]replication.BinlogSyncerConfig{
-		"binlog": (&binlogClient{serverID: 123, subs: newSubscriptionRegistry()}).buildSyncerConfig("127.0.0.1", 3306),
-		"gtid":   (&gtidClient{serverID: 123, subs: newSubscriptionRegistry()}).buildSyncerConfig("127.0.0.1", 3306),
+		"binlog": (&binlogClient{feedCore: feedCore{serverID: 123, subs: newSubscriptionRegistry()}}).buildSyncerConfig("127.0.0.1", 3306),
+		"gtid":   (&gtidClient{feedCore: feedCore{serverID: 123, subs: newSubscriptionRegistry()}}).buildSyncerConfig("127.0.0.1", 3306),
 	}
 	for name, cfg := range configs {
 		require.Equal(t, time.UTC, cfg.TimestampStringLocation, "%s client must decode TIMESTAMP values in UTC", name)
@@ -1030,8 +1030,10 @@ func TestGTIDProcessQueryEventXAGuard(t *testing.T) {
 	empty, err := mysql.ParseMysqlGTIDSet("")
 	require.NoError(t, err)
 	c := &gtidClient{
-		logger:       slog.Default(),
-		subs:         newSubscriptionRegistry(),
+		feedCore: feedCore{
+			logger: slog.Default(),
+			subs:   newSubscriptionRegistry(),
+		},
 		bufferedGTID: empty,
 		flushedGTID:  empty.Clone(),
 	}
@@ -1073,14 +1075,16 @@ func TestGTIDClientCTASNotifiesSchemaFilter(t *testing.T) {
 	sid := uuid.MustParse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
 	var got []FatalReason
 	c := &gtidClient{
-		logger:           slog.Default(),
-		subs:             newSubscriptionRegistry(),
-		bufferedGTID:     empty,
-		flushedGTID:      empty.Clone(),
-		ddlFilterSchema:  "test",
-		callerCancelFunc: func(r FatalReason) bool { got = append(got, r); return true },
-		pendingSID:       sid[:],
-		pendingGNO:       7,
+		feedCore: feedCore{
+			logger:           slog.Default(),
+			subs:             newSubscriptionRegistry(),
+			ddlFilterSchema:  "test",
+			callerCancelFunc: func(r FatalReason) bool { got = append(got, r); return true },
+		},
+		bufferedGTID: empty,
+		flushedGTID:  empty.Clone(),
+		pendingSID:   sid[:],
+		pendingGNO:   7,
 	}
 	require.NoError(t, c.processQueryEvent(&replication.QueryEvent{Schema: []byte("test"),
 		Query: []byte("CREATE TABLE `ctas1` (`a` int NOT NULL) START TRANSACTION")}))
@@ -1402,7 +1406,7 @@ func TestGTIDClientSavepointTransaction(t *testing.T) {
 //
 // Both parser outcomes for such a statement must defer. The parser now
 // understands the START TRANSACTION suffix, so the parsed path defers via
-// extractTablesFromDDLStmts's opensTransaction (group 1 below); the GTID
+// parseQueryEvent's opensTransaction (group 1 below); the GTID
 // advances at the group's own terminator, the XIDEvent. An unparseable
 // QueryEvent (group 2: ANSI_QUOTES DDL, which the parser does not
 // parse) never promotes either, because it could equally sit mid-group;
@@ -1655,7 +1659,9 @@ func TestGTIDPromotePendingGTID(t *testing.T) {
 	gset, err := mysql.ParseMysqlGTIDSet(sid + ":1-5")
 	require.NoError(t, err)
 	c := &gtidClient{
-		logger:       slog.Default(),
+		feedCore: feedCore{
+			logger: slog.Default(),
+		},
 		bufferedGTID: gset,
 	}
 
@@ -1696,8 +1702,10 @@ func TestFlushedGTIDIsMonotonicAcrossOverlappingFlushes(t *testing.T) {
 	require.NoError(t, err)
 
 	client := &gtidClient{
-		logger:       slog.Default(),
-		subs:         newSubscriptionRegistry(),
+		feedCore: feedCore{
+			logger: slog.Default(),
+			subs:   newSubscriptionRegistry(),
+		},
 		bufferedGTID: older,
 	}
 	sub := &gatedSubscription{gates: make(chan chan struct{})}
@@ -1796,9 +1804,11 @@ func TestGTIDProcessDDLNotificationMoveStyle(t *testing.T) {
 
 	cancelled := false
 	c := &gtidClient{
-		logger:           slog.Default(),
-		callerCancelFunc: func(FatalReason) bool { cancelled = true; return true },
-		subs:             newSubscriptionRegistry(),
+		feedCore: feedCore{
+			logger:           slog.Default(),
+			callerCancelFunc: func(FatalReason) bool { cancelled = true; return true },
+			subs:             newSubscriptionRegistry(),
+		},
 	}
 	chunker, err := table.NewChunker(tbl, table.ChunkerConfig{})
 	require.NoError(t, err)

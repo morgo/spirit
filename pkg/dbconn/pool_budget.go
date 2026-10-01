@@ -6,7 +6,18 @@ import "fmt"
 // continuous syncs. Monitor and advisory-lock connections use separate dedicated pools.
 const DefaultMaxConnections = 128
 
-// MinMigrationPoolSize covers the connections that cutover cannot serialize.
+// MinMigrationPoolSize is the smallest --max-connections a migration can
+// complete on. It covers the connections that cutover cannot serialize.
+//
+// The cutover sets the number: it needs the LOCK TABLES connection, the RENAME
+// TABLE connection and the flush threads, and unlike every other phase it
+// cannot trade connections for time — below the minimum it does not run slower,
+// it cannot run. See migration's CutOver.Run, which holds the same number and
+// will raise a pool that arrives under it.
+//
+// Nothing else gets a say. The copy, the checksum and the drain all queue on a
+// small pool and finish eventually, so a low --max-connections is the operator
+// asking for a slow migration, which is theirs to ask for.
 const MinMigrationPoolSize = 5
 
 // ValidateMaxConnections validates an explicit pool budget against

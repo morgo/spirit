@@ -28,9 +28,6 @@ if err != nil {
 if lint.HasErrors(violations) {
     // Handle errors
 }
-
-// Filter violations by linter
-flagViolations := lint.FilterByLinter(violations, "has_foreign_key")
 ```
 
 ### Creating a Custom Linter
@@ -154,17 +151,13 @@ type Location struct {
 ### Registration
 
 - `Register(l Linter)` - Register a linter (call from init())
-- `Enable(name string)` - Enable a linter by name
-- `Disable(name string)` - Disable a linter by name
-- `List()` - Get all registered linter names
-- `Get(name string)` - Get a linter by name
+
+Linters are enabled when registered; enable or disable them per run with `Config.Enabled`.
 
 ### Execution
 
 - `RunLinters(createTables, alterStatements, config) ([]Violation, error)` - Run all enabled linters, returns violations and any configuration errors
 - `HasErrors(violations)` - Check if any violations are errors
-- `HasWarnings(violations)` - Check if any violations are warnings
-- `FilterByLinter(violations, name)` - Filter by linter name
 
 ## Built-in Linters
 

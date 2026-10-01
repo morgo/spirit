@@ -267,16 +267,16 @@ func TestPlanChanges_WithInfos(t *testing.T) {
 	require.Equal(t, "t1", plan.Changes[0].TableName)
 
 	// The test_info linter should produce an info for the ALTER TABLE change.
-	require.True(t, plan.HasInfos(), "expected lint infos from test_info linter")
-	require.NotEmpty(t, plan.Changes[0].Infos())
-	require.Equal(t, "test_info", plan.Changes[0].Infos()[0].Linter.Name())
-	require.Contains(t, plan.Changes[0].Infos()[0].Message, "informational suggestion")
+	infos := plan.Changes[0].filterBySeverity(SeverityInfo)
+	require.NotEmpty(t, infos, "expected lint infos from test_info linter")
+	require.Equal(t, "test_info", infos[0].Linter.Name())
+	require.Contains(t, infos[0].Message, "informational suggestion")
 
 	// Infos should not appear as warnings or errors.
 	require.Empty(t, plan.Changes[0].Errors())
 }
 
-func TestPlanChanges_HasInfosFalseWhenNone(t *testing.T) {
+func TestPlanChanges_NoInfosWhenNone(t *testing.T) {
 	current := []table.TableSchema{
 		{Name: "t1", Schema: "CREATE TABLE t1 (id BIGINT PRIMARY KEY)"},
 	}
@@ -286,9 +286,8 @@ func TestPlanChanges_HasInfosFalseWhenNone(t *testing.T) {
 	plan, err := PlanChanges(current, desired, nil, nil)
 	require.NoError(t, err)
 	require.True(t, plan.HasChanges())
-	// No info-producing linter is registered, so HasInfos should be false.
-	require.False(t, plan.HasInfos())
-	require.Empty(t, plan.Changes[0].Infos())
+	// No info-producing linter is registered, so there should be no infos.
+	require.Empty(t, plan.Changes[0].filterBySeverity(SeverityInfo))
 }
 
 func TestPlanChanges_InfosNotOnNonAlter(t *testing.T) {
@@ -314,8 +313,7 @@ func TestPlanChanges_InfosNotOnNonAlter(t *testing.T) {
 	require.Len(t, plan.Changes, 1)
 	require.Contains(t, plan.Changes[0].Statement, "CREATE TABLE")
 	// The info linter only fires on ALTER, so no infos here.
-	require.False(t, plan.HasInfos())
-	require.Empty(t, plan.Changes[0].Infos())
+	require.Empty(t, plan.Changes[0].filterBySeverity(SeverityInfo))
 }
 
 func TestPlanChanges_MultiStatementSameTable(t *testing.T) {
@@ -358,7 +356,7 @@ func TestPlanChanges_MultiStatementSameTable(t *testing.T) {
 	// Violations should only be on the last statement.
 	require.Empty(t, t1Changes[0].Warnings(), "first statement should have no violations")
 	require.Empty(t, t1Changes[0].Errors(), "first statement should have no violations")
-	require.Empty(t, t1Changes[0].Infos(), "first statement should have no violations")
+	require.Empty(t, t1Changes[0].filterBySeverity(SeverityInfo), "first statement should have no violations")
 	require.NotEmpty(t, t1Changes[1].Warnings(), "last statement should carry the FK warning")
 	require.True(t, plan.HasWarnings())
 }

@@ -309,7 +309,7 @@ func TestForceExecRetryKillsFreshBlocker(t *testing.T) {
 			if attempts > 1 {
 				retryKillCalled = time.Now()
 				// The retry's kill worker saw it waiting: the real kill must find the fresh blocker.
-				return killLockingTransactions(ctx, db, tables, config, slog.Default(), []int{connID})
+				return killLockingTransactions(ctx, db, tables, slog.Default(), []int{connID})
 			}
 			// The kill runs at the 100ms delay. Hold the first blocker past the
 			// one-second lock budget so the first attempt definitely fails,
@@ -681,7 +681,7 @@ func TestKillLockingTransactionsReportsKillsBesideADeniedOne(t *testing.T) {
 	other := holdTableLock(t, ctx, tt.DB, "kill_partly_denied")
 
 	tbl := table.NewTableInfo(db, "test", "kill_partly_denied")
-	killed, err := killLockingTransactions(ctx, db, []*table.TableInfo{tbl}, config, slog.Default(), nil)
+	killed, err := killLockingTransactions(ctx, db, []*table.TableInfo{tbl}, slog.Default(), nil)
 	require.ErrorIs(t, err, &mysql.MySQLError{Number: parsermysql.ErrKillDenied})
 	require.Equal(t, []int{ownedPID}, killed)
 	_, err = other.ExecContext(ctx, "SELECT 1")
@@ -858,7 +858,7 @@ func TestForceExecKillsOnceAStatementStartsWaiting(t *testing.T) {
 				func(ctx context.Context, connID int) ([]int, error) {
 					killCalls++
 					killedAfter = time.Since(started)
-					return killLockingTransactions(ctx, db, []*table.TableInfo{tbl}, config, slog.Default(), []int{connID})
+					return killLockingTransactions(ctx, db, []*table.TableInfo{tbl}, slog.Default(), []int{connID})
 				}, waitForKilledTransactions, nil)
 			require.NoError(t, err)
 			require.Equal(t, 1, killCalls)
@@ -1143,7 +1143,7 @@ func TestForceExecKeepsAnObservedWaitAcrossAFailedCheck(t *testing.T) {
 				func(ctx context.Context, connID int) ([]int, error) {
 					killCalls++
 					killedAfter = time.Since(started)
-					return killLockingTransactions(ctx, db, []*table.TableInfo{tbl}, config, slog.Default(), []int{connID})
+					return killLockingTransactions(ctx, db, []*table.TableInfo{tbl}, slog.Default(), []int{connID})
 				}, waitForKilledTransactions, nil)
 			require.NoError(t, err)
 			require.Equal(t, 1, killCalls)
@@ -1202,7 +1202,7 @@ func TestForceExecKillsRightAfterACheckThatRunsPastTheDelay(t *testing.T) {
 		func(ctx context.Context, connID int) ([]int, error) {
 			attempts++
 			killedAt = time.Now()
-			return killLockingTransactions(ctx, db, []*table.TableInfo{tbl}, config, slog.Default(), []int{connID})
+			return killLockingTransactions(ctx, db, []*table.TableInfo{tbl}, slog.Default(), []int{connID})
 		}, waitForKilledTransactions, nil)
 	require.NoError(t, err)
 	require.Equal(t, 1, attempts)
@@ -1260,7 +1260,7 @@ func TestForceExecKillsAtTheDelayBetweenPolls(t *testing.T) {
 		func(ctx context.Context, connID int) ([]int, error) {
 			attempts++
 			killedAt = time.Now()
-			return killLockingTransactions(ctx, db, []*table.TableInfo{tbl}, config, slog.Default(), []int{connID})
+			return killLockingTransactions(ctx, db, []*table.TableInfo{tbl}, slog.Default(), []int{connID})
 		}, waitForKilledTransactions, nil)
 	require.NoError(t, err)
 	require.Equal(t, 1, attempts)
@@ -1426,7 +1426,7 @@ func TestForceExecKeepsTheWaitAcrossAFailedLookupBetweenFailedChecks(t *testing.
 				failNext = true
 				return nil, fmt.Errorf("%w: %w", errBlockerLookupFailed, io.EOF)
 			}
-			return killLockingTransactions(ctx, db, []*table.TableInfo{tbl}, config, slog.Default(), []int{connID})
+			return killLockingTransactions(ctx, db, []*table.TableInfo{tbl}, slog.Default(), []int{connID})
 		}, waitForKilledTransactions, nil)
 	require.NoError(t, err)
 	require.Len(t, killedAfter, 2)

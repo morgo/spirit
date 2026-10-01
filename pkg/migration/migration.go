@@ -18,10 +18,6 @@ import (
 	"github.com/block/spirit/pkg/utils"
 )
 
-// defaultMaxConnections is the pool size a programmatic caller that leaves
-// MaxConnections unset gets, the same as the CLI default (see flags.Common).
-const defaultMaxConnections = flags.DefaultMaxConnections
-
 var (
 	defaultHost     = "127.0.0.1"
 	defaultPort     = 3306
@@ -47,7 +43,7 @@ type Migration struct {
 	// guaranteed one, which costs throughput and nothing else. Ask for more
 	// than the server can spare and the copy does not slow down, it dies on
 	// `Error 1040: Too many connections`. Validate rejects a value too small
-	// for the migration to finish on; see minPoolSize.
+	// for the migration to finish on; see dbconn.MinMigrationPoolSize.
 	flags.Common
 	flags.Cutover
 
@@ -65,19 +61,6 @@ type Migration struct {
 	// testThrottler is a test-only copier throttler (see WithTestThrottler).
 	testThrottler throttler.Throttler
 }
-
-// minPoolSize is the smallest --max-connections a migration can complete on.
-//
-// The cutover sets the number: it needs the LOCK TABLES connection, the RENAME
-// TABLE connection and the flush threads, and unlike every other phase it
-// cannot trade connections for time — below the minimum it does not run slower,
-// it cannot run. See CutOver.Run, which holds the same number and will raise a
-// pool that arrives under it.
-//
-// Nothing else gets a say. The copy, the checksum and the drain all queue on a
-// small pool and finish eventually, so a low --max-connections is the operator
-// asking for a slow migration, which is theirs to ask for.
-const minPoolSize = dbconn.MinMigrationPoolSize
 
 // Validate is called by Kong after parsing to reject invalid flag values.
 // Zero values mean "use the default" (normalizeOptions fills them in), so they

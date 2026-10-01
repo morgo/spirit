@@ -109,10 +109,10 @@ func (c *CutOver) Run(ctx context.Context) error {
 		// Because we want to safely flush quickly, we set the limit to 5.
 		//
 		// A migration cannot reach here under that number: Migration.Validate
-		// rejects a --max-connections below minPoolSize, which is this 5. The
-		// guard stays for callers that build a CutOver directly, and it is the
-		// one place spirit will exceed a configured pool size — because the
-		// alternative is a cutover that cannot run at all.
+		// rejects a --max-connections below dbconn.MinMigrationPoolSize, which
+		// is this 5. The guard stays for callers that build a CutOver directly,
+		// and it is the one place spirit will exceed a configured pool size —
+		// because the alternative is a cutover that cannot run at all.
 		dbconn.SetPoolSize(c.db, 5)
 	}
 	// Collect every attempt's error and join them on exit, so an operator

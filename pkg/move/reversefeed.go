@@ -102,17 +102,16 @@ type ReverseFeed struct {
 	flushInt time.Duration
 
 	// A fatal error on any feed (schema change or stream failure) means U can no
-	// longer be trusted for rollback. We capture it once and close fatalCh so
-	// Run wakes immediately and the caller can degrade to complete-forward
-	// rather than silently letting U drift.
+	// longer be trusted for rollback. We capture it once so
+	// the caller, which polls Err, can degrade to complete-forward rather than
+	// silently letting U drift.
 	fatalOnce sync.Once
-	fatalCh   chan struct{}
 	fatalMu   sync.Mutex
 	fatalErr  error
 }
 
 // NewReverseFeed wires the feeds and their shared applier. It does not open any
-// binlog stream — call Start or Run for that — but it does query each source
+// binlog stream — call Start for that — but it does query each source
 // server once: change.NewAutoClient selects (and validates) the change-source
 // coordinate scheme per source, so e.g. a GTID-set Position on a server that no
 // longer has GTIDs enabled fails here with a clear error rather than as a
@@ -187,7 +186,6 @@ func NewReverseFeed(ctx context.Context, cfg ReverseFeedConfig) (_ *ReverseFeed,
 		appl:     appl,
 		logger:   logger,
 		flushInt: flushInt,
-		fatalCh:  make(chan struct{}),
 	}
 	// If wiring the per-source feeds fails partway, tear down the feeds already
 	// created so we don't leak their binlog syncer goroutines and connections.
@@ -247,7 +245,7 @@ func NewReverseFeed(ctx context.Context, cfg ReverseFeedConfig) (_ *ReverseFeed,
 	return rf, nil
 }
 
-// onFatal records the first fatal feed condition and wakes Run. It returns true
+// onFatal records the first fatal feed condition for Err. It returns true
 // (we always act on it: the window degrades to complete-forward).
 func (rf *ReverseFeed) onFatal(reason change.FatalReason) bool {
 	rf.fatalOnce.Do(func() {
@@ -255,7 +253,6 @@ func (rf *ReverseFeed) onFatal(reason change.FatalReason) bool {
 		rf.fatalErr = fmt.Errorf("reverse feed hit a fatal condition (%s); rollback is no longer safe", reason)
 		rf.fatalMu.Unlock()
 		rf.logger.Error("reverse feed fatal; source can no longer be trusted for rollback", "reason", reason.String())
-		close(rf.fatalCh)
 	})
 	return true
 }
@@ -338,34 +335,6 @@ func (rf *ReverseFeed) Positions() []string {
 		out[i] = client.Position()
 	}
 	return out
-}
-
-// Run opens the feeds and holds the rollback window for the given duration,
-// keeping U current. It returns:
-//   - nil when the window elapses normally (after a final flush);
-//   - ctx.Err() if the context is cancelled;
-//   - a fatal error if any feed dies (rollback is then unsafe and the caller
-//     must complete-forward).
-//
-// Run does not Close the feeds; the caller does that after deciding the
-// terminal action (complete-forward or roll back), since a reverse cutover
-// needs the feeds flushed one last time first.
-func (rf *ReverseFeed) Run(ctx context.Context, window time.Duration) error {
-	if err := rf.Start(ctx); err != nil {
-		return err
-	}
-	timer := time.NewTimer(window)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-rf.fatalCh:
-		return rf.Err()
-	case <-timer.C:
-	}
-	// Window elapsed normally: final drain so U reflects everything written to
-	// the sources during the window before the caller retires it.
-	return rf.Flush(ctx)
 }
 
 // Close stops periodic flush and closes all feeds. Safe to call more than once.

@@ -60,7 +60,7 @@ func TestAutoscalingLeavesThreadFlagsAloneWhenItCannotEngage(t *testing.T) {
 	// --max-connections. What autoscaling would have changed here is the
 	// ceilings the copier scales its own workers against, not the pool they
 	// check connections out of.
-	require.Equal(t, defaultMaxConnections, m.dbConfig.MaxOpenConnections)
+	require.Equal(t, flags.DefaultMaxConnections, m.dbConfig.MaxOpenConnections)
 }
 
 // TestPoolSizeIsExactlyMaxConnections is the property an operator budgets
@@ -76,7 +76,7 @@ func TestPoolSizeIsExactlyMaxConnections(t *testing.T) {
 	testutils.RunSQL(t, `INSERT INTO pool_verbatim VALUES (1, 'a'), (2, 'b')`)
 
 	// Not the default, not any sum of the thread counts, and comfortably above
-	// minPoolSize — a number nothing could arrive at by deriving it.
+	// dbconn.MinMigrationPoolSize — a number nothing could arrive at by deriving it.
 	const maxConnections = 37
 	m := NewTestRunner(t, "pool_verbatim", "ENGINE=InnoDB", WithMaxConnections(maxConnections))
 	require.NoError(t, m.Run(t.Context()))
@@ -127,7 +127,7 @@ const minAdaptiveBatchSizeForTest = 50
 func TestMaxConnectionsDefaultMatchesItsFlag(t *testing.T) {
 	field, ok := reflect.TypeFor[Migration]().FieldByName("MaxConnections")
 	require.True(t, ok)
-	require.Equal(t, strconv.Itoa(defaultMaxConnections), field.Tag.Get("default"))
+	require.Equal(t, strconv.Itoa(flags.DefaultMaxConnections), field.Tag.Get("default"))
 
 	// And an unset field lands on it, so a programmatic caller is bounded too.
 	// That is not incidental: the derived ceilings only overflow on the large
@@ -135,7 +135,7 @@ func TestMaxConnectionsDefaultMatchesItsFlag(t *testing.T) {
 	m := &Migration{Statement: "ALTER TABLE t1 ENGINE=InnoDB", Database: "test"}
 	_, err := m.normalizeOptions()
 	require.NoError(t, err)
-	require.Equal(t, defaultMaxConnections, m.MaxConnections)
+	require.Equal(t, flags.DefaultMaxConnections, m.MaxConnections)
 }
 
 // TestReadBoundsForPool covers the one worker count that cannot be left to
@@ -151,7 +151,7 @@ func TestReadBoundsForPool(t *testing.T) {
 	const reserve = minChecksumPhaseReserve
 
 	// Room to spare: the bounds are whatever was derived.
-	start, ceiling := dbconn.ReadBoundsForPool(16, 32, defaultMaxConnections, reserve)
+	start, ceiling := dbconn.ReadBoundsForPool(16, 32, flags.DefaultMaxConnections, reserve)
 	require.Equal(t, 16, start)
 	require.Equal(t, 32, ceiling)
 
@@ -210,7 +210,7 @@ func TestReadBoundsSurviveTheirConsumers(t *testing.T) {
 	// small to comfortable. The small pools are the point: they are the ones
 	// where the derived bounds and the operator's budget disagree.
 	for _, vCPUs := range []int{16, 32, 64, 96, 128} {
-		for _, maxConnections := range []int{8, 16, 20, 32, 64, defaultMaxConnections} {
+		for _, maxConnections := range []int{8, 16, 20, 32, 64, flags.DefaultMaxConnections} {
 			readStart, readCeiling := autoscale.ReadBounds(vCPUs)
 			start, ceiling := dbconn.ReadBoundsForPool(readStart, readCeiling, maxConnections, reserve)
 
@@ -243,7 +243,7 @@ func TestValidateMaxConnections(t *testing.T) {
 		}
 	}
 
-	require.NoError(t, valid(defaultMaxConnections).Validate())
+	require.NoError(t, valid(flags.DefaultMaxConnections).Validate())
 	require.NoError(t, valid(4+minChecksumPhaseReserve).Validate(),
 		"a small but workable pool is the operator asking for a slow migration, which is allowed")
 
@@ -255,13 +255,13 @@ func TestValidateMaxConnections(t *testing.T) {
 	require.ErrorContains(t, valid(-1).Validate(), "must be non-negative",
 		"negative is no longer a way to ask for an unbounded pool")
 
-	require.ErrorContains(t, valid(minPoolSize-1).Validate(), "for the cutover to run",
+	require.ErrorContains(t, valid(dbconn.MinMigrationPoolSize-1).Validate(), "for the cutover to run",
 		"below the cutover's minimum the migration cannot finish, only fail late")
 
-	// Above minPoolSize but below what the checksum phase needs: its read
+	// Above dbconn.MinMigrationPoolSize but below what the checksum phase needs: its read
 	// transactions hold their connections for the whole phase, so the control
 	// plane and the drain would have nothing left to check out.
-	pinning := valid(minPoolSize + 1)
+	pinning := valid(dbconn.MinMigrationPoolSize + 1)
 	pinning.Threads = 32
 	err := pinning.Validate()
 	require.ErrorContains(t, err, "below what the checksum phase needs")
