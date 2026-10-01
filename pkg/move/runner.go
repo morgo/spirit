@@ -2428,9 +2428,10 @@ func (r *Runner) Abort(cause error) {
 // Note: The applier is NOT started here. The copier will start it when it begins copying.
 func (r *Runner) createApplier() (applier.Applier, error) {
 	appl, err := applier.New(r.targets, &applier.ApplierConfig{
-		DBConfig: r.dbConfig,
-		Logger:   r.logger,
-		Threads:  r.move.WriteThreads,
+		DBConfig:    r.dbConfig,
+		Logger:      r.logger,
+		Threads:     r.move.WriteThreads,
+		MetricsSink: r.metricsSink,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create applier: %w", err)
