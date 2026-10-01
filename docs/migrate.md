@@ -201,20 +201,21 @@ oversized ranges stay on normal splitting/retries. Snapshot reads have a
 Snapshot retries use the ordinary retry delay and bounded
 hot-attempt count, then defer without authorizing cutover. Unresolved ranges
 are revisited in another pass. Completing a scan or
-deferring a hot range does not authorize cutover. Stable divergence aborts the
-migration instead of repairing the shadow table. Persistently hot workloads can
-therefore prevent completion; cancel the run or resume with the default checker.
+deferring a hot range does not authorize cutover. As with the default checker,
+a stable divergence found by the initial checksum is repaired from the source and
+re-verified on a later pass, while one found by the continuous checksum during
+the sentinel wait aborts the migration. The initial checksum gives up after 10
+passes without a clean one and fails the migration. Persistently hot workloads
+can therefore prevent completion; resume with the default checker.
 
 This is optimistic verification, not a comparison at one common source/target
 snapshot. Use it to evaluate the experimental algorithm before adopting it
 broadly. The final replication drain and cutover locking are unchanged.
 
-Copy checkpoints are preserved, but experimental checksum progress is neither
-saved nor resumed: verification starts from the beginning after a restart,
-including when resuming a checkpoint created by the default checker.
-`--checksum-yield-timeout` applies only to the default snapshot checksum. There
-is no equivalent overall deadline for the experimental gate: unresolved hot
-ranges can keep it running until cancelled. The status line's `deferred` count
+Initial checksum progress is checkpointed and resumed the same way as with the
+default checker, including when resuming a checkpoint created by the default
+checker. `--checksum-yield-timeout` applies only to the default snapshot
+checksum; the experimental gate is bounded by its 10-pass limit instead. The status line's `deferred` count
 covers only the current pass, not the lifetime of the run; use the timestamped
 hot-range and pass-completion logs to investigate repeated deferrals.
 
