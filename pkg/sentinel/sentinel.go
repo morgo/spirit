@@ -42,9 +42,12 @@ var (
 // does not already exist. The schema is taken from the connection (the table
 // name is unqualified) rather than passed in, so this works under Vitess where
 // a fixed schema name isn't meaningful — point db at the right keyspace/schema.
-// Creation must be idempotent: the name is a constant, a resumed migration
-// recreates it, and TestSentinelCreateNeverObservedAbsent relies on CREATE IF
-// NOT EXISTS so a concurrent existence probe never sees it missing.
+// Creation must be idempotent: the name is a constant, so a fresh run can find
+// it left over from an earlier run or shared with a concurrent one, and
+// TestSentinelCreateNeverObservedAbsent relies on CREATE IF NOT EXISTS so a
+// concurrent existence probe never sees it missing. Only the fresh path calls
+// Create (migration's newMigration, move's newCopy); neither runner recreates
+// it on resume, so a sentinel dropped before a resume stays dropped.
 func Create(ctx context.Context, db *sql.DB) error {
 	return dbconn.Exec(ctx, db, "CREATE TABLE IF NOT EXISTS %n (id int NOT NULL PRIMARY KEY)", TableName)
 }
