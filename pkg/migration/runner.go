@@ -731,7 +731,7 @@ func (r *Runner) postCopyPhase(ctx context.Context) error {
 	if err := r.status.DoContext(ctx, status.AnalyzeTable, func() error {
 		r.logger.Info("Running ANALYZE TABLE")
 		for _, change := range r.changes {
-			if err := dbconn.Exec(ctx, r.db, "ANALYZE TABLE %n.%n", change.newTable.SchemaName, change.newTable.TableName); err != nil {
+			if err := dbconn.AnalyzeTable(ctx, r.db, r.logger, change.newTable.SchemaName, change.newTable.TableName); err != nil {
 				return err
 			}
 

@@ -431,6 +431,41 @@ func TestExecRawVerb(t *testing.T) {
 	require.ErrorContains(t, err, "expect sqlescape.RawSQL")
 }
 
+// TestAnalyzeTable verifies that AnalyzeTable inspects the ANALYZE TABLE
+// result set and surfaces a missing table as an error, rather than silently
+// returning nil: ANALYZE reports it as a Msg_type="Error" row, not a statement
+// error, so a plain Exec would succeed. Both the unqualified form (resolved
+// against the connection's default database) and the qualified form are
+// covered.
+func TestAnalyzeTable(t *testing.T) {
+	dbName, scopedDB := testutils.CreateUniqueTestDatabase(t)
+	_, err := scopedDB.ExecContext(t.Context(), "CREATE TABLE present (id INT PRIMARY KEY)")
+	require.NoError(t, err)
+
+	db, err := New(testutils.DSN(), NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	logger := slog.Default()
+
+	// Unqualified, on a connection whose default database holds the table.
+	// A freshly-created table analyzes cleanly (Msg_type "status").
+	require.NoError(t, AnalyzeTable(t.Context(), scopedDB, logger, "", "present"))
+	// Re-analyzing succeeds too, even though it may report a non-OK status row
+	// ("Table is already up to date") — only Msg_type="Error" is a failure.
+	require.NoError(t, AnalyzeTable(t.Context(), scopedDB, logger, "", "present"))
+	err = AnalyzeTable(t.Context(), scopedDB, logger, "", "does_not_exist")
+	require.ErrorContains(t, err, "ANALYZE TABLE does_not_exist failed: Error")
+
+	// Qualified, on a connection whose default database is a different one.
+	require.NoError(t, AnalyzeTable(t.Context(), db, logger, dbName, "present"))
+	err = AnalyzeTable(t.Context(), db, logger, dbName, "does_not_exist")
+	require.ErrorContains(t, err, "ANALYZE TABLE "+dbName+".does_not_exist failed: Error")
+
+	// A nil logger is accepted (the non-OK warning is skipped).
+	require.NoError(t, AnalyzeTable(t.Context(), db, nil, dbName, "present"))
+}
+
 // TestForceExecRawVerb tests that ForceExec supports the %r verb, while
 // preserving its kill-timer behavior: a connection holding a metadata lock
 // on the table is force-killed so the DDL succeeds.

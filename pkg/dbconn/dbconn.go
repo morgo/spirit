@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"math/rand/v2"
+	"strings"
 	"sync"
 	"time"
 
@@ -714,4 +715,52 @@ func Exec(ctx context.Context, db *sql.DB, stmt string, args ...any) error {
 	}
 	_, err = db.ExecContext(ctx, stmt)
 	return err
+}
+
+// AnalyzeTable runs ANALYZE TABLE for schemaName.tableName on db. An empty
+// schemaName leaves the table unqualified, so it resolves against db's default
+// database (required through a Vitess vtgate, where qualifying is wrong). It
+// reads the result set rather than using Exec because ANALYZE reports a
+// failure such as a missing table as a Msg_type="Error" row (not a statement
+// error), which would otherwise be a silent no-op.
+func AnalyzeTable(ctx context.Context, db *sql.DB, logger *slog.Logger, schemaName, tableName string) error {
+	var stmt, name string
+	var err error
+	if schemaName == "" {
+		stmt, err = sqlescape.EscapeSQL("ANALYZE TABLE %n", tableName)
+		name = tableName
+	} else {
+		stmt, err = sqlescape.EscapeSQL("ANALYZE TABLE %n.%n", schemaName, tableName)
+		name = schemaName + "." + tableName
+	}
+	if err != nil {
+		return err
+	}
+	rows, err := db.QueryContext(ctx, stmt)
+	if err != nil {
+		return err
+	}
+	defer utils.CloseAndLog(rows)
+	for rows.Next() {
+		// ANALYZE TABLE returns: Table, Op, Msg_type, Msg_text.
+		var tbl, op, msgType, msgText string
+		if err := rows.Scan(&tbl, &op, &msgType, &msgText); err != nil {
+			return err
+		}
+		// Only Msg_type = "Error" indicates the statistics were not refreshed.
+		// Other rows ("status", "note", "warning") are not failures even when
+		// Msg_text is not "OK" (e.g. "Table is already up to date"); accept
+		// them, logging anything non-OK as a warning for visibility.
+		if strings.EqualFold(msgType, "error") {
+			return fmt.Errorf("ANALYZE TABLE %s failed: %s: %s", name, msgType, msgText)
+		}
+		if !strings.EqualFold(msgText, "OK") && logger != nil {
+			logger.Warn("ANALYZE TABLE reported a non-OK message",
+				"table", name,
+				"msg_type", msgType,
+				"msg_text", msgText,
+			)
+		}
+	}
+	return rows.Err()
 }
