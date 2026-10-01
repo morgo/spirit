@@ -52,12 +52,8 @@ func TestSyncContinuousChecksumFirstCleanPass(t *testing.T) {
 	// On a quiet table, the first clean pass should be quick.
 	h.await(runner.FirstCleanPass(), 30*time.Second, "FirstCleanPass")
 
-	// FirstCleanPass fires in the initial Run; the counters below belong to
-	// the run in progress, so wait for continuous verification to complete a
-	// pass of its own.
-	h.eventually(func() bool { return runner.ChecksumStats().PassesCompleted >= 1 },
-		30*time.Second, "a continuous pass completes")
-	stats := runner.ChecksumStats()
+	stats := h.awaitInitialVerification(30 * time.Second)
+	require.GreaterOrEqual(t, stats.PassesCompleted, uint64(1), "at least one pass should have completed")
 	require.False(t, stats.FirstCleanPassAt.IsZero(), "FirstCleanPassAt should be set")
 	require.Equal(t, uint64(0), stats.PermanentFailures, "no permanent failures expected on a quiet table")
 

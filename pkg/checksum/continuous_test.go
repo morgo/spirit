@@ -24,7 +24,7 @@ type continuousRunStub struct {
 func (c *continuousRunStub) Run(ctx context.Context) error { return c.run(ctx) }
 
 func TestContinuousSnapshotLifecycle(t *testing.T) {
-	for _, outcome := range []string{"clean", "cancel", "failure", "joined-cancel", "foreign-cancel"} {
+	for _, outcome := range []string{"clean", "cancel", "failure", "joined-cancel", "foreign-cancel", "divergence-then-cancel"} {
 		t.Run(outcome, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				ctx, cancel := context.WithCancel(t.Context())
@@ -45,6 +45,14 @@ func TestContinuousSnapshotLifecycle(t *testing.T) {
 					}
 					if outcome == "failure" {
 						return failure
+					}
+					if outcome == "divergence-then-cancel" {
+						// A worker confirmed a divergence, then the sentinel drop
+						// cancelled the pass and a sibling's cancellation won the
+						// race to be returned.
+						resume.divergence.set(fmt.Errorf("%w: chunk 1", ErrPermanentDivergence))
+						cancel()
+						return fmt.Errorf("checksum failed: %w", context.Canceled)
 					}
 					if outcome != "foreign-cancel" {
 						cancel()
@@ -70,6 +78,8 @@ func TestContinuousSnapshotLifecycle(t *testing.T) {
 					require.ErrorIs(t, err, failure)
 				case "foreign-cancel":
 					require.ErrorIs(t, err, context.Canceled)
+				case "divergence-then-cancel":
+					require.ErrorIs(t, err, ErrPermanentDivergence, "a confirmed divergence outranks the cancellation")
 				default:
 					require.NoError(t, err)
 				}

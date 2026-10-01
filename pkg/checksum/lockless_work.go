@@ -1,6 +1,7 @@
 package checksum
 
 import (
+	"fmt"
 	"sync/atomic"
 	"time"
 
@@ -140,4 +141,14 @@ type workResult struct {
 	// err is set on any read or query failure (or a Recopy failure); the
 	// dispatcher returns it from Run.
 	err error
+}
+
+// divergenceError is the ErrPermanentDivergence a permanent result reports:
+// the settling evidence when the range was settled, else both signatures.
+func (r *workResult) divergenceError() error {
+	if r.permanentEvidence != "" {
+		return fmt.Errorf("%w: chunk %s (%s)", ErrPermanentDivergence, r.item.chunk.String(), r.permanentEvidence)
+	}
+	return fmt.Errorf("%w: chunk %s (source crc=%d count=%d, target crc=%d count=%d)", ErrPermanentDivergence,
+		r.item.chunk.String(), r.newSrc.crc, r.newSrc.count, r.newTgt.crc, r.newTgt.count)
 }

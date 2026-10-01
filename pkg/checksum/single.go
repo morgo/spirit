@@ -217,6 +217,20 @@ func (c *SingleChecker) ChecksumChunk(ctx context.Context, trxPool *dbconn.TrxPo
 		// to inspect closely and report on the differences.
 		c.differencesFound.Add(1)
 		c.logger.Warn("chunk verification failed", "chunk", chunk.String(), "reason", mismatch.reason(sourceCount, targetCount), "sourceChecksum", sourceChecksum, "targetChecksum", targetChecksum, "sourceCount", sourceCount, "targetCount", targetCount)
+		// RunContinuous does not repair: the mismatch was read under a
+		// snapshot taken behind a table lock, so it is not apply lag, and it is
+		// reported rather than rewritten while a cutover may be imminent. The
+		// verdict is latched before the diagnostics, which read under ctx: a
+		// cancellation from them must not be what the run reports.
+		recopier := c.repairer()
+		if recopier == nil {
+			divergence := fmt.Errorf("%w: chunk %s (%s)", ErrPermanentDivergence, chunk.String(), mismatch.reason(sourceCount, targetCount))
+			c.resume.divergence.set(divergence)
+			if err := c.inspectDifferences(ctx, trx, chunk); err != nil {
+				c.logger.Warn("failed to inspect row differences", "chunk", chunk.String(), "error", err)
+			}
+			return divergence
+		}
 		if err := c.inspectDifferences(ctx, trx, chunk); err != nil {
 			return err
 		}
@@ -225,13 +239,6 @@ func (c *SingleChecker) ChecksumChunk(ctx context.Context, trxPool *dbconn.TrxPo
 		// so return the transaction now and let the keepalive cover it while
 		// this worker queues for the recopier's lock.
 		putTrx()
-		// RunContinuous does not repair: the mismatch was read under a
-		// snapshot taken behind a table lock, so it is not apply lag, and it is
-		// reported rather than rewritten while a cutover may be imminent.
-		recopier := c.repairer()
-		if recopier == nil {
-			return fmt.Errorf("%w: chunk %s (%s)", ErrPermanentDivergence, chunk.String(), mismatch.reason(sourceCount, targetCount))
-		}
 		if err = recopier.Recopy(ctx, chunk); err != nil {
 			return err
 		}
@@ -678,6 +685,7 @@ func (c *SingleChecker) repairer() Recopier {
 // is cancelled. Each pass is a Run that does not repair: a mismatch returns
 // ErrPermanentDivergence.
 func (c *SingleChecker) RunContinuous(ctx context.Context) error {
+	c.resume.divergence.reset()
 	c.resume.continuous.Store(true)
 	return runContinuousSnapshot(ctx, c, []change.Source{c.feed}, &c.resume, func() error {
 		return c.resume.restart(&c.differencesFound, c.chunker.Reset)
@@ -806,6 +814,11 @@ func runContinuousSnapshot(ctx context.Context, checker Checker, feeds []change.
 		resume.active.Store(true)
 		err := checker.Run(ctx)
 		resume.active.Store(false)
+		// A confirmed divergence outranks whatever error won the race to be
+		// returned, cancellation included.
+		if divergence := resume.divergence.get(); divergence != nil {
+			return divergence
+		}
 		if err != nil {
 			// Nothing is repaired in continuous mode, so a cancellation leaves
 			// the target exactly as verified as it was: filter it to nil.

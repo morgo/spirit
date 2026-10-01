@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -178,6 +179,49 @@ func TestParityContinuousReportsDivergence(t *testing.T) {
 			// an ErrorIs on the sentinel alone would still pass after three
 			// attempts had been spent on it.
 			require.NotErrorIs(t, err, ErrAttemptsExhausted, "a divergence verdict is not retried")
+			require.Equal(t, 2, f.rowsOnTarget(t, name), "no repair was attempted")
+		})
+	}
+}
+
+// cancelOnInspect cancels a context when the checker starts logging the row
+// differences of a confirmed divergence — the moment a sentinel drop would have
+// to land to race the verdict.
+type cancelOnInspect struct {
+	slog.Handler
+	cancel context.CancelFunc
+}
+
+func (h cancelOnInspect) Handle(ctx context.Context, r slog.Record) error {
+	if r.Message == "inspecting differences for chunk" {
+		h.cancel()
+	}
+	return h.Handler.Handle(ctx, r)
+}
+
+// A divergence RunContinuous has confirmed is reported even when the run is
+// cancelled straight after: cancellation is a clean stop only for a target the
+// run had no verdict on. Otherwise a sentinel drop racing the report would cut
+// over a table known to be wrong.
+func TestParityContinuousDivergenceSurvivesCancel(t *testing.T) {
+	prev := LocklessMinPassInterval
+	LocklessMinPassInterval = 0
+	t.Cleanup(func() { LocklessMinPassInterval = prev })
+	for _, lockless := range []bool{false, true} {
+		t.Run(fmt.Sprintf("lockless=%v", lockless), func(t *testing.T) {
+			name := fmt.Sprintf("parity_divcancel_%v", lockless)
+			f := newParityFixture(t, name, "a INT NOT NULL PRIMARY KEY, b INT")
+			testutils.RunSQL(t, fmt.Sprintf("INSERT INTO %s VALUES (1,1),(2,2),(3,3)", name))
+			testutils.RunSQL(t, fmt.Sprintf("INSERT INTO %s VALUES (1,1),(2,2)", utils.NewTableName(name)))
+			f.start(t, name)
+
+			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+			defer cancel()
+			checker := f.checker(t, lockless, func(c *CheckerConfig) {
+				c.Logger = slog.New(cancelOnInspect{Handler: slog.NewTextHandler(testWriter{}, nil), cancel: cancel})
+			})
+			require.ErrorIs(t, checker.RunContinuous(ctx), ErrPermanentDivergence)
+			require.ErrorIs(t, ctx.Err(), context.Canceled, "the run was cancelled after the verdict")
 			require.Equal(t, 2, f.rowsOnTarget(t, name), "no repair was attempted")
 		})
 	}

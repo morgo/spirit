@@ -156,7 +156,11 @@ type Runner struct {
 	// keeps the FirstCleanPass accessor non-blocking — callers can grab it
 	// before Run starts and select on it without deadlocking. It stays
 	// open if the run exits without observing a clean pass.
-	locklessChecker         *checksum.LocklessChecker
+	locklessChecker *checksum.LocklessChecker
+	// initialChecksumStats is the checker's Stats when the initial
+	// verification returned clean (initialChecksumDone).
+	initialChecksumStats    checksum.LocklessCheckerStats
+	initialChecksumDone     bool
 	locklessChunker         table.Chunker
 	locklessReadyCh         chan struct{}
 	firstCleanPassCh        chan struct{}
@@ -581,7 +585,8 @@ func (r *Runner) runChecksum(ctx context.Context) error {
 	}()
 
 	// The copy controller has exited. Keep write scaling alive for the
-	// initial verification's repairs, and join it before stopping the applier.
+	// initial verification's repairs, and join it before stopping the applier
+	// (the deferred call covers an early return; a second call is a no-op).
 	stopScaling := copier.StartWriteAutoscaler(ctx, r.currentLoadSignal(), r.applier, r.autoscale, r.logger, r.metricsSink)
 	defer stopScaling()
 
@@ -621,6 +626,13 @@ func (r *Runner) runChecksum(ctx context.Context) error {
 	if err := checker.Run(ctx); err != nil {
 		return err
 	}
+	// RunContinuous resets the per-run counters, so keep the initial
+	// verification's; and it never repairs, so stop the repair write scaling.
+	r.progMu.Lock()
+	r.initialChecksumStats = checker.Stats()
+	r.initialChecksumDone = true
+	r.progMu.Unlock()
+	stopScaling()
 	// Continuous verification: passes keep running until ctx is cancelled.
 	// RunContinuous reports a cancellation as nil; any other error is real.
 	return checker.RunContinuous(ctx)
@@ -695,6 +707,16 @@ func (r *Runner) checksumConfig() *checksum.CheckerConfig {
 		RetryFlushWait: 2 * r.sync.FlushInterval,
 		Logger:         r.logger,
 	}
+}
+
+// InitialChecksumStats returns the statistics of the initial verification,
+// the one that repairs, once it has completed; ok is false before then.
+// ChecksumStats reports the run in progress, and continuous verification
+// starts its counters from zero.
+func (r *Runner) InitialChecksumStats() (stats checksum.LocklessCheckerStats, ok bool) {
+	r.progMu.RLock()
+	defer r.progMu.RUnlock()
+	return r.initialChecksumStats, r.initialChecksumDone
 }
 
 // ChecksumStats returns a point-in-time snapshot of lockless-checksum

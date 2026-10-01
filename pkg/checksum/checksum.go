@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"sync/atomic"
 	"time"
 
 	"github.com/block/spirit/pkg/applier"
@@ -544,6 +545,28 @@ func waitForChecksum(ctx context.Context, delay time.Duration) bool {
 		return ctx.Err() == nil
 	}
 }
+
+// divergenceLatch holds the first divergence a continuous run confirmed. The
+// verdict is reached before work that a cancellation can interrupt — the row
+// diagnostics, the hand-off from a worker, a sibling worker's error winning the
+// race to be reported — so it is latched where it is reached, and a continuous
+// run reports it ahead of any cancellation. A sentinel drop that races the
+// report must not turn a known divergence into a clean stop and a cutover.
+type divergenceLatch struct{ err atomic.Pointer[error] }
+
+// set records err unless a divergence is already latched: the first one wins.
+func (l *divergenceLatch) set(err error) { l.err.CompareAndSwap(nil, &err) }
+
+// get returns the latched divergence, or nil.
+func (l *divergenceLatch) get() error {
+	if p := l.err.Load(); p != nil {
+		return *p
+	}
+	return nil
+}
+
+// reset clears the latch at the start of a run.
+func (l *divergenceLatch) reset() { l.err.Store(nil) }
 
 // Accept wrapped cancellation, but not a joined cancellation plus a real error.
 func checksumCanceled(err error) bool {

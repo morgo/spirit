@@ -269,10 +269,13 @@ type LocklessChecker struct {
 	// every other counter it is never reset. Tests read it to tell a
 	// confirmed divergence apart from lag that reconciled on retry.
 	confirmedDifferences atomic.Uint64
-	retryQueueDepth      atomic.Int64
-	hotChunkCount        atomic.Int64
-	inFlight             atomic.Int64
-	walkerStalls         atomic.Uint64
+	// divergence is the first divergence this run confirmed without repairing
+	// it. Only a continuous run reads it; see divergenceLatch.
+	divergence      divergenceLatch
+	retryQueueDepth atomic.Int64
+	hotChunkCount   atomic.Int64
+	inFlight        atomic.Int64
+	walkerStalls    atomic.Uint64
 
 	statsMu          sync.RWMutex
 	firstCleanPassAt time.Time
@@ -653,6 +656,7 @@ func (c *LocklessChecker) run(ctx context.Context, untilClean bool) error {
 		}
 	}
 	c.resetRunCounters()
+	c.divergence.reset()
 	c.statsMu.Lock()
 	c.started = time.Now()
 	c.finished = false
@@ -686,10 +690,17 @@ func (c *LocklessChecker) run(ctx context.Context, untilClean bool) error {
 	}
 
 	err := c.runPasses(ctx, untilClean, minPassInterval)
-	if continuous && ctx.Err() != nil && checksumCanceled(err) {
-		// The pass loop joins repairs before returning cancellation, so a
-		// wrapped cancellation here is benign. Never hide joined errors.
-		return nil
+	if continuous {
+		// A confirmed divergence outranks whatever error won the race to be
+		// returned: a worker drops its result on cancellation.
+		if divergence := c.divergence.get(); divergence != nil {
+			return divergence
+		}
+		if ctx.Err() != nil && checksumCanceled(err) {
+			// Nothing is repaired in continuous mode, so a cancellation leaves
+			// the target as verified as it was. Never hide joined errors.
+			return nil
+		}
 	}
 	return err
 }
@@ -1314,10 +1325,11 @@ func (c *LocklessChecker) resolveSettledDivergence(ctx context.Context, res *wor
 	c.confirmedDifferences.Add(1) // before any repair
 	recopier := c.repairer()
 	if recopier == nil {
-		c.logRowDifferences(ctx, chunk, "hot chunk has diverged")
 		res.permanent = true
 		res.permanentEvidence = fmt.Sprintf("settled against the change stream after %d attempts, %d rows still outstanding; see the logged row differences",
 			res.snapshot.attempts, len(res.snapshot.pending))
+		c.divergence.set(res.divergenceError())
+		c.logRowDifferences(ctx, chunk, "hot chunk has diverged")
 		return
 	}
 	c.logRowDifferences(ctx, chunk, "recopying diverged hot chunk")
@@ -1471,8 +1483,9 @@ func (c *LocklessChecker) executeWork(ctx context.Context, item *workItem) *work
 		return res
 	}
 
-	c.logRowDifferences(ctx, item.chunk, "chunk has diverged")
 	res.permanent = true
+	c.divergence.set(res.divergenceError())
+	c.logRowDifferences(ctx, item.chunk, "chunk has diverged")
 	return res
 }
 
@@ -1563,7 +1576,7 @@ func (c *LocklessChecker) handleResult(res *workResult, enqueueRetry func(*retry
 				"chunk", res.item.chunk.String(),
 				"evidence", res.permanentEvidence,
 			)
-			return fmt.Errorf("%w: chunk %s (%s)", ErrPermanentDivergence, res.item.chunk.String(), res.permanentEvidence)
+			return res.divergenceError()
 		}
 		c.cfg.Logger.Error("lockless checksum: permanent divergence",
 			"chunk", res.item.chunk.String(),
@@ -1573,8 +1586,7 @@ func (c *LocklessChecker) handleResult(res *workResult, enqueueRetry func(*retry
 			"targetCount", res.newTgt.count,
 			"originalSourceCRC", res.item.originalSrc.crc,
 		)
-		return fmt.Errorf("%w: chunk %s (source crc=%d count=%d, target crc=%d count=%d)", ErrPermanentDivergence,
-			res.item.chunk.String(), res.newSrc.crc, res.newSrc.count, res.newTgt.crc, res.newTgt.count)
+		return res.divergenceError()
 	}
 	if res.snapshot != nil {
 		return enqueueRetry(&retryEntry{chunk: res.item.chunk, snapshot: res.snapshot, splitBudget: res.item.splitBudget,

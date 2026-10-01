@@ -333,8 +333,11 @@ After the initial copy, sync verifies the target in two stages:
 
 1. **Initial verification** repeats passes until one is clean. A range that
    still differs once the change stream has caught up is repaired from the
-   source and re-verified. A range that keeps diverging pass after pass fails
-   the sync rather than looping forever.
+   source and re-verified. Verification gives up after ten passes with none
+   clean, and the sync fails with a "verification did not converge" error rather
+   than looping forever. That happens when a range keeps diverging after each
+   repair, or when it changes too often to be compared in any of the ten
+   passes. A restart runs the initial verification again from the start.
 2. **Continuous verification** then re-checks the target about once an hour
    until the sync is stopped. It never repairs: the initial verification already
    found the target consistent, so a range that differs after that is
