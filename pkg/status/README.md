@@ -10,7 +10,7 @@ The states are defined in lifecycle order:
 
 `Initial` → `CopyRows` → `ApplyChangeset` → `RestoreSecondaryIndexes` → `AnalyzeTable` → `Checksum` → `PostChecksum` → `WaitingOnSentinelTable` → `CutOver` → `ReverseWindow` → `Close` → `ErrCleanup`
 
-This ordering is deliberate — the code uses ordinal comparisons (e.g., `state >= CutOver`) to determine when to stop checkpointing and status reporting. `WaitingOnSentinelTable` sorts after `Checksum` so that `state >= Checksum` stays true while the sentinel wait blocks the cutover.
+This ordering is deliberate — the code uses ordinal comparisons (e.g., `state >= CutOver`) to determine when to stop checkpointing and status reporting. `WaitingOnSentinelTable` sorts after `PostChecksum` because that is when it runs. The checkpoint gates in migration and move persist checksum resume evidence only in the window `[Checksum, WaitingOnSentinelTable)`: the sentinel wait discards that evidence, so a restart during the wait re-verifies the whole range.
 
 `ReverseWindow` is entered only by a `move` run with [`--reverse-window`](../../docs/move.md#reverse-window) set. It sorts immediately after `CutOver`: the forward cutover is done and traffic is on the target, but Spirit keeps the source current in change-only mode so the move can still be rolled back. Because it is `>= CutOver`, the background status/checkpoint loops have already stopped (the reverse-window driver manages its own checkpoint writes) while orchestration can still observe that a revert is possible.
 

@@ -46,8 +46,10 @@ var (
 // it left over from an earlier run or shared with a concurrent one, and
 // TestSentinelCreateNeverObservedAbsent relies on CREATE IF NOT EXISTS so a
 // concurrent existence probe never sees it missing. Only the fresh path calls
-// Create (migration's newMigration, move's newCopy); neither runner recreates
-// it on resume, so a sentinel dropped before a resume stays dropped.
+// Create (migration's newMigration, move's newCopy), so a sentinel dropped
+// before a successful resume stays dropped. A run whose resume is impossible
+// (e.g. a too-old checkpoint, or move's --force) falls back to the fresh path
+// and, with --defer-cutover, creates it again.
 func Create(ctx context.Context, db *sql.DB) error {
 	return dbconn.Exec(ctx, db, "CREATE TABLE IF NOT EXISTS %n (id int NOT NULL PRIMARY KEY)", TableName)
 }
