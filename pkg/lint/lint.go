@@ -69,7 +69,7 @@ import (
 // Config holds linter configuration
 type Config struct {
 	// Enabled maps linter names to whether they are enabled
-	// If a linter is not in this map, it uses its default enabled state
+	// If a linter is not in this map, it runs
 	Enabled map[string]bool
 
 	// Settings maps linter names to their configuration as map[string]string
@@ -87,12 +87,7 @@ type Config struct {
 // RunLinters runs all enabled linters and returns any violations found.
 // Linters are executed in an undefined order.
 //
-// A linter is executed if:
-//   - It is enabled by default (set during Register), AND
-//   - It is not explicitly disabled in config.Enabled
-//
-// OR:
-//   - It is explicitly enabled in config.Enabled
+// Every registered linter runs unless config.Enabled maps its name to false.
 //
 // If a linter implements ConfigurableLinter and has settings in config.Settings,
 // those settings are applied before running the linter.
@@ -108,19 +103,8 @@ func RunLinters(existingSchema []*statement.CreateTable, changes []*statement.Ab
 	var violations []Violation
 
 	for name, linter := range linters {
-		// Check if linter is explicitly disabled in config
+		// Skip a linter the config explicitly disables
 		if enabled, ok := config.Enabled[name]; ok && !enabled {
-			continue
-		}
-
-		// Check if linter is explicitly enabled in config
-		explicitlyEnabled := false
-		if enabled, ok := config.Enabled[name]; ok && enabled {
-			explicitlyEnabled = true
-		}
-
-		// Skip if not enabled by default and not explicitly enabled
-		if !linter.enabled && !explicitlyEnabled {
 			continue
 		}
 

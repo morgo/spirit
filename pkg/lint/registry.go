@@ -6,8 +6,7 @@ import (
 
 // linter represents a registered linter with metadata
 type linter struct {
-	l       Linter
-	enabled bool
+	l Linter
 }
 
 var (
@@ -17,7 +16,7 @@ var (
 
 // Register registers a linter with the global registry.
 // This should be called from init() functions in linter implementations.
-// Linters are enabled by default when registered.
+// A registered linter runs unless Config.Enabled disables it.
 func Register(l Linter) {
 	lock.Lock()
 	defer lock.Unlock()
@@ -26,8 +25,5 @@ func Register(l Linter) {
 		linters = make(map[string]*linter)
 	}
 
-	linters[l.Name()] = &linter{
-		l:       l,
-		enabled: true,
-	}
+	linters[l.Name()] = &linter{l: l}
 }

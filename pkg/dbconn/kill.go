@@ -196,7 +196,7 @@ func statementIsWaitingForTableLock(ctx context.Context, db *sql.DB, tables []*t
 // including when killing another one failed. KILL acknowledges the request
 // before rollback and lock release complete. A blocker left alive because it
 // is too heavy to kill is reported as errHeavyTransactionSkipped.
-func killLockingTransactions(ctx context.Context, db *sql.DB, tables []*table.TableInfo, config *DBConfig, logger *slog.Logger, ignorePIDs []int) ([]int, error) {
+func killLockingTransactions(ctx context.Context, db *sql.DB, tables []*table.TableInfo, logger *slog.Logger, ignorePIDs []int) ([]int, error) {
 	killed, heavy, err := killBlockers(ctx, db, tables, logger, ignorePIDs)
 	if len(heavy) > 0 {
 		err = errors.Join(err, fmt.Errorf("%w: sessions %v", errHeavyTransactionSkipped, heavy))

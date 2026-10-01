@@ -182,34 +182,6 @@ func TestRunLinters_WithConfig_Disabled(t *testing.T) {
 	require.Empty(t, violations)
 }
 
-func TestRunLinters_WithConfig_Enabled(t *testing.T) {
-	resetForTest(t)
-
-	linter := &mockLinter{
-		name: "test_linter",
-	}
-	linter.violations = []Violation{
-		{Linter: linter, Severity: SeverityWarning, Message: "Should see this"},
-	}
-
-	// Disable by default
-	Register(linter)
-	lock.Lock()
-	linters["test_linter"].enabled = false
-	lock.Unlock()
-
-	// But explicitly enable via config
-	violations, err := RunLinters(nil, nil, Config{
-		Enabled: map[string]bool{
-			"test_linter": true,
-		},
-	})
-	require.NoError(t, err)
-
-	require.Len(t, violations, 1)
-	require.Equal(t, "Should see this", violations[0].Message)
-}
-
 func TestRunLinters_ConfigurableLinter(t *testing.T) {
 	resetForTest(t)
 

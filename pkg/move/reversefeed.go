@@ -102,11 +102,10 @@ type ReverseFeed struct {
 	flushInt time.Duration
 
 	// A fatal error on any feed (schema change or stream failure) means U can no
-	// longer be trusted for rollback. We capture it once (and close fatalCh) so
+	// longer be trusted for rollback. We capture it once so
 	// the caller, which polls Err, can degrade to complete-forward rather than
 	// silently letting U drift.
 	fatalOnce sync.Once
-	fatalCh   chan struct{}
 	fatalMu   sync.Mutex
 	fatalErr  error
 }
@@ -187,7 +186,6 @@ func NewReverseFeed(ctx context.Context, cfg ReverseFeedConfig) (_ *ReverseFeed,
 		appl:     appl,
 		logger:   logger,
 		flushInt: flushInt,
-		fatalCh:  make(chan struct{}),
 	}
 	// If wiring the per-source feeds fails partway, tear down the feeds already
 	// created so we don't leak their binlog syncer goroutines and connections.
@@ -255,7 +253,6 @@ func (rf *ReverseFeed) onFatal(reason change.FatalReason) bool {
 		rf.fatalErr = fmt.Errorf("reverse feed hit a fatal condition (%s); rollback is no longer safe", reason)
 		rf.fatalMu.Unlock()
 		rf.logger.Error("reverse feed fatal; source can no longer be trusted for rollback", "reason", reason.String())
-		close(rf.fatalCh)
 	})
 	return true
 }
