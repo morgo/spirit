@@ -222,6 +222,9 @@ func TestParityContinuousDivergenceSurvivesCancel(t *testing.T) {
 			})
 			require.ErrorIs(t, checker.RunContinuous(ctx), ErrPermanentDivergence)
 			require.ErrorIs(t, ctx.Err(), context.Canceled, "the run was cancelled after the verdict")
+			if lockless, ok := checker.(*LocklessChecker); ok {
+				require.Equal(t, uint64(1), lockless.Stats().PermanentFailures, "counted even if the worker dropped its result")
+			}
 			require.Equal(t, 2, f.rowsOnTarget(t, name), "no repair was attempted")
 		})
 	}

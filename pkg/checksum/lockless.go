@@ -1325,10 +1325,9 @@ func (c *LocklessChecker) resolveSettledDivergence(ctx context.Context, res *wor
 	c.confirmedDifferences.Add(1) // before any repair
 	recopier := c.repairer()
 	if recopier == nil {
-		res.permanent = true
 		res.permanentEvidence = fmt.Sprintf("settled against the change stream after %d attempts, %d rows still outstanding; see the logged row differences",
 			res.snapshot.attempts, len(res.snapshot.pending))
-		c.divergence.set(res.divergenceError())
+		c.reportPermanent(res)
 		c.logRowDifferences(ctx, chunk, "hot chunk has diverged")
 		return
 	}
@@ -1483,10 +1482,34 @@ func (c *LocklessChecker) executeWork(ctx context.Context, item *workItem) *work
 		return res
 	}
 
-	res.permanent = true
-	c.divergence.set(res.divergenceError())
+	c.reportPermanent(res)
 	c.logRowDifferences(ctx, item.chunk, "chunk has diverged")
 	return res
+}
+
+// reportPermanent records a divergence that will not be repaired, in the
+// worker that confirmed it: it marks the result, counts and logs it, and
+// latches it. Doing all of it here rather than in handleResult means a result
+// the worker drops on cancellation is still counted, logged and reported.
+func (c *LocklessChecker) reportPermanent(res *workResult) {
+	res.permanent = true
+	c.permanentFailures.Add(1)
+	if res.permanentEvidence != "" {
+		c.cfg.Logger.Error("lockless checksum: permanent divergence",
+			"chunk", res.item.chunk.String(),
+			"evidence", res.permanentEvidence,
+		)
+	} else {
+		c.cfg.Logger.Error("lockless checksum: permanent divergence",
+			"chunk", res.item.chunk.String(),
+			"sourceCRC", res.newSrc.crc,
+			"targetCRC", res.newTgt.crc,
+			"sourceCount", res.newSrc.count,
+			"targetCount", res.newTgt.count,
+			"originalSourceCRC", res.item.originalSrc.crc,
+		)
+	}
+	c.divergence.set(res.divergenceError())
 }
 
 // logRowDifferences logs one line per diverged row in the chunk, so an operator
@@ -1570,22 +1593,7 @@ func (c *LocklessChecker) handleResult(res *workResult, enqueueRetry func(*retry
 	// the result: re-enqueueing it would poll a range whose answer is already
 	// known, forever, and the run would never return the divergence.
 	if res.permanent {
-		c.permanentFailures.Add(1)
-		if res.permanentEvidence != "" {
-			c.cfg.Logger.Error("lockless checksum: permanent divergence",
-				"chunk", res.item.chunk.String(),
-				"evidence", res.permanentEvidence,
-			)
-			return res.divergenceError()
-		}
-		c.cfg.Logger.Error("lockless checksum: permanent divergence",
-			"chunk", res.item.chunk.String(),
-			"sourceCRC", res.newSrc.crc,
-			"targetCRC", res.newTgt.crc,
-			"sourceCount", res.newSrc.count,
-			"targetCount", res.newTgt.count,
-			"originalSourceCRC", res.item.originalSrc.crc,
-		)
+		// Counted and logged by the worker; see reportPermanent.
 		return res.divergenceError()
 	}
 	if res.snapshot != nil {

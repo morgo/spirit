@@ -770,6 +770,44 @@ func TestLocklessSettlesHotChunkEndToEnd(t *testing.T) {
 	}
 }
 
+// A divergence settled against the change stream is reported by RunContinuous
+// even when the run is cancelled straight after the verdict, and counted: the
+// worker may drop its result on cancellation, so the verdict is latched,
+// counted and logged where it is reached rather than in handleResult.
+func TestLocklessContinuousSettledDivergenceSurvivesCancel(t *testing.T) {
+	db, chunk := snapshotTestTables(t, "id INT PRIMARY KEY, value INT", []string{"id"})
+	snapshotExec(t, db, "INSERT INTO src VALUES (1,10),(2,20)")
+	snapshotExec(t, db, "INSERT INTO dst VALUES (1,10),(2,99)") // the stream's image contradicts row 2
+
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	defer cancel()
+	chunker := newTestChunker(1)
+	chunker.chunks[0] = chunk
+	cfg := fastConfig()
+	cfg.RetryDelay = time.Millisecond
+	cfg.MaxHotAttempts = 3
+	cfg.minPassInterval = time.Hour
+	cfg.Logger = slog.New(cancelOnInspect{Handler: slog.NewTextHandler(testWriter{}, nil), cancel: cancel})
+	c := newTestChecker(t, chunker, cfg, func(_ context.Context, _ *table.Chunk, attempt int) (int64, int64, uint64, error) {
+		return int64(attempt), 0, 1, nil // the source never stops moving
+	})
+	c.recopier = &fakeRecopier{recopyFn: func(context.Context, *table.Chunk) error {
+		t.Error("RunContinuous must not repair")
+		return nil
+	}}
+	c.sourceDBs = []*sql.DB{db}
+	c.snapshotChunk = func(ctx context.Context, chunk *table.Chunk) (*hotSnapshot, error) {
+		return captureHotSnapshot(ctx, []*sql.DB{db}, []*sql.DB{db}, chunk)
+	}
+	c.feeds = []change.Source{&parkingFeed{events: []parkedEvent{{key: []any{int64(2)}, image: []any{int64(2), int64(20)}}}}}
+
+	err := c.RunContinuous(ctx)
+	require.ErrorIs(t, err, ErrPermanentDivergence)
+	require.ErrorContains(t, err, "settled against the change stream")
+	require.ErrorIs(t, ctx.Err(), context.Canceled, "the run was cancelled after the verdict")
+	require.Equal(t, uint64(1), c.Stats().PermanentFailures, "counted even if the worker dropped its result")
+}
+
 // TestCompareRowToImageRefusesAmbiguousTargetRead pins the guard that a point
 // predicate must address exactly one target row before its value is read as a
 // verdict.
