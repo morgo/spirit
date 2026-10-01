@@ -42,7 +42,13 @@ type parkingFeed struct {
 	// rewriteAfter, when positive, makes every verification past that many
 	// deliveries report the row as rewritten.
 	rewriteAfter int
-	watches      []change.RowWatch
+	// applyFn, when set, runs after the flush on the parked-event path only. A
+	// test that scripts the catch-up the parked event carries puts it here, not
+	// in FlushFn: the checker also drains every feed in the background (a retry
+	// waiting on its flush gate requests one), and a catch-up in FlushFn can then
+	// land before the settle runs, leaving the snapshot to verify by polling.
+	applyFn func(ctx context.Context) error
+	watches []change.RowWatch
 }
 
 func (f *parkingFeed) VerifyRowAtNextChange(ctx context.Context, watch change.RowWatch, verify change.RowVerifier) error {
@@ -77,6 +83,11 @@ func (f *parkingFeed) VerifyRowAtNextChange(ctx context.Context, watch change.Ro
 	}
 	if err := f.Flush(ctx); err != nil {
 		return err
+	}
+	if f.applyFn != nil {
+		if err := f.applyFn(ctx); err != nil {
+			return err
+		}
 	}
 	return verify(ctx, ev.key, ev.image, ev.deleted)
 }
@@ -737,7 +748,7 @@ func TestLocklessSettlesHotChunkEndToEnd(t *testing.T) {
 			// missing.
 			feed := &parkingFeed{events: []parkedEvent{{key: []any{int64(2)}, image: []any{int64(2), int64(20)}}}}
 			if converge {
-				feed.FlushFn = func(ctx context.Context) error {
+				feed.applyFn = func(ctx context.Context) error {
 					_, err := db.ExecContext(ctx, "REPLACE INTO dst SELECT * FROM src")
 					return err
 				}
@@ -876,7 +887,7 @@ func TestLocklessSettlesHotRowOnTheFeedThatOwnsIt(t *testing.T) {
 		return captureHotSnapshot(ctx, sources, []*sql.DB{db}, chunk)
 	}
 	owner := &parkingFeed{events: []parkedEvent{{key: []any{int64(2)}, image: []any{int64(2), int64(20)}}}}
-	owner.FlushFn = func(ctx context.Context) error {
+	owner.applyFn = func(ctx context.Context) error {
 		_, err := db.ExecContext(ctx, "REPLACE INTO dst SELECT * FROM src")
 		return err
 	}
