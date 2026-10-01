@@ -170,5 +170,5 @@ func TestIndexVisibilityMixedLinter_Registered(t *testing.T) {
 
 	violations, err := RunLinters(nil, stmts, Config{})
 	require.NoError(t, err)
-	require.Len(t, FilterByLinter(violations, "index_visibility_mixed"), 1)
+	require.Len(t, filterByLinter(violations, "index_visibility_mixed"), 1)
 }

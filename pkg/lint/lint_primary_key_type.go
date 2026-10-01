@@ -201,8 +201,7 @@ func (l *PrimaryKeyLinter) checkColumnType(tableName string, column *statement.C
 	if _, ok := l.allowedTypes[columnType]; ok {
 		// A PK on an allowed type passes. We deliberately do NOT emit a
 		// "prefer UNSIGNED" warning for signed integer PKs — it was judged
-		// too noisy for real-world schemas. isSignedIntType (with its unit
-		// tests) is retained should that policy be revisited.
+		// too noisy for real-world schemas.
 		return nil
 	}
 
@@ -248,8 +247,4 @@ func (l *PrimaryKeyLinter) isBinaryType(column *statement.Column) bool {
 	rawType := column.Raw.Tp.GetType()
 
 	return (rawType == mysql.TypeString || rawType == mysql.TypeVarchar) && mysql.HasBinaryFlag(column.Raw.Tp.GetFlag())
-}
-
-func isSignedIntType(column *statement.Column) bool {
-	return mysql.IsIntegerType(column.Raw.Tp.GetType()) && (column.Unsigned == nil || !*column.Unsigned)
 }

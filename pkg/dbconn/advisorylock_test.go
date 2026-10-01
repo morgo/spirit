@@ -184,7 +184,9 @@ func TestAdvisoryLockLength(t *testing.T) {
 // simulateConnectionClose simulates a temporary network issue by closing the connection
 func simulateConnectionClose(t *testing.T, lock *AdvisoryLock, logger *slog.Logger) {
 	// close the existing connection to simulate a network issue
-	err := lock.CloseDBConnection(logger)
+	logger.Info("about to close advisory lock database connection")
+	require.NotNil(t, lock.db)
+	err := lock.db.Close()
 	require.NoError(t, err)
 
 	// wait a bit to ensure the connection is closed

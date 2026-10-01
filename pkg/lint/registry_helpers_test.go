@@ -1,8 +1,12 @@
 package lint
 
 import (
+	"maps"
+	"slices"
 	"sync"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 // initialLintRegistry holds a snapshot of the linters registered by init()
@@ -35,13 +39,32 @@ func restoreInitialLintRegistry() {
 	}
 }
 
-// resetForTest wipes the linter registry like Reset() does, but also registers
-// a t.Cleanup that restores the init() snapshot when the test ends. Use this
-// instead of bare Reset() in tests so that subsequent tests in the same binary
-// see the full set of linters their init() functions registered.
+// resetForTest wipes the linter registry and registers a t.Cleanup that
+// restores the init() snapshot when the test ends, so that subsequent tests in
+// the same binary see the full set of linters their init() functions registered.
 func resetForTest(t *testing.T) {
 	t.Helper()
 	captureInitialLintRegistry()
-	Reset()
+	lock.Lock()
+	linters = make(map[string]*linter)
+	lock.Unlock()
 	t.Cleanup(restoreInitialLintRegistry)
+}
+
+// registeredLinterNames returns the names of all registered linters in sorted order.
+func registeredLinterNames() []string {
+	lock.RLock()
+	defer lock.RUnlock()
+	return slices.Sorted(maps.Keys(linters))
+}
+
+// registeredLinter returns the registered linter with the given name, failing
+// the test if it is not registered.
+func registeredLinter(t *testing.T, name string) Linter {
+	t.Helper()
+	lock.RLock()
+	defer lock.RUnlock()
+	l, ok := linters[name]
+	require.True(t, ok, "linter %q not registered", name)
+	return l.l
 }

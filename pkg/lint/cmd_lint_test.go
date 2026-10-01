@@ -91,7 +91,7 @@ func TestLintCmd_LintEntireSchemaFromDir(t *testing.T) {
 	require.NoError(t, err)
 
 	// Should have has_float violation
-	floatViolations := FilterByLinter(violations, "has_float")
+	floatViolations := filterByLinter(violations, "has_float")
 	require.NotEmpty(t, floatViolations, "expected has_float violation")
 }
 

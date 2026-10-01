@@ -921,8 +921,7 @@ func TestTypePedantic_Collation_PostStateAlterConvergesCollation(t *testing.T) {
 }
 
 func TestTypePedantic_RegisteredAndDescribed(t *testing.T) {
-	l, err := Get("type_pedantic")
-	require.NoError(t, err)
+	l := registeredLinter(t, "type_pedantic")
 	require.NotEmpty(t, l.Description())
 	require.Contains(t, l.String(), "type_pedantic")
 }

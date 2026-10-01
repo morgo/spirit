@@ -88,7 +88,7 @@ func TestEncodeSchemaTable(t *testing.T) {
 	}
 }
 
-func TestExtractTablesFromDDLStmts(t *testing.T) {
+func TestParseQueryEventTables(t *testing.T) {
 	tests := []struct {
 		name          string
 		defaultSchema string
@@ -249,14 +249,14 @@ func TestExtractTablesFromDDLStmts(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, opensTransaction, err := extractTablesFromDDLStmts(tt.defaultSchema, tt.statement)
+			info, err := parseQueryEvent(tt.defaultSchema, tt.statement)
 			if tt.wantErr {
 				require.Error(t, err)
 				return
 			}
 			require.NoError(t, err)
-			require.Equal(t, tt.want, got)
-			require.Equal(t, tt.wantOpensTxn, opensTransaction)
+			require.Equal(t, tt.want, info.tables)
+			require.Equal(t, tt.wantOpensTxn, info.opensTransaction)
 		})
 	}
 }
@@ -319,8 +319,8 @@ func TestToSet(t *testing.T) {
 	}
 }
 
-// TestExtractTablesFromDDLStmtsComplex tests more complex DDL statements
-func TestExtractTablesFromDDLStmtsComplex(t *testing.T) {
+// TestParseQueryEventTablesComplex tests more complex DDL statements
+func TestParseQueryEventTablesComplex(t *testing.T) {
 	tests := []struct {
 		name          string
 		defaultSchema string
@@ -390,13 +390,13 @@ func TestExtractTablesFromDDLStmtsComplex(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, _, err := extractTablesFromDDLStmts(tt.defaultSchema, tt.statement)
+			info, err := parseQueryEvent(tt.defaultSchema, tt.statement)
 			if tt.wantErr {
 				require.Error(t, err)
 				return
 			}
 			require.NoError(t, err)
-			require.Equal(t, tt.want, got)
+			require.Equal(t, tt.want, info.tables)
 		})
 	}
 }
@@ -440,10 +440,10 @@ func TestExtractTablesFromAccountManagementDDL(t *testing.T) {
 	}
 	for _, statement := range statements {
 		t.Run(statement, func(t *testing.T) {
-			tables, opensTransaction, err := extractTablesFromDDLStmts("test", statement)
+			info, err := parseQueryEvent("test", statement)
 			require.NoError(t, err)
-			require.Empty(t, tables)
-			require.False(t, opensTransaction)
+			require.Empty(t, info.tables)
+			require.False(t, info.opensTransaction)
 		})
 	}
 }

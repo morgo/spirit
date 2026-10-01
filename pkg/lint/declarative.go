@@ -34,11 +34,6 @@ func (c *PlannedChange) Warnings() []Violation {
 	return c.filterBySeverity(SeverityWarning)
 }
 
-// Infos returns lint violations with INFO severity.
-func (c *PlannedChange) Infos() []Violation {
-	return c.filterBySeverity(SeverityInfo)
-}
-
 func (c *PlannedChange) filterBySeverity(severity Severity) []Violation {
 	var result []Violation
 	for _, v := range c.Violations {
@@ -74,16 +69,6 @@ func (p *Plan) HasErrors() bool {
 func (p *Plan) HasWarnings() bool {
 	for i := range p.Changes {
 		if len(p.Changes[i].Warnings()) > 0 {
-			return true
-		}
-	}
-	return false
-}
-
-// HasInfos returns true if any change has lint infos.
-func (p *Plan) HasInfos() bool {
-	for i := range p.Changes {
-		if len(p.Changes[i].Infos()) > 0 {
 			return true
 		}
 	}
