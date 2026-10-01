@@ -5,17 +5,14 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/block/spirit/pkg/applier"
 	"github.com/block/spirit/pkg/dbconn"
-	"github.com/block/spirit/pkg/table"
 	"github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/go-mysql-org/go-mysql/replication"
 	"github.com/google/uuid"
@@ -26,42 +23,40 @@ var _ Source = (*gtidClient)(nil)
 
 // gtidClient is a change.Source that uses MySQL GTIDs as the resume
 // coordinate instead of (binlog-file, offset). It is selected automatically
-// (see NewAutoClient) whenever the source server has GTIDs enabled. It is a
-// parallel implementation to binlogClient; nothing is shared with it directly
-// so the binlog client can be kept untouched while this one matures.
+// (see NewAutoClient) whenever the source server has GTIDs enabled; servers
+// without GTIDs fall back to binlogClient.
+//
+// Shared with binlogClient through the embedded feedCore (see feedcore.go):
+// subscriptions and how they are built, DDL filtering, the fatal-error
+// callback, Stop/Close teardown, flush bookkeeping (FlushResidual and the
+// FeedStats flush fields), the Flush / FlushUnderTableLock / periodic-flush
+// loops, the syncer config, and row dispatch through the parker.
+//
+// Specific to this client (in this file): the GTID position fields and
+// their accessors (Position, StartFromPosition, CurrentPosition,
+// AllChangesFlushed), flush (which snapshots and advances the flushed GTID
+// set), BlockWait/blockWait (which poll @@GLOBAL.gtid_executed rather than
+// chasing a file offset), FeedStats, VerifyRowAtNextChange (it hands the
+// parker this client's flush), Start/recreateStreamer, readStream and event
+// decoding (per-transaction GTID promotion, processQueryEvent,
+// processRowsEvent, processTransactionPayload).
 //
 // Wire protocol: COM_BINLOG_DUMP_GTID via go-mysql's
 // BinlogSyncer.StartSyncGTID. The server requires gtid_mode=ON and
 // enforce_gtid_consistency=ON; a non-GTID source will error out at Start.
 type gtidClient struct {
-	mu sync.Mutex
+	// feedCore holds the state and methods shared with binlogClient,
+	// including mu, which also guards this type's GTID fields
+	// (bufferedGTID / flushedGTID / pendingSID / pendingGNO) and streamer.
+	feedCore
 
-	host     string
-	username string
-	password string
+	host string
 
 	cfg      replication.BinlogSyncerConfig
-	syncer   *replication.BinlogSyncer
 	streamer *replication.BinlogStreamer
 
 	db       *sql.DB
-	applier  applier.Applier
 	dbConfig *dbconn.DBConfig
-
-	subs *subscriptionRegistry
-
-	// parker backs VerifyRowAtNextChange: it holds the reader between events
-	// and owns the single armed watch. See park.go.
-	parker RowParker
-
-	callerCancelFunc func(FatalReason) bool
-	ddlFilterSchema  string
-	ddlFilterTables  map[string]struct{}
-
-	// stopped mirrors binlogClient.stopped; see Stop.
-	stopped atomic.Bool
-
-	serverID uint32
 
 	// bufferedGTID is everything we have seen from the stream and either
 	// fully decoded into subscriptions (committed transactions) or that
@@ -81,24 +76,6 @@ type gtidClient struct {
 	pendingSID   []byte
 	pendingGNO   int64
 
-	// flushResidual is the pending-change count observed at the end of the
-	// most recent flush, and flushCount how many flushes have completed. Both
-	// guarded by mu. See Source.FlushResidual.
-	flushResidual int
-	flushCount    int
-
-	// lastFlush* describe the most recently completed flush, for FeedStats.
-	// Guarded by mu. See binlogClient for why every flush is recorded, not
-	// just the periodic one.
-	lastFlushAt       time.Time
-	lastFlushDuration time.Duration
-	lastFlushRows     int
-	// lastFlushComplete is that flush's allChangesFlushed result: whether
-	// every subscription drained everything it held. Flush reads it, alongside
-	// each subscription's LastDrainHitBudget, to tell a backlog it can work
-	// through from one it cannot — see backlogWorthDraining.
-	lastFlushComplete bool
-
 	// rotations counts binlog rotations seen on the stream. Position
 	// tracking here is by GTID, so this is reported for diagnostics only.
 	rotations atomic.Int64
@@ -108,42 +85,6 @@ type gtidClient struct {
 	// recordEventTime from the read loop, read back by eventTime; see
 	// FeedStats.BufferedEventAt.
 	lastEventTime atomic.Int64
-
-	periodicFlushLock   sync.Mutex
-	periodicFlushCancel context.CancelFunc
-	periodicFlushDone   chan struct{}
-
-	cancelFunc func()
-	isClosed   atomic.Bool
-	logger     *slog.Logger
-	streamWG   sync.WaitGroup
-
-	subscriptionSoftLimitBytes int64
-
-	// subscriptionSoftLimitChanges is the per-subscription change-count
-	// cap, applied alongside the byte cap. Zero disables it. See
-	// DefaultSubscriptionSoftLimitChanges.
-	subscriptionSoftLimitChanges int
-
-	// flushConcurrency is the map-mode flush batch concurrency passed
-	// to each subscription on construction. See DefaultFlushConcurrency.
-	flushConcurrency int
-
-	// batchSize is the map-mode flush batch size passed to each
-	// subscription on construction. It travels with flushConcurrency:
-	// the two together set the rows a drain has in flight. See
-	// DefaultBatchSize.
-	batchSize int
-
-	// underLoad is ClientConfig.UnderLoad, handed to every subscription so the
-	// drain can narrow itself when the target is loaded. Nil disables it.
-	underLoad func() bool
-
-	// flushRequests receives the subscription that parked on its soft
-	// memory limit; runPeriodicFlush selects on it and flushes that
-	// subscription first, then runs the normal all-subscription pass.
-	// See the binlog client's field of the same name.
-	flushRequests chan Subscription
 }
 
 // NewGTIDClient constructs the GTID-backed change.Source. It mirrors
@@ -156,63 +97,13 @@ func NewGTIDClient(db *sql.DB, host string, username, password string, appl appl
 	if config.DBConfig == nil {
 		config.DBConfig = dbconn.NewDBConfig()
 	}
-	softLimit := config.SubscriptionSoftLimitBytes
-	if softLimit == 0 {
-		softLimit = DefaultSubscriptionSoftLimitBytes
-	} else if softLimit < 0 {
-		softLimit = 0
+	c := &gtidClient{
+		db:       db,
+		dbConfig: config.DBConfig,
+		host:     host,
 	}
-	softLimitChanges := config.SubscriptionSoftLimitChanges
-	if softLimitChanges == 0 {
-		softLimitChanges = DefaultSubscriptionSoftLimitChanges
-	} else if softLimitChanges < 0 {
-		softLimitChanges = 0
-	}
-	return &gtidClient{
-		db:                           db,
-		dbConfig:                     config.DBConfig,
-		host:                         host,
-		username:                     username,
-		password:                     password,
-		logger:                       config.Logger,
-		subs:                         newSubscriptionRegistry(),
-		callerCancelFunc:             config.CancelFunc,
-		ddlFilterSchema:              config.DDLFilterSchema,
-		ddlFilterTables:              toSet(config.DDLFilterTables),
-		serverID:                     config.ServerID,
-		applier:                      appl,
-		subscriptionSoftLimitBytes:   softLimit,
-		subscriptionSoftLimitChanges: softLimitChanges,
-		flushConcurrency:             config.resolveFlushConcurrency(),
-		batchSize:                    config.resolveBatchSize(),
-		underLoad:                    config.UnderLoad,
-		flushRequests:                make(chan Subscription, 1),
-	}
-}
-
-// AddSubscription satisfies Source.
-func (c *gtidClient) AddSubscription(currentTable, newTable *table.TableInfo, chunker table.MappedChunker) error {
-	subKey := encodeSchemaTable(currentTable.SchemaName, currentTable.TableName)
-	sub, err := NewBufferedSubscription(BufferedSubscriptionConfig{
-		CurrentTable:     currentTable,
-		NewTable:         newTable,
-		Applier:          c.applier,
-		Chunker:          chunker,
-		Logger:           c.logger,
-		SoftLimitBytes:   c.subscriptionSoftLimitBytes,
-		SoftLimitChanges: c.subscriptionSoftLimitChanges,
-		FlushRequest:     c.flushRequests,
-		FlushConcurrency: c.flushConcurrency,
-		BatchSize:        c.batchSize,
-		UnderLoad:        c.underLoad,
-	})
-	if err != nil {
-		return fmt.Errorf("could not build subscription for table %s.%s: %w", currentTable.SchemaName, currentTable.TableName, err)
-	}
-	if !c.subs.Add(subKey, sub) {
-		return fmt.Errorf("subscription already exists for table %s.%s", currentTable.SchemaName, currentTable.TableName)
-	}
-	return nil
+	c.configure(username, password, appl, config)
+	return c
 }
 
 // getCurrentGTIDSet reads the source's @@GLOBAL.gtid_executed and parses
@@ -414,35 +305,6 @@ func (c *gtidClient) StartFromPosition(ctx context.Context, pos string) error {
 	c.flushedGTID = parsed
 	c.mu.Unlock()
 	return c.Start(ctx)
-}
-
-// buildSyncerConfig returns the BinlogSyncerConfig used by Start. Split
-// out (mirroring binlogClient.buildSyncerConfig) so tests can assert the
-// decode options below stay in sync between the two clients.
-func (c *gtidClient) buildSyncerConfig(host string, port uint16) replication.BinlogSyncerConfig {
-	return replication.BinlogSyncerConfig{
-		ServerID: c.serverID,
-		Flavor:   "mysql",
-		Host:     host,
-		Port:     port,
-		User:     c.username,
-		Password: c.password,
-		// Demote go-mysql's per-rotation INFO line the same way the binlog
-		// client does — see syncerQuietMessages.
-		Logger: newDemotingLogger(c.logger, syncerQuietMessages),
-		// Render JSON the same way the binlog client does — see the
-		// rationale on NewBinlogClient.
-		RenderJSONAsMySQLText: true,
-		// Decode TIMESTAMP values in UTC the same way the binlog client
-		// does — see the rationale on NewBinlogClient. Without this, the
-		// decoder uses the process's local timezone while the applier
-		// writes over time_zone='+00:00' connections, silently shifting
-		// stored TIMESTAMP values on any non-UTC host.
-		TimestampStringLocation: time.UTC,
-		// Decode row images only for subscribed tables, the same way the
-		// binlog client does — see newRowsEventDecodeFunc.
-		RowsEventDecodeFunc: newRowsEventDecodeFunc(c.subs, &c.stopped),
-	}
 }
 
 // Start satisfies Source. On a fresh start it reads @@GLOBAL.gtid_executed
@@ -879,51 +741,6 @@ func (c *gtidClient) processTransactionPayload(e *replication.TransactionPayload
 	return nil
 }
 
-// processDDLNotification mirrors binlogClient.processDDLNotification.
-func (c *gtidClient) processDDLNotification(schema, table string) {
-	if c.stopped.Load() {
-		// Post-cutover; see Source.Stop.
-		return
-	}
-	if c.ddlFilterSchema != "" {
-		if schema != c.ddlFilterSchema {
-			return
-		}
-		if len(c.ddlFilterTables) > 0 {
-			if _, ok := c.ddlFilterTables[table]; !ok {
-				return
-			}
-		}
-	} else {
-		matchFound := false
-		for _, sub := range c.subs.Snapshot() {
-			for _, tsub := range sub.Tables() {
-				if tsub == nil {
-					// Defensive: in-tree subscriptions never emit nil
-					// entries (bufferedMap.Tables omits a nil newTable),
-					// but the interface can't guarantee it for other
-					// implementations, and a DDL notification must never
-					// crash the stream reader.
-					continue
-				}
-				if tsub.SchemaName == schema && tsub.TableName == table {
-					matchFound = true
-					break
-				}
-			}
-			if matchFound {
-				break
-			}
-		}
-		if !matchFound {
-			return
-		}
-	}
-	if c.fatalError(FatalReasonSchemaChange) {
-		c.logger.Error("table definition changed, cancelling operation", "schema", schema, "table", table)
-	}
-}
-
 // processRowsEvent mirrors binlogClient.processRowsEvent.
 func (c *gtidClient) processRowsEvent(ev *replication.BinlogEvent, e *replication.RowsEvent) error {
 	if c.stopped.Load() {
@@ -1014,74 +831,22 @@ func (c *gtidClient) processRowsEvent(ev *replication.BinlogEvent, e *replicatio
 	return nil
 }
 
-// Stop mirrors binlogClient.Stop; see Source.Stop.
-func (c *gtidClient) Stop() {
-	if c.stopped.Swap(true) {
-		return
-	}
-	c.logger.Debug("change stream stopped; further events will not be dispatched")
-}
-
-// fatalError mirrors binlogClient.fatalError; see the doc comment there.
-func (c *gtidClient) fatalError(reason FatalReason) bool {
-	if c.callerCancelFunc != nil {
-		return c.callerCancelFunc(reason)
-	}
-	return false
-}
-
-// GetDeltaLen satisfies Source.
-func (c *gtidClient) GetDeltaLen() int {
-	deltaLen := 0
-	for _, subscription := range c.subs.Snapshot() {
-		deltaLen += subscription.Length()
-	}
-	return deltaLen
-}
-
-func (c *gtidClient) Close() {
-	c.isClosed.Store(true)
-
-	c.mu.Lock()
-	cancel := c.cancelFunc
-	c.mu.Unlock()
-	if cancel != nil {
-		cancel()
-	}
-
-	for _, sub := range c.subs.Snapshot() {
-		sub.Close()
-	}
-
-	// Join the independently cancellable writer too. Both background loops
-	// must finish before Close returns; neither join depends on the other.
-	c.StopPeriodicFlush()
-
-	c.streamWG.Wait()
-
-	if c.syncer != nil {
-		c.syncer.Close()
-		c.syncer = nil
-	}
-}
-
-// FlushUnderTableLock satisfies Source. Same two-pass dance as the
-// binlog client: flush the in-flight delta, wait for the events the
-// flush itself generated to be ingested, then flush again so the
-// resume coordinate covers those.
+// FlushUnderTableLock satisfies Source. See feedCore.flushUnderTableLock:
+// flush the in-flight delta, wait for the events the flush itself generated
+// to be ingested, then flush again so the resume coordinate covers those.
 func (c *gtidClient) FlushUnderTableLock(ctx context.Context, locks []*dbconn.TableLock) error {
-	if len(locks) == 0 {
-		// Flushing "under lock" without any lock would silently execute the
-		// statements outside the locks the caller believes are held.
-		return errors.New("FlushUnderTableLock requires at least one table lock")
-	}
-	if err := c.flush(ctx, true, locks); err != nil {
-		return err
-	}
-	if err := c.BlockWait(ctx); err != nil {
-		return err
-	}
-	return c.flush(ctx, true, locks)
+	return c.flushUnderTableLock(ctx, locks, c.flush, c.BlockWait)
+}
+
+// Flush satisfies Source. See feedCore.flushUntilTrivial.
+func (c *gtidClient) Flush(ctx context.Context) error {
+	return c.flushUntilTrivial(ctx, c.flush, c.BlockWait, "GTID")
+}
+
+// StartPeriodicFlush satisfies Source. See feedCore.startPeriodicFlush;
+// calls after Close are ignored.
+func (c *gtidClient) StartPeriodicFlush(ctx context.Context, interval time.Duration) {
+	c.startPeriodicFlush(ctx, interval, c.flush, "GTID changeset")
 }
 
 func (c *gtidClient) flush(ctx context.Context, underLock bool, locks []*dbconn.TableLock) error {
@@ -1120,40 +885,6 @@ func (c *gtidClient) flush(ctx context.Context, underLock bool, locks []*dbconn.
 	}
 	c.recordFlush(start, batch, allChangesFlushed)
 	return nil
-}
-
-// recordFlush captures what this flush left behind (for FlushResidual) and
-// how long it took on how many changes (for FeedStats). Recorded whether or
-// not every change could be flushed: a flush that could not drain everything
-// is exactly the case a caller watching for a feed losing ground needs to see.
-//
-// GetDeltaLen takes no lock of its own, so it is called before acquiring c.mu.
-func (c *gtidClient) recordFlush(start time.Time, batch int, complete bool) {
-	residual := c.GetDeltaLen()
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.flushResidual = residual
-	c.flushCount++
-	c.lastFlushAt = time.Now()
-	c.lastFlushDuration = time.Since(start)
-	c.lastFlushRows = batch
-	c.lastFlushComplete = complete
-}
-
-// lastFlushWasComplete reports whether the most recent flush drained every
-// subscription. Flush uses it to decide whether re-draining a backlog
-// immediately would make progress or just re-defer the same keys.
-func (c *gtidClient) lastFlushWasComplete() bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.lastFlushComplete
-}
-
-// FlushResidual satisfies Source.
-func (c *gtidClient) FlushResidual() (int, int) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.flushResidual, c.flushCount
 }
 
 // countRotation folds one rotate event into the rotation counter and returns
@@ -1200,121 +931,6 @@ func (c *gtidClient) FeedStats() FeedStats {
 	return stats
 }
 
-// Flush satisfies Source. Same shape as binlogClient.Flush.
-func (c *gtidClient) Flush(ctx context.Context) error {
-	for {
-		subs := c.subs.Snapshot()
-		parks := watchParks(subs)
-		if err := c.flush(ctx, false, nil); err != nil {
-			return err
-		}
-		pending := c.GetDeltaLen()
-		redrainCanProgress := c.lastFlushWasComplete() || drainHitBudget(subs)
-		if backlogWorthDraining(pending, parks.readerWasBlocked(subs), redrainCanProgress) {
-			c.logger.Debug("reader is not keeping up, draining again instead of waiting on it",
-				"pending", pending)
-			continue
-		}
-		if err := c.BlockWait(ctx); err != nil {
-			c.logger.Warn("error waiting for GTID reader to catch up", "error", err)
-			if errors.Is(err, context.Canceled) || ctx.Err() != nil {
-				return ctx.Err()
-			}
-			continue
-		}
-		if c.GetDeltaLen() < binlogTrivialThreshold {
-			break
-		}
-	}
-	return c.flush(ctx, false, nil)
-}
-
-// StopPeriodicFlush satisfies Source.
-func (c *gtidClient) StopPeriodicFlush() {
-	c.periodicFlushLock.Lock()
-	cancel := c.periodicFlushCancel
-	done := c.periodicFlushDone
-	c.periodicFlushCancel = nil
-	c.periodicFlushDone = nil
-	c.periodicFlushLock.Unlock()
-	if cancel == nil {
-		return
-	}
-	cancel()
-	<-done
-}
-
-// StartPeriodicFlush satisfies Source. Calls after Close are ignored.
-func (c *gtidClient) StartPeriodicFlush(ctx context.Context, interval time.Duration) {
-	c.periodicFlushLock.Lock()
-	if c.isClosed.Load() {
-		c.periodicFlushLock.Unlock()
-		c.logger.Debug("ignoring periodic flush start on a closed client")
-		return
-	}
-	if c.periodicFlushCancel != nil {
-		c.periodicFlushLock.Unlock()
-		return
-	}
-	flushCtx, cancel := context.WithCancel(ctx)
-	done := make(chan struct{})
-	c.periodicFlushCancel = cancel
-	c.periodicFlushDone = done
-	c.periodicFlushLock.Unlock()
-
-	go c.runPeriodicFlush(flushCtx, interval, done)
-}
-
-func (c *gtidClient) runPeriodicFlush(ctx context.Context, interval time.Duration, done chan struct{}) {
-	defer close(done)
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		trigger := "interval"
-		select {
-		case <-ctx.Done():
-			return
-		case parked := <-c.flushRequests:
-			// A subscription parked on its soft memory limit. Flush now:
-			// the parked reader stalls GTID ingestion, and waiting out
-			// the remainder of the interval burns retention headroom.
-			// Flush the parked subscription first — the all-subscription
-			// pass below visits the registry in nondeterministic order,
-			// and draining another saturated subscription first would
-			// leave the reader parked for that entire drain. The full
-			// pass still runs afterwards for position advancement.
-			trigger = "soft-limit-park"
-			if _, err := parked.Flush(ctx, false, nil); err != nil {
-				if periodicFlushStopping(ctx) {
-					return
-				}
-				c.logger.Error("error flushing parked subscription", "error", err)
-				if c.fatalError(FatalReasonFlushError) {
-					return
-				}
-			}
-		case <-ticker.C:
-		}
-		startLoop := time.Now()
-		c.logger.Debug("starting periodic flush of GTID changeset", "trigger", trigger)
-		if err := c.flush(ctx, false, nil); err != nil {
-			if periodicFlushStopping(ctx) {
-				return
-			}
-			c.logger.Error("error flushing GTID changeset", "error", err)
-			// The failed changes stay buffered and the flushed position
-			// stays where it is, so every later pass would fail the same
-			// way while the checkpoint falls further behind the binlog
-			// retention window. Stop the caller rather than carry on.
-			if c.fatalError(FatalReasonFlushError) {
-				return
-			}
-		}
-		// Debug, not Info — see binlogClient.runPeriodicFlush (#329).
-		c.logger.Debug("finished periodic flush of GTID changeset", "total-duration", time.Since(startLoop).String(), "trigger", trigger)
-	}
-}
-
 // BlockWait satisfies Source. Reads the source's @@GLOBAL.gtid_executed
 // and waits until our buffered set is a superset of it.
 func (c *gtidClient) BlockWait(ctx context.Context) error {
@@ -1352,36 +968,6 @@ func (c *gtidClient) blockWait(ctx context.Context, timeout time.Duration) error
 			time.Sleep(blockWaitSleep)
 		}
 	}
-}
-
-// SetWatermarkOptimization satisfies Source.
-func (c *gtidClient) SetWatermarkOptimization(ctx context.Context, newVal bool) error {
-	for _, sub := range c.subs.Snapshot() {
-		if err := sub.SetWatermarkOptimization(ctx, newVal); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// dispatchRow delivers one row change to its subscription, cooperating with any
-// armed verification (see park.go). All three steps are ordered, and each one
-// is wrong anywhere else:
-//
-//   - RowParker.Watch runs first, so a rewrite of the watched row is counted
-//     before it
-//     can be buffered, and therefore before any flush could carry it;
-//   - the change is buffered next, so the flush the verification runs puts it on
-//     the target;
-//   - the reader parks before the verification is released, so nothing past this
-//     event is admitted while the target is read.
-//
-// The rest of this event still dispatches behind the park, which is what the
-// rewrite count covers; no later event does.
-func (c *gtidClient) dispatchRow(sub Subscription, tbl *table.TableInfo, key, image []any, deleted bool) {
-	watched := c.parker.Watch(tbl, key, image, deleted)
-	sub.HasChanged(key, image, deleted)
-	watched.Release()
 }
 
 // VerifyRowAtNextChange satisfies Source. The parker owns the ordering; all

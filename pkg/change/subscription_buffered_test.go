@@ -219,8 +219,10 @@ func TestBufferedMapFlushUnderLockBypassesWatermark(t *testing.T) {
 	require.NoError(t, err)
 
 	client := &binlogClient{
+		feedCore: feedCore{
+			logger: logger,
+		},
 		db:       db,
-		logger:   logger,
 		dbConfig: dbconn.NewDBConfig(),
 	}
 
@@ -351,8 +353,10 @@ func TestBufferedMapFlushWithoutLockRespectsWatermark(t *testing.T) {
 	require.NoError(t, err)
 
 	client := &binlogClient{
+		feedCore: feedCore{
+			logger: logger,
+		},
 		db:       db,
-		logger:   logger,
 		dbConfig: dbconn.NewDBConfig(),
 	}
 
@@ -455,7 +459,9 @@ func TestBufferedMapQueueModeRouting(t *testing.T) {
 	mockChunker.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
 
 	client := &binlogClient{
-		logger:   slog.Default(),
+		feedCore: feedCore{
+			logger: slog.Default(),
+		},
 		dbConfig: dbconn.NewDBConfig(),
 	}
 
@@ -526,8 +532,10 @@ func TestBufferedMapQueueModeFlush(t *testing.T) {
 	mockChunker.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
 
 	client := &binlogClient{
+		feedCore: feedCore{
+			logger: slog.Default(),
+		},
 		db:       db,
-		logger:   slog.Default(),
 		dbConfig: dbconn.NewDBConfig(),
 	}
 
@@ -608,8 +616,10 @@ func TestBufferedMapQueueModeFIFOOrder(t *testing.T) {
 	mockChunker.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
 
 	client := &binlogClient{
+		feedCore: feedCore{
+			logger: slog.Default(),
+		},
 		db:       db,
-		logger:   slog.Default(),
 		dbConfig: dbconn.NewDBConfig(),
 	}
 
@@ -675,8 +685,10 @@ func TestBufferedMapTransitionDrainsOutgoing(t *testing.T) {
 	mockChunker.MarkAsComplete()
 
 	client := &binlogClient{
+		feedCore: feedCore{
+			logger: slog.Default(),
+		},
 		db:       db,
-		logger:   slog.Default(),
 		dbConfig: dbconn.NewDBConfig(),
 	}
 
@@ -761,8 +773,10 @@ func TestBufferedMapToggleDrainFailureLeavesFlagUnchanged(t *testing.T) {
 	mockChunker.MarkAsComplete()
 
 	client := &binlogClient{
+		feedCore: feedCore{
+			logger: slog.Default(),
+		},
 		db:       db,
-		logger:   slog.Default(),
 		dbConfig: dbconn.NewDBConfig(),
 	}
 
@@ -835,7 +849,9 @@ func TestBufferedMapTogglePassthrough(t *testing.T) {
 	mockChunker.SimulateProgress(0.001)
 
 	client := &binlogClient{
-		logger:   slog.Default(),
+		feedCore: feedCore{
+			logger: slog.Default(),
+		},
 		dbConfig: dbconn.NewDBConfig(),
 	}
 
@@ -881,7 +897,9 @@ func TestBufferedMapConcurrentHasChanged(t *testing.T) {
 	mockChunker.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
 
 	client := &binlogClient{
-		logger:   slog.Default(),
+		feedCore: feedCore{
+			logger: slog.Default(),
+		},
 		dbConfig: dbconn.NewDBConfig(),
 	}
 
@@ -934,7 +952,9 @@ func TestBufferedMapKeyOverwriteDedupes(t *testing.T) {
 	mockChunker.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
 
 	client := &binlogClient{
-		logger:   slog.Default(),
+		feedCore: feedCore{
+			logger: slog.Default(),
+		},
 		dbConfig: dbconn.NewDBConfig(),
 	}
 
@@ -979,7 +999,9 @@ func TestBufferedMapHasChangedNilAndEmpty(t *testing.T) {
 	mockChunker.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
 
 	client := &binlogClient{
-		logger:   slog.Default(),
+		feedCore: feedCore{
+			logger: slog.Default(),
+		},
 		dbConfig: dbconn.NewDBConfig(),
 	}
 
@@ -1027,7 +1049,9 @@ func TestBufferedMapKeyAboveWatermarkCounters(t *testing.T) {
 	mockChunker.SimulateProgress(0.005) // Current position at 5
 
 	client := &binlogClient{
-		logger:   slog.Default(),
+		feedCore: feedCore{
+			logger: slog.Default(),
+		},
 		dbConfig: dbconn.NewDBConfig(),
 	}
 
@@ -1095,8 +1119,10 @@ func TestBufferedMapQueueFlushEmpty(t *testing.T) {
 	mockChunker.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
 
 	client := &binlogClient{
+		feedCore: feedCore{
+			logger: slog.Default(),
+		},
 		db:       db,
-		logger:   slog.Default(),
 		dbConfig: dbconn.NewDBConfig(),
 	}
 
@@ -1150,8 +1176,10 @@ func TestBufferedMapQueueFlushUnderLock(t *testing.T) {
 	mockChunker.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
 
 	client := &binlogClient{
+		feedCore: feedCore{
+			logger: slog.Default(),
+		},
 		db:       db,
-		logger:   slog.Default(),
 		dbConfig: dbconn.NewDBConfig(),
 	}
 
@@ -1229,8 +1257,10 @@ func TestBufferedMapQueueConcurrentFlush(t *testing.T) {
 	mockChunker.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
 
 	client := &binlogClient{
+		feedCore: feedCore{
+			logger: slog.Default(),
+		},
 		db:       db,
-		logger:   slog.Default(),
 		dbConfig: dbconn.NewDBConfig(),
 	}
 
@@ -1831,8 +1861,10 @@ func TestBufferedMapSeparatorInPKValues(t *testing.T) {
 	mockChunker.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
 
 	client := &binlogClient{
+		feedCore: feedCore{
+			logger: slog.Default(),
+		},
 		db:       db,
-		logger:   slog.Default(),
 		dbConfig: dbconn.NewDBConfig(),
 	}
 

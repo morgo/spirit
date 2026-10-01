@@ -46,12 +46,12 @@ func TestRecordEventTime(t *testing.T) {
 func TestBothClientsReportTheEventAge(t *testing.T) {
 	behind := time.Now().Add(-2 * time.Hour).Truncate(time.Second)
 
-	gtid := &gtidClient{subs: newSubscriptionRegistry()}
+	gtid := &gtidClient{feedCore: feedCore{subs: newSubscriptionRegistry()}}
 	require.True(t, gtid.FeedStats().BufferedEventAt.IsZero())
 	recordEventTime(&gtid.lastEventTime, uint32(behind.Unix()))
 	require.Equal(t, behind, gtid.FeedStats().BufferedEventAt)
 
-	binlog := &binlogClient{subs: newSubscriptionRegistry()}
+	binlog := &binlogClient{feedCore: feedCore{subs: newSubscriptionRegistry()}}
 	require.True(t, binlog.FeedStats().BufferedEventAt.IsZero())
 	recordEventTime(&binlog.lastEventTime, uint32(behind.Unix()))
 	require.Equal(t, behind, binlog.FeedStats().BufferedEventAt)

@@ -1071,10 +1071,12 @@ func TestAllChangesFlushed(t *testing.T) {
 	)`
 	srcTable, dstTable := setupTestTables(t, t1, t2)
 	client := &binlogClient{
+		feedCore: feedCore{
+			logger: slog.Default(),
+			subs:   newSubscriptionRegistry(),
+		},
 		db:       nil,
-		logger:   slog.Default(),
 		dbConfig: dbconn.NewDBConfig(),
-		subs:     newSubscriptionRegistry(),
 	}
 
 	// Test 1: Initial state - should be flushed when no changes
@@ -1139,7 +1141,7 @@ func TestAllChangesFlushed(t *testing.T) {
 //
 // Regression gate for the Copilot review on #853.
 func TestSetBufferedPosIsMonotonic(t *testing.T) {
-	client := &binlogClient{logger: slog.Default()}
+	client := &binlogClient{feedCore: feedCore{logger: slog.Default()}}
 
 	// Initial setBufferedPos always wins (zero-value start).
 	start := mysql.Position{Name: "binlog.000010", Pos: 5000}
@@ -1204,8 +1206,10 @@ func (s *gatedSubscription) Close()                                             
 // is the regression gate for the invariant itself.
 func TestFlushedPosIsMonotonicAcrossOverlappingFlushes(t *testing.T) {
 	client := &binlogClient{
-		logger: slog.Default(),
-		subs:   newSubscriptionRegistry(),
+		feedCore: feedCore{
+			logger: slog.Default(),
+			subs:   newSubscriptionRegistry(),
+		},
 	}
 	sub := &gatedSubscription{gates: make(chan chan struct{})}
 	require.True(t, client.subs.Add("test", sub))
@@ -1562,11 +1566,13 @@ func TestProcessDDLNotification(t *testing.T) {
 	makeClient := func(filterSchema string, filterTables []string) (*binlogClient, *bool) {
 		cancelled := false
 		c := &binlogClient{
-			logger:           slog.Default(),
-			callerCancelFunc: func(FatalReason) bool { cancelled = true; return true },
-			ddlFilterSchema:  filterSchema,
-			ddlFilterTables:  toSet(filterTables),
-			subs:             newSubscriptionRegistry(),
+			feedCore: feedCore{
+				logger:           slog.Default(),
+				callerCancelFunc: func(FatalReason) bool { cancelled = true; return true },
+				ddlFilterSchema:  filterSchema,
+				ddlFilterTables:  toSet(filterTables),
+				subs:             newSubscriptionRegistry(),
+			},
 		}
 		return c, &cancelled
 	}
@@ -1586,13 +1592,15 @@ func TestProcessDDLNotification(t *testing.T) {
 		cancelled := false
 		reason := FatalReason(-1)
 		c := &binlogClient{
-			logger: slog.Default(),
-			callerCancelFunc: func(r FatalReason) bool {
-				cancelled = true
-				reason = r
-				return true
+			feedCore: feedCore{
+				logger: slog.Default(),
+				callerCancelFunc: func(r FatalReason) bool {
+					cancelled = true
+					reason = r
+					return true
+				},
+				subs: newSubscriptionRegistry(),
 			},
-			subs: newSubscriptionRegistry(),
 		}
 		sub := &bufferedMap{
 			table:    tbl,
@@ -1628,9 +1636,11 @@ func TestProcessDDLNotification(t *testing.T) {
 		// a non-subscribed table.
 		cancelled := false
 		c := &binlogClient{
-			logger:           slog.Default(),
-			callerCancelFunc: func(FatalReason) bool { cancelled = true; return true },
-			subs:             newSubscriptionRegistry(),
+			feedCore: feedCore{
+				logger:           slog.Default(),
+				callerCancelFunc: func(FatalReason) bool { cancelled = true; return true },
+				subs:             newSubscriptionRegistry(),
+			},
 		}
 		chunker, err := table.NewChunker(tbl, table.ChunkerConfig{})
 		require.NoError(t, err)
@@ -1690,9 +1700,11 @@ func TestProcessDDLNotification(t *testing.T) {
 
 	t.Run("no cancel func: does not panic", func(t *testing.T) {
 		c := &binlogClient{
-			logger:          slog.Default(),
-			ddlFilterSchema: "mydb",
-			subs:            newSubscriptionRegistry(),
+			feedCore: feedCore{
+				logger:          slog.Default(),
+				ddlFilterSchema: "mydb",
+				subs:            newSubscriptionRegistry(),
+			},
 		}
 		// Should not panic even though callerCancelFunc is nil.
 		require.NotPanics(t, func() {

@@ -72,7 +72,7 @@ func TestBlockWaitTimeoutDiagnostics(t *testing.T) {
 			var wait func(context.Context, time.Duration) error
 			var initial string
 			if mode == "binlog" {
-				client := &binlogClient{db: tt.DB, logger: slog.Default(), subs: subs}
+				client := &binlogClient{feedCore: feedCore{logger: slog.Default(), subs: subs}, db: tt.DB}
 				position, err := client.getCurrentBinlogPosition(t.Context())
 				require.NoError(t, err)
 				client.bufferedPos = position // blockWait rotates to a later real file.
@@ -81,7 +81,7 @@ func TestBlockWaitTimeoutDiagnostics(t *testing.T) {
 			} else {
 				empty, err := mysql.ParseMysqlGTIDSet("")
 				require.NoError(t, err)
-				client := &gtidClient{db: tt.DB, logger: slog.Default(), subs: subs, bufferedGTID: empty}
+				client := &gtidClient{feedCore: feedCore{logger: slog.Default(), subs: subs}, db: tt.DB, bufferedGTID: empty}
 				target, err := client.getCurrentGTIDSet(t.Context())
 				require.NoError(t, err)
 				require.False(t, target.IsEmpty(), "CREATE TABLE must advance the source GTID")

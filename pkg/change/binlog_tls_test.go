@@ -80,9 +80,11 @@ func TestClientTLSConfiguration(t *testing.T) {
 
 			// Create a mock client (we can't actually connect without real DB)
 			client := &binlogClient{
+				feedCore: feedCore{
+					username: "testuser",
+					password: "testpass",
+				},
 				host:     tc.host,
-				username: "testuser",
-				password: "testpass",
 				dbConfig: tlsConfig,
 			}
 
