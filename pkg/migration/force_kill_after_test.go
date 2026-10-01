@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/block/spirit/pkg/flags"
 	"github.com/stretchr/testify/require"
 )
 
@@ -23,7 +24,7 @@ func TestMigrationForceKillAfter(t *testing.T) {
 		{"subsecond timeout", 500 * time.Millisecond, 100 * time.Millisecond, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			m := &Migration{Statement: "ALTER TABLE t ADD COLUMN c INT", LockWaitTimeout: tc.timeout, ForceKillAfter: tc.delay}
+			m := &Migration{Statement: "ALTER TABLE t ADD COLUMN c INT", Cutover: flags.Cutover{LockWaitTimeout: tc.timeout, ForceKillAfter: tc.delay}}
 			err := m.Validate()
 			_, runnerErr := NewRunner(m)
 			if tc.valid {

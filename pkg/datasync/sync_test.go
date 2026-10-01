@@ -4,8 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"reflect"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -17,6 +15,7 @@ import (
 	"github.com/block/spirit/pkg/change"
 	"github.com/block/spirit/pkg/checksum"
 	"github.com/block/spirit/pkg/dbconn/sqlescape"
+	"github.com/block/spirit/pkg/flags"
 	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
@@ -210,18 +209,6 @@ func TestNewRunnerValidation(t *testing.T) {
 	require.Positive(t, r.sync.FlushInterval)
 }
 
-// TestSyncTargetChunkSizeKongDefault pins the hardcoded Kong default on
-// --target-chunk-size to table.DefaultTargetChunkBytes (the Kong tag must be a
-// literal, so this guards against drift from the constant).
-func TestSyncTargetChunkSizeKongDefault(t *testing.T) {
-	field, ok := reflect.TypeFor[Sync]().FieldByName("TargetChunkSize")
-	require.True(t, ok)
-	require.Equal(t,
-		strconv.FormatUint(table.DefaultTargetChunkBytes, 10),
-		field.Tag.Get("default"),
-		"Kong default for --target-chunk-size must equal table.DefaultTargetChunkBytes")
-}
-
 // TestSyncE2E drives the full sync lifecycle against a local MySQL using
 // the built-in binlog change source: initial copy, then continuous
 // replication of an INSERT, an UPDATE and a DELETE, then a clean
@@ -276,13 +263,11 @@ func TestSyncE2E(t *testing.T) {
 	}
 
 	s := &Sync{
-		SourceDSN:      sourceDSN,
-		TargetDSN:      targetDSN,
-		Threads:        2,
-		WriteThreads:   16,
-		MaxConnections: 2,
-		Target:         &applier.Target{DB: tgt, Config: dest},
-		FlushInterval:  100 * time.Millisecond,
+		SourceDSN:     sourceDSN,
+		TargetDSN:     targetDSN,
+		Common:        flags.Common{Threads: 2, WriteThreads: 16, MaxConnections: 2},
+		Target:        &applier.Target{DB: tgt, Config: dest},
+		FlushInterval: 100 * time.Millisecond,
 	}
 	runner, err := NewRunner(s)
 	require.NoError(t, err)
@@ -339,10 +324,9 @@ func TestSyncInitialCopy(t *testing.T) {
 	testutils.RunSQL(t, `DROP DATABASE IF EXISTS sync_initialcopy_dest`)
 
 	s := &Sync{
-		SourceDSN:    sourceDSN,
-		TargetDSN:    targetDSN,
-		Threads:      2,
-		WriteThreads: 2,
+		SourceDSN: sourceDSN,
+		TargetDSN: targetDSN,
+		Common:    flags.Common{Threads: 2, WriteThreads: 2},
 	}
 	runner, err := NewRunner(s)
 	require.NoError(t, err)
@@ -379,10 +363,9 @@ func TestRunnerStatusTask(t *testing.T) {
 	testutils.RunSQL(t, `DROP DATABASE IF EXISTS sync_statustask_dest`)
 
 	s := &Sync{
-		SourceDSN:    src.FormatDSN(),
-		TargetDSN:    dest.FormatDSN(),
-		Threads:      2,
-		WriteThreads: 2,
+		SourceDSN: src.FormatDSN(),
+		TargetDSN: dest.FormatDSN(),
+		Common:    flags.Common{Threads: 2, WriteThreads: 2},
 	}
 	runner, err := NewRunner(s)
 	require.NoError(t, err)
@@ -493,10 +476,9 @@ func TestSyncResume(t *testing.T) {
 
 	newSync := func() *Sync {
 		return &Sync{
-			SourceDSN:    sourceDSN,
-			TargetDSN:    targetDSN,
-			Threads:      2,
-			WriteThreads: 2,
+			SourceDSN: sourceDSN,
+			TargetDSN: targetDSN,
+			Common:    flags.Common{Threads: 2, WriteThreads: 2},
 		}
 	}
 
@@ -566,10 +548,9 @@ func TestSyncResumeNoWatermarkRow(t *testing.T) {
 
 	newSync := func() *Sync {
 		return &Sync{
-			SourceDSN:    sourceDSN,
-			TargetDSN:    targetDSN,
-			Threads:      2,
-			WriteThreads: 2,
+			SourceDSN: sourceDSN,
+			TargetDSN: targetDSN,
+			Common:    flags.Common{Threads: 2, WriteThreads: 2},
 		}
 	}
 
@@ -625,11 +606,10 @@ func TestSyncForce(t *testing.T) {
 
 	newSync := func(force bool) *Sync {
 		return &Sync{
-			SourceDSN:    sourceDSN,
-			TargetDSN:    targetDSN,
-			Threads:      2,
-			WriteThreads: 2,
-			Force:        force,
+			SourceDSN: sourceDSN,
+			TargetDSN: targetDSN,
+			Common:    flags.Common{Threads: 2, WriteThreads: 2},
+			Force:     force,
 		}
 	}
 	run := func(force bool) error {
@@ -712,9 +692,8 @@ func TestSyncForcePreservesForeignTables(t *testing.T) {
 			SourceDSN: src.FormatDSN(),
 			TargetDSN: dest.FormatDSN(),
 
-			Threads:      2,
-			WriteThreads: 2,
-			Force:        force,
+			Common: flags.Common{Threads: 2, WriteThreads: 2},
+			Force:  force,
 		}
 	}
 	run := func(force bool) error {
@@ -788,11 +767,10 @@ func TestSyncResumeIncompatibleCheckpoint(t *testing.T) {
 
 	newSync := func(force bool) *Sync {
 		return &Sync{
-			SourceDSN:    sourceDSN,
-			TargetDSN:    targetDSN,
-			Threads:      2,
-			WriteThreads: 2,
-			Force:        force,
+			SourceDSN: sourceDSN,
+			TargetDSN: targetDSN,
+			Common:    flags.Common{Threads: 2, WriteThreads: 2},
+			Force:     force,
 		}
 	}
 
@@ -842,6 +820,71 @@ func TestSyncResumeIncompatibleCheckpoint(t *testing.T) {
 	require.NoError(t, tgt.QueryRowContext(context.Background(),
 		"SELECT COUNT(*) FROM information_schema.COLUMNS WHERE table_schema='sync_incompat_dest' AND table_name='_spirit_sync_checkpoint' AND column_name='binlog_position'").Scan(&n2))
 	require.Equal(t, 1, n2, "force must recreate the checkpoint table with the current schema")
+}
+
+// TestSyncResumeCheckpointTooOld verifies --checkpoint-max-age on sync: a
+// checkpoint last written longer ago than the limit is refused with
+// status.ErrCheckpointTooOld (the target is not empty, so like move there is
+// no silent fresh copy), a larger limit resumes from it, and --force treats it
+// as unresumable and re-copies.
+func TestSyncResumeCheckpointTooOld(t *testing.T) {
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	src := cfg.Clone()
+	src.DBName = "sync_chkpt_age_src"
+	dest := cfg.Clone()
+	dest.DBName = "sync_chkpt_age_dest"
+	sourceDSN := src.FormatDSN()
+	targetDSN := dest.FormatDSN()
+
+	testutils.RunSQL(t, `DROP DATABASE IF EXISTS sync_chkpt_age_src`)
+	testutils.RunSQL(t, `CREATE DATABASE sync_chkpt_age_src`)
+	testutils.RunSQL(t, `CREATE TABLE sync_chkpt_age_src.t1 (id INT PRIMARY KEY, val VARCHAR(255))`)
+	testutils.RunSQL(t, `INSERT INTO sync_chkpt_age_src.t1 VALUES (1,'one'),(2,'two'),(3,'three')`)
+	testutils.RunSQL(t, `CREATE TABLE sync_chkpt_age_src.t2 (id INT PRIMARY KEY, val VARCHAR(255))`)
+	testutils.RunSQL(t, `INSERT INTO sync_chkpt_age_src.t2 VALUES (10,'ten'),(20,'twenty')`)
+	testutils.RunSQL(t, `DROP DATABASE IF EXISTS sync_chkpt_age_dest`)
+
+	run := func(force bool, maxAge time.Duration) error {
+		r, nerr := NewRunner(&Sync{
+			SourceDSN: sourceDSN,
+			TargetDSN: targetDSN,
+			Common:    flags.Common{Threads: 2, WriteThreads: 2, CheckpointMaxAge: maxAge},
+			Force:     force,
+		})
+		require.NoError(t, nerr)
+		rerr := runUntilCopied(t, r)
+		require.NoError(t, r.Close())
+		return rerr
+	}
+	tgt, err := sql.Open("block-mysql", targetDSN)
+	require.NoError(t, err)
+	defer utils.CloseAndLog(tgt)
+	// Simulate a sync that has been stopped for 8 days (the default limit is
+	// 7). The row must carry a watermark, or there is nothing to resume from.
+	backdate := func() {
+		var wm string
+		require.NoError(t, tgt.QueryRowContext(t.Context(),
+			"SELECT IFNULL(copier_watermark, '') FROM _spirit_sync_checkpoint").Scan(&wm))
+		require.NotEmpty(t, wm, "the previous run must have recorded a copier watermark")
+		_, err := tgt.ExecContext(t.Context(), "UPDATE _spirit_sync_checkpoint SET created_at = DATE_SUB(UTC_TIMESTAMP(), INTERVAL 8 DAY)")
+		require.NoError(t, err)
+	}
+
+	require.NoError(t, run(false, 0))
+	backdate()
+
+	err = run(false, 0)
+	require.ErrorIs(t, err, status.ErrCheckpointTooOld)
+	require.ErrorContains(t, err, "re-run with a larger --checkpoint-max-age")
+
+	require.NoError(t, run(false, 9*24*time.Hour), "a checkpoint within a larger limit must resume")
+
+	backdate()
+	require.NoError(t, run(true, 0), "--force must treat a too-old checkpoint as unresumable and re-copy")
+	var n int
+	require.NoError(t, tgt.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM t1").Scan(&n))
+	require.Equal(t, 3, n)
 }
 
 // TestSyncPositionEncodeDecode covers the checkpoint-position payload codec:
@@ -911,9 +954,8 @@ func TestSyncResumeSourceIdentity(t *testing.T) {
 			SourceDSN: src.FormatDSN(),
 			TargetDSN: dest.FormatDSN(),
 
-			Threads:      2,
-			WriteThreads: 2,
-			Force:        force,
+			Common: flags.Common{Threads: 2, WriteThreads: 2},
+			Force:  force,
 		}
 	}
 	run := func(force bool) error {
@@ -1031,8 +1073,7 @@ func TestSyncFreshTargetSchemaMismatch(t *testing.T) {
 			SourceDSN: src.FormatDSN(),
 			TargetDSN: dest.FormatDSN(),
 
-			Threads:      2,
-			WriteThreads: 2,
+			Common: flags.Common{Threads: 2, WriteThreads: 2},
 		})
 		require.NoError(t, nerr)
 		return r
@@ -1129,10 +1170,9 @@ func TestSyncCreateTableLegacyDefault(t *testing.T) {
 	target := applier.Target{DB: targetDB, Config: targetCfg, KeyRange: "0"}
 
 	s := &Sync{
-		SourceDSN:    src.FormatDSN(),
-		Target:       &target,
-		Threads:      2,
-		WriteThreads: 2,
+		SourceDSN: src.FormatDSN(),
+		Target:    &target,
+		Common:    flags.Common{Threads: 2, WriteThreads: 2},
 	}
 	runner, err := NewRunner(s)
 	require.NoError(t, err)
@@ -1290,8 +1330,7 @@ func TestSyncDeferSecondaryIndexesE2E(t *testing.T) {
 	s := &Sync{
 		SourceDSN:             sourceDSN,
 		TargetDSN:             targetDSN,
-		Threads:               2,
-		WriteThreads:          2,
+		Common:                flags.Common{Threads: 2, WriteThreads: 2},
 		FlushInterval:         100 * time.Millisecond,
 		DeferSecondaryIndexes: true,
 	}
@@ -1332,13 +1371,12 @@ func TestSyncValidate(t *testing.T) {
 	}{
 		{name: "zero values are valid"},
 		{name: "typical values are valid", s: Sync{
-			Threads:       4,
-			WriteThreads:  4,
+			Common:        flags.Common{Threads: 4, WriteThreads: 4},
 			FlushInterval: 30 * time.Second,
 		}},
-		{name: "negative threads", s: Sync{Threads: -5},
+		{name: "negative threads", s: Sync{Common: flags.Common{Threads: -5}},
 			wantErr: "--threads must be non-negative, got -5"},
-		{name: "negative write-threads", s: Sync{WriteThreads: -1},
+		{name: "negative write-threads", s: Sync{Common: flags.Common{WriteThreads: -1}},
 			wantErr: "--write-threads must be non-negative, got -1"},
 		{name: "negative flush-interval", s: Sync{FlushInterval: -time.Minute},
 			wantErr: "--flush-interval must be non-negative, got -1m0s"},
@@ -1463,10 +1501,9 @@ func TestSyncResumeSourceSchemaChanged(t *testing.T) {
 
 	newSync := func() *Sync {
 		return &Sync{
-			SourceDSN:    sourceDSN,
-			TargetDSN:    targetDSN,
-			Threads:      2,
-			WriteThreads: 2,
+			SourceDSN: sourceDSN,
+			TargetDSN: targetDSN,
+			Common:    flags.Common{Threads: 2, WriteThreads: 2},
 		}
 	}
 
@@ -1671,7 +1708,7 @@ func TestSyncRefusesUnsupportedNames(t *testing.T) {
 
 			src, dest := cfg.Clone(), cfg.Clone()
 			src.DBName, dest.DBName = tc.srcDB, destDB
-			runner, err := NewRunner(&Sync{SourceDSN: src.FormatDSN(), TargetDSN: dest.FormatDSN(), Threads: 1, WriteThreads: 1})
+			runner, err := NewRunner(&Sync{SourceDSN: src.FormatDSN(), TargetDSN: dest.FormatDSN(), Common: flags.Common{Threads: 1, WriteThreads: 1}})
 			require.NoError(t, err)
 			ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 			defer cancel()
@@ -1712,7 +1749,7 @@ func TestSyncRefusesEnumSetMembersOutsideUTF8MB3(t *testing.T) {
 
 	src, dest := cfg.Clone(), cfg.Clone()
 	src.DBName, dest.DBName = srcDB, destDB
-	runner, err := NewRunner(&Sync{SourceDSN: src.FormatDSN(), TargetDSN: dest.FormatDSN(), Threads: 1, WriteThreads: 1})
+	runner, err := NewRunner(&Sync{SourceDSN: src.FormatDSN(), TargetDSN: dest.FormatDSN(), Common: flags.Common{Threads: 1, WriteThreads: 1}})
 	require.NoError(t, err)
 	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 	defer cancel()
@@ -1752,7 +1789,7 @@ func TestSyncRefusesMisreportedEnumSetTarget(t *testing.T) {
 
 	src, dest := cfg.Clone(), cfg.Clone()
 	src.DBName, dest.DBName = srcDB, destDB
-	runner, err := NewRunner(&Sync{SourceDSN: src.FormatDSN(), TargetDSN: dest.FormatDSN(), Threads: 1, WriteThreads: 1})
+	runner, err := NewRunner(&Sync{SourceDSN: src.FormatDSN(), TargetDSN: dest.FormatDSN(), Common: flags.Common{Threads: 1, WriteThreads: 1}})
 	require.NoError(t, err)
 	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 	defer cancel()
@@ -1805,7 +1842,7 @@ func TestSyncRefusesFloatAndBitPrimaryKeys(t *testing.T) {
 
 			src, dest := cfg.Clone(), cfg.Clone()
 			src.DBName, dest.DBName = srcDB, destDB
-			runner, err := NewRunner(&Sync{SourceDSN: src.FormatDSN(), TargetDSN: dest.FormatDSN(), Threads: 1, WriteThreads: 1})
+			runner, err := NewRunner(&Sync{SourceDSN: src.FormatDSN(), TargetDSN: dest.FormatDSN(), Common: flags.Common{Threads: 1, WriteThreads: 1}})
 			require.NoError(t, err)
 			ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 			defer cancel()

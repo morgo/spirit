@@ -42,6 +42,8 @@ The target check runs before the copy and on resume, before move writes anything
 - [defer-cutover](#defer-cutover)
 - [defer-secondary-indexes](#defer-secondary-indexes)
 - [force](#force)
+- [force-kill-after](#force-kill-after)
+- [lock-wait-timeout](#lock-wait-timeout)
 - [max-commit-latency](#max-commit-latency)
 - [max-connections](#max-connections)
 - [reverse-window](#reverse-window)
@@ -49,6 +51,8 @@ The target check runs before the copy and on resume, before move writes anything
 - [target-chunk-size](#target-chunk-size)
 - [target-dsn](#target-dsn)
 - [threads](#threads)
+- [tls-ca](#tls-ca)
+- [tls-mode](#tls-mode)
 - [write-threads](#write-threads)
 - [enable-experimental-autoscaling](#enable-experimental-autoscaling)
 
@@ -69,6 +73,8 @@ The same caveats about [resuming across Spirit binary versions](migrate.md#resum
 - Default value: `false`
 
 When set to `true`, a sentinel table (`_spirit_sentinel`) is created on the first **target** database (targets[0], alongside the checkpoint) during setup, before the row copy starts. Move continues through copy and the initial checksum, then blocks before cutover until the sentinel table is manually dropped, giving the operator a chance to verify the copy before proceeding.
+
+A sentinel table that Move did not create blocks the cutover in the same way. If you start a move without `defer-cutover`, you can create `_spirit_sentinel` on the first target before the cutover, and Move blocks as though `defer-cutover` had been set. This applies to programmatic callers that leave `DeferCutOver` unset as well as to the CLI.
 
 #### Two-checksum model
 
@@ -104,6 +110,20 @@ When set to `true`, target tables are created without deferrable regular seconda
 When Move cannot resume from an existing checkpoint — for example the checkpoint was written by an incompatible Spirit version, or the target is in a state the resume path cannot validate — it fails rather than risk corrupting a partially-copied target (see [checkpoint-max-age](#checkpoint-max-age)).
 
 Passing `--force` changes that recovery behaviour: instead of failing, Move wipes the target tables and starts the copy fresh, checking for source-side failures before wiping and re-running the full post-setup checks against the cleaned target. Expired checkpoints and malformed or missing source positions are eligible for forced recovery; transient read or connection failures are not. Source and target must refer to different databases, even if different hostnames or credentials are used. Use it only when the target's current contents can safely be discarded.
+
+### force-kill-after
+
+- Type: Duration
+- Default value: `0s` (i.e. 90% of [lock-wait-timeout](#lock-wait-timeout))
+
+How long Spirit waits before it starts killing the connections that are blocking a metadata lock. Shared with `migrate`; see [migrate's force-kill-after](migrate.md#force-kill-after).
+
+### lock-wait-timeout
+
+- Type: Duration
+- Default value: `30s`
+
+The `lock_wait_timeout` Spirit sets on its connections, bounding how long its DDL and table locks wait. Shared with `migrate`; see [migrate's lock-wait-timeout](migrate.md#lock-wait-timeout) for the force-kill rules.
 
 ### max-commit-latency
 
@@ -194,9 +214,23 @@ The failure is therefore immediate, but it still arrives later than it needs to:
 ### threads
 
 - Type: Integer
-- Default value: `2`
+- Default value: `4` (`2` before these flags were shared with `migrate` and `sync`)
 
 How many chunks to copy in parallel from the source.
+
+### tls-ca
+
+- Type: String
+- Default value: ``
+
+Path to a custom TLS CA certificate file (PEM format), applied to every source and target connection. Shared with `migrate`; see [migrate's tls-ca](migrate.md#tls-ca).
+
+### tls-mode
+
+- Type: Enumeration
+- Default value: `PREFERRED`
+
+The TLS mode applied to every source and target connection: `DISABLED`, `PREFERRED`, `REQUIRED`, `VERIFY_CA` or `VERIFY_IDENTITY`. A DSN's own `tls=` parameter takes precedence. Shared with `migrate`; see [migrate's tls-mode](migrate.md#tls-mode).
 
 ### write-threads
 

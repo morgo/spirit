@@ -159,6 +159,9 @@ observe its load but do not share a single worker budget.
 - [max-connections](#max-connections)
 - [defer-secondary-indexes](#defer-secondary-indexes)
 - [force](#force)
+- [checkpoint-max-age](#checkpoint-max-age)
+- [tls-ca](#tls-ca)
+- [tls-mode](#tls-mode)
 
 ### source-dsn
 
@@ -200,6 +203,8 @@ How many chunks to copy in parallel from the source during the initial copy.
 - Default value: `4`
 
 How many concurrent write threads to use on the target.
+
+These counts are overridden when [autoscaling](#autoscaling) engages.
 
 ### flush-interval
 
@@ -264,6 +269,29 @@ run has since been dropped from the source, `--force` does not discover or
 remove that stale target table. Remove such tables manually if they are no
 longer wanted. Intended for testing/iterating. `--force` does not bypass the
 refusal of target triggers and events (see [Schema objects](#schema-objects)).
+
+### checkpoint-max-age
+
+- Type: Duration
+- Default value: `168h` (7 days)
+
+The maximum age of a checkpoint before Sync refuses to resume from it. A checkpoint's age is the time since it was last written, which for a stopped sync is how long it has been stopped. Catching up that much change stream can be slower than re-copying, and the source may have purged the binary logs in the meantime.
+
+Like [move](move.md#checkpoint-max-age), and unlike [migrate](migrate.md#checkpoint-max-age), Sync does **not** fall back to a fresh copy on its own: the target already holds data. The sync fails with a `checkpoint is too old to safely resume` error. To proceed, either re-run with a larger `--checkpoint-max-age`, or re-run with [`--force`](#force), which treats the checkpoint as unresumable and re-copies.
+
+### tls-ca
+
+- Type: String
+- Default value: ``
+
+Path to a custom TLS CA certificate file (PEM format), applied to every source and target connection. Shared with `migrate`; see [migrate's tls-ca](migrate.md#tls-ca).
+
+### tls-mode
+
+- Type: Enumeration
+- Default value: `PREFERRED`
+
+The TLS mode applied to every source and target connection: `DISABLED`, `PREFERRED`, `REQUIRED`, `VERIFY_CA` or `VERIFY_IDENTITY`. A DSN's own `tls=` parameter takes precedence. Shared with `migrate`; see [migrate's tls-mode](migrate.md#tls-mode).
 
 ## GTID auto-detection
 

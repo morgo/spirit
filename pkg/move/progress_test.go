@@ -9,6 +9,7 @@ import (
 	"github.com/block/mysql"
 	"github.com/block/spirit/pkg/checksum"
 	"github.com/block/spirit/pkg/copier/copiertest"
+	"github.com/block/spirit/pkg/flags"
 	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
@@ -116,11 +117,9 @@ func TestMoveProgressPolledConcurrently(t *testing.T) {
 
 	// test
 	move := &Move{
-		SourceDSN:    sourceDSN,
-		TargetDSN:    targetDSN,
-		Threads:      2,
-		WriteThreads: 2,
-		DeferCutOver: false,
+		SourceDSN: sourceDSN,
+		TargetDSN: targetDSN,
+		Common:    flags.Common{Threads: 2, WriteThreads: 2},
 	}
 	runner, err := NewRunner(move)
 	require.NoError(t, err)

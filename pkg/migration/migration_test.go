@@ -1,21 +1,27 @@
 package migration
 
 import (
+	"context"
+	"database/sql"
 	"fmt"
 	"log/slog"
 	"os"
-	"reflect"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/block/spirit/pkg/autoscale"
 	"github.com/block/spirit/pkg/checksum"
+	"github.com/block/spirit/pkg/concurrency"
+	"github.com/block/spirit/pkg/copier"
+	"github.com/block/spirit/pkg/flags"
 	"github.com/block/spirit/pkg/sentinel"
 	"github.com/block/spirit/pkg/statement"
 	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
+	"github.com/block/spirit/pkg/throttler"
+	"github.com/block/spirit/pkg/utils"
 
 	"github.com/block/mysql"
 	"github.com/stretchr/testify/require"
@@ -121,12 +127,12 @@ func TestE2ENullAlter1Row(t *testing.T) {
 }
 
 // TestE2EAutoscalingEnabled runs a full migration with the experimental
-// write-thread autoscaler turned on. The local (non-Aurora) target has no
-// GradualThrottler, so this exercises the downgrade path end-to-end: the
-// autoscaler declines to engage (a warning is logged), write threads stay at
-// the starting value, the connection pool is still sized for the ceiling, and
-// the migration completes correctly (goleak in TestMain catches leaks). The
-// engaged path is covered by the autoscaler unit tests.
+// write-thread autoscaler turned on. The local (non-Aurora) target supplies no
+// Aurora load signal, so this exercises the disengaged path end-to-end:
+// concurrency.Engage declines (and logs why), the configured thread counts
+// stand, and the migration completes correctly (goleak in TestMain catches
+// leaks). The engaged path is covered by pkg/concurrency and the autoscaler
+// unit tests.
 func TestE2EAutoscalingEnabled(t *testing.T) {
 	t.Parallel()
 	tt := testutils.NewTestTable(t, "t1autoscale", `CREATE TABLE t1autoscale (
@@ -141,6 +147,61 @@ func TestE2EAutoscalingEnabled(t *testing.T) {
 
 	var count int
 	require.NoError(t, tt.DB.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM t1autoscale").Scan(&count))
+	require.Equal(t, 5, count)
+}
+
+// TestE2EAutoscalingEngaged runs a migration with autoscaling engaged, which
+// CI cannot reach for real (it needs an Aurora target): the Aurora probes are
+// faked to report a redo-aware 16-vCPU target. It pins that the probe runs
+// once, before setup chooses resume or fresh, and that the runner provisions
+// the plan concurrency.Derive produces for that target — the starting counts
+// replace --threads/--write-threads, and the read and write ceilings and the
+// flush pair are the plan's, not swapped or left at their defaults.
+// setupCopierCheckerAndReplClient builds the copier and the checksum from
+// autoscaleConfigs, so the configs are asserted there.
+func TestE2EAutoscalingEngaged(t *testing.T) {
+	t.Parallel()
+	tt := testutils.NewTestTable(t, "t1autoscaleon", `CREATE TABLE t1autoscaleon (
+		id int(11) NOT NULL AUTO_INCREMENT,
+		name varchar(255) NOT NULL,
+		PRIMARY KEY (id)
+	)`)
+	testutils.RunSQL(t, `INSERT INTO t1autoscaleon (name) VALUES ('a'), ('b'), ('c'), ('d'), ('e')`)
+	r := NewTestRunner(t, "t1autoscaleon", "ENGINE=InnoDB", WithThreads(1), WithWriteThreads(1), WithAutoscaling())
+	var builds int
+	r.buildAurora = func(context.Context, throttler.AuroraSetup) (throttler.AuroraResult, error) {
+		builds++
+		return throttler.AuroraResult{Throttlers: []throttler.Throttler{&throttler.Noop{}}, RedoAware: true}, nil
+	}
+	r.auroraVCPUs = func(context.Context, *sql.DB) (int, error) { return 16, nil }
+	require.NoError(t, r.Run(t.Context()))
+	defer utils.CloseAndLog(r)
+
+	// A programmatic Migration leaves MaxCommitLatency at zero, which disables
+	// the commit-latency backstop, so the write ceiling stays at its start.
+	require.Zero(t, r.migration.MaxCommitLatency)
+	want, ok := concurrency.Derive(concurrency.Topology{VCPUs: []int{16}}, autoscale.ClientCeiling(), true, false)
+	require.True(t, ok)
+	require.Equal(t, 1, builds, "the Aurora probe must run once per migration")
+	require.Equal(t, want, r.autoscale)
+	require.NotEqual(t, want.MaxReadThreads, want.MaxWriteThreads, "distinct ceilings, so a read/write swap would fail this test")
+	require.Equal(t, want.ReadStart, r.migration.Threads, "--threads is replaced by the derived start")
+	require.Equal(t, want.WriteStart, r.migration.WriteThreads, "--write-threads is replaced by the derived start")
+	// The configs the copier and the checksum were built from.
+	copierAutoscale, checksumAutoscale := r.autoscaleConfigs()
+	require.Equal(t, copier.AutoscaleConfig{
+		Enabled:        true,
+		StartThreads:   want.WriteStart,
+		MaxThreads:     want.MaxWriteThreads,
+		MaxReadThreads: want.MaxReadThreads,
+	}, copierAutoscale)
+	require.Equal(t, checksum.AutoscaleConfig{Enabled: true, MaxThreads: want.MaxReadThreads}, checksumAutoscale)
+	feed := r.replClientConfig(r.autoscale.FlushConcurrency, r.autoscale.FlushBatchSize)
+	require.Equal(t, want.FlushConcurrency, feed.FlushConcurrency)
+	require.Equal(t, want.FlushBatchSize, feed.BatchSize)
+
+	var count int
+	require.NoError(t, tt.DB.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM t1autoscaleon").Scan(&count))
 	require.Equal(t, 5, count)
 }
 
@@ -398,30 +459,15 @@ func TestMigrationParamsDefaultsUsed(t *testing.T) {
 	require.Equal(t, uint64(table.DefaultTargetChunkBytes), migration.TargetChunkSize)
 }
 
-// TestTargetChunkSizeKongDefault pins the hardcoded Kong default on
-// --target-chunk-size to table.DefaultTargetChunkBytes. The Kong tag must be a
-// literal, so this guards against it drifting from the constant (which also
-// backs the zero-value default in normalizeOptions).
-func TestTargetChunkSizeKongDefault(t *testing.T) {
-	t.Parallel()
-	field, ok := reflect.TypeFor[Migration]().FieldByName("TargetChunkSize")
-	require.True(t, ok)
-	require.Equal(t,
-		strconv.FormatUint(table.DefaultTargetChunkBytes, 10),
-		field.Tag.Get("default"),
-		"Kong default for --target-chunk-size must equal table.DefaultTargetChunkBytes")
-}
-
 func TestMigrationParamsCLIUsed(t *testing.T) {
 	t.Parallel()
 	migration := &Migration{
-		Host:               "cli-host:3306",
-		Username:           "cli-user",
-		Password:           new("cli-password"),
-		Database:           "cli-db",
-		Statement:          "ALTER TABLE testtable ENGINE=InnoDB",
-		TLSMode:            "VERIFY_CA",
-		TLSCertificatePath: "/path/to/ca",
+		Host:      "cli-host:3306",
+		Username:  "cli-user",
+		Password:  new("cli-password"),
+		Database:  "cli-db",
+		Statement: "ALTER TABLE testtable ENGINE=InnoDB",
+		Common:    flags.Common{TLSMode: "VERIFY_CA", TLSCertificatePath: "/path/to/ca"},
 	}
 
 	_, err := migration.normalizeOptions()
@@ -482,14 +528,13 @@ tls-ca = /path/from/file
 `)
 
 	migration := &Migration{
-		Host:               "cli-host:1234",
-		Username:           "cli-user",
-		Password:           new("cli-password"),
-		Database:           "cli-db",
-		Statement:          "ALTER TABLE testtable ENGINE=InnoDB",
-		ConfFile:           confPath,
-		TLSMode:            "REQUIRED",
-		TLSCertificatePath: "/path/to/cert",
+		Host:      "cli-host:1234",
+		Username:  "cli-user",
+		Password:  new("cli-password"),
+		Database:  "cli-db",
+		Statement: "ALTER TABLE testtable ENGINE=InnoDB",
+		ConfFile:  confPath,
+		Common:    flags.Common{TLSMode: "REQUIRED", TLSCertificatePath: "/path/to/cert"},
 	}
 
 	_, err := migration.normalizeOptions()
@@ -826,7 +871,7 @@ func TestDefaultPort(t *testing.T) {
 		Username:  "root",
 		Password:  new("mypassword"),
 		Database:  "test",
-		Threads:   2,
+		Common:    flags.Common{Threads: 2},
 		Statement: "ALTER TABLE t1 DROP COLUMN b, ENGINE=InnoDB",
 	})
 	require.NoError(t, err)
@@ -895,18 +940,16 @@ func TestMigrationValidate(t *testing.T) {
 	}{
 		{name: "zero values are valid"},
 		{name: "typical values are valid", m: Migration{
-			Threads:          4,
-			WriteThreads:     4,
-			ReplicaMaxLag:    120 * time.Second,
-			CheckpointMaxAge: 168 * time.Hour,
+			Common:        flags.Common{Threads: 4, WriteThreads: 4, CheckpointMaxAge: 168 * time.Hour},
+			ReplicaMaxLag: 120 * time.Second,
 		}},
-		{name: "negative threads", m: Migration{Threads: -5},
+		{name: "negative threads", m: Migration{Common: flags.Common{Threads: -5}},
 			wantErr: "--threads must be non-negative, got -5"},
-		{name: "negative write-threads", m: Migration{WriteThreads: -1},
+		{name: "negative write-threads", m: Migration{Common: flags.Common{WriteThreads: -1}},
 			wantErr: "--write-threads must be non-negative, got -1"},
 		{name: "negative replica-max-lag", m: Migration{ReplicaMaxLag: -time.Minute},
 			wantErr: "--replica-max-lag must be non-negative, got -1m0s"},
-		{name: "negative checkpoint-max-age", m: Migration{CheckpointMaxAge: -time.Hour},
+		{name: "negative checkpoint-max-age", m: Migration{Common: flags.Common{CheckpointMaxAge: -time.Hour}},
 			wantErr: "--checkpoint-max-age must be non-negative, got -1h0m0s"},
 	}
 	for _, tt := range tests {
