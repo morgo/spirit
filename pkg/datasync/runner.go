@@ -1229,9 +1229,10 @@ func (r *Runner) createApplier() (applier.Applier, error) {
 		return r.sync.Applier, nil
 	}
 	appl, err := applier.New([]applier.Target{r.target}, &applier.ApplierConfig{
-		DBConfig: r.targetDBConfig,
-		Logger:   r.logger,
-		Threads:  r.sync.WriteThreads,
+		DBConfig:    r.targetDBConfig,
+		Logger:      r.logger,
+		Threads:     r.sync.WriteThreads,
+		MetricsSink: r.metricsSink,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create applier: %w", err)
@@ -1988,9 +1989,7 @@ func (r *Runner) fatal() error {
 // calls change.Source.Close (documented idempotent) to release the
 // runner's reference.
 func (r *Runner) Close() error {
-	if r.cancelFunc != nil {
-		r.cancelFunc(nil)
-	}
+	r.Cancel()
 	// Wait for the status + checkpoint goroutines (status.WatchTask) to exit
 	// before tearing down connections, so a late DumpCheckpoint can't run
 	// against a closed pool.
