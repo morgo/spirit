@@ -50,7 +50,9 @@ The two `Mode`s differ only in what `Create` does:
 
 The runners write a checkpoint every 50 seconds (`status.CheckpointDumpInterval`, driven by `status.WatchTask`), so an interrupted run loses about a minute of progress. A write that fails is fatal: the runner stops rather than continue without a checkpoint.
 
-When `Write` returns, its `REPLACE` is no longer pending on the server: it has committed, failed, or been rolled back. Runners rely on this when they stop the checkpoint writer and then read or rewrite the row. Cancelling the context does not cancel a write already sent; `Write` waits up to 10 seconds for the server to answer. If it has not answered by then, `Write` kills the session, waits for it to exit, and returns `ErrWriteAbandoned`. A write that never reached the server returns `ErrWriteNotSent`. See [#1313](https://github.com/block/spirit/issues/1313).
+`Write` is designed so that, when it returns, its `REPLACE` is no longer pending on the server: it has committed, failed, or been rolled back. Runners rely on this when they stop the checkpoint writer and then read or rewrite the row. Cancelling the context does not cancel a write already sent; `Write` waits up to 10 seconds for the server to answer. If it has not answered by then, `Write` kills the session, waits for it to exit, and returns `ErrWriteAbandoned`. A write that never reached the server returns `ErrWriteNotSent`. See [#1313](https://github.com/block/spirit/issues/1313).
+
+There is one exception. If killing the session also fails, `Write` still returns `ErrWriteAbandoned`, and the error message says the `REPLACE` may still commit. In that case the guarantee does not hold: the row may later be overwritten by the abandoned write.
 
 ## Resume policy
 
@@ -95,11 +97,13 @@ See [pkg/migration/README.md](../migration/README.md#failure-handling).
 
 ### Move
 
-A move's resume policy is in `pkg/move/runner.go`. It differs from a migration's in one important way: a move **never** silently starts fresh. The target tables already contain rows, so a checkpoint that is too old, unreadable, or written by another version fails the run. The operator must either raise `--checkpoint-max-age` or wipe the targets. A move also uses `move_phase` and `cutover_at` so a restart during the reverse window neither copies again nor cuts over again. See [move: checkpoint-max-age](../../docs/move.md#checkpoint-max-age).
+A move's resume policy is in `pkg/move/runner.go` (`decideResume`). Unlike a migration, a move does not start fresh when a checkpoint is unusable. The target tables already contain rows, so a checkpoint that is too old, unreadable, or written by another version fails the run. The operator must either raise `--checkpoint-max-age`, re-run with `--force`, or wipe the targets.
+
+The exception is an **empty** checkpoint table (`ErrNotFound`): a move that was cancelled before its first checkpoint write leaves one behind. Its fixed name, `_spirit_move_checkpoint`, proves an earlier move owns the targets, so the move drops the target tables and the checkpoint table and starts a fresh copy without `--force`. A move also uses `move_phase` and `cutover_at` so a restart during the reverse window neither copies again nor cuts over again. See [move: checkpoint-max-age](../../docs/move.md#checkpoint-max-age).
 
 ### Datasync
 
-Datasync uses `Persistent` mode, and the existence of `_spirit_sync_checkpoint` is its resume signal: the table is created before any row is copied, so a prior run owns the target even if it died before writing its first checkpoint. Like a move, it does not start fresh on its own; `--force` does that. A `file:offset` checkpoint also records the source's `@@server_uuid`, and resume refuses a position from a different server. See [sync: checkpoint-max-age](../../docs/sync.md#checkpoint-max-age) and [sync: force](../../docs/sync.md#force).
+Datasync uses `Persistent` mode, and the existence of `_spirit_sync_checkpoint` is its resume signal: the table is created before any row is copied, so a prior run owns the target even if it died before writing its first checkpoint. If the table exists but holds no row, datasync resumes and copies again from the start over the existing target tables, which is safe because the copy is idempotent. A checkpoint that is too old or unreadable by this version fails the run; `--force` discards it and starts fresh. A `file:offset` checkpoint also records the source's `@@server_uuid`, and resume refuses a position from a different server. See [sync: checkpoint-max-age](../../docs/sync.md#checkpoint-max-age) and [sync: force](../../docs/sync.md#force).
 
 ## Background: binary log retention
 
@@ -114,12 +118,15 @@ To avoid this:
 
 ## Cross-version compatibility
 
-The checkpoint table is version-specific. `ReadLatest` selects its columns by name, so a table written by a version with a different schema fails the read with `ER_BAD_FIELD_ERROR` (for example, when this version expects a column the table does not have). Spirit does not migrate or backfill checkpoint data between versions. `IsIncompatible` reports this case, along with `ER_NO_SUCH_TABLE`, so runners can tell an unusable checkpoint apart from a transient read error.
+Resuming with a different Spirit version than the one that wrote the checkpoint is **not supported**, because Spirit cannot always detect that it is happening. Spirit does not migrate or backfill checkpoint data between versions.
 
-- **Upgrading or rolling back Spirit mid-migration** fails the read in either direction. A migration treats this as definitive and starts fresh, losing all copy progress. A move or datasync run fails.
-- **A schema change is detected; a change in meaning is not.** If a version changes the meaning of a stored value without changing the table's schema (for example, a watermark format change), the read succeeds and the new version misinterprets the old checkpoint. See [Resuming across Spirit binary versions](../../docs/migrate.md#resuming-across-spirit-binary-versions).
+`ReadLatest` selects its columns by name. That catches some version differences, but not all:
+
+- **A column this version expects is missing** (typically, a newer binary reading a table written by an older one): the read fails with `ER_BAD_FIELD_ERROR`. `IsIncompatible` reports this case, along with `ER_NO_SUCH_TABLE`, so runners can tell an unusable checkpoint apart from a transient read error. A migration treats it as definitive and starts fresh, losing all copy progress. A move or datasync run fails.
+- **The table has columns this version does not know** (typically, an older binary reading a table written by a newer one, when the newer version only added columns): the read succeeds, because it selects only the columns it knows. Nothing detects the mismatch.
+- **A change in meaning is not detected either.** If a version changes the meaning of a stored value without changing the table's schema (for example, a watermark format change), the read succeeds and the new version misinterprets the old checkpoint. See [Resuming across Spirit binary versions](../../docs/migrate.md#resuming-across-spirit-binary-versions).
 
 Operationally:
 
 - Finish an in-flight migration on the Spirit version that started it.
-- If you must change versions mid-migration, expect the copy to restart from zero, and plan binlog retention and maintenance windows for that.
+- If you must change versions mid-migration, drop the checkpoint table so the run starts fresh deliberately. Do not rely on Spirit to detect the version change.

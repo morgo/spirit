@@ -85,7 +85,7 @@ The copier and the change source run in parallel during the row copy. The only h
 
 A `--statement` that is not an `ALTER TABLE` (`CREATE TABLE`, `DROP TABLE`, `RENAME TABLE`) is executed directly and the run ends. This is only allowed when the statement contains a single table.
 
-For `ALTER TABLE`, the runner rejects a user-supplied `ALGORITHM=` or `LOCK=` clause before it touches the server. Step 4 prepends its own `ALGORITHM=` assertion, and MySQL resolves duplicate options last-one-wins, so a user's `ALGORITHM=COPY` would turn the INSTANT attempt into a blocking rebuild. The runner then loads each table's metadata and runs the statement-scope checks, which reject statements Spirit can never execute.
+For `ALTER TABLE`, the runner rejects a user-supplied `ALGORITHM=` or `LOCK=` clause after connecting but before any table introspection or DDL. Step 4 prepends its own `ALGORITHM=` assertion, and MySQL resolves duplicate options last-one-wins, so a user's `ALGORITHM=COPY` would turn the INSTANT attempt into a blocking rebuild. The runner then loads each table's metadata and runs the statement-scope checks, which reject statements Spirit can never execute.
 
 ### 3. Advisory locks
 
