@@ -435,7 +435,7 @@ func ForceExec(ctx context.Context, db *sql.DB, tables []*table.TableInfo, dbCon
 		return statementIsWaitingForTableLock(ctx, db, tables, logger, connID)
 	}
 	return forceExec(ctx, db, dbConfig, logger, stmt, waiting, func(ctx context.Context, connID int) ([]int, error) {
-		return killLockingTransactions(ctx, db, tables, dbConfig, logger, []int{connID})
+		return killLockingTransactions(ctx, db, tables, logger, []int{connID})
 	}, waitForKilledTransactions, nil)
 }
 

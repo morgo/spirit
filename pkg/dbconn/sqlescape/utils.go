@@ -18,7 +18,6 @@ package sqlescape
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"reflect"
 	"slices"
 	"strconv"
@@ -145,7 +144,7 @@ func escapeStringBackslash(buf []byte, v string) []byte {
 	return escapeBytesBackslash(buf, []byte(v))
 }
 
-// escapeSQL is the internal impl of EscapeSQL and FormatSQL.
+// escapeSQL is the internal impl of EscapeSQL.
 func escapeSQL(sql string, args ...any) ([]byte, error) {
 	buf := make([]byte, 0, len(sql))
 	argPos := 0
@@ -351,23 +350,4 @@ func MustEscapeSQL(sql string, args ...any) string {
 		panic(err)
 	}
 	return r
-}
-
-// FormatSQL is the io.Writer version of EscapeSQL. Please refer to EscapeSQL for details.
-func FormatSQL(w io.Writer, sql string, args ...any) error {
-	buf, err := escapeSQL(sql, args...)
-	if err != nil {
-		return err
-	}
-	_, err = w.Write(buf)
-	return err
-}
-
-// MustFormatSQL is a helper around FormatSQL, like MustEscapeSQL. But it asks that the writer must be strings.Builder,
-// which will not return error when w.Write(...).
-func MustFormatSQL(w *strings.Builder, sql string, args ...any) {
-	err := FormatSQL(w, sql, args...)
-	if err != nil {
-		panic(err)
-	}
 }

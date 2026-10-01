@@ -161,11 +161,22 @@ func TestDuplicateColumnLinter_MultipleDuplicates(t *testing.T) {
 	require.True(t, duplicates["name"])
 }
 
-func TestExampleLinters_Integration(t *testing.T) {
-	// Reset the global registry
-	lint.Reset()
+// exampleViolations keeps only the violations reported by this package's
+// example linters, discarding those from the built-in linters that are also
+// registered in the global registry.
+func exampleViolations(violations []lint.Violation) []lint.Violation {
+	var filtered []lint.Violation
+	for _, v := range violations {
+		switch v.Linter.Name() {
+		case "table_name_length", "duplicate_column":
+			filtered = append(filtered, v)
+		}
+	}
+	return filtered
+}
 
-	// Register our example linters
+func TestExampleLinters_Integration(t *testing.T) {
+	// Register our example linters alongside the built-in ones.
 	lint.Register(NewTableNameLengthLinter())
 	lint.Register(&DuplicateColumnLinter{})
 
@@ -180,6 +191,7 @@ func TestExampleLinters_Integration(t *testing.T) {
 	// Run all linters
 	violations, err := lint.RunLinters([]*statement.CreateTable{ct}, nil, lint.Config{})
 	require.NoError(t, err)
+	violations = exampleViolations(violations)
 
 	// Should have violations from both linters
 	require.Len(t, violations, 2)
@@ -195,8 +207,6 @@ func TestExampleLinters_Integration(t *testing.T) {
 }
 
 func TestExampleLinters_WithConfig(t *testing.T) {
-	lint.Reset()
-
 	lint.Register(NewTableNameLengthLinter())
 	lint.Register(&DuplicateColumnLinter{})
 
@@ -213,6 +223,7 @@ func TestExampleLinters_WithConfig(t *testing.T) {
 		},
 	})
 	require.NoError(t, err)
+	violations = exampleViolations(violations)
 
 	// Should only have violation from duplicate_column linter
 	require.Len(t, violations, 1)
@@ -220,8 +231,6 @@ func TestExampleLinters_WithConfig(t *testing.T) {
 }
 
 func TestTableNameLengthLinter_WithConfigSettings(t *testing.T) {
-	lint.Reset()
-
 	lint.Register(NewTableNameLengthLinter())
 
 	// Create a table name that's 50 characters
@@ -235,7 +244,7 @@ func TestTableNameLengthLinter_WithConfigSettings(t *testing.T) {
 	// With default config (58), should pass
 	violations, err := lint.RunLinters([]*statement.CreateTable{ct}, nil, lint.Config{})
 	require.NoError(t, err)
-	require.Empty(t, violations)
+	require.Empty(t, exampleViolations(violations))
 
 	// Configure max length to 40 via Config.Settings
 	violations, err = lint.RunLinters([]*statement.CreateTable{ct}, nil, lint.Config{
@@ -246,6 +255,7 @@ func TestTableNameLengthLinter_WithConfigSettings(t *testing.T) {
 		},
 	})
 	require.NoError(t, err)
+	violations = exampleViolations(violations)
 
 	// Should now have a violation
 	require.Len(t, violations, 1)

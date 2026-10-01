@@ -331,11 +331,10 @@ func TestZeroDateLinter_AlterTableAddColumn(t *testing.T) {
 
 // Test registration
 func TestZeroDateLinter_Registration(t *testing.T) {
-	// Re-register in case other tests called Reset()
+	// Re-register in case other tests wiped the registry
 	Register(&ZeroDateLinter{})
 
-	linter, err := Get("zero_date")
-	require.NoError(t, err)
+	linter := registeredLinter(t, "zero_date")
 	require.NotNil(t, linter)
 	require.IsType(t, &ZeroDateLinter{}, linter)
 }
