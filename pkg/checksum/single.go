@@ -33,13 +33,6 @@ var (
 	// long-running transactions to reduce HLL (history list length) growth.
 	ErrYieldTimeout = errors.New("checksum yield timeout")
 
-	// ErrRepairUnverified is returned by RunContinuous when a pass repaired a
-	// mismatch and was cancelled before it could re-verify the rewritten rows.
-	// A repair is not verification, so the target is unproven and cutover must
-	// not proceed on the strength of that pass. It is distinct from an ordinary
-	// cancellation, which a continuous pass filters to nil.
-	ErrRepairUnverified = errors.New("checksum cancelled with a repair unverified")
-
 	// DefaultYieldTimeout is the default maximum duration for a single checksum
 	// pass before yielding to release long-running REPEATABLE READ transactions.
 	DefaultYieldTimeout = 24 * time.Hour
@@ -72,10 +65,10 @@ type SingleChecker struct {
 	logger           *slog.Logger
 	differencesFound atomic.Uint64
 	resume           snapshotResume
-	// recopier is the write path a mismatched chunk is rewritten through, and
-	// its presence is the repair policy: nil means a divergence is an error
-	// rather than something to rewrite. Both checkers repair through the same
-	// interface; see newRecopier for how the factory chooses one.
+	// recopier is the write path Run rewrites a mismatched chunk through. Read
+	// it through repairer, which withholds it from RunContinuous. Both checkers
+	// repair through the same interface; see newRecopier for how the factory
+	// chooses one. It is nil only for the package's own tests.
 	recopier        Recopier
 	maxRetries      int
 	yieldTimeout    time.Duration
@@ -222,9 +215,22 @@ func (c *SingleChecker) ChecksumChunk(ctx context.Context, trxPool *dbconn.TrxPo
 	if mismatch := compareChunk(sourceChecksum, targetChecksum, sourceCount, targetCount); mismatch.mismatched() {
 		// The source and target do not match, so we first need
 		// to inspect closely and report on the differences.
-		c.resume.observed.Add(1)
 		c.differencesFound.Add(1)
 		c.logger.Warn("chunk verification failed", "chunk", chunk.String(), "reason", mismatch.reason(sourceCount, targetCount), "sourceChecksum", sourceChecksum, "targetChecksum", targetChecksum, "sourceCount", sourceCount, "targetCount", targetCount)
+		// RunContinuous does not repair: the mismatch was read under a
+		// snapshot taken behind a table lock, so it is not apply lag, and it is
+		// reported rather than rewritten while a cutover may be imminent. The
+		// verdict is latched before the diagnostics, which read under ctx: a
+		// cancellation from them must not be what the run reports.
+		recopier := c.repairer()
+		if recopier == nil {
+			divergence := fmt.Errorf("%w: chunk %s (%s)", ErrPermanentDivergence, chunk.String(), mismatch.reason(sourceCount, targetCount))
+			c.resume.divergence.set(divergence)
+			if err := c.inspectDifferences(ctx, trx, chunk); err != nil {
+				c.logger.Warn("failed to inspect row differences", "chunk", chunk.String(), "error", err)
+			}
+			return divergence
+		}
 		if err := c.inspectDifferences(ctx, trx, chunk); err != nil {
 			return err
 		}
@@ -233,13 +239,7 @@ func (c *SingleChecker) ChecksumChunk(ctx context.Context, trxPool *dbconn.TrxPo
 		// so return the transaction now and let the keepalive cover it while
 		// this worker queues for the recopier's lock.
 		putTrx()
-		// Are we allowed to fix the differences? If not, return an error.
-		// This is mostly used by the test-suite.
-		if c.recopier == nil {
-			return errors.New("checksum mismatch")
-		}
-		// Since we can fix differences, replace the chunk.
-		if err = c.recopier.Recopy(ctx, chunk); err != nil {
+		if err = recopier.Recopy(ctx, chunk); err != nil {
 			return err
 		}
 	}
@@ -423,6 +423,11 @@ func (c *SingleChecker) Run(ctx context.Context) error {
 		// InnoDB history list length (HLL) growth, then re-acquire a table lock
 		// and fresh snapshot before resuming from the low watermark.
 		if err := c.runChecksumWithYield(ctx); err != nil {
+			// A difference this run may not repair is a verdict about the
+			// data, and repeating the read would reach it again.
+			if errors.Is(err, ErrPermanentDivergence) {
+				return err
+			}
 			c.logger.Error("checksum encountered an error", "error", err)
 			lastErr = err
 			continue
@@ -665,7 +670,22 @@ var _ Checker = (*SingleChecker)(nil)
 
 func (c *SingleChecker) ContinuousActive() bool { return c.resume.active.Load() }
 
+// repairer returns the Recopier a mismatched chunk is rewritten through, or nil
+// when it must be reported instead. That is decided by the mode: Run repairs
+// and RunContinuous does not. resume.continuous is sticky, and Run is never
+// called after RunContinuous.
+func (c *SingleChecker) repairer() Recopier {
+	if c.resume.continuous.Load() {
+		return nil
+	}
+	return c.recopier
+}
+
+// RunContinuous re-verifies the table every LocklessMinPassInterval until ctx
+// is cancelled. Each pass is a Run that does not repair: a mismatch returns
+// ErrPermanentDivergence.
 func (c *SingleChecker) RunContinuous(ctx context.Context) error {
+	c.resume.divergence.reset()
 	c.resume.continuous.Store(true)
 	return runContinuousSnapshot(ctx, c, []change.Source{c.feed}, &c.resume, func() error {
 		return c.resume.restart(&c.differencesFound, c.chunker.Reset)
@@ -790,24 +810,20 @@ func runContinuousSnapshot(ctx context.Context, checker Checker, feeds []change.
 		if err := reset(); err != nil {
 			return fmt.Errorf("reset continuous checksum: %w", err)
 		}
-		before := resume.observed.Load()
 		started := time.Now()
 		resume.active.Store(true)
 		err := checker.Run(ctx)
 		resume.active.Store(false)
+		// A confirmed divergence outranks whatever error won the race to be
+		// returned, cancellation included.
+		if divergence := resume.divergence.get(); divergence != nil {
+			return divergence
+		}
 		if err != nil {
-			// A retry can reset DifferencesFound even after a repair was interrupted.
-			// Use the monotonic observation count for this entire Run instead.
+			// Nothing is repaired in continuous mode, so a cancellation leaves
+			// the target exactly as verified as it was: filter it to nil.
 			if ctx.Err() != nil && checksumCanceled(err) {
-				if resume.observed.Load() == before {
-					return nil
-				}
-				// A repair is not verification: the rewritten rows were never
-				// observed equal. Cancelling before the pass could re-verify
-				// them leaves the target unproven, so the cancellation is
-				// refused rather than filtered. Say which of the two it is —
-				// a bare "context canceled" reads as the shutdown working.
-				return fmt.Errorf("%w: cancelled after repairing a mismatch and before re-verifying it", ErrRepairUnverified)
+				return nil
 			}
 			return err
 		}

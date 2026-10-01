@@ -60,8 +60,8 @@ type LocklessCheckerStats struct {
 	// RecopiesThisPass is the count of chunks that were recopied this
 	// pass — i.e. retry detected stable target divergence (source CRC
 	// unchanged across the retry window, target still wrong) and the
-	// configured Recopier rewrote the chunk from source. Zero when no
-	// Recopier is configured (those failures surface as
+	// Recopier rewrote the chunk from source. Always zero under
+	// RunContinuous, which does not repair (those failures surface as
 	// ErrPermanentDivergence and abort the run instead). A pass with
 	// RecopiesThisPass > 0 cannot be the first clean pass — recopied
 	// chunks are repaired, not verified, and are re-read on the next

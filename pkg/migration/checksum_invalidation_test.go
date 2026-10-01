@@ -168,73 +168,64 @@ func TestContinuousChecksumClearsCheckpointWatermark(t *testing.T) {
 	require.Empty(t, wm, "later dumps cannot resurrect the initial watermark")
 }
 
-// TestLocklessChecksumRepairsDivergenceBeforeCutover is the E2E parity case: a
-// defer-cutover migration reaches the sentinel wait, a row in the _new table is
-// corrupted externally, and the lockless checksum detects the divergence,
-// repairs it from the source, re-verifies on the following pass, and lets the
-// migration complete. That is exactly what the default snapshot checker does;
-// the lockless checker used to abort the migration instead.
-//
-// The repaired range is never reported to the chunker, so no checksum_watermark
-// can be published from below it either — asserted here because the cost of
-// getting that wrong is a resumed run silently skipping the diverged chunk.
+// TestContinuousChecksumAbortsThenResumeRepairs is the E2E contract for both
+// checkers: a defer-cutover migration reaches the sentinel wait, a row in the
+// _new table is corrupted externally, and the continuous checksum detects the
+// divergence and aborts the migration with ErrPermanentDivergence rather than
+// rewriting rows while a cutover may be imminent. The persisted checksum
+// watermark is empty, so the resumed migration re-runs the initial checksum
+// from the start, which repairs the row, and then cuts over.
 //
 // Not parallel: it relies on the short lockless-checksum pacing / retry delay
 // set once in TestMain (checksum.LocklessMinPassInterval = 2s,
-// checksum.DefaultLocklessRetryDelay = 1s) so the divergence is detected and
-// repaired promptly.
-func TestLocklessChecksumRepairsDivergenceBeforeCutover(t *testing.T) {
-	tableName := "cont_chk_clear"
-	tt := testutils.NewTestTable(t, tableName, `CREATE TABLE cont_chk_clear (
-		id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
-		val VARCHAR(64) NOT NULL
-	)`)
-	tt.SeedRows(t, "INSERT INTO cont_chk_clear (val) SELECT 'a'", 1000)
+// checksum.DefaultLocklessRetryDelay = 1s) so the divergence is detected
+// promptly.
+func TestContinuousChecksumAbortsThenResumeRepairs(t *testing.T) {
+	for _, lockless := range []bool{false, true} {
+		t.Run(fmt.Sprintf("lockless=%t", lockless), func(t *testing.T) {
+			tableName := "cont_chk_abort"
+			tt := testutils.NewTestTable(t, tableName, `CREATE TABLE cont_chk_abort (
+				id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+				val VARCHAR(64) NOT NULL
+			)`)
+			tt.SeedRows(t, "INSERT INTO cont_chk_abort (val) SELECT 'a'", 1000)
+			t.Cleanup(func() { testutils.RunSQL(t, "DROP TABLE IF EXISTS "+sentinel.TableName) })
+			withChecker := func(m *Migration) { m.EnableExperimentalLocklessChecksum = lockless }
 
-	m := NewTestRunner(t, tableName, "ENGINE=InnoDB",
-		WithThreads(1),
-		WithDeferCutOver(),
-		WithRespectSentinel(),
-		func(m *Migration) { m.EnableExperimentalLocklessChecksum = true })
-	running := startTestRun(t, m.Run, m.Close)
+			m := NewTestRunner(t, tableName, "ENGINE=InnoDB",
+				WithThreads(1),
+				WithDeferCutOver(),
+				WithRespectSentinel(),
+				withChecker)
+			running := startTestRun(t, m.Run, m.Close)
+			waitForStatus(t, m, status.WaitingOnSentinelTable, running)
 
-	waitForStatus(t, m, status.WaitingOnSentinelTable, running)
+			newTable := utils.NewTableName(tableName)
+			testutils.RunSQL(t, fmt.Sprintf("UPDATE `%s` SET val = 'corrupted' WHERE id = 1", newTable))
 
-	checkpointTable := utils.CheckpointTableName(tableName)
-	// Corrupt a row in the new table behind spirit's back, then let the
-	// migration proceed. A lockless-checksum pass detects the divergence,
-	// confirms it on retry (source unchanged, target still wrong) and repairs
-	// it; the next pass verifies clean and the cutover runs.
-	newTable := utils.NewTableName(tableName)
-	testutils.RunSQL(t, fmt.Sprintf("UPDATE `%s` SET val = 'corrupted' WHERE id = 1", newTable))
+			err := running.wait(t)
+			require.ErrorIs(t, err, checksum.ErrPermanentDivergence,
+				"the continuous checksum must report the divergence, not repair it")
+			var val string
+			require.NoError(t, tt.DB.QueryRowContext(t.Context(),
+				"SELECT val FROM `"+newTable+"` WHERE id = 1").Scan(&val))
+			require.Equal(t, "corrupted", val, "continuous verification must not write")
+			var stale int
+			require.NoError(t, tt.DB.QueryRowContext(t.Context(), fmt.Sprintf(
+				"SELECT COUNT(*) FROM `%s` WHERE checksum_watermark <> ''", utils.CheckpointTableName(tableName))).Scan(&stale))
+			require.Zero(t, stale, "no resume evidence may survive continuous verification")
 
-	// Hold the sentinel until the background checksum has actually repaired the
-	// row, so the assertion below is about the repair and not about a cutover
-	// that raced it.
-	require.Eventually(t, func() bool {
-		var val string
-		if err := tt.DB.QueryRowContext(t.Context(),
-			"SELECT val FROM `"+newTable+"` WHERE id = 1").Scan(&val); err != nil {
-			return false
-		}
-		return val == "a"
-	}, 60*time.Second, 250*time.Millisecond, "the diverged row must be repaired from the source")
-
-	// No checkpoint written from here on may carry a checksum_watermark: the
-	// diverged chunk is the first one, so nothing below it is verified.
-	var stale int
-	require.NoError(t, tt.DB.QueryRowContext(t.Context(), fmt.Sprintf(
-		"SELECT COUNT(*) FROM `%s` WHERE checksum_watermark <> ''", checkpointTable)).Scan(&stale))
-	require.Zero(t, stale, "a repaired first chunk leaves no verified prefix to publish")
-
-	testutils.RunSQL(t, "DROP TABLE "+sentinel.TableName)
-	require.NoError(t, running.wait(t))
-
-	// The corruption was repaired from the source rather than cut over.
-	var val string
-	require.NoError(t, tt.DB.QueryRowContext(t.Context(),
-		"SELECT val FROM `"+tableName+"` WHERE id = 1").Scan(&val))
-	require.Equal(t, "a", val)
+			// Resume without the sentinel: the initial checksum repairs the row
+			// from the source and the migration cuts over.
+			testutils.RunSQL(t, "DROP TABLE "+sentinel.TableName)
+			m2 := NewTestRunner(t, tableName, "ENGINE=InnoDB", WithThreads(1), withChecker)
+			require.NoError(t, startTestRun(t, m2.Run, m2.Close).wait(t))
+			require.True(t, m2.usedResumeFromCheckpoint.Load(), "the second run must resume, not start over")
+			require.NoError(t, tt.DB.QueryRowContext(t.Context(),
+				"SELECT val FROM `"+tableName+"` WHERE id = 1").Scan(&val))
+			require.Equal(t, "a", val, "the corruption was repaired from the source rather than cut over")
+		})
+	}
 }
 
 // advanceRunnerToChecksumWatermarks seeds the runner's table and brings both
@@ -315,36 +306,6 @@ func latestCheckpointWatermarks(t *testing.T, r *Runner) (string, string) {
 			r.checkpointTable.SchemaName, r.checkpointTable.TableName)).Scan(&copierWM, &checksumWM)
 	require.NoError(t, err)
 	return copierWM, checksumWM
-}
-
-// The default checker now repairs and reverifies during sentinel wait too.
-// The same object owns both phases; background progress cannot become a checkpoint.
-func TestContinuousSnapshotRepairsBeforeCutover(t *testing.T) {
-	dbName, _ := testutils.CreateUniqueTestDatabase(t)
-	testutils.RunSQLInDatabase(t, dbName, "CREATE TABLE continuous_repair (id INT PRIMARY KEY, val INT NOT NULL)")
-	testutils.RunSQLInDatabase(t, dbName, "INSERT INTO continuous_repair VALUES (1, 42)")
-	m := NewTestRunner(t, "continuous_repair", "ENGINE=InnoDB", WithDBName(dbName), WithThreads(1), WithDeferCutOver(), WithRespectSentinel())
-	running := startTestRun(t, m.Run, m.Close)
-	waitForStatus(t, m, status.WaitingOnSentinelTable, running)
-	checker := m.checker
-	require.IsType(t, &checksum.SingleChecker{}, checker)
-	testutils.RunSQLInDatabase(t, dbName, "UPDATE _continuous_repair_new SET val = 0 WHERE id = 1")
-	// A repair is not verification, so wait for the pass that repaired to
-	// finish rather than for the repaired value alone: DifferencesFound is
-	// reset between attempts, so it reads zero in the window after the repair
-	// and before the re-verification that proves it, and a sentinel dropped in
-	// that window is refused rather than filtered.
-	require.Eventually(t, func() bool {
-		var value int
-		err := m.db.QueryRowContext(t.Context(), "SELECT val FROM _continuous_repair_new WHERE id = 1").Scan(&value)
-		return err == nil && value == 42 && checker.DifferencesFound() == 0 && !checker.ContinuousActive()
-	}, 30*time.Second, 50*time.Millisecond)
-	wm, err := checker.ResumeWatermark()
-	require.NoError(t, err)
-	require.Empty(t, wm)
-	require.Same(t, checker, m.checker)
-	testutils.RunSQLInDatabase(t, dbName, "DROP TABLE _spirit_sentinel")
-	require.NoError(t, running.wait(t))
 }
 
 // Disable periodic dumping so neither it nor graceful-exit cleanup can hide a

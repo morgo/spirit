@@ -17,7 +17,7 @@ import (
 // chunkRepairer rewrites a diverged chunk on the targets from the sources. It
 // is the repair path for SingleChecker, which calls it when a chunk mismatches
 // under its snapshot, and for the lockless checker, which is handed one as its
-// Recopier when the caller asked for repairs (CheckerConfig.FixDifferences) —
+// Recopier for its Run (RunContinuous never repairs) —
 // whether one server holds both copies (a migration) or N sources are routed
 // onto M targets (a move). Sharing the implementation is what makes the
 // algorithms repair identically rather than nearly-identically — in particular

@@ -39,6 +39,15 @@ func newTestCheckerConfig(t *testing.T, db *sql.DB) *CheckerConfig {
 	return config
 }
 
+// newDetectOnlyCheckerConfig is newTestCheckerConfig without a repair path, so
+// a mismatch surfaces as ErrPermanentDivergence instead of being rewritten.
+func newDetectOnlyCheckerConfig(t *testing.T, db *sql.DB) *CheckerConfig {
+	t.Helper()
+	config := newTestCheckerConfig(t, db)
+	config.noRepair = true
+	return config
+}
+
 func TestBasicChecksum(t *testing.T) {
 	testutils.RunSQL(t, "DROP TABLE IF EXISTS basic_checksum, _basic_checksum_new, _basic_checksum_chkpnt")
 	testutils.RunSQL(t, "CREATE TABLE basic_checksum (a INT NOT NULL, b INT, c INT, PRIMARY KEY (a))")
@@ -106,16 +115,11 @@ func TestBasicValidation(t *testing.T) {
 	_, err = NewChecker([]*sql.DB{db}, chunker, nil, newTestCheckerConfig(t, db)) // no feed
 	require.EqualError(t, err, "at least one feed must be provided")
 
-	// A checker cannot repair without an applier, and that has to fail here
-	// rather than on the first mismatch hours into a migration. It is only
-	// demanded when repairs were asked for: a checker that reports a divergence
-	// rather than healing it never needs a write path.
-	repairCfg := NewCheckerDefaultConfig()
-	repairCfg.FixDifferences = true
-	_, err = NewChecker([]*sql.DB{db}, chunker, []change.Source{feed}, repairCfg)
-	require.EqualError(t, err, "applier must be non-nil to repair differences")
+	// A checker cannot repair without an applier, and Run always repairs, so
+	// that has to fail here rather than on the first mismatch hours into a
+	// migration.
 	_, err = NewChecker([]*sql.DB{db}, chunker, []change.Source{feed}, NewCheckerDefaultConfig())
-	require.NoError(t, err)
+	require.EqualError(t, err, "applier must be non-nil: Run repairs the differences it finds")
 
 	// Supplying one does not select a different checker — that is what
 	// Lockless is for. A config that differs from the default only by having
@@ -170,7 +174,6 @@ func TestUnfixableUniqueChecksum(t *testing.T) {
 	require.NoError(t, chunker.Open())
 
 	config := newTestCheckerConfig(t, db)
-	config.FixDifferences = true
 	checker, err := NewChecker([]*sql.DB{db}, chunker, []change.Source{feed}, config)
 	require.NoError(t, err)
 	err = checker.Run(t.Context())
@@ -211,7 +214,6 @@ func TestFixCorrupt(t *testing.T) {
 	require.NoError(t, chunker.Open())
 
 	config := newTestCheckerConfig(t, db)
-	config.FixDifferences = true
 	config.MaxRetries = 2
 	checker, err := NewChecker([]*sql.DB{db}, chunker, []change.Source{feed}, config)
 	require.NoError(t, err)
@@ -238,9 +240,9 @@ func TestFixCorrupt(t *testing.T) {
 // and the retry reset previously did not clear it. Because isHealthy()
 // returns false while isInvalid is set, the next attempt dispatched zero
 // chunks and completed with differencesFound==0 — logging "checksum passed"
-// and returning nil without having verified a single row. With
-// FixDifferences=false a persistent mismatch must fail every attempt and
-// surface an error, never nil.
+// and returning nil without having verified a single row. A persistent
+// mismatch whose repair keeps failing must fail every attempt and surface an
+// error, never nil.
 func TestRetryDoesNotVacuouslyPass(t *testing.T) {
 	testutils.RunSQL(t, "DROP TABLE IF EXISTS retrypoison_t1, _retrypoison_t1_new, _retrypoison_t1_chkpnt")
 	testutils.RunSQL(t, "CREATE TABLE retrypoison_t1 (a INT NOT NULL, b INT, c INT, PRIMARY KEY (a))")
@@ -270,16 +272,19 @@ func TestRetryDoesNotVacuouslyPass(t *testing.T) {
 	require.NoError(t, chunker.Open())
 
 	config := newTestCheckerConfig(t, db)
-	config.FixDifferences = false // surface the mismatch as an error on every attempt
 	config.MaxRetries = 2
 	checker, err := NewChecker([]*sql.DB{db}, chunker, []change.Source{feed}, config)
 	require.NoError(t, err)
+	// A repair that fails is a retryable error (unlike a divergence Run may
+	// not repair), so the mismatch is re-detected and errors on every attempt.
+	repairFailed := errors.New("repair failed")
+	checker.(*SingleChecker).recopier = &fakeRecopier{recopyFn: func(context.Context, *table.Chunk) error { return repairFailed }}
 
 	err = checker.Run(t.Context())
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrAttemptsExhausted)
 	require.NotErrorIs(t, err, ErrDifferencesExhausted)
-	require.ErrorContains(t, err, "checksum mismatch")
+	require.ErrorIs(t, err, repairFailed)
 
 	// The final attempt must have actually re-verified chunks: its counter
 	// was reset at the start of the attempt, so a non-zero value proves the
@@ -364,12 +369,12 @@ func TestCorruptChecksum(t *testing.T) {
 	require.NoError(t, feed.Start(t.Context()))
 	require.NoError(t, chunker.Open())
 
-	checker, err := NewChecker([]*sql.DB{db}, chunker, []change.Source{feed}, newTestCheckerConfig(t, db))
+	checker, err := NewChecker([]*sql.DB{db}, chunker, []change.Source{feed}, newDetectOnlyCheckerConfig(t, db))
 	require.NoError(t, err)
 	singleChecker, ok := checker.(*SingleChecker)
 	require.True(t, ok, "checker is not of type *SingleChecker")
 	err = singleChecker.runChecksum(t.Context())
-	require.ErrorContains(t, err, "checksum mismatch")
+	require.ErrorIs(t, err, ErrPermanentDivergence)
 }
 
 // TestCorruptBinaryChecksum tests that the checksum detects corruption in a
@@ -406,12 +411,12 @@ func TestCorruptBinaryChecksum(t *testing.T) {
 	require.NoError(t, feed.Start(t.Context()))
 	require.NoError(t, chunker.Open())
 
-	checker, err := NewChecker([]*sql.DB{db}, chunker, []change.Source{feed}, newTestCheckerConfig(t, db))
+	checker, err := NewChecker([]*sql.DB{db}, chunker, []change.Source{feed}, newDetectOnlyCheckerConfig(t, db))
 	require.NoError(t, err)
 	singleChecker, ok := checker.(*SingleChecker)
 	require.True(t, ok, "checker is not of type *SingleChecker")
 	err = singleChecker.runChecksum(t.Context())
-	require.ErrorContains(t, err, "checksum mismatch")
+	require.ErrorIs(t, err, ErrPermanentDivergence)
 }
 
 func TestBoundaryCases(t *testing.T) {
@@ -441,12 +446,12 @@ func TestBoundaryCases(t *testing.T) {
 	require.NoError(t, feed.Start(t.Context()))
 	require.NoError(t, chunker.Open())
 
-	checker, err := NewChecker([]*sql.DB{db}, chunker, []change.Source{feed}, newTestCheckerConfig(t, db))
+	checker, err := NewChecker([]*sql.DB{db}, chunker, []change.Source{feed}, newDetectOnlyCheckerConfig(t, db))
 	require.NoError(t, err)
 	// Type assert to *SingleChecker to access runChecksum
 	singleChecker, ok := checker.(*SingleChecker)
 	require.True(t, ok, "checker is not of type *SingleChecker")
-	require.Error(t, singleChecker.runChecksum(t.Context()))
+	require.ErrorIs(t, singleChecker.runChecksum(t.Context()), ErrPermanentDivergence)
 
 	// UPDATE t1 to also be NULL
 	testutils.RunSQL(t, "UPDATE checkert1 SET c = NULL")
@@ -664,12 +669,12 @@ func TestColumnBoundaryShift(t *testing.T) {
 	require.NoError(t, feed.Start(t.Context()))
 	require.NoError(t, chunker.Open())
 
-	checker, err := NewChecker([]*sql.DB{db}, chunker, []change.Source{feed}, newTestCheckerConfig(t, db))
+	checker, err := NewChecker([]*sql.DB{db}, chunker, []change.Source{feed}, newDetectOnlyCheckerConfig(t, db))
 	require.NoError(t, err)
 	singleChecker, ok := checker.(*SingleChecker)
 	require.True(t, ok, "checker is not of type *SingleChecker")
 	err = singleChecker.runChecksum(t.Context())
-	require.ErrorContains(t, err, "checksum mismatch")
+	require.ErrorIs(t, err, ErrPermanentDivergence)
 }
 
 // TestChecksumChunkReleasesTrxDuringRepair reproduces the production failure
@@ -709,7 +714,6 @@ func TestChecksumChunkReleasesTrxDuringRepair(t *testing.T) {
 	require.NoError(t, chunker.Open())
 
 	config := newTestCheckerConfig(t, db)
-	config.FixDifferences = true
 	checkerIntf, err := NewChecker([]*sql.DB{db}, chunker, []change.Source{feed}, config)
 	require.NoError(t, err)
 	checker, ok := checkerIntf.(*SingleChecker)
@@ -853,7 +857,6 @@ func checksumRetryHarness(t *testing.T, name string, mutateSQL string) (*flakyCh
 
 	config := newTestCheckerConfig(t, db)
 	config.Concurrency = 1 // deterministic: chunks 1-2 complete (watermark ready) before Next() call 3 injects
-	config.FixDifferences = true
 	checker, err := NewChecker([]*sql.DB{db}, chunker, []change.Source{feed}, config)
 	require.NoError(t, err)
 	return chunker, checker, func() {
@@ -1000,7 +1003,6 @@ func TestChecksumCancelledMidAttempt(t *testing.T) {
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			config := newTestCheckerConfig(t, db)
-			config.FixDifferences = true
 			// One attempt, so the cancellation is necessarily in the last one:
 			// the pre-attempt check cannot absorb it and the loop runs to its end.
 			config.MaxRetries = 1
@@ -1088,13 +1090,13 @@ func TestChecksumTypeConversions(t *testing.T) {
 			require.NoError(t, feed.Start(t.Context()))
 			require.NoError(t, chunker.Open())
 
-			checker, err := NewChecker([]*sql.DB{db}, chunker, []change.Source{feed}, newTestCheckerConfig(t, db))
+			checker, err := NewChecker([]*sql.DB{db}, chunker, []change.Source{feed}, newDetectOnlyCheckerConfig(t, db))
 			require.NoError(t, err)
 			single, ok := checker.(*SingleChecker)
 			require.True(t, ok)
 			err = single.runChecksum(t.Context())
 			if tc.wantMismatch {
-				require.ErrorContains(t, err, "checksum mismatch")
+				require.ErrorIs(t, err, ErrPermanentDivergence)
 			} else {
 				require.NoError(t, err)
 			}

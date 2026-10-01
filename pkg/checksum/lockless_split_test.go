@@ -117,7 +117,7 @@ func TestLocklessHotSplit(t *testing.T) {
 			children := []*table.Chunk{newTestChunk(0, 500), newTestChunk(500, 501), newTestChunk(501, 1000)}
 			cfg := fastConfig()
 			cfg.RetryDelay = time.Millisecond
-			cfg.MinPassInterval = time.Hour
+			cfg.minPassInterval = time.Hour
 			cfg.MaxHotAttempts = 4
 			c := newTestChecker(t, chunker, cfg, func(_ context.Context, ch *table.Chunk, attempt int) (int64, int64, uint64, error) {
 				if ch == parent || (hotLeaf && ch == children[1]) {
@@ -255,7 +255,7 @@ func TestHotSplitRecursesToSmallRanges(t *testing.T) {
 	chunker := &testChunker{chunks: []*table.Chunk{root}}
 	cfg := fastConfig()
 	cfg.RetryDelay = time.Millisecond
-	cfg.MinPassInterval = time.Hour
+	cfg.minPassInterval = time.Hour
 	c := newTestChecker(t, chunker, cfg, func(_ context.Context, ch *table.Chunk, n int) (int64, int64, uint64, error) {
 		lo := ch.LowerBound.Value[0].Val.(uint64)
 		hi := ch.UpperBound.Value[0].Val.(uint64)
@@ -297,7 +297,7 @@ func TestHotSplitSmallRangesKeepRetryEvidence(t *testing.T) {
 			require.Empty(t, children)
 			cfg := fastConfig()
 			cfg.RetryDelay = time.Millisecond
-			cfg.MinPassInterval = time.Hour
+			cfg.minPassInterval = time.Hour
 			cfg.MaxHotAttempts = 4
 			var reads atomic.Int64
 			c := newTestChecker(t, newTestChunker(1), cfg, func(_ context.Context, _ *table.Chunk, attempt int) (int64, int64, uint64, error) {
@@ -376,7 +376,7 @@ func TestHotSplitFailureDefersWithoutVerification(t *testing.T) {
 	cfg := fastConfig()
 	cfg.MaxHotAttempts = 4
 	cfg.RetryDelay = time.Millisecond
-	cfg.MinPassInterval = time.Hour
+	cfg.minPassInterval = time.Hour
 	c := newTestChecker(t, newTestChunker(1), cfg, func(_ context.Context, _ *table.Chunk, n int) (int64, int64, uint64, error) {
 		return int64(n * 100), -1, 10, nil
 	})

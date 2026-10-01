@@ -71,8 +71,7 @@ import (
 // active store and is applied by a later flush, preserving per-key
 // order. The destination converges to source's current state once the
 // last unflushed event for each affected PK has been applied; the
-// post-cutover checksum (with FixDifferences=true) catches any
-// divergence that slips through.
+// post-copy checksum repairs any divergence that slips through.
 //
 // SetWatermarkOptimization owns the watermark-driven transition: when
 // its toggle changes which store is active, it drains the outgoing
@@ -931,11 +930,9 @@ func (s *bufferedMap) HasChanged(key, row []any, deleted bool) {
 	// the event is gone, and the flushed GTID/position still advances past
 	// it. A repairing checksum is the only thing that closes the gap, and
 	// how much it closes depends on the caller: migrate and move gate
-	// cutover on a mandatory FixDifferences checksum, so the divergence
-	// never reaches trusted data; continuous sync (pkg/datasync) only
-	// repairs it eventually, so its target can serve a
-	// missing/stale/phantom row until a later checksum pass covers that
-	// chunk. Deterministic repro: TestKeyAboveWatermarkVisibilityWindow.
+	// cutover on a mandatory repairing checksum, so the divergence never
+	// reaches trusted data; continuous sync (pkg/datasync) repairs it in
+	// its initial checksum, and a divergence after that aborts the sync. Deterministic repro: TestKeyAboveWatermarkVisibilityWindow.
 	// Analysis + fix directions: "Above-watermark discard vs. binlog
 	// visibility" in this package's README.
 	// Without a BufferedKeyNoter the discard is never safe (see keyNoter), so

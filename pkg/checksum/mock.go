@@ -41,10 +41,6 @@ func (*MockChecker) ExecTime() time.Duration              { return 0 }
 func (m *MockChecker) DifferencesFound() uint64           { return m.differencesFound.Load() }
 func (m *MockChecker) SetDifferencesFound(n uint64)       { m.differencesFound.Store(n) }
 
-// ConfirmedDifferences mirrors LocklessChecker.ConfirmedDifferences and
-// reports the SetDifferencesFound value: the mock has no transient mismatches.
-func (m *MockChecker) ConfirmedDifferences() uint64 { return m.differencesFound.Load() }
-
 func (m *MockChecker) ResumeWatermark() (string, error) {
 	if m.continuous.Load() || m.Chunker == nil {
 		return "", nil

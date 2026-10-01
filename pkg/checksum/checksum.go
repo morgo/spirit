@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"sync/atomic"
 	"time"
 
 	"github.com/block/spirit/pkg/applier"
@@ -41,6 +42,14 @@ var (
 	// and the condition may well be gone by the next attempt. It wraps the last
 	// attempt's error, which is the one worth triaging.
 	ErrAttemptsExhausted = errors.New("checksum errored on every attempt")
+
+	// ErrPermanentDivergence is returned by RunContinuous when it confirms a
+	// difference: the source is not racing, and (for LocklessChecker) the
+	// mismatch survived a full drain of every feed, so it is not apply lag.
+	// RunContinuous never repairs, because it runs while a cutover may be
+	// imminent; the caller aborts, and the resumed run's initial Run repairs
+	// the range. Run never returns it, since Run repairs what it finds.
+	ErrPermanentDivergence = errors.New("checksum: permanent divergence detected")
 
 	// fixChunkTimeout bounds the DELETE + Apply pair that recopies a mismatched
 	// chunk. The pair runs under a context derived from context.WithoutCancel so
@@ -85,14 +94,18 @@ type Checker interface {
 	// ResumeWatermark returns safe verification progress, or an empty string when
 	// a resumed run must recheck everything. Read it instead of the walker watermark.
 	ResumeWatermark() (string, error)
-	// Run performs finite verification. A nil result authorizes completion;
+	// Run performs finite verification, and it repairs: a chunk that differs
+	// is rewritten from the source through the configured Applier and
+	// re-verified by a later pass. A nil result authorizes completion;
 	// deferred ranges and repairs alone are not verification.
 	Run(ctx context.Context) error
 	// RunContinuous reuses a successfully completed checker for background
-	// verification. Calls to Run and RunContinuous must be sequential. A nil
-	// return means cancellation was safe, not that the interrupted pass verified
-	// every row. Other errors abort cutover. Once started, ResumeWatermark stays
-	// empty: restarting requires full initial verification.
+	// verification, and it never repairs: a confirmed difference returns
+	// ErrPermanentDivergence. A resumed run's initial Run is what repairs it.
+	// Calls to Run and RunContinuous must be sequential. A nil return means
+	// cancellation was safe, not that the interrupted pass verified every row.
+	// Other errors abort cutover. Once started, ResumeWatermark stays empty:
+	// restarting requires full initial verification.
 	RunContinuous(context.Context) error
 	// ContinuousActive distinguishes a running pass from interval pacing.
 	// It is safe to query concurrently with RunContinuous.
@@ -195,12 +208,6 @@ type CheckerConfig struct {
 	TargetChunkTime time.Duration
 	DBConfig        *dbconn.DBConfig
 	Logger          *slog.Logger
-	// FixDifferences is the repair policy, and it means the same thing to both
-	// checkers: when set, a mismatched chunk is rewritten from the source and
-	// re-verified; when unset, a mismatch is reported as an error. The factory
-	// turns it into the Recopier the checker actually repairs through — see
-	// newRecopier, which also says which applier field that write path needs.
-	FixDifferences bool
 	// Watermark is verification evidence from a previous run: every row below
 	// it was read on both sides and observed equal. Supplying it makes the
 	// factory open the chunker there, so verification resumes rather than
@@ -212,11 +219,11 @@ type CheckerConfig struct {
 	// MaxRetries bounds whole-run attempts for every checker: a transient
 	// infrastructure failure costs an attempt rather than the migration.
 	MaxRetries int
-	// Applier is the write path a mismatched chunk is rewritten through. It is
+	// Applier is the write path Run rewrites a mismatched chunk through. It is
 	// the caller's to supply because every runner already has one, and building
 	// a second here would hide which one a repair actually goes through.
 	//
-	// Required when FixDifferences is set — a checker that cannot repair should
+	// Required: Run always repairs, and a checker that cannot repair should
 	// fail to build, not on the first mismatch hours in. A repair starts and
 	// stops it around each rewrite, since repairs are rare and serialized.
 	// Lockless also reads GetTargets from it to find the copy being verified
@@ -277,15 +284,6 @@ type CheckerConfig struct {
 	// verification and makes the pass not clean.
 	MaxHotAttempts int
 
-	// MinPassInterval is the minimum wall-clock time between the start of one
-	// pass and the start of the next, measured from the previous pass's start
-	// (a pass that already ran longer incurs no extra wait). Zero means passes
-	// run back-to-back, which is convenient for tests but heavy in production:
-	// RunContinuous substitutes LocklessMinPassInterval (1h) so a small table
-	// whose pass finishes in seconds does not re-scan continuously, and the
-	// finite gate substitutes RetryDelay. The wait honours cancellation.
-	MinPassInterval time.Duration
-
 	// MaxPasses bounds Run and RunUntilClean: once this many passes have
 	// completed without one of them being clean, verification gives up with
 	// ErrVerificationUnresolved rather than walking the table again. Zero means
@@ -313,6 +311,22 @@ type CheckerConfig struct {
 	// own configured interval, and a verification pass stopping it on the way
 	// out would be stopping someone else's goroutine.
 	ExternalFlushLoop bool
+
+	// ---------------------------------------------------------------------
+	// Test-only. Unexported so that no caller outside this package can build
+	// a checker whose behaviour differs from the documented contract.
+	// ---------------------------------------------------------------------
+
+	// noRepair builds a checker without a Recopier, so Run reports a
+	// difference as an error instead of rewriting it, and no Applier is
+	// required. Package tests use it to observe mismatches directly.
+	noRepair bool
+
+	// minPassInterval overrides the pacing between lockless passes in both
+	// modes, measured from the start of the previous pass. Zero selects the
+	// production pacing: RetryDelay for Run, LocklessMinPassInterval for
+	// RunContinuous. See LocklessChecker.passInterval.
+	minPassInterval time.Duration
 }
 
 // defaultedConcurrency resolves a configured worker count. A concurrency of at
@@ -351,18 +365,16 @@ func NewCheckerDefaultConfig() *CheckerConfig {
 		TargetChunkTime: table.ChunkerDefaultTarget,
 		DBConfig:        dbconn.NewDBConfig(),
 		Logger:          slog.Default(),
-		FixDifferences:  false,
 		MaxRetries:      defaultMaxRetries,
 		YieldTimeout:    DefaultYieldTimeout,
 	}
 }
 
-// newRecopier builds the repair path a mismatched chunk is rewritten through,
-// or returns nil when the caller did not ask for repairs. Every checker goes
-// through this one function, so the answer to "what happens on a divergence?"
-// does not depend on which checker the config selected: a nil recopier means
-// the mismatch is reported as an error, and a non-nil one means the chunk is
-// rewritten and re-verified.
+// newRecopier builds the repair path Run rewrites a mismatched chunk through.
+// Every checker goes through this one function, so the answer to "what happens
+// on a divergence?" does not depend on which checker the config selected: Run
+// rewrites the chunk and re-verifies it, and RunContinuous reports it. Only the
+// package's own tests (noRepair) build a checker without one.
 //
 // Only the shape of the rewrite depends on the topology. A cross-server target named by TargetDB reads from one
 // server and writes to another, and has no ColumnMapping to apply because both
@@ -375,11 +387,11 @@ func NewCheckerDefaultConfig() *CheckerConfig {
 // config.DBConfig is the write side's in every case: it configures the DELETE
 // that clears the range on the target before the rows are rewritten.
 func newRecopier(sourceDBs, targetDBs []*sql.DB, config *CheckerConfig) (Recopier, error) {
-	if !config.FixDifferences {
+	if config.noRepair {
 		return nil, nil
 	}
 	if config.Applier == nil {
-		return nil, errors.New("applier must be non-nil to repair differences")
+		return nil, errors.New("applier must be non-nil: Run repairs the differences it finds")
 	}
 	switch {
 	case config.TargetDB != nil:
@@ -533,6 +545,28 @@ func waitForChecksum(ctx context.Context, delay time.Duration) bool {
 		return ctx.Err() == nil
 	}
 }
+
+// divergenceLatch holds the first divergence a continuous run confirmed. The
+// verdict is reached before work that a cancellation can interrupt — the row
+// diagnostics, the hand-off from a worker, a sibling worker's error winning the
+// race to be reported — so it is latched where it is reached, and a continuous
+// run reports it ahead of any cancellation. A sentinel drop that races the
+// report must not turn a known divergence into a clean stop and a cutover.
+type divergenceLatch struct{ err atomic.Pointer[error] }
+
+// set records err unless a divergence is already latched: the first one wins.
+func (l *divergenceLatch) set(err error) { l.err.CompareAndSwap(nil, &err) }
+
+// get returns the latched divergence, or nil.
+func (l *divergenceLatch) get() error {
+	if p := l.err.Load(); p != nil {
+		return *p
+	}
+	return nil
+}
+
+// reset clears the latch at the start of a run.
+func (l *divergenceLatch) reset() { l.err.Store(nil) }
 
 // Accept wrapped cancellation, but not a joined cancellation plus a real error.
 func checksumCanceled(err error) bool {

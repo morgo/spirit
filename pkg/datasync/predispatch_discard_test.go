@@ -185,7 +185,7 @@ func runSyncPreDispatchScenario(t *testing.T, secondIsDelete bool) {
 
 	// The lockless checksum must not have had to repair anything.
 	h.await(runner.FirstCleanPass(), 60*time.Second, "FirstCleanPass")
-	stats := runner.ChecksumStats()
+	stats := h.awaitInitialVerification(60 * time.Second)
 	requireTargetMatches("after the first clean pass")
 	require.Zero(t, stats.MismatchesDetected,
 		"the lockless checksum found (and repaired) a divergence the copy left behind: %+v", stats)

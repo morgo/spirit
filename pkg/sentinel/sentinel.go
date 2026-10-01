@@ -80,10 +80,10 @@ type WaitConfig struct {
 
 	// InvalidateWatermark is invoked exactly once, after the continuous
 	// checksum goroutine has fully stopped, to apply the caller's resume policy.
-	// Migration clears checksum evidence unconditionally; move clears it when
-	// verification observed differences. It runs even when the parent context
-	// was cancelled. Callers needing crash safety before background work must
-	// also invalidate evidence before starting that work in RunChecksum.
+	// Migration and move both clear checksum evidence unconditionally. It runs
+	// even when the parent context was cancelled. Callers needing crash safety
+	// before background work must also invalidate evidence before starting
+	// that work in RunChecksum.
 	InvalidateWatermark func(ctx context.Context) error
 
 	Logger *slog.Logger

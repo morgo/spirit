@@ -1,6 +1,7 @@
 package checksum
 
 import (
+	"fmt"
 	"sync/atomic"
 	"time"
 
@@ -116,8 +117,9 @@ type workResult struct {
 	readDuration time.Duration
 
 	// permanent is true iff this is a retry that failed with the source
-	// CRC unchanged AND no Recopier is configured — i.e. real divergence
-	// with no self-heal path. Run will exit with ErrPermanentDivergence.
+	// CRC unchanged in a run that does not repair (RunContinuous) — i.e.
+	// real divergence with no self-heal path. The run exits with
+	// ErrPermanentDivergence.
 	permanent bool
 
 	// permanentEvidence describes what proved the divergence, for the error
@@ -139,4 +141,14 @@ type workResult struct {
 	// err is set on any read or query failure (or a Recopy failure); the
 	// dispatcher returns it from Run.
 	err error
+}
+
+// divergenceError is the ErrPermanentDivergence a permanent result reports:
+// the settling evidence when the range was settled, else both signatures.
+func (r *workResult) divergenceError() error {
+	if r.permanentEvidence != "" {
+		return fmt.Errorf("%w: chunk %s (%s)", ErrPermanentDivergence, r.item.chunk.String(), r.permanentEvidence)
+	}
+	return fmt.Errorf("%w: chunk %s (source crc=%d count=%d, target crc=%d count=%d)", ErrPermanentDivergence,
+		r.item.chunk.String(), r.newSrc.crc, r.newSrc.count, r.newTgt.crc, r.newTgt.count)
 }

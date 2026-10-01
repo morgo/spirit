@@ -15,8 +15,8 @@ type snapshotResume struct {
 	mu         sync.Mutex
 	continuous atomic.Bool
 	active     atomic.Bool
-	// Never reset: cancellation must see mismatches across retries.
-	observed atomic.Uint64
+	// divergence is the first divergence a continuous pass confirmed.
+	divergence divergenceLatch
 }
 
 func (s *snapshotResume) capture(chunker table.Chunker, differences *atomic.Uint64) (string, error) {

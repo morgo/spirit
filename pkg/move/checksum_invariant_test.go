@@ -192,86 +192,63 @@ func TestDumpCheckpointSuppressesWatermarkWithDifferences(t *testing.T) {
 		"checksum_watermark must be persisted again once DifferencesFound clears")
 }
 
-// TestDumpCheckpointSuppressesWatermarkWithContinuousDifferences pins the
-// sentinel-wait half of the invariant in the move runner: the continuous
-// checker is a separate object from r.checker, so DumpCheckpoint must
-// consult it too. Once it has confirmed any divergence (ConfirmedDifferences,
-// which excludes apply lag; see continuousVerifier), checkpoints must stop
-// carrying a checksum_watermark — even though the initial checker is still
-// clean — or the operator's re-run would resume the checksum at the
-// end-of-initial-pass watermark and never re-verify the repaired range.
-// Mirrors the migration-package test of the same name.
-func TestDumpCheckpointSuppressesWatermarkWithContinuousDifferences(t *testing.T) {
-	r, ctx := setupRunnerForChecksumTest(t, "cont_invariant")
-
-	// The initial checksum completed clean; the move is now blocked in the
-	// sentinel wait (which is >= Checksum, so watermarks are dumped).
-	r.checker = &checksum.MockChecker{Chunker: r.checksumChunker}
-	r.status.Set(status.WaitingOnSentinelTable)
-
-	// --- Case 1: no continuous checker yet (just entered the wait). ---
-	require.NoError(t, r.DumpCheckpoint(ctx))
-	copierWM, checksumWM := latestCheckpointWatermarks(t, r)
-	require.NotEmpty(t, copierWM, "copier_watermark should always be persisted")
-	require.NotEmpty(t, checksumWM,
-		"checksum_watermark must be persisted while no continuous checker exists")
-
-	// --- Case 2: continuous checker exists and is clean. ---
-	cont := &checksum.MockChecker{Chunker: r.checksumChunker}
-	r.continuousChecker = cont
-	require.NoError(t, r.DumpCheckpoint(ctx))
-	_, checksumWM = latestCheckpointWatermarks(t, r)
-	require.NotEmpty(t, checksumWM,
-		"checksum_watermark must be persisted while the continuous checker is clean")
-
-	// --- Case 3: continuous checker has confirmed a divergence. ---
-	cont.SetDifferencesFound(1) // MockChecker reports it as ConfirmedDifferences
-	require.NoError(t, r.DumpCheckpoint(ctx))
-	copierWM, checksumWM = latestCheckpointWatermarks(t, r)
-	require.NotEmpty(t, copierWM)
-	require.Empty(t, checksumWM,
-		"checksum_watermark must be empty once the continuous checker found differences, even with a clean initial checker")
-}
-
-// TestInvalidateChecksumWatermarkAfterContinuousDivergence pins the
-// race-closing half of the sentinel-wait fix in the move runner: a
-// checkpoint row that was persisted WITH a watermark before the continuous
-// checker recorded its difference must be blanked by
-// invalidateChecksumWatermark on the abort path, because resume reads the
-// latest row. Mirrors the migration-package test of the same name.
-func TestInvalidateChecksumWatermarkAfterContinuousDivergence(t *testing.T) {
+// TestContinuousChecksumClearsCheckpointWatermark pins the sentinel-wait half
+// of the invariant: continuous verification publishes no resume evidence, so
+// the initial checksum's persisted watermark is cleared before it starts (a
+// hard crash during the wait must not resume on it) and no later dump can
+// write it back. The copy checkpoint survives. Mirrors the migration-package
+// test of the same name.
+func TestContinuousChecksumClearsCheckpointWatermark(t *testing.T) {
 	r, ctx := setupRunnerForChecksumTest(t, "cont_invalidate")
 
-	r.checker = &checksum.MockChecker{Chunker: r.checksumChunker}
-	r.status.Set(status.WaitingOnSentinelTable)
+	mock := &checksum.MockChecker{Chunker: r.checksumChunker}
+	r.checker = mock
+	r.status.Set(status.Checksum)
 
-	// Persist a checkpoint while everything is believed clean — this is the
-	// "last periodic dump before the difference was recorded" row that the
-	// abort path must neutralize.
+	// The initial checksum completed clean: its watermark is persisted.
 	require.NoError(t, r.DumpCheckpoint(ctx))
 	_, checksumWM := latestCheckpointWatermarks(t, r)
 	require.NotEmpty(t, checksumWM)
 
-	// No continuous checker, or a clean one: invalidate must be a no-op.
-	require.NoError(t, r.invalidateChecksumWatermark(ctx))
+	// Entering the sentinel wait discards the evidence even while the checker
+	// still publishes it: the gap before RunContinuous marks it continuous.
+	r.status.Set(status.WaitingOnSentinelTable)
+	wm, err := mock.ResumeWatermark()
+	require.NoError(t, err)
+	require.NotEmpty(t, wm, "the checker has not entered continuous mode yet")
+	require.NoError(t, r.DumpCheckpoint(ctx))
 	_, checksumWM = latestCheckpointWatermarks(t, r)
-	require.NotEmpty(t, checksumWM,
-		"invalidate must not touch the watermark when no continuous checker exists")
-	cont := &checksum.MockChecker{Chunker: r.checksumChunker}
-	r.continuousChecker = cont
-	require.NoError(t, r.invalidateChecksumWatermark(ctx))
+	require.Empty(t, checksumWM, "a dump during the sentinel wait must not persist the initial watermark")
+	r.status.Set(status.Checksum)
+	require.NoError(t, r.DumpCheckpoint(ctx))
 	_, checksumWM = latestCheckpointWatermarks(t, r)
-	require.NotEmpty(t, checksumWM,
-		"invalidate must not touch the watermark while the continuous checker is clean")
+	require.NotEmpty(t, checksumWM)
+	r.status.Set(status.WaitingOnSentinelTable)
 
-	// Continuous checker confirmed a divergence: the already-persisted
-	// watermark row must be rewritten to empty.
-	cont.SetDifferencesFound(1)
-	require.NoError(t, r.invalidateChecksumWatermark(ctx))
+	// Starting continuous verification clears it, before any pass runs.
+	runCtx, cancel := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() { done <- r.runContinuousChecksum(runCtx) }()
+	require.Eventually(t, func() bool {
+		_, wm := latestCheckpointWatermarks(t, r)
+		return wm == ""
+	}, 5*time.Second, 10*time.Millisecond)
 	copierWM, checksumWM := latestCheckpointWatermarks(t, r)
 	require.NotEmpty(t, copierWM, "copier_watermark must survive invalidation")
-	require.Empty(t, checksumWM,
-		"the previously-persisted checksum_watermark must be blanked after continuous divergence")
+	require.Empty(t, checksumWM)
+
+	// Later dumps cannot resurrect it: the checker publishes no evidence once
+	// continuous verification has started.
+	require.Eventually(t, func() bool {
+		wm, err := mock.ResumeWatermark()
+		return err == nil && wm == ""
+	}, 5*time.Second, 10*time.Millisecond)
+	require.NoError(t, r.DumpCheckpoint(ctx))
+	_, checksumWM = latestCheckpointWatermarks(t, r)
+	require.Empty(t, checksumWM, "later dumps cannot resurrect the initial watermark")
+
+	cancel()
+	require.NoError(t, <-done, "a cancelled continuous checksum is a safe stop")
 	var stale int
 	require.NoError(t, r.targets[0].DB.QueryRowContext(t.Context(),
 		fmt.Sprintf("SELECT COUNT(*) FROM `%s`.`%s` WHERE checksum_watermark <> ''",

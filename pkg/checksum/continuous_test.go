@@ -24,7 +24,7 @@ type continuousRunStub struct {
 func (c *continuousRunStub) Run(ctx context.Context) error { return c.run(ctx) }
 
 func TestContinuousSnapshotLifecycle(t *testing.T) {
-	for _, outcome := range []string{"clean", "cancel", "repair-cancel", "failure", "joined-cancel", "foreign-cancel"} {
+	for _, outcome := range []string{"clean", "cancel", "failure", "joined-cancel", "foreign-cancel", "divergence-then-cancel"} {
 		t.Run(outcome, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				ctx, cancel := context.WithCancel(t.Context())
@@ -46,11 +46,16 @@ func TestContinuousSnapshotLifecycle(t *testing.T) {
 					if outcome == "failure" {
 						return failure
 					}
+					if outcome == "divergence-then-cancel" {
+						// A worker confirmed a divergence, then the sentinel drop
+						// cancelled the pass and a sibling's cancellation won the
+						// race to be returned.
+						resume.divergence.set(fmt.Errorf("%w: chunk 1", ErrPermanentDivergence))
+						cancel()
+						return fmt.Errorf("checksum failed: %w", context.Canceled)
+					}
 					if outcome != "foreign-cancel" {
 						cancel()
-					}
-					if outcome == "repair-cancel" {
-						resume.observed.Add(1)
 					}
 					if outcome == "joined-cancel" {
 						return errors.Join(context.Canceled, failure)
@@ -71,13 +76,10 @@ func TestContinuousSnapshotLifecycle(t *testing.T) {
 				switch outcome {
 				case "failure", "joined-cancel":
 					require.ErrorIs(t, err, failure)
-				case "repair-cancel":
-					// The pass observed a mismatch and was cancelled before it
-					// could re-verify the repair, so the cancellation is
-					// refused as unverified rather than filtered to nil.
-					require.ErrorIs(t, err, ErrRepairUnverified)
 				case "foreign-cancel":
 					require.ErrorIs(t, err, context.Canceled)
+				case "divergence-then-cancel":
+					require.ErrorIs(t, err, ErrPermanentDivergence, "a confirmed divergence outranks the cancellation")
 				default:
 					require.NoError(t, err)
 				}
@@ -139,7 +141,8 @@ func TestLocklessContinuousReusesCheckerAfterInitialPass(t *testing.T) {
 		feed := &change.MockSource{}
 		cfg := NewCheckerDefaultConfig()
 		cfg.Lockless = true
-		cfg.MinPassInterval = time.Second
+		cfg.Applier = &applier.MockApplier{}
+		cfg.minPassInterval = time.Second
 		checker, err := NewChecker([]*sql.DB{{}}, chunker, []change.Source{feed}, cfg)
 		require.NoError(t, err)
 		require.NoError(t, checker.Run(t.Context()))
@@ -244,6 +247,7 @@ func newContinuousChecker(t *testing.T, chunker table.Chunker, feed change.Sourc
 	t.Helper()
 	cfg := NewCheckerDefaultConfig()
 	cfg.Lockless = true
+	cfg.Applier = &applier.MockApplier{}
 	checker, err := NewChecker([]*sql.DB{{}}, chunker, []change.Source{feed}, cfg)
 	require.NoError(t, err)
 	return checker.(*LocklessChecker)
@@ -257,7 +261,8 @@ func TestLocklessContinuousForeignCancellation(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		cfg := NewCheckerDefaultConfig()
 		cfg.Lockless = true
-		cfg.MinPassInterval = time.Second
+		cfg.Applier = &applier.MockApplier{}
+		cfg.minPassInterval = time.Second
 		checker, err := NewChecker([]*sql.DB{{}}, &canceledScan{newTestChunker(1)}, []change.Source{&change.MockSource{}}, cfg)
 		require.NoError(t, err)
 		require.ErrorIs(t, checker.RunContinuous(t.Context()), context.Canceled)

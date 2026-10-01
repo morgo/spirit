@@ -155,6 +155,18 @@ func (h *runHandle) awaitContinuous(timeout time.Duration) {
 		timeout, "Run enters the continuous phase")
 }
 
+// awaitInitialVerification waits for the initial verification to return clean
+// and returns its statistics. Read them here rather than from ChecksumStats
+// after FirstCleanPass: continuous verification starts right after and resets
+// the counters, so a read there can see zeros.
+func (h *runHandle) awaitInitialVerification(timeout time.Duration) checksum.LocklessCheckerStats {
+	h.t.Helper()
+	h.eventually(func() bool { _, ok := h.runner.InitialChecksumStats(); return ok },
+		timeout, "the initial verification completes")
+	stats, _ := h.runner.InitialChecksumStats()
+	return stats
+}
+
 // stop cancels the run, waits for it to drain, closes the runner, and asserts
 // Run returned no error. A wait that already failed the test with that error
 // does not get to report it a second time: stop runs from a defer in tests

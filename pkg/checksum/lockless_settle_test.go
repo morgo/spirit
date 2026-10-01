@@ -687,7 +687,7 @@ func TestCheckHotSnapshotEscalatesOnlyWhenExhausted(t *testing.T) {
 	require.False(t, res.deferHot, "a settled divergence is a verdict, not a deferral")
 	require.True(t, res.permanent, "no recopier configured, so a settled divergence is fatal")
 	require.Equal(t, uint64(1), c.hotChunksSettledThisPass.Load())
-	require.Equal(t, uint64(1), c.ConfirmedDifferences(), "a settled divergence is a confirmed one")
+	require.Equal(t, uint64(1), c.confirmedDifferences.Load(), "a settled divergence is a confirmed one")
 }
 
 // TestLocklessSettlesHotChunkEndToEnd is the whole point of the escalation,
@@ -721,7 +721,7 @@ func TestLocklessSettlesHotChunkEndToEnd(t *testing.T) {
 			cfg := fastConfig()
 			cfg.RetryDelay = time.Millisecond
 			cfg.MaxHotAttempts = 3
-			cfg.MinPassInterval = time.Hour
+			cfg.minPassInterval = time.Hour
 			// No recopier: a settled divergence must be reported, which is the
 			// clearest way to see that a verdict was reached at all.
 			c := newTestChecker(t, chunker, cfg, func(_ context.Context, _ *table.Chunk, attempt int) (int64, int64, uint64, error) {
@@ -753,7 +753,7 @@ func TestLocklessSettlesHotChunkEndToEnd(t *testing.T) {
 			require.Zero(t, stats.HotChunksDeferredThisPass)
 			if converge {
 				require.NoError(t, err)
-				require.Zero(t, c.ConfirmedDifferences(), "a settle that converged confirmed nothing")
+				require.Zero(t, c.confirmedDifferences.Load(), "a settle that converged confirmed nothing")
 				require.False(t, stats.FirstCleanPassAt.IsZero())
 				var diffs int
 				require.NoError(t, db.QueryRowContext(t.Context(),
@@ -763,11 +763,49 @@ func TestLocklessSettlesHotChunkEndToEnd(t *testing.T) {
 			}
 			require.ErrorIs(t, err, ErrPermanentDivergence,
 				"a settled divergence is reported; before settling it was invisible")
-			require.Equal(t, uint64(1), c.ConfirmedDifferences())
+			require.Equal(t, uint64(1), c.confirmedDifferences.Load())
 			require.ErrorContains(t, err, "settled against the change stream",
 				"a settled divergence names its own evidence, not aggregate CRCs it never read")
 		})
 	}
+}
+
+// A divergence settled against the change stream is reported by RunContinuous
+// even when the run is cancelled straight after the verdict, and counted: the
+// worker may drop its result on cancellation, so the verdict is latched,
+// counted and logged where it is reached rather than in handleResult.
+func TestLocklessContinuousSettledDivergenceSurvivesCancel(t *testing.T) {
+	db, chunk := snapshotTestTables(t, "id INT PRIMARY KEY, value INT", []string{"id"})
+	snapshotExec(t, db, "INSERT INTO src VALUES (1,10),(2,20)")
+	snapshotExec(t, db, "INSERT INTO dst VALUES (1,10),(2,99)") // the stream's image contradicts row 2
+
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	defer cancel()
+	chunker := newTestChunker(1)
+	chunker.chunks[0] = chunk
+	cfg := fastConfig()
+	cfg.RetryDelay = time.Millisecond
+	cfg.MaxHotAttempts = 3
+	cfg.minPassInterval = time.Hour
+	cfg.Logger = slog.New(cancelOnInspect{Handler: slog.NewTextHandler(testWriter{}, nil), cancel: cancel})
+	c := newTestChecker(t, chunker, cfg, func(_ context.Context, _ *table.Chunk, attempt int) (int64, int64, uint64, error) {
+		return int64(attempt), 0, 1, nil // the source never stops moving
+	})
+	c.recopier = &fakeRecopier{recopyFn: func(context.Context, *table.Chunk) error {
+		t.Error("RunContinuous must not repair")
+		return nil
+	}}
+	c.sourceDBs = []*sql.DB{db}
+	c.snapshotChunk = func(ctx context.Context, chunk *table.Chunk) (*hotSnapshot, error) {
+		return captureHotSnapshot(ctx, []*sql.DB{db}, []*sql.DB{db}, chunk)
+	}
+	c.feeds = []change.Source{&parkingFeed{events: []parkedEvent{{key: []any{int64(2)}, image: []any{int64(2), int64(20)}}}}}
+
+	err := c.RunContinuous(ctx)
+	require.ErrorIs(t, err, ErrPermanentDivergence)
+	require.ErrorContains(t, err, "settled against the change stream")
+	require.ErrorIs(t, ctx.Err(), context.Canceled, "the run was cancelled after the verdict")
+	require.Equal(t, uint64(1), c.Stats().PermanentFailures, "counted even if the worker dropped its result")
 }
 
 // TestCompareRowToImageRefusesAmbiguousTargetRead pins the guard that a point
@@ -828,7 +866,7 @@ func TestLocklessSettlesHotRowOnTheFeedThatOwnsIt(t *testing.T) {
 	cfg.RetryDelay = time.Millisecond
 	cfg.MaxHotAttempts = 3
 	cfg.MaxPasses = 1
-	cfg.MinPassInterval = time.Hour
+	cfg.minPassInterval = time.Hour
 	c := newTestChecker(t, chunker, cfg, func(_ context.Context, _ *table.Chunk, attempt int) (int64, int64, uint64, error) {
 		return int64(attempt), 0, 1, nil // the source never stops moving
 	})

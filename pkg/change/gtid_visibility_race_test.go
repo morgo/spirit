@@ -287,5 +287,5 @@ func TestKeyAboveWatermarkVisibilityWindow(t *testing.T) {
 
 	// End state: the source has the row, the target does not, the buffer is
 	// empty, and the resume coordinate says everything is handled. In the
-	// full flows only the post-copy checksum (FixDifferences) repairs this.
+	// full flows only the post-copy checksum's repair closes this.
 }

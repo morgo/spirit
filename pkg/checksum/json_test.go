@@ -111,9 +111,11 @@ func TestJSONChecksumFullMantissaTextImage(t *testing.T) {
 	require.NoError(t, feed.Start(t.Context()))
 	require.NoError(t, chunker.Open())
 
-	// FixDifferences is left false (the default): a single pass must find
-	// zero differences, i.e. this passes on the first attempt with no repair.
-	checker, err := NewChecker([]*sql.DB{db}, chunker, []change.Source{feed}, newTestCheckerConfig(t, db))
+	// noRepair: a single pass must find zero differences, i.e. this passes on
+	// the first attempt with no repair.
+	config := newTestCheckerConfig(t, db)
+	config.noRepair = true
+	checker, err := NewChecker([]*sql.DB{db}, chunker, []change.Source{feed}, config)
 	require.NoError(t, err)
 	singleChecker, ok := checker.(*SingleChecker)
 	require.True(t, ok, "checker is not of type *SingleChecker")
@@ -186,11 +188,12 @@ func TestDistributedJSONChecksumTextImage(t *testing.T) {
 	require.NoError(t, chunker.Open())
 
 	// The applier names the target server, as it does for a move.
-	// FixDifferences is left false (the default): a single pass must find
-	// zero differences, i.e. this passes on the first attempt with no repair.
+	// noRepair: a single pass must find zero differences, i.e. this passes on
+	// the first attempt with no repair.
 	config := NewCheckerDefaultConfig()
 	config.Lockless = true
 	config.Applier = app
+	config.noRepair = true
 
 	checker, err := NewChecker([]*sql.DB{src}, chunker, []change.Source{feed}, config)
 	require.NoError(t, err)
@@ -246,20 +249,21 @@ func TestJSONChecksumMisparsedDoubleRepairConverges(t *testing.T) {
 	require.NoError(t, feed.Start(t.Context()))
 	require.NoError(t, chunker.Open())
 
-	// Phase 1: with FixDifferences off, the divergence must be flagged.
-	detectChecker, err := NewChecker([]*sql.DB{db}, chunker, []change.Source{feed}, newTestCheckerConfig(t, db))
+	// Phase 1: without a repair path, the divergence must be flagged.
+	detectConfig := newTestCheckerConfig(t, db)
+	detectConfig.noRepair = true
+	detectChecker, err := NewChecker([]*sql.DB{db}, chunker, []change.Source{feed}, detectConfig)
 	require.NoError(t, err)
 	singleChecker, ok := detectChecker.(*SingleChecker)
 	require.True(t, ok, "checker is not of type *SingleChecker")
 	err = singleChecker.runChecksum(t.Context())
-	require.ErrorContains(t, err, "checksum mismatch")
+	require.ErrorIs(t, err, ErrPermanentDivergence)
 
-	// Phase 2: with FixDifferences on, attempt 1 repairs and attempt 2 must
+	// Phase 2: Run repairs: attempt 1 repairs and attempt 2 must
 	// come back clean — MaxRetries=2 leaves no room for a repair that fails
 	// to converge.
 	require.NoError(t, chunker.Reset())
 	config := newTestCheckerConfig(t, db)
-	config.FixDifferences = true
 	config.MaxRetries = 2
 	fixChecker, err := NewChecker([]*sql.DB{db}, chunker, []change.Source{feed}, config)
 	require.NoError(t, err)
@@ -311,12 +315,12 @@ func TestJSONChecksumDecimalGenuineMismatchStillCaught(t *testing.T) {
 	require.NoError(t, feed.Start(t.Context()))
 	require.NoError(t, chunker.Open())
 
-	checker, err := NewChecker([]*sql.DB{db}, chunker, []change.Source{feed}, newTestCheckerConfig(t, db))
+	checker, err := NewChecker([]*sql.DB{db}, chunker, []change.Source{feed}, newDetectOnlyCheckerConfig(t, db))
 	require.NoError(t, err)
 	singleChecker, ok := checker.(*SingleChecker)
 	require.True(t, ok, "checker is not of type *SingleChecker")
 	err = singleChecker.runChecksum(t.Context())
-	require.ErrorContains(t, err, "checksum mismatch")
+	require.ErrorIs(t, err, ErrPermanentDivergence)
 }
 
 // TestJSONChecksumTextToJSONConversion pins a LONGTEXT->JSON conversion

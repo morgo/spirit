@@ -1,6 +1,7 @@
 package checksum
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"testing"
@@ -64,13 +65,13 @@ func TestFactoryLocklessConfigAndLifecycle(t *testing.T) {
 	cfg.Concurrency = 2
 	cfg.Autoscale = AutoscaleConfig{MaxThreads: 3}
 	cfg.Lockless = true
+	cfg.noRepair = true
 	checker, err := NewChecker([]*sql.DB{{}}, chunker, []change.Source{feed}, cfg)
 	require.NoError(t, err)
 	finite := checker.(*LocklessChecker)
 	require.Equal(t, 2, finite.cfg.Concurrency)
 	require.Equal(t, cfg.Autoscale, finite.cfg.Autoscale)
-	// FixDifferences was not set, so a confirmed divergence is an error rather
-	// than something to repair, and no recopier was built.
+	// noRepair was set, so no recopier was built and no applier was required.
 	require.Nil(t, finite.recopier)
 	checker.SetThrottler(&throttler.Noop{})
 	require.Contains(t, StatusRow(checker), "scanning")
@@ -86,12 +87,11 @@ func TestFactoryLocklessConfigAndLifecycle(t *testing.T) {
 	require.Equal(t, feed.PeriodicFlushStarts(), feed.PeriodicFlushStops())
 }
 
-// Repair policy is derived from FixDifferences for every algorithm, and it is
-// the same derivation: the recopier the checker repairs through is built by the
-// factory, so a divergence is answered identically whichever checker the config
-// selected. The write path it is built over is the caller's, and it is required
-// when — and only when — repairs were asked for.
-func TestFactoryDerivesRepairPolicy(t *testing.T) {
+// Repair policy is not configuration: it follows the mode, identically for
+// every algorithm. Run repairs through the recopier the factory builds over
+// the caller's applier, so the applier is always required; RunContinuous never
+// repairs. Only the package's own tests can build a checker without a recopier.
+func TestFactoryRepairPolicyFollowsMode(t *testing.T) {
 	for _, mode := range []string{"single", "lockless"} {
 		t.Run(mode, func(t *testing.T) {
 			newCfg := func() *CheckerConfig {
@@ -101,30 +101,37 @@ func TestFactoryDerivesRepairPolicy(t *testing.T) {
 				}
 				return cfg
 			}
-			recopierOf := func(c Checker) Recopier {
+			repairerOf := func(c Checker) Recopier {
 				if c, ok := c.(*SingleChecker); ok {
-					return c.recopier
+					return c.repairer()
 				}
-				return c.(*LocklessChecker).recopier
+				return c.(*LocklessChecker).repairer()
 			}
 
-			// Without FixDifferences there is no repair path at all, and no
-			// applier is demanded for one.
-			checker, err := NewChecker([]*sql.DB{{}}, newTestChunker(0), []change.Source{&change.MockSource{}}, newCfg())
-			require.NoError(t, err)
-			require.Nil(t, recopierOf(checker), "a divergence is an error, not something to rewrite")
+			// A checker that cannot repair fails to build, not on the first
+			// mismatch hours in.
+			_, err := NewChecker([]*sql.DB{{}}, newTestChunker(0), []change.Source{&change.MockSource{}}, newCfg())
+			require.ErrorContains(t, err, "applier must be non-nil")
 
+			// Run repairs.
 			cfg := newCfg()
-			cfg.FixDifferences = true
 			cfg.Applier = &applier.MockApplier{}
+			checker, err := NewChecker([]*sql.DB{{}}, newTestChunker(0), []change.Source{&change.MockSource{}}, cfg)
+			require.NoError(t, err)
+			require.NotNil(t, repairerOf(checker), "Run repairs")
+
+			// RunContinuous does not, and the mode is sticky.
+			ctx, cancel := context.WithCancel(t.Context())
+			cancel()
+			require.NoError(t, checker.RunContinuous(ctx))
+			require.Nil(t, repairerOf(checker), "RunContinuous reports rather than repairs")
+
+			// The test-only escape hatch needs no applier and never repairs.
+			cfg = newCfg()
+			cfg.noRepair = true
 			checker, err = NewChecker([]*sql.DB{{}}, newTestChunker(0), []change.Source{&change.MockSource{}}, cfg)
 			require.NoError(t, err)
-			require.NotNil(t, recopierOf(checker))
-
-			cfg = newCfg()
-			cfg.FixDifferences = true
-			_, err = NewChecker([]*sql.DB{{}}, newTestChunker(0), []change.Source{&change.MockSource{}}, cfg)
-			require.ErrorContains(t, err, "applier must be non-nil to repair differences")
+			require.Nil(t, repairerOf(checker))
 		})
 	}
 }
@@ -141,7 +148,6 @@ func TestFactoryCrossServerTarget(t *testing.T) {
 	newCfg := func() *CheckerConfig {
 		cfg := NewCheckerDefaultConfig()
 		cfg.Lockless = true
-		cfg.FixDifferences = true
 		cfg.Applier = &applier.MockApplier{}
 		return cfg
 	}
@@ -203,6 +209,7 @@ func TestFactoryExternalFlushLoop(t *testing.T) {
 		t.Run(fmt.Sprintf("external=%t", external), func(t *testing.T) {
 			cfg := NewCheckerDefaultConfig()
 			cfg.Lockless = true
+			cfg.Applier = &applier.MockApplier{}
 			cfg.ExternalFlushLoop = external
 			checker, err := NewChecker([]*sql.DB{{}}, newTestChunker(0), []change.Source{&change.MockSource{}}, cfg)
 			require.NoError(t, err)
@@ -216,6 +223,7 @@ func TestFactoryExternalFlushLoop(t *testing.T) {
 func TestFactoryBoundsLocklessPasses(t *testing.T) {
 	cfg := NewCheckerDefaultConfig()
 	cfg.Lockless = true
+	cfg.Applier = &applier.MockApplier{}
 	checker, err := NewChecker([]*sql.DB{{}}, newTestChunker(0), []change.Source{&change.MockSource{}}, cfg)
 	require.NoError(t, err)
 	require.Positive(t, checker.(*LocklessChecker).cfg.MaxPasses)
@@ -233,6 +241,8 @@ func TestFactoryLocklessTopology(t *testing.T) {
 	build := func(sources []*sql.DB, feeds []change.Source, app applier.Applier) (*LocklessChecker, error) {
 		cfg := NewCheckerDefaultConfig()
 		cfg.Lockless = true
+		// An applier is always required; one with no targets names nothing.
+		cfg.Applier = &applier.MockApplier{}
 		if app != nil {
 			cfg.Applier = app
 		}
@@ -266,6 +276,7 @@ func TestFactoryLocklessTopology(t *testing.T) {
 
 	cfg := NewCheckerDefaultConfig()
 	cfg.Lockless = true
+	cfg.Applier = &applier.MockApplier{}
 	cfg.TargetDB = c
 	_, err = NewChecker([]*sql.DB{a, b}, newTestChunker(0), feeds, cfg)
 	require.ErrorContains(t, err, "TargetDB requires exactly one source, got 2")

@@ -719,9 +719,8 @@ const cutoverAtomicityCompositeSchema = `CREATE TABLE %s (
 // composite-PK variants were dropped when deltaQueue went away (#821) and
 // are restored here against the unified bufferedMap implementation.
 //
-// Note on FixDifferences: this test runs with the production default
-// (FixDifferences=true on the checksum). An earlier version of this test
-// flipped FixDifferences off via useTestCutover so that any copy-phase row
+// Note on repair: this test runs the production initial checksum, which
+// repairs. An earlier version turned repair off so that any copy-phase row
 // loss surfaced as a "checksum mismatch" error before partial cutover ran.
 // That made the test a sharper probe of issue #746, but it also turned the
 // `KeyAboveHighWatermark` optimization's "drop the binlog event, the
@@ -730,12 +729,12 @@ const cutoverAtomicityCompositeSchema = `CREATE TABLE %s (
 // see every row the binlog streamer has already observed — which the MySQL
 // binlog/visibility race documented in #746 violates under sufficient
 // parallel-commit load. In production this is harmless because the
-// checksum's repair pass (FixDifferences=true) re-copies any missed rows
-// before cutover; in the test it surfaced as a CI flake on the composite
-// variant of the since-removed unbuffered copier. We accept that FixDifferences=true masks
-// algorithmic bugs in the copy/applier path here: the production cutover
-// path has the same masking, so probing without it was probing a stricter
-// invariant than spirit actually offers.
+// checksum's repair re-copies any missed rows before cutover; in the test it
+// surfaced as a CI flake on the composite variant of the since-removed
+// unbuffered copier. We accept that the repair masks algorithmic bugs in the
+// copy/applier path here: the production cutover path has the same masking,
+// so probing without it was probing a stricter invariant than spirit
+// actually offers.
 func TestCutoverAtomicityWithConcurrentWrites(t *testing.T) {
 	t.Parallel()
 
