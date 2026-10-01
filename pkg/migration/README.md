@@ -70,8 +70,8 @@ The copier and the change source run in parallel during the row copy. The only h
 | 5 | [Preflight checks](#checks) | `Initial` | `Run` |
 | 6 | Resume from checkpoint, or start fresh | `Initial` | `setup`, `resumeFromCheckpoint`, `newMigration` |
 | 7 | Post-setup checks | `Initial` | `Run` |
-| 8 | Copy rows (change source already streaming) | `CopyRows` | `runCopy` |
-| 9 | Disable the watermark optimization; drain the change source | `ApplyChangeset` | `postCopyPhase` |
+| 8 | Copy rows (change source already streaming), then disable the watermark optimization | `CopyRows` | `runCopy`, `Run` |
+| 9 | Drain the change source | `ApplyChangeset` | `postCopyPhase` |
 | 10 | `ANALYZE TABLE` each `_new` table | `AnalyzeTable` | `postCopyPhase` |
 | 11 | Initial checksum | `Checksum` | `checksum` |
 | 12 | Drain the change source again | `PostChecksum` | `checksum` |
@@ -98,7 +98,7 @@ An atomic multi-table migration also takes a schema-scoped lock (`dbconn.WithMul
 For a single-table `ALTER`, Spirit first tries MySQL's own DDL:
 
 1. `ALTER TABLE t ALGORITHM=INSTANT, <alter>`.
-2. If that fails, and the statement is classified as INPLACE-safe (`statement.AlgorithmInplaceConsideredSafe`), `ALTER TABLE t ALGORITHM=INPLACE, LOCK=NONE, <alter>`. INPLACE-safe means every clause only modifies metadata: `RENAME INDEX`, making an index invisible, `DROP INDEX`, `DROP`/`TRUNCATE`/`ADD PARTITION`, a table `COMMENT`, or a `MODIFY`/`CHANGE` to `VARCHAR` that neither reorders the column nor adds `NOT NULL`. Spirit cannot tell a `VARCHAR` length change from a type conversion here, so it relies on MySQL rejecting `ALGORITHM=INPLACE, LOCK=NONE` for a change that is not metadata-only, such as a type conversion. Reordering a column or adding `NOT NULL` are excluded because MySQL accepts them as INPLACE but rebuilds the table.
+2. If that fails, and the statement is classified as INPLACE-safe (`statement.AlgorithmInplaceConsideredSafe`), `ALTER TABLE t ALGORITHM=INPLACE, LOCK=NONE, <alter>`. INPLACE-safe means every clause only modifies metadata: `RENAME INDEX`, making an index invisible, `DROP INDEX`, `DROP`/`TRUNCATE`/`ADD PARTITION`, a table `COMMENT`, or a `MODIFY`/`CHANGE` to `VARCHAR` that neither reorders the column nor declares `NOT NULL`. Spirit cannot tell a `VARCHAR` length change from a type conversion here, so it relies on MySQL rejecting `ALGORITHM=INPLACE, LOCK=NONE` for a change that is not metadata-only, such as a type conversion. Reordering a column or changing it to `NOT NULL` is excluded because MySQL accepts both as INPLACE but rebuilds the table. Spirit cannot tell from the statement whether the column is already `NOT NULL`, so any `MODIFY`/`CHANGE` that declares `NOT NULL` is copied, even when the column already was.
 
 Both run through `dbconn.ForceExec`, which [force-kills](#force-kill) sessions that block the metadata lock. If either succeeds, the migration is complete: Spirit drops any stale `_new` and checkpoint tables left by an earlier copy-based attempt on this table, and returns. Any other failure falls through to the copy algorithm, except a lost connection: then the DDL may or may not have been applied, and Spirit aborts with `status.ErrOwnershipAmbiguous` rather than copy from a table of unknown shape.
 
@@ -139,7 +139,7 @@ Before cutover, the runner blocks while a table named `_spirit_sentinel` exists 
 - `--defer-cutover` is set. The runner created the sentinel in setup, and an operator drops it to release the cutover.
 - **Any** sentinel exists, regardless of who created it. An operator can hold a running migration's cutover by creating one. The hidden `--ignore-sentinel` flag disables this (tests use it), but never overrides `--defer-cutover`.
 
-If no sentinel exists, the step returns immediately. While waiting, a **continuous checksum** re-verifies the tables in the background, at most one pass per hour. A divergence it confirms aborts the migration rather than being repaired. The wait gives up with an error after 48 hours (`sentinel.WaitLimit`). See [defer-cutover](../../docs/migrate.md#defer-cutover).
+If no sentinel exists, the step returns immediately. While waiting, a **continuous checksum** re-verifies the tables in the background, at most one pass per hour. A divergence it confirms aborts the migration rather than being repaired. Entering the wait discards the saved checksum watermark, so a run interrupted during the wait keeps its copy progress but repeats the whole initial checksum when it resumes. The wait gives up with an error after 48 hours (`sentinel.WaitLimit`). See [defer-cutover](../../docs/migrate.md#defer-cutover).
 
 ### 14. Cutover
 
@@ -232,7 +232,7 @@ The rest is the same for both:
 
 - **Repair.** The initial checksum repairs a chunk with a confirmed mismatch: it deletes the range from `_new`, reads it from the source, rewrites it through the applier, then verifies it again. The default checker allows 3 attempts. The lockless checker gives up after 10 passes without a clean pass (`ErrVerificationUnresolved`). In both cases the migration fails rather than cutting over.
 - **Continuous checksum.** It runs only during the sentinel wait, never repairs, and aborts the migration on a confirmed divergence.
-- **Resume.** The checksum watermark is saved in the checkpoint, so a resumed run continues the initial checksum where it stopped. The continuous checksum's progress is not saved.
+- **Resume.** The checksum watermark is saved in the checkpoint until the sentinel wait starts, so a run interrupted during the initial checksum continues it where it stopped. The sentinel wait discards the watermark, so a run interrupted during the wait repeats the whole initial checksum. The continuous checksum's progress is never saved.
 
 The lockless checker is intended to replace the default checker. Until it becomes the default, the default checker's table lock is one of the metadata locks listed in the next section. See [pkg/checksum/README.md](../checksum/README.md) for both algorithms in detail.
 
@@ -352,7 +352,7 @@ Differences from the CLI to be aware of:
 
 | Symbol | Purpose |
 |--------|---------|
-| `Migration` | The configuration, also the Kong CLI struct. Embeds `flags.Common` and `flags.Cutover`, shared with `move` and `sync` |
+| `Migration` | The configuration, also the Kong CLI struct. Embeds `flags.Common` (shared with `move` and `sync`) and `flags.Cutover` (shared with `move`) |
 | `Migration.Validate()` | Cross-flag validation |
 | `Migration.Run()` | CLI entry point: `NewRunner`, `ScopePreRun` checks, `Runner.Run`, `Close` |
 | `NewRunner(*Migration)` | Parses the statement, applies defaults, and builds a `Runner`. Does not connect |

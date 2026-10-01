@@ -22,7 +22,7 @@ CREATE TABLE <name> (
 );
 ```
 
-The columns a runner does not use are left empty. `binlog_position` holds whatever the change source returned from `Position()`. For the built-in MySQL sources that is either a binlog `file:offset` coordinate (for example `mysql-bin.000042:4567`) or a GTID set, depending on whether the server has GTIDs enabled. For a multi-source move it is a JSON map of positions, one per source. The name is historical: the column predates the GTID source.
+The columns a runner does not use are left empty. `binlog_position` holds whatever the change source returned from `Position()`. For the built-in MySQL sources that is either a binlog `file:offset` coordinate (for example `mysql-bin.000042:4567`) or a GTID set, depending on whether the server has GTIDs enabled. For a multi-source move it is a JSON map of positions, one per source. Datasync always stores a versioned JSON wrapper, `{"v", "position", "server_uuid", "source_addr"}`, so that resume can refuse a `file:offset` position recorded on a different server. Do not parse this column as a bare position without checking which runner wrote it. The name is historical: the column predates the GTID source.
 
 The table holds **one row**. `Write` overwrites it with `REPLACE ... VALUES (1, ...)`, so the table never grows. `REPLACE` is a single atomic statement, so a crash during a write leaves either the previous checkpoint or the new one, never neither. The server assigns `created_at` on every write. `ReadLatest` reads the row with an explicit column list (see [Cross-version compatibility](#cross-version-compatibility)), and returns `ErrNotFound` if the table is empty.
 
@@ -66,7 +66,7 @@ When a migration starts, `Runner.setup` always tries `resumeFromCheckpoint` firs
 4. **The table name matches** (single-table only). This catches two long table names that truncate to the same checkpoint table.
 5. **The checkpoint is younger than `--checkpoint-max-age`** (default 7 days). Replaying many days of change stream can take longer than copying again.
 6. **The components can be rebuilt.** The copy chunker opens at the saved copier watermark. If a checksum watermark was saved, the checksum chunker opens there, so the initial checksum also resumes. The change source and its subscriptions are created.
-7. **The change source can resume from the saved position.** `StartFromPosition` checks that the position is still available. For a `file:offset` position, the binlog file must still be listed by `SHOW BINARY LOGS`. For a GTID set, the set must cover `@@GLOBAL.gtid_purged`. If it does not, the source returns `change.ErrPositionNotFound`, which the runner reports as `status.ErrBinlogNotFound`.
+7. **The change source can resume from the saved position.** `StartFromPosition` checks that the position is still available. For a `file:offset` position, the binlog file must still be listed by `SHOW BINARY LOGS`. For a GTID set, the set must cover `@@GLOBAL.gtid_purged`, and `@@GLOBAL.gtid_executed` must contain the set. The second condition fails after a restore from backup or a failover to a replica that lagged: the server never executed transactions the checkpoint records as applied, and resuming would silently skip them. If either condition fails, the source returns `change.ErrPositionNotFound`, which the runner reports as `status.ErrBinlogNotFound`.
 
 The position also decides which change source is built (`change.NewAutoClient`). A run resumes in the coordinate scheme its checkpoint was written in: a `file:offset` checkpoint resumes on the binlog client even if the server has since enabled GTIDs. A GTID checkpoint on a server that no longer has GTIDs enabled fails the run.
 
@@ -80,7 +80,7 @@ These failures are definitive. Spirit logs the reason and starts a fresh migrati
 - The checkpoint table is empty.
 - The statement or `original_table_name` does not match.
 - The checkpoint is older than `--checkpoint-max-age`.
-- The position has been purged, or cannot be parsed.
+- The position has been purged, the server's GTID history no longer contains it, or it cannot be parsed.
 - The checkpoint table was written by a version with a different schema (`ER_BAD_FIELD_ERROR`).
 - The stored watermarks or `created_at` cannot be decoded.
 

@@ -57,7 +57,8 @@ This protects against resuming from very stale checkpoints where replaying the a
 
 When Spirit reads a checkpoint, it relies on the columns of the checkpoint table matching the columns the current binary expects:
 
-- **If the checkpoint table schema differs** between versions (columns added, removed, or reordered), the resume read will fail and Spirit logs a warning and starts a fresh migration. Progress from the previous binary version is silently discarded.
+- **If the checkpoint table is missing a column the current binary expects** (typically, a newer binary resuming a checkpoint written by an older one), the resume read fails, and Spirit logs a warning and starts a fresh migration. Progress from the previous binary version is discarded.
+- **If the checkpoint table only has extra or reordered columns** (typically, an older binary resuming a checkpoint written by a newer one), the read succeeds, because Spirit selects the columns it knows by name. Spirit cannot detect the mismatch, and resumes from a checkpoint whose extra fields it ignores.
 - **If the checkpoint table schema is unchanged but the *meaning* of stored values has changed** between versions (for example, a watermark format change, a routing-policy change, or a new applier behavior), Spirit cannot detect the mismatch. The resume will silently succeed and the new binary will reinterpret the old checkpoint, which can produce incorrect results.
 
 Operationally, this means:
@@ -202,10 +203,11 @@ rather than by reading the source again. A range that keeps changing is
 *settled* one row at a time: Spirit waits for the row's next change event,
 applies it to the shadow table, and compares the shadow row to that event's
 row image. The more often a row is written, the sooner its next event arrives.
-A row is deferred to the next pass only when no change arrives within its
-budget, it is written again before the shadow row can be read, or the buffered
-changes cannot be fully applied. See
-[Continuously updated hot rows](../pkg/checksum/README.md#continuously-updated-hot-rows).
+A row is deferred to the next pass instead when, for example, no change arrives
+within the range's 5-second settling budget, it is written again before the
+shadow row can be read, or the buffered changes cannot be fully applied. See
+[Continuously updated hot rows](../pkg/checksum/README.md#continuously-updated-hot-rows)
+for the full list.
 
 This is optimistic verification, not a comparison at one common source/target
 snapshot. Use it to evaluate the experimental algorithm before adopting it
