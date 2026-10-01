@@ -27,14 +27,14 @@ func TestStopDispatchSuppressesDDLNotification(t *testing.T) {
 		{
 			name: "binlog",
 			build: func(cancel func(FatalReason) bool) (func(string, string), func()) {
-				c := &binlogClient{logger: logger, callerCancelFunc: cancel, ddlFilterSchema: "test", subs: newSubscriptionRegistry()}
+				c := &binlogClient{feedCore: feedCore{logger: logger, callerCancelFunc: cancel, ddlFilterSchema: "test", subs: newSubscriptionRegistry()}}
 				return c.processDDLNotification, c.Stop
 			},
 		},
 		{
 			name: "gtid",
 			build: func(cancel func(FatalReason) bool) (func(string, string), func()) {
-				c := &gtidClient{logger: logger, callerCancelFunc: cancel, ddlFilterSchema: "test", subs: newSubscriptionRegistry()}
+				c := &gtidClient{feedCore: feedCore{logger: logger, callerCancelFunc: cancel, ddlFilterSchema: "test", subs: newSubscriptionRegistry()}}
 				return c.processDDLNotification, c.Stop
 			},
 		},

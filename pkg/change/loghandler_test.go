@@ -70,8 +70,8 @@ func TestSyncerConfigUsesDemotingLogger(t *testing.T) {
 	logger := newTestLogger(&buf, slog.LevelInfo)
 
 	for name, syncerLogger := range map[string]*slog.Logger{
-		"binlog": (&binlogClient{logger: logger}).buildSyncerConfig("127.0.0.1", 3306).Logger,
-		"gtid":   (&gtidClient{logger: logger}).buildSyncerConfig("127.0.0.1", 3306).Logger,
+		"binlog": (&binlogClient{feedCore: feedCore{logger: logger}}).buildSyncerConfig("127.0.0.1", 3306).Logger,
+		"gtid":   (&gtidClient{feedCore: feedCore{logger: logger}}).buildSyncerConfig("127.0.0.1", 3306).Logger,
 	} {
 		buf.Reset()
 		syncerLogger.Info("rotate to next binlog")

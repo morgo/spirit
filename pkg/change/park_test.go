@@ -416,13 +416,13 @@ func TestDispatchRowOrdering(t *testing.T) {
 	tbl := &table.TableInfo{SchemaName: "test", TableName: "t1"}
 	for name, newClient := range map[string]func() (*RowParker, func(Subscription)){
 		"binlog": func() (*RowParker, func(Subscription)) {
-			c := &binlogClient{subs: newSubscriptionRegistry()}
+			c := &binlogClient{feedCore: feedCore{subs: newSubscriptionRegistry()}}
 			return &c.parker, func(sub Subscription) {
 				c.dispatchRow(sub, tbl, []any{int64(1)}, []any{int64(1)}, false)
 			}
 		},
 		"gtid": func() (*RowParker, func(Subscription)) {
-			c := &gtidClient{subs: newSubscriptionRegistry()}
+			c := &gtidClient{feedCore: feedCore{subs: newSubscriptionRegistry()}}
 			return &c.parker, func(sub Subscription) {
 				c.dispatchRow(sub, tbl, []any{int64(1)}, []any{int64(1)}, false)
 			}

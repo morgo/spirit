@@ -362,8 +362,8 @@ type BufferedSubscriptionConfig struct {
 }
 
 // NewBufferedSubscription constructs the default bufferedMap-backed
-// Subscription. It is the public counterpart to binlogClient's internal
-// AddSubscription helper: out-of-tree change.Source implementations
+// Subscription. It is the public counterpart to feedCore's AddSubscription,
+// which both binlog-backed clients share: out-of-tree change.Source implementations
 // (e.g. strata's pkg/vstream) call this from their own AddSubscription to
 // build a Subscription the runner / copier can drive.
 //
