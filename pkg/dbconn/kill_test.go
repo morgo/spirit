@@ -116,7 +116,7 @@ func TestKillLongRunningTransactions(t *testing.T) {
 		require.Contains(t, txIDs, id)
 	}
 
-	err = KillLockingTransactions(t.Context(), db, tables, nil, logger, nil)
+	err = KillLockingTransactions(t.Context(), db, tables, logger, nil)
 	require.NoError(t, err)
 
 	for _, tx := range txs {

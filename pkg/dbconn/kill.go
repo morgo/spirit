@@ -170,7 +170,7 @@ type LockDetail struct {
 	TrxWeight    sql.NullInt64  // Rows modified by the transaction
 }
 
-func KillLockingTransactions(ctx context.Context, db *sql.DB, tables []*table.TableInfo, config *DBConfig, logger *slog.Logger, ignorePIDs []int) error {
+func KillLockingTransactions(ctx context.Context, db *sql.DB, tables []*table.TableInfo, logger *slog.Logger, ignorePIDs []int) error {
 	_, _, err := killBlockers(ctx, db, tables, logger, ignorePIDs)
 	return err
 }
