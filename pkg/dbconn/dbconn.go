@@ -717,12 +717,34 @@ func Exec(ctx context.Context, db *sql.DB, stmt string, args ...any) error {
 	return err
 }
 
+// analyzeAttempts is how many times AnalyzeTable runs ANALYZE TABLE before
+// it gives up on an Error row, and analyzeRetryDelay the pause between them.
+var (
+	analyzeAttempts   = 3
+	analyzeRetryDelay = time.Second
+)
+
+// analyzeErrorRow is an ANALYZE TABLE result row with Msg_type="Error".
+type analyzeErrorRow struct {
+	name, msgType, msgText string
+}
+
+func (e *analyzeErrorRow) Error() string {
+	return fmt.Sprintf("ANALYZE TABLE %s failed: %s: %s", e.name, e.msgType, e.msgText)
+}
+
 // AnalyzeTable runs ANALYZE TABLE for schemaName.tableName on db. An empty
 // schemaName leaves the table unqualified, so it resolves against db's default
 // database (required through a Vitess vtgate, where qualifying is wrong). It
 // reads the result set rather than using Exec because ANALYZE reports a
 // failure such as a missing table as a Msg_type="Error" row (not a statement
 // error), which would otherwise be a silent no-op.
+//
+// ANALYZE also reports a lock wait timeout as an Error row, with no error code
+// to tell it apart from a permanent failure. A run calls this after its whole
+// copy, so a transient lock should not end it: an Error row is retried up to
+// analyzeAttempts times, and only the last one is returned. A statement error
+// is returned at once.
 func AnalyzeTable(ctx context.Context, db *sql.DB, logger *slog.Logger, schemaName, tableName string) error {
 	var stmt, name string
 	var err error
@@ -736,6 +758,26 @@ func AnalyzeTable(ctx context.Context, db *sql.DB, logger *slog.Logger, schemaNa
 	if err != nil {
 		return err
 	}
+	for attempt := 1; ; attempt++ {
+		err = analyzeOnce(ctx, db, logger, stmt, name)
+		var errRow *analyzeErrorRow
+		if err == nil || !errors.As(err, &errRow) || attempt >= analyzeAttempts {
+			return err
+		}
+		if logger != nil {
+			logger.Warn("ANALYZE TABLE failed; retrying", "table", name, "attempt", attempt, "error", err)
+		}
+		select {
+		case <-ctx.Done():
+			return errors.Join(err, context.Cause(ctx))
+		case <-time.After(analyzeRetryDelay):
+		}
+	}
+}
+
+// analyzeOnce runs stmt once and checks its result rows. An Error row is
+// returned as an *analyzeErrorRow.
+func analyzeOnce(ctx context.Context, db *sql.DB, logger *slog.Logger, stmt, name string) error {
 	rows, err := db.QueryContext(ctx, stmt)
 	if err != nil {
 		return err
@@ -752,7 +794,7 @@ func AnalyzeTable(ctx context.Context, db *sql.DB, logger *slog.Logger, schemaNa
 		// Msg_text is not "OK" (e.g. "Table is already up to date"); accept
 		// them, logging anything non-OK as a warning for visibility.
 		if strings.EqualFold(msgType, "error") {
-			return fmt.Errorf("ANALYZE TABLE %s failed: %s: %s", name, msgType, msgText)
+			return &analyzeErrorRow{name: name, msgType: msgType, msgText: msgText}
 		}
 		if !strings.EqualFold(msgText, "OK") && logger != nil {
 			logger.Warn("ANALYZE TABLE reported a non-OK message",

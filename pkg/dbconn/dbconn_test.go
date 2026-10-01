@@ -438,6 +438,9 @@ func TestExecRawVerb(t *testing.T) {
 // against the connection's default database) and the qualified form are
 // covered.
 func TestAnalyzeTable(t *testing.T) {
+	// A missing table is an Error row on every attempt; don't wait between them.
+	defer func(d time.Duration) { analyzeRetryDelay = d }(analyzeRetryDelay)
+	analyzeRetryDelay = time.Millisecond
 	dbName, scopedDB := testutils.CreateUniqueTestDatabase(t)
 	_, err := scopedDB.ExecContext(t.Context(), "CREATE TABLE present (id INT PRIMARY KEY)")
 	require.NoError(t, err)
@@ -464,6 +467,38 @@ func TestAnalyzeTable(t *testing.T) {
 
 	// A nil logger is accepted (the non-OK warning is skipped).
 	require.NoError(t, AnalyzeTable(t.Context(), db, nil, dbName, "present"))
+}
+
+// TestAnalyzeTableOutlastsTransientLock: a lock that outlives one
+// lock_wait_timeout makes ANALYZE return an Error row. That is transient,
+// not a reason to abandon a finished copy, so AnalyzeTable retries it.
+func TestAnalyzeTableOutlastsTransientLock(t *testing.T) {
+	dbName, scopedDB := testutils.CreateUniqueTestDatabase(t)
+	_, err := scopedDB.ExecContext(t.Context(), "CREATE TABLE t (id INT PRIMARY KEY)")
+	require.NoError(t, err)
+
+	cfg := NewDBConfig()
+	cfg.LockWaitTimeout = 1
+	db, err := New(testutils.DSN(), cfg)
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	holder, err := scopedDB.Conn(t.Context())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(holder)
+	_, err = holder.ExecContext(t.Context(), "LOCK TABLES t WRITE")
+	require.NoError(t, err)
+	unlocked := make(chan struct{})
+	go func() {
+		defer close(unlocked)
+		time.Sleep(1500 * time.Millisecond)
+		if _, err := holder.ExecContext(context.Background(), "UNLOCK TABLES"); err != nil {
+			t.Log(err)
+		}
+	}()
+	defer func() { <-unlocked }()
+
+	require.NoError(t, AnalyzeTable(t.Context(), db, nil, dbName, "t"))
 }
 
 // TestForceExecRawVerb tests that ForceExec supports the %r verb, while
