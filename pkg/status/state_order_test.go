@@ -13,16 +13,14 @@ import (
 // silently change which states satisfy those gates and invert the safety logic.
 //
 // Known ordinal-comparison sites that depend on this order (non-exhaustive):
-//   - pkg/migration/runner.go: `state >= Checksum` gates persisting the
-//     checkpoint's checksum_watermark; `state >= CutOver` makes fatalError()
-//     a no-op (errors after cutover are expected and must not cancel/invalidate).
-//   - pkg/move/runner.go: `state >= Checksum` and `state >= CutOver` gate the
-//     continuous-checksum loop and post-cutover error handling.
+//   - pkg/migration/runner.go and pkg/move/runner.go: the window
+//     `state >= Checksum && state < WaitingOnSentinelTable` gates persisting the
+//     checkpoint's checksum_watermark (the sentinel wait discards checksum
+//     evidence); `state >= CutOver` makes fatalError() a no-op (errors after
+//     cutover are expected and must not cancel/invalidate); `state > CutOver`
+//     blanks Status().
 //   - pkg/status/task.go: `state > CutOver` / `state >= CutOver` gate progress
 //     reporting and terminal-state handling.
-//   - state.go itself documents that WaitingOnSentinelTable must sort AFTER
-//     Checksum so that `state >= Checksum` stays true while the sentinel wait
-//     blocks the cutover.
 //   - pkg/move/reversewindow.go: the ReverseWindow state sorts AFTER CutOver so
 //     the post-cutover reverse window satisfies `state >= CutOver` (fatalError
 //     becomes a no-op; the status/checkpoint dumpers stop) — intended.

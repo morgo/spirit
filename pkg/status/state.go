@@ -39,17 +39,20 @@ const (
 	AnalyzeTable
 	Checksum
 	PostChecksum // second mass apply
-	// WaitingOnSentinelTable comes after the initial checksum so that
-	// `state >= Checksum` is true while the sentinel-wait blocks the cutover.
-	// During this state Spirit also runs the "continuous checksum" loop
-	// described in docs/migrate.md.
+	// WaitingOnSentinelTable comes after PostChecksum because that is when it
+	// runs. The checkpoint gates persist checksum resume evidence only in
+	// [Checksum, WaitingOnSentinelTable): the sentinel wait discards it, so a
+	// restart during the wait re-verifies the whole range. During this state
+	// Spirit also runs the "continuous checksum" loop described in
+	// docs/migrate.md.
 	WaitingOnSentinelTable
 	CutOver
 	// ReverseWindow is the post-cutover reverse window, entered only when
 	// --reverse-window > 0: traffic is on the target and spirit keeps the source
 	// current in change-only mode while watching for a revert request. It sorts
-	// after CutOver (so `state >= Checksum` stays true) and lets orchestration
-	// surface that a revert is still possible.
+	// after CutOver (so `state >= CutOver` stays true: fatalError is a no-op and
+	// the status/checkpoint loops stop) and lets orchestration surface that a
+	// revert is still possible.
 	ReverseWindow
 	Close
 	ErrCleanup
