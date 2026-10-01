@@ -2332,9 +2332,8 @@ func (r *Runner) runContinuousChecksum(ctx context.Context) error {
 // the checksum phase.
 func (r *Runner) DumpCheckpoint(ctx context.Context) error {
 	// Serialize the whole dump (condition evaluation + INSERT) against
-	// invalidateChecksumWatermark, so the sentinel-abort path can never be
-	// overtaken by an in-flight dump that read its conditions before the
-	// continuous checker recorded a difference. See checkpointMu.
+	// invalidateChecksumWatermark, so an in-flight dump cannot overwrite the
+	// cleared watermark with one it read before. See checkpointMu.
 	r.checkpointMu.Lock()
 	defer r.checkpointMu.Unlock()
 	// Collect per-source positions (opaque strings owned by the source
@@ -2353,10 +2352,12 @@ func (r *Runner) DumpCheckpoint(ctx context.Context) error {
 		return status.ErrWatermarkNotReady // it might not be ready, we can try again.
 	}
 	// The checker excludes repaired or otherwise unverified ranges from its
-	// resume evidence, and publishes none once continuous verification has
-	// started, so a restart during the sentinel wait rechecks the whole range.
+	// resume evidence. Sentinel waiting discards checksum evidence before the
+	// background checker starts, including the gap between invalidating the
+	// watermark and RunContinuous marking the checker continuous, so a restart
+	// during the sentinel wait rechecks the whole range.
 	var checksumWatermark string
-	if r.status.Get() >= status.Checksum && r.checker != nil {
+	if state := r.status.Get(); state >= status.Checksum && state < status.WaitingOnSentinelTable && r.checker != nil {
 		wm, wmErr := r.checker.ResumeWatermark()
 		if wmErr != nil {
 			return status.ErrWatermarkNotReady

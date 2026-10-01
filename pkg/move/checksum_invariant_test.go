@@ -203,12 +203,27 @@ func TestContinuousChecksumClearsCheckpointWatermark(t *testing.T) {
 
 	mock := &checksum.MockChecker{Chunker: r.checksumChunker}
 	r.checker = mock
-	r.status.Set(status.WaitingOnSentinelTable)
+	r.status.Set(status.Checksum)
 
 	// The initial checksum completed clean: its watermark is persisted.
 	require.NoError(t, r.DumpCheckpoint(ctx))
 	_, checksumWM := latestCheckpointWatermarks(t, r)
 	require.NotEmpty(t, checksumWM)
+
+	// Entering the sentinel wait discards the evidence even while the checker
+	// still publishes it: the gap before RunContinuous marks it continuous.
+	r.status.Set(status.WaitingOnSentinelTable)
+	wm, err := mock.ResumeWatermark()
+	require.NoError(t, err)
+	require.NotEmpty(t, wm, "the checker has not entered continuous mode yet")
+	require.NoError(t, r.DumpCheckpoint(ctx))
+	_, checksumWM = latestCheckpointWatermarks(t, r)
+	require.Empty(t, checksumWM, "a dump during the sentinel wait must not persist the initial watermark")
+	r.status.Set(status.Checksum)
+	require.NoError(t, r.DumpCheckpoint(ctx))
+	_, checksumWM = latestCheckpointWatermarks(t, r)
+	require.NotEmpty(t, checksumWM)
+	r.status.Set(status.WaitingOnSentinelTable)
 
 	// Starting continuous verification clears it, before any pass runs.
 	runCtx, cancel := context.WithCancel(ctx)
