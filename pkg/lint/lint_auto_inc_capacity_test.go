@@ -732,10 +732,9 @@ func TestAutoIncCapacity_EmptySlices(t *testing.T) {
 // Test registration
 
 func TestAutoIncCapacity_Registered(t *testing.T) {
-	l, err := Get("auto_inc_capacity")
-	require.NoError(t, err)
+	l := registeredLinter(t, "auto_inc_capacity")
 	require.Equal(t, "auto_inc_capacity", l.Name())
-	require.Contains(t, List(), "auto_inc_capacity")
+	require.Contains(t, registeredLinterNames(), "auto_inc_capacity")
 }
 
 func TestAutoIncCapacity_RunLinters_ReadmeExample(t *testing.T) {
@@ -750,7 +749,7 @@ func TestAutoIncCapacity_RunLinters_ReadmeExample(t *testing.T) {
 	violations, err := RunLinters(nil, stmts, Config{})
 	require.NoError(t, err)
 
-	filtered := FilterByLinter(violations, "auto_inc_capacity")
+	filtered := filterByLinter(violations, "auto_inc_capacity")
 	require.Len(t, filtered, 1)
 	require.Equal(t, SeverityError, filtered[0].Severity)
 	require.Contains(t, filtered[0].Message, "AUTO_INCREMENT")
@@ -760,7 +759,7 @@ func TestAutoIncCapacity_RunLinters_ReadmeExample(t *testing.T) {
 		Enabled: map[string]bool{"auto_inc_capacity": true},
 	})
 	require.NoError(t, err)
-	require.Len(t, FilterByLinter(violations, "auto_inc_capacity"), 1)
+	require.Len(t, filterByLinter(violations, "auto_inc_capacity"), 1)
 }
 
 // Test overflow-safety of the threshold calculation. maxValue*threshold

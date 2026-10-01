@@ -1402,7 +1402,7 @@ func TestGTIDClientSavepointTransaction(t *testing.T) {
 //
 // Both parser outcomes for such a statement must defer. The parser now
 // understands the START TRANSACTION suffix, so the parsed path defers via
-// extractTablesFromDDLStmts's opensTransaction (group 1 below); the GTID
+// parseQueryEvent's opensTransaction (group 1 below); the GTID
 // advances at the group's own terminator, the XIDEvent. An unparseable
 // QueryEvent (group 2: ANSI_QUOTES DDL, which the parser does not
 // parse) never promotes either, because it could equally sit mid-group;

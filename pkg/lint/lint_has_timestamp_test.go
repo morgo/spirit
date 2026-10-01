@@ -747,7 +747,7 @@ func TestHasTimestampLinter_Registered(t *testing.T) {
 	resetForTest(t)
 	Register(&HasTimestampLinter{})
 
-	names := List()
+	names := registeredLinterNames()
 	found := slices.Contains(names, "has_timestamp")
 	require.True(t, found, "has_timestamp linter should be registered")
 }

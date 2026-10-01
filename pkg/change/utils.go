@@ -45,7 +45,14 @@ type schemaTable struct {
 
 // queryEventInfo describes the statements in one binlog QueryEvent.
 type queryEventInfo struct {
-	tables               []schemaTable
+	tables []schemaTable
+	// opensTransaction reports that the statement opens a transaction group
+	// rather than being one: BEGIN / START TRANSACTION, or the
+	// CREATE TABLE ... START TRANSACTION form MySQL 8.0.21+ writes to the
+	// binary log in place of CREATE TABLE ... SELECT under row-based
+	// replication. The group's row events follow the statement, so GTID
+	// promotion must wait for the group's real terminator (see
+	// gtidClient.processQueryEvent).
 	opensTransaction     bool
 	keepsTransactionOpen bool
 	endsTransaction      bool
@@ -58,6 +65,7 @@ var queryEventParsers = sync.Pool{New: func() any { return parser.New() }}
 
 // parseQueryEvent classifies transaction control and extracts DDL table names
 // from the same parse, so every consumer sees the same statement semantics.
+// The table extraction is based on canal: https://github.com/go-mysql-org/go-mysql/blob/34b6b0998dde44e51dff0bbcc1ac88339f57f830/canal/sync.go#L195-L245
 func parseQueryEvent(defaultSchema, statements string) (info queryEventInfo, err error) {
 	p := queryEventParsers.Get().(*parser.Parser)
 	defer func() {
@@ -172,24 +180,6 @@ func foreignKeyParents(defaultSchema string, refs []*ast.ReferenceDef) []schemaT
 		tables = append(tables, schemaTable{schema, table})
 	}
 	return tables
-}
-
-// extractTablesFromDDLStmts extracts table names from DDL statements.
-// The logic is based on canal: https://github.com/go-mysql-org/go-mysql/blob/34b6b0998dde44e51dff0bbcc1ac88339f57f830/canal/sync.go#L195-L245
-//
-// opensTransaction reports that the statement opens a transaction group
-// rather than being one: BEGIN / START TRANSACTION, or the
-// CREATE TABLE ... START TRANSACTION form MySQL 8.0.21+ writes to the
-// binary log in place of CREATE TABLE ... SELECT under row-based
-// replication. The group's row events follow the statement, so GTID
-// promotion must wait for the group's real terminator (see
-// gtidClient.processQueryEvent).
-func extractTablesFromDDLStmts(defaultSchema string, statements string) (tables []schemaTable, opensTransaction bool, err error) {
-	info, err := parseQueryEvent(defaultSchema, statements)
-	if err != nil {
-		return nil, false, err
-	}
-	return info.tables, info.opensTransaction, nil
 }
 
 // toSet converts a string slice to a set (map[string]struct{}) for O(1) lookups.

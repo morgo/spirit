@@ -51,6 +51,17 @@ func (m *mockConfigurableLinter) DefaultConfig() map[string]string {
 	}
 }
 
+// filterByLinter returns only violations from the specified linter.
+func filterByLinter(violations []Violation, linterName string) []Violation {
+	var filtered []Violation
+	for _, v := range violations {
+		if v.Linter.Name() == linterName {
+			filtered = append(filtered, v)
+		}
+	}
+	return filtered
+}
+
 func TestRegister(t *testing.T) {
 	// Reset registry before test
 	resetForTest(t)
@@ -63,12 +74,11 @@ func TestRegister(t *testing.T) {
 	Register(linter)
 
 	// Verify linter was registered
-	names := List()
+	names := registeredLinterNames()
 	require.Contains(t, names, "test_linter")
 
 	// Verify we can get it back
-	retrieved, err := Get("test_linter")
-	require.NoError(t, err)
+	retrieved := registeredLinter(t, "test_linter")
 	require.Equal(t, "test_linter", retrieved.Name())
 }
 
@@ -83,66 +93,11 @@ func TestRegisterMultiple(t *testing.T) {
 	Register(linter2)
 	Register(linter3)
 
-	names := List()
+	names := registeredLinterNames()
 	require.Len(t, names, 3)
 	require.Contains(t, names, "linter1")
 	require.Contains(t, names, "linter2")
 	require.Contains(t, names, "linter3")
-}
-
-func TestEnableDisable(t *testing.T) {
-	resetForTest(t)
-
-	linter := &mockLinter{name: "test_linter"}
-	Register(linter)
-
-	// Linters are enabled by default
-	require.True(t, linters["test_linter"].enabled)
-
-	// Disable it
-	err := Disable("test_linter")
-	require.NoError(t, err)
-	require.False(t, linters["test_linter"].enabled)
-
-	// Enable it again
-	err = Enable("test_linter")
-	require.NoError(t, err)
-	require.True(t, linters["test_linter"].enabled)
-}
-
-func TestEnableDisableNonexistent(t *testing.T) {
-	resetForTest(t)
-
-	err := Enable("nonexistent")
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "not found")
-
-	err = Disable("nonexistent")
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "not found")
-}
-
-func TestGet(t *testing.T) {
-	resetForTest(t)
-
-	linter := &mockLinter{
-		name:        "test_linter",
-		description: "A test linter",
-	}
-	Register(linter)
-
-	retrieved, err := Get("test_linter")
-	require.NoError(t, err)
-	require.Equal(t, "test_linter", retrieved.Name())
-	require.Equal(t, "A test linter", retrieved.Description())
-}
-
-func TestGetNonexistent(t *testing.T) {
-	resetForTest(t)
-
-	_, err := Get("nonexistent")
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "not found")
 }
 
 func TestRunLinters_Empty(t *testing.T) {
@@ -239,7 +194,9 @@ func TestRunLinters_WithConfig_Enabled(t *testing.T) {
 
 	// Disable by default
 	Register(linter)
-	require.NoError(t, Disable("test_linter"))
+	lock.Lock()
+	linters["test_linter"].enabled = false
+	lock.Unlock()
 
 	// But explicitly enable via config
 	violations, err := RunLinters(nil, nil, Config{
@@ -312,68 +269,6 @@ func TestHasErrors(t *testing.T) {
 	// Even adding more warnings shouldn't make HasErrors return true
 	violations = append(violations, Violation{Severity: SeverityWarning})
 	require.False(t, HasErrors(violations))
-}
-
-func TestHasWarnings(t *testing.T) {
-	violations := []Violation{
-		{Severity: SeverityWarning},
-		{Severity: SeverityWarning},
-	}
-	// All violations are warnings, so HasWarnings should return true
-	require.True(t, HasWarnings(violations))
-
-	violations = append(violations, Violation{Severity: SeverityWarning})
-	require.True(t, HasWarnings(violations))
-}
-
-func TestFilterByLinter(t *testing.T) {
-	linter1 := &mockLinter{name: "linter1"}
-	linter2 := &mockLinter{name: "linter2"}
-
-	violations := []Violation{
-		{Linter: linter1, Message: "Message 1"},
-		{Linter: linter2, Message: "Message 2"},
-		{Linter: linter1, Message: "Message 3"},
-	}
-
-	linter1Violations := FilterByLinter(violations, "linter1")
-	require.Len(t, linter1Violations, 2)
-	require.Equal(t, "Message 1", linter1Violations[0].Message)
-	require.Equal(t, "Message 3", linter1Violations[1].Message)
-
-	linter2Violations := FilterByLinter(violations, "linter2")
-	require.Len(t, linter2Violations, 1)
-	require.Equal(t, "Message 2", linter2Violations[0].Message)
-
-	nonexistentViolations := FilterByLinter(violations, "nonexistent")
-	require.Empty(t, nonexistentViolations)
-}
-
-func TestListSorted(t *testing.T) {
-	resetForTest(t)
-
-	// Register in non-alphabetical order
-	Register(&mockLinter{name: "zebra"})
-	Register(&mockLinter{name: "alpha"})
-	Register(&mockLinter{name: "beta"})
-
-	names := List()
-	require.Equal(t, []string{"alpha", "beta", "zebra"}, names)
-}
-
-func TestReset(t *testing.T) {
-	captureInitialLintRegistry()
-	t.Cleanup(restoreInitialLintRegistry)
-	Reset()
-
-	Register(&mockLinter{name: "linter1"})
-	Register(&mockLinter{name: "linter2"})
-
-	require.Len(t, List(), 2)
-
-	Reset()
-
-	require.Empty(t, List())
 }
 
 func TestViolationWithLocation(t *testing.T) {

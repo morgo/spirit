@@ -96,7 +96,7 @@ func TestKillLongRunningTransactions(t *testing.T) {
 	require.NoError(t, err)
 
 	TransactionWeightThreshold = 1000 // Set a low threshold for testing purposes
-	ids, err := GetLockingTransactions(t.Context(), db, tables, nil, logger, nil)
+	ids, _, err := getLockingTransactions(t.Context(), db, tables, logger, nil)
 	require.NoError(t, err)
 
 	// We expect only the second transaction to be considered
@@ -108,7 +108,7 @@ func TestKillLongRunningTransactions(t *testing.T) {
 	}
 
 	TransactionWeightThreshold = 1e7 // Reset the threshold to a high value
-	ids, err = GetLockingTransactions(t.Context(), db, tables, nil, logger, nil)
+	ids, _, err = getLockingTransactions(t.Context(), db, tables, logger, nil)
 	require.NoError(t, err)
 	// Now we expect both transactions to be considered long-running, because the weight threshold is higher.
 	require.Len(t, ids, 2)

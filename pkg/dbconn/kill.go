@@ -171,7 +171,7 @@ type LockDetail struct {
 }
 
 func KillLockingTransactions(ctx context.Context, db *sql.DB, tables []*table.TableInfo, config *DBConfig, logger *slog.Logger, ignorePIDs []int) error {
-	_, _, err := killBlockers(ctx, db, tables, config, logger, ignorePIDs)
+	_, _, err := killBlockers(ctx, db, tables, logger, ignorePIDs)
 	return err
 }
 
@@ -197,7 +197,7 @@ func statementIsWaitingForTableLock(ctx context.Context, db *sql.DB, tables []*t
 // before rollback and lock release complete. A blocker left alive because it
 // is too heavy to kill is reported as errHeavyTransactionSkipped.
 func killLockingTransactions(ctx context.Context, db *sql.DB, tables []*table.TableInfo, config *DBConfig, logger *slog.Logger, ignorePIDs []int) ([]int, error) {
-	killed, heavy, err := killBlockers(ctx, db, tables, config, logger, ignorePIDs)
+	killed, heavy, err := killBlockers(ctx, db, tables, logger, ignorePIDs)
 	if len(heavy) > 0 {
 		err = errors.Join(err, fmt.Errorf("%w: sessions %v", errHeavyTransactionSkipped, heavy))
 	}
@@ -207,7 +207,7 @@ func killLockingTransactions(ctx context.Context, db *sql.DB, tables []*table.Ta
 // killBlockers kills the transactions holding locks on tables. It returns the
 // sessions it signalled and the blocking sessions it left alive because their
 // transactions are too heavy to kill.
-func killBlockers(ctx context.Context, db *sql.DB, tables []*table.TableInfo, config *DBConfig, logger *slog.Logger, ignorePIDs []int) (killed, heavy []int, err error) {
+func killBlockers(ctx context.Context, db *sql.DB, tables []*table.TableInfo, logger *slog.Logger, ignorePIDs []int) (killed, heavy []int, err error) {
 	// First, check if there are explicit table locks that would prevent us from acquiring the metadata lock.
 	locks, err := GetTableLocks(ctx, db, tables, logger, ignorePIDs)
 	if err != nil {
@@ -248,18 +248,12 @@ func killBlockers(ctx context.Context, db *sql.DB, tables []*table.TableInfo, co
 	return killed, heavy, nil
 }
 
-// GetLockingTransactions queries the performance schema to find locking transactions
+// getLockingTransactions queries the performance schema to find locking transactions
 // that are holding locks on the specified tables. It returns a list of PIDs of these transactions.
 // If no tables are specified, it will return all long-running transactions.
-// If a transaction's weight exceeds the TransactionWeightThreshold, it will be skipped.
-// If no long-running transactions are found, it returns nil.
-func GetLockingTransactions(ctx context.Context, db *sql.DB, tables []*table.TableInfo, config *DBConfig, logger *slog.Logger, ignorePIDs []int) ([]int, error) {
-	pids, _, err := getLockingTransactions(ctx, db, tables, logger, ignorePIDs)
-	return pids, err
-}
-
-// getLockingTransactions is GetLockingTransactions that also returns the
-// sessions it skipped because their transactions are too heavy to kill.
+// If a transaction's weight exceeds the TransactionWeightThreshold, it will be skipped
+// and returned in heavy instead, as too heavy to kill.
+// If no long-running transactions are found, pids is nil.
 func getLockingTransactions(ctx context.Context, db *sql.DB, tables []*table.TableInfo, logger *slog.Logger, ignorePIDs []int) (pids, heavy []int, err error) {
 	// This function should query the performance schema to find long-running transactions
 	// that are holding locks on the specified tables.
@@ -364,7 +358,7 @@ func GetTableLocks(ctx context.Context, db *sql.DB, tables []*table.TableInfo, l
 	query := TableLockQuery
 	params := make([]any, 0, len(tables)*2)
 	// Always exclude our own connection (CONNECTION_ID()); see the matching
-	// note in GetLockingTransactions. Any caller-supplied PIDs are appended to
+	// note in getLockingTransactions. Any caller-supplied PIDs are appended to
 	// the same NOT IN list.
 	inList, inParams := sliceToInList(ignorePIDs)
 	if len(inList) > 0 {
@@ -417,7 +411,7 @@ func GetTableLocks(ctx context.Context, db *sql.DB, tables []*table.TableInfo, l
 
 // CheckForceKillPrivileges verifies that the connection's user holds every
 // privilege force-kill needs: SELECT on the performance_schema tables its
-// queries read (see GetTableLocks and GetLockingTransactions), PROCESS to read
+// queries read (see GetTableLocks and getLockingTransactions), PROCESS to read
 // information_schema.innodb_trx, and CONNECTION_ADMIN or SUPER to kill another
 // user's session. It returns an error naming each one that is missing.
 //
@@ -429,7 +423,7 @@ func GetTableLocks(ctx context.Context, db *sql.DB, tables []*table.TableInfo, l
 // row of information_schema.innodb_metrics, no rows of the performance_schema
 // lock tables, and, when rds_superuser_role is granted, the global
 // activate_all_roles_on_login. It logs nothing, so unlike GetTableLocks /
-// GetLockingTransactions it neither scans server-wide locks nor emits "found
+// getLockingTransactions it neither scans server-wide locks nor emits "found
 // locking transaction" log lines.
 func CheckForceKillPrivileges(ctx context.Context, db *sql.DB) error {
 	var errs []error
