@@ -22,6 +22,8 @@ func (progressChecker) GetProgress() status.ChecksumProgress {
 	return status.ChecksumProgress{RowsChecked: 25, RowsTotal: 100}
 }
 
+func (progressChecker) ContinuousActive() bool { return false }
+
 func TestMoveProgress(t *testing.T) {
 	r := &Runner{}
 	require.Empty(t, r.Progress().Tables)

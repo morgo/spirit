@@ -1,6 +1,7 @@
 package checksum
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"testing"
@@ -78,21 +79,16 @@ func (f *parityFixture) start(t *testing.T, name string) {
 	require.NoError(t, f.chunker.Open())
 }
 
-// checker builds the checker the migration runner would build: FixDifferences
-// and an Applier are always supplied (pkg/migration passes both
-// unconditionally), and `lockless` selects the experimental algorithm exactly
+// checker builds the checker the migration runner would build: an Applier is
+// always supplied (pkg/migration passes it unconditionally), and `lockless` selects the experimental algorithm exactly
 // as Migration.EnableExperimentalLocklessChecksum does.
 func (f *parityFixture) checker(t *testing.T, lockless bool, opts ...func(*CheckerConfig)) Checker {
 	t.Helper()
 	config := NewCheckerDefaultConfig()
 	config.Concurrency = 2
-	config.FixDifferences = true
 	config.Applier = applier.NewSingleTargetForTest(t, f.db)
 	if lockless {
 		config.Lockless = true
-		// Repair policy is deliberately not set: the factory derives it from
-		// FixDifferences, which is the whole point of these tests.
-		//
 		// Shorter than DefaultLocklessRetryDelay so a confirmed divergence
 		// surfaces within the test budget.
 		config.RetryDelay = 100 * time.Millisecond
@@ -133,8 +129,8 @@ func TestParityCleanTables(t *testing.T) {
 
 // TestParityTargetDivergence: a _new table that has diverged is REPAIRED and
 // the migration is allowed to proceed, under both algorithms. This used to be
-// the headline gap — the lockless checker ignored FixDifferences and aborted
-// the migration instead — so it is asserted here in the same shape for both.
+// the headline gap — the lockless checker aborted the migration instead — so it
+// is asserted here in the same shape for both.
 func TestParityTargetDivergence(t *testing.T) {
 	for _, lockless := range []bool{false, true} {
 		t.Run(fmt.Sprintf("lockless=%v", lockless), func(t *testing.T) {
@@ -155,10 +151,14 @@ func TestParityTargetDivergence(t *testing.T) {
 	}
 }
 
-// A caller that did NOT ask for repairs still gets a hard error rather than a
-// silent pass — this is the `spirit sync`-shaped configuration, and it is the
-// only thing FixDifferences=false should change.
-func TestParityDivergenceWithoutRepair(t *testing.T) {
+// RunContinuous never repairs: the same divergence Run would recopy is
+// reported as ErrPermanentDivergence and left in place, under both algorithms.
+// The applier is supplied, as the runners supply it, so the two modes differ in
+// the method called alone.
+func TestParityContinuousReportsDivergence(t *testing.T) {
+	prev := LocklessMinPassInterval
+	LocklessMinPassInterval = 0 // the snapshot checker waits one interval before its first pass
+	t.Cleanup(func() { LocklessMinPassInterval = prev })
 	for _, lockless := range []bool{false, true} {
 		t.Run(fmt.Sprintf("lockless=%v", lockless), func(t *testing.T) {
 			name := fmt.Sprintf("parity_norepair_%v", lockless)
@@ -167,30 +167,17 @@ func TestParityDivergenceWithoutRepair(t *testing.T) {
 			testutils.RunSQL(t, fmt.Sprintf("INSERT INTO %s VALUES (1,1),(2,2)", utils.NewTableName(name)))
 			f.start(t, name)
 
-			config := NewCheckerDefaultConfig()
-			config.Concurrency = 2
-			config.FixDifferences = false
-			// Not required with FixDifferences off — neither checker builds a
-			// repair path it would never use — but supplied for both so the two
-			// differ in policy alone.
-			config.Applier = applier.NewSingleTargetForTest(t, f.db)
-			if lockless {
-				config.Lockless = true
-				config.RetryDelay = 100 * time.Millisecond
-			}
-			checker, err := NewChecker([]*sql.DB{f.db}, f.chunker, []change.Source{f.feed}, config)
-			require.NoError(t, err)
-			err = checker.Run(t.Context())
-			require.Error(t, err)
-			if lockless {
-				require.ErrorIs(t, err, ErrPermanentDivergence)
-				// A divergence verdict is about the data, so a fresh attempt
-				// reaches the same conclusion. Assert it was not retried:
-				// ErrAttemptsExhausted wraps the last attempt's error with %w,
-				// so an ErrorIs on the sentinel alone would still pass after
-				// three attempts had been spent on it.
-				require.NotErrorIs(t, err, ErrAttemptsExhausted, "a divergence verdict is not retried")
-			}
+			checker := f.checker(t, lockless)
+			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+			defer cancel()
+			err := checker.RunContinuous(ctx)
+			require.ErrorIs(t, err, ErrPermanentDivergence)
+			// A divergence verdict is about the data, so a fresh attempt
+			// reaches the same conclusion. Assert it was not retried:
+			// ErrAttemptsExhausted wraps the last attempt's error with %w, so
+			// an ErrorIs on the sentinel alone would still pass after three
+			// attempts had been spent on it.
+			require.NotErrorIs(t, err, ErrAttemptsExhausted, "a divergence verdict is not retried")
 			require.Equal(t, 2, f.rowsOnTarget(t, name), "no repair was attempted")
 		})
 	}

@@ -129,7 +129,8 @@ During the initial copy, the shared copier controller adjusts read and write
 workers using target load and the applier queue. After copying, the continuous
 checksum controller adjusts concurrent checks using target load and change-feed
 backlog. Target overload pauses new checks, while in-flight repairs finish.
-A write controller also remains active for checksum repairs. Cancellation joins
+A write controller also remains active for the initial verification's repairs.
+Cancellation joins
 these controllers before the applier is stopped.
 
 Replication flushes are separate from the applier's copy/repair worker pool.
@@ -325,6 +326,23 @@ File+offset checkpoints also record the source's `@@server_uuid`. Resume refuses
 coordinates from a different server or an older checkpoint without identity;
 use `--force` to discard the partial copy and start fresh. GTID checkpoints
 remain portable across servers, subject to the normal GTID resume checks.
+
+## Verification and repair
+
+After the initial copy, sync verifies the target in two stages:
+
+1. **Initial verification** repeats passes until one is clean. A range that
+   still differs once the change stream has caught up is repaired from the
+   source and re-verified. A range that keeps diverging pass after pass fails
+   the sync rather than looping forever.
+2. **Continuous verification** then re-checks the target about once an hour
+   until the sync is stopped. It never repairs: the initial verification already
+   found the target consistent, so a range that differs after that is
+   unexpected. Sync stops with a "permanent divergence" error that names the
+   range, and leaves the target as it found it. Restarting the sync runs the
+   initial verification again, which repairs the range.
+
+Pass numbers in the status restart at 1 when continuous verification begins.
 
 ## Verification of hot ranges
 

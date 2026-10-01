@@ -4,6 +4,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/block/spirit/pkg/checksum"
 	"github.com/block/spirit/pkg/flags"
 	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/throttler"
@@ -18,14 +19,14 @@ func TestMoveContinuousChecksumThrottleProgress(t *testing.T) {
 	r := &Runner{}
 	r.setThrottler(&busyProgressThrottler{})
 	require.True(t, r.throttleStatus(status.Checksum).Throttled)
-	require.Empty(t, r.throttleStatus(status.WaitingOnSentinelTable))
-	r.continuousChecksumActive.Store(true)
-	require.True(t, r.throttleStatus(status.WaitingOnSentinelTable).Throttled)
+	require.Empty(t, r.throttleStatus(status.WaitingOnSentinelTable), "no checker yet")
+	v := &pacingChecker{}
+	r.checker = v
+	require.Empty(t, r.throttleStatus(status.WaitingOnSentinelTable), "waiting between passes")
+	v.active.Store(true)
+	require.True(t, r.throttleStatus(status.WaitingOnSentinelTable).Throttled, "reading a pass")
 	require.InDelta(t, 1.2, r.throttleStatus(status.WaitingOnSentinelTable).Utilization, 0.001)
-	r.continuousChecksumActive.Store(false)
-	require.Empty(t, r.throttleStatus(status.WaitingOnSentinelTable))
 	require.Empty(t, r.throttleStatus(status.CutOver))
-	r.continuousChecksumActive.Store(true)
 	r.setThrottler(&throttler.Mock{})
 	require.Empty(t, r.throttleStatus(status.WaitingOnSentinelTable)) // Binary signals do not pace checksums.
 }
@@ -43,32 +44,12 @@ func TestReverseWindowPreservesConfiguredWorkers(t *testing.T) {
 	}
 }
 
-// pacingVerifier is a continuous checker that is either reading or waiting out
-// the interval between passes.
-type pacingVerifier struct{ active atomic.Bool }
-
-func (v *pacingVerifier) ContinuousActive() bool       { return v.active.Load() }
-func (v *pacingVerifier) ConfirmedDifferences() uint64 { return 0 }
-
-// Between continuous passes the checker holds no read load, so the sentinel
-// wait must not report the host throttle as pacing it.
-func TestMoveContinuousChecksumThrottleProgressBetweenPasses(t *testing.T) {
-	r := &Runner{}
-	r.setThrottler(&busyProgressThrottler{})
-	v := &pacingVerifier{}
-	r.continuousChecker = v
-	r.continuousChecksumActive.Store(true)
-	require.Empty(t, r.throttleStatus(status.WaitingOnSentinelTable), "waiting between passes")
-	v.active.Store(true)
-	require.True(t, r.throttleStatus(status.WaitingOnSentinelTable).Throttled, "reading a pass")
+// pacingChecker is a continuous checker that is either reading or waiting out
+// the interval between passes. Between passes the checker holds no read load,
+// so the sentinel wait must not report the host throttle as pacing it.
+type pacingChecker struct {
+	checksum.MockChecker
+	active atomic.Bool
 }
 
-// The sentinel-wait checker's policy: lockless across every source and target,
-// no repair (a confirmed divergence aborts the move; resume repairs it), and
-// passes paced at continuousChecksumMinInterval.
-func TestContinuousCheckerConfig(t *testing.T) {
-	cfg := (&Runner{}).continuousCheckerConfig()
-	require.True(t, cfg.Lockless)
-	require.False(t, cfg.FixDifferences, "a divergence during the sentinel wait must abort, not be recopied")
-	require.Equal(t, continuousChecksumMinInterval, cfg.MinPassInterval)
-}
+func (v *pacingChecker) ContinuousActive() bool { return v.active.Load() }

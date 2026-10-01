@@ -15,8 +15,6 @@ type snapshotResume struct {
 	mu         sync.Mutex
 	continuous atomic.Bool
 	active     atomic.Bool
-	// Never reset: cancellation must see mismatches across retries.
-	observed atomic.Uint64
 }
 
 func (s *snapshotResume) capture(chunker table.Chunker, differences *atomic.Uint64) (string, error) {

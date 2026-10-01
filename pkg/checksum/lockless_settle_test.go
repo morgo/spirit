@@ -687,7 +687,7 @@ func TestCheckHotSnapshotEscalatesOnlyWhenExhausted(t *testing.T) {
 	require.False(t, res.deferHot, "a settled divergence is a verdict, not a deferral")
 	require.True(t, res.permanent, "no recopier configured, so a settled divergence is fatal")
 	require.Equal(t, uint64(1), c.hotChunksSettledThisPass.Load())
-	require.Equal(t, uint64(1), c.ConfirmedDifferences(), "a settled divergence is a confirmed one")
+	require.Equal(t, uint64(1), c.confirmedDifferences.Load(), "a settled divergence is a confirmed one")
 }
 
 // TestLocklessSettlesHotChunkEndToEnd is the whole point of the escalation,
@@ -721,7 +721,7 @@ func TestLocklessSettlesHotChunkEndToEnd(t *testing.T) {
 			cfg := fastConfig()
 			cfg.RetryDelay = time.Millisecond
 			cfg.MaxHotAttempts = 3
-			cfg.MinPassInterval = time.Hour
+			cfg.minPassInterval = time.Hour
 			// No recopier: a settled divergence must be reported, which is the
 			// clearest way to see that a verdict was reached at all.
 			c := newTestChecker(t, chunker, cfg, func(_ context.Context, _ *table.Chunk, attempt int) (int64, int64, uint64, error) {
@@ -753,7 +753,7 @@ func TestLocklessSettlesHotChunkEndToEnd(t *testing.T) {
 			require.Zero(t, stats.HotChunksDeferredThisPass)
 			if converge {
 				require.NoError(t, err)
-				require.Zero(t, c.ConfirmedDifferences(), "a settle that converged confirmed nothing")
+				require.Zero(t, c.confirmedDifferences.Load(), "a settle that converged confirmed nothing")
 				require.False(t, stats.FirstCleanPassAt.IsZero())
 				var diffs int
 				require.NoError(t, db.QueryRowContext(t.Context(),
@@ -763,7 +763,7 @@ func TestLocklessSettlesHotChunkEndToEnd(t *testing.T) {
 			}
 			require.ErrorIs(t, err, ErrPermanentDivergence,
 				"a settled divergence is reported; before settling it was invisible")
-			require.Equal(t, uint64(1), c.ConfirmedDifferences())
+			require.Equal(t, uint64(1), c.confirmedDifferences.Load())
 			require.ErrorContains(t, err, "settled against the change stream",
 				"a settled divergence names its own evidence, not aggregate CRCs it never read")
 		})
@@ -828,7 +828,7 @@ func TestLocklessSettlesHotRowOnTheFeedThatOwnsIt(t *testing.T) {
 	cfg.RetryDelay = time.Millisecond
 	cfg.MaxHotAttempts = 3
 	cfg.MaxPasses = 1
-	cfg.MinPassInterval = time.Hour
+	cfg.minPassInterval = time.Hour
 	c := newTestChecker(t, chunker, cfg, func(_ context.Context, _ *table.Chunk, attempt int) (int64, int64, uint64, error) {
 		return int64(attempt), 0, 1, nil // the source never stops moving
 	})

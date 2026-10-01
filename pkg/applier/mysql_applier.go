@@ -1029,9 +1029,9 @@ func (a *MySQLApplier) DeleteKeys(ctx context.Context, sourceTable, targetTable 
 //     latest row image) so that every transiently-deleted row will be
 //     re-inserted as flushes progress. The destination converges back
 //     to source's current state once the last unflushed event for each
-//     affected PK has been applied. The post-cutover checksum (with
-//     `FixDifferences=true`) is the backstop that catches any
-//     divergence that survives.
+//     affected PK has been applied. The post-copy checksum, which
+//     repairs, is the backstop that catches any divergence that
+//     survives.
 //
 // We supply inline row images rather than `REPLACE INTO ... SELECT FROM
 // source`, so the read-after-commit race that motivated #746 does not

@@ -239,7 +239,7 @@ func runUntilClean(t *testing.T, c *LocklessChecker) (stop func() error, errCh <
 // decision, so waiting on it alone lets a non-blocking FirstCleanPass read land
 // in the gap. NextPassAt is set at the top of the next iteration, after the
 // decision, but only while waiting between passes, so the checker must use a
-// long MinPassInterval (e.g. time.Hour).
+// long minPassInterval (e.g. time.Hour).
 func waitFirstPassDecided(t *testing.T, c *LocklessChecker, timeout time.Duration) {
 	t.Helper()
 	require.Eventually(t, func() bool {
@@ -256,7 +256,7 @@ func fastConfig() CheckerConfig {
 		RetryDelay:  50 * time.Millisecond,
 		// Back-to-back passes. A zero here means "let the mode pick", which in
 		// continuous mode is an hour.
-		MinPassInterval: time.Millisecond,
+		minPassInterval: time.Millisecond,
 		MaxQueueSize:    16,
 		Logger:          slog.New(slog.NewTextHandler(testWriter{}, &slog.HandlerOptions{Level: slog.LevelError})),
 	}
@@ -271,16 +271,16 @@ func (testWriter) Write(p []byte) (int, error) { return len(p), nil }
 // Tests
 // ---------------------------------------------------------------------------
 
-// TestLocklessMinPassIntervalPacesPasses verifies MinPassInterval throttles
+// TestLocklessMinPassIntervalPacesPasses verifies minPassInterval throttles
 // the gap between passes: the first pass runs immediately, then each subsequent
-// pass waits until MinPassInterval has elapsed since the previous pass started.
+// pass waits until minPassInterval has elapsed since the previous pass started.
 // With an always-clean table, reaching 3 passes therefore cannot happen before
-// 2*MinPassInterval. Only the lower bound is asserted (the upper bound would be
+// 2*minPassInterval. Only the lower bound is asserted (the upper bound would be
 // timing-flaky).
 func TestLocklessMinPassIntervalPacesPasses(t *testing.T) {
 	const interval = 100 * time.Millisecond
 	cfg := fastConfig()
-	cfg.MinPassInterval = interval
+	cfg.minPassInterval = interval
 	chunker := newTestChunker(1)
 	c := newTestChecker(t, chunker, cfg,
 		func(ctx context.Context, chunk *table.Chunk, attempt int) (int64, int64, uint64, error) {
@@ -430,7 +430,7 @@ func TestPermanentlyHotChunkDefersToNextPass(t *testing.T) {
 	chunker := newTestChunker(1)
 	cfg := fastConfig()
 	cfg.MaxHotAttempts = 3
-	cfg.MinPassInterval = time.Hour
+	cfg.minPassInterval = time.Hour
 	c := newTestChecker(t, chunker, cfg,
 		func(ctx context.Context, chunk *table.Chunk, attempt int) (int64, int64, uint64, error) {
 			return int64(attempt), 0, 1000, nil
@@ -599,7 +599,7 @@ func (r *fakeRecopier) callCount() int {
 }
 
 // TestRecopyOnStableDivergence: a chunk mismatches twice with the source
-// CRC unchanged. With a Recopier configured, the checker calls Recopy
+// CRC unchanged. Under Run, the checker calls Recopy
 // instead of returning ErrPermanentDivergence; the pass completes with
 // the chunk counted in the recopies bucket, and FirstCleanPass fires on
 // the follow-up pass that re-verifies the repaired chunks.
@@ -627,7 +627,7 @@ func TestRecopyOnStableDivergence(t *testing.T) {
 	)
 	c.recopier = recopier
 
-	stop, _ := runUntil(t, c)
+	stop, _ := runUntilClean(t, c) // Run repairs; RunContinuous does not
 	select {
 	case <-c.FirstCleanPass():
 	case <-time.After(2 * time.Second):
@@ -693,7 +693,7 @@ func TestHotChunkDuringFeedDrainIsBounded(t *testing.T) {
 	}}
 	cfg := fastConfig() // no recopier: a confirmed divergence is fatal
 	cfg.MaxHotAttempts = 3
-	cfg.MinPassInterval = time.Hour
+	cfg.minPassInterval = time.Hour
 	c := newTestChecker(t, newTestChunker(1), cfg,
 		func(context.Context, *table.Chunk, int) (int64, int64, uint64, error) {
 			// Stable between retries, changing only inside Flush. Every retry
@@ -777,7 +777,7 @@ func TestRecopyPassDoesNotFireFirstCleanPass(t *testing.T) {
 	)
 	c.recopier = recopier
 
-	stop, _ := runUntil(t, c)
+	stop, _ := runUntilClean(t, c) // Run repairs; RunContinuous does not
 
 	// Wait for pass 1 — the pass containing the recopy — to complete.
 	require.EventuallyWithT(t, func(collect *assert.CollectT) {
@@ -844,7 +844,7 @@ func TestRecopiedChunkReverifiedBeforeCleanPass(t *testing.T) {
 	)
 	c.recopier = recopier
 
-	stop, _ := runUntil(t, c)
+	stop, _ := runUntilClean(t, c) // Run repairs; RunContinuous does not
 	select {
 	case <-c.FirstCleanPass():
 	case <-time.After(2 * time.Second):
@@ -964,7 +964,7 @@ func TestRecopyOnRowCountMismatch(t *testing.T) {
 	)
 	c.recopier = recopier
 
-	stop, _ := runUntil(t, c)
+	stop, _ := runUntilClean(t, c) // Run repairs; RunContinuous does not
 	select {
 	case <-c.FirstCleanPass():
 	case <-time.After(2 * time.Second):
@@ -1050,7 +1050,7 @@ func TestStatsReportsInFlightWork(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
 	cfg := fastConfig()
-	cfg.MinPassInterval = time.Hour
+	cfg.minPassInterval = time.Hour
 	c := newTestChecker(t, chunker, cfg,
 		func(ctx context.Context, chunk *table.Chunk, attempt int) (int64, int64, uint64, error) {
 			close(started)
@@ -1127,7 +1127,7 @@ func TestHotChunkExactAttemptLimit(t *testing.T) {
 		t.Run(fmt.Sprint(limit), func(t *testing.T) {
 			cfg := fastConfig()
 			cfg.MaxHotAttempts = limit
-			cfg.MinPassInterval = time.Hour
+			cfg.minPassInterval = time.Hour
 			var reads atomic.Int64
 			c := newTestChecker(t, newTestChunker(1), cfg,
 				func(context.Context, *table.Chunk, int) (int64, int64, uint64, error) {
@@ -1304,7 +1304,7 @@ func TestScanCompleteResetsAndExcludesWalkerFailure(t *testing.T) {
 
 func TestLocklessNextPassSchedule(t *testing.T) {
 	cfg := fastConfig()
-	cfg.MinPassInterval = time.Hour
+	cfg.minPassInterval = time.Hour
 	c := newTestChecker(t, newTestChunker(1), cfg,
 		func(ctx context.Context, chunk *table.Chunk, attempt int) (int64, int64, uint64, error) {
 			return 7, 7, 100, nil
@@ -1330,7 +1330,7 @@ func TestRunUntilClean(t *testing.T) {
 			cfg := fastConfig()
 			cfg.RetryDelay = time.Millisecond
 			cfg.MaxHotAttempts = 2
-			cfg.MinPassInterval = time.Hour
+			cfg.minPassInterval = time.Hour
 			c := newTestChecker(t, newTestChunker(1), cfg,
 				func(ctx context.Context, chunk *table.Chunk, attempt int) (int64, int64, uint64, error) {
 					switch mode {
@@ -1387,7 +1387,7 @@ func TestRunUntilClean(t *testing.T) {
 func TestRunUntilCleanHonoursMaxPasses(t *testing.T) {
 	cfg := fastConfig()
 	cfg.RetryDelay = time.Millisecond
-	cfg.MinPassInterval = time.Millisecond
+	cfg.minPassInterval = time.Millisecond
 	cfg.MaxHotAttempts = 2
 	cfg.MaxPasses = 3
 	c := newTestChecker(t, newTestChunker(1), cfg,
@@ -1573,7 +1573,7 @@ func TestRetryWaitsForFeedFlush(t *testing.T) {
 func TestRunIgnoresMaxPasses(t *testing.T) {
 	cfg := fastConfig()
 	cfg.RetryDelay = time.Millisecond
-	cfg.MinPassInterval = time.Millisecond
+	cfg.minPassInterval = time.Millisecond
 	cfg.MaxHotAttempts = 2
 	cfg.MaxPasses = 2
 	c := newTestChecker(t, newTestChunker(1), cfg,
@@ -1637,7 +1637,7 @@ func (c *watermarkChunker) Reset() error {
 func TestRepairedChunkIsNotResumeEvidence(t *testing.T) {
 	cfg := fastConfig()
 	cfg.Concurrency = 1
-	cfg.MinPassInterval = time.Millisecond
+	cfg.minPassInterval = time.Millisecond
 	cfg.MaxPasses = 1 // stop after the pass that repairs
 	chunker := newWatermarkChunker(3)
 	recopier := &fakeRecopier{}
@@ -1680,7 +1680,7 @@ func TestResumeWatermarkTracksCurrentWalkOnly(t *testing.T) {
 	cfg := fastConfig()
 	cfg.Concurrency = 1
 	cfg.RetryDelay = time.Millisecond
-	cfg.MinPassInterval = time.Millisecond
+	cfg.minPassInterval = time.Millisecond
 	cfg.MaxHotAttempts = 2
 	chunker := newWatermarkChunker(3)
 	// The first two chunks verify; the last is permanently hot, so it is
@@ -1824,6 +1824,7 @@ func TestFiniteLocklessRetriesTransientFailures(t *testing.T) {
 		t.Helper()
 		cfg := NewCheckerDefaultConfig()
 		cfg.Lockless = true
+		cfg.noRepair = true
 		cfg.RetryDelay = time.Millisecond
 		checker, err := NewChecker([]*sql.DB{{}}, chunker, []change.Source{&change.MockSource{}}, cfg)
 		require.NoError(t, err)
@@ -1871,6 +1872,7 @@ func TestFiniteLocklessReportsFullProgressAfterCleanPass(t *testing.T) {
 	chunker := &partialProgressChunker{testChunker: newTestChunker(0), verified: 3, total: 10}
 	cfg := NewCheckerDefaultConfig()
 	cfg.Lockless = true
+	cfg.noRepair = true
 	cfg.RetryDelay = time.Millisecond
 	checker, err := NewChecker([]*sql.DB{{}}, chunker, []change.Source{&change.MockSource{}}, cfg)
 	require.NoError(t, err)
@@ -1905,7 +1907,7 @@ func TestLocklessDrainsEveryFeedBeforeADivergenceVerdict(t *testing.T) {
 
 // A target that is one read behind and then catches up is apply lag, not
 // divergence. DifferencesFound counts it (it is a first-read mismatch), but
-// ConfirmedDifferences, which a move's checksum-watermark gates read, must not.
+// confirmedDifferences must not.
 func TestLocklessLagThatReconcilesIsNotAConfirmedDifference(t *testing.T) {
 	cfg := fastConfig()
 	cfg.RetryDelay = time.Millisecond
@@ -1919,19 +1921,17 @@ func TestLocklessLagThatReconcilesIsNotAConfirmedDifference(t *testing.T) {
 	defer cancel()
 	require.NoError(t, c.RunUntilClean(ctx))
 	require.Equal(t, uint64(1), c.DifferencesFound(), "the first-read mismatch is still observed")
-	require.Zero(t, c.ConfirmedDifferences(), "a mismatch that reconciled on retry is lag, not a difference")
+	require.Zero(t, c.confirmedDifferences.Load(), "a mismatch that reconciled on retry is lag, not a difference")
 }
 
 // A stable divergence is confirmed before it is repaired, and stays confirmed
-// across later clean passes: a repaired range no longer backs the initial
-// checksum's verdict, so a caller that saw it clean between the two would
-// persist a watermark the repair invalidated.
+// across later clean passes: the counter is a lifetime total.
 func TestLocklessConfirmedDifferencesCountedBeforeRepairAndKept(t *testing.T) {
 	var recopied atomic.Bool
 	var confirmedAtRepair atomic.Uint64
 	var c *LocklessChecker
 	recopier := &fakeRecopier{recopyFn: func(context.Context, *table.Chunk) error {
-		confirmedAtRepair.Store(c.ConfirmedDifferences())
+		confirmedAtRepair.Store(c.confirmedDifferences.Load())
 		recopied.Store(true)
 		return nil
 	}}
@@ -1943,14 +1943,19 @@ func TestLocklessConfirmedDifferencesCountedBeforeRepairAndKept(t *testing.T) {
 	})
 	c.recopier = recopier
 
+	// Run repairs, then returns on the clean pass that re-verifies the repair.
+	require.NoError(t, c.Run(t.Context()))
+	require.Equal(t, uint64(1), confirmedAtRepair.Load(), "counted before the repair starts")
+	require.Equal(t, uint64(1), c.confirmedDifferences.Load())
+
+	// Later clean passes — here, continuous ones — must not clear it.
 	stop, _ := runUntil(t, c)
 	require.EventuallyWithT(t, func(collect *assert.CollectT) {
-		assert.GreaterOrEqual(collect, c.Stats().PassesCompleted, uint64(3))
+		assert.GreaterOrEqual(collect, c.Stats().PassesCompleted, uint64(2))
 	}, 5*time.Second, 10*time.Millisecond)
 	err := stop()
 	require.True(t, errors.Is(err, context.Canceled) || err == nil)
-	require.Equal(t, uint64(1), confirmedAtRepair.Load(), "counted before the repair starts")
-	require.Equal(t, uint64(1), c.ConfirmedDifferences(), "later clean passes must not clear it")
+	require.Equal(t, uint64(1), c.confirmedDifferences.Load(), "later clean passes must not clear it")
 }
 
 // Without a recopier the confirmed divergence is reported, and counted.
@@ -1961,7 +1966,7 @@ func TestLocklessPermanentDivergenceIsConfirmed(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 	require.ErrorIs(t, c.Run(ctx), ErrPermanentDivergence)
-	require.Equal(t, uint64(1), c.ConfirmedDifferences())
+	require.Equal(t, uint64(1), c.confirmedDifferences.Load())
 }
 
 // The backlog signal over several feeds sums their residuals and reports the
@@ -2036,7 +2041,7 @@ func TestSplitChildrenAreNotGatedOnAFlush(t *testing.T) {
 	cfg := fastConfig()
 	cfg.RetryDelay = time.Millisecond
 	cfg.RetryFlushWait = time.Hour
-	cfg.MinPassInterval = time.Hour
+	cfg.minPassInterval = time.Hour
 	cfg.MaxHotAttempts = 4
 	c := newTestChecker(t, chunker, cfg, func(_ context.Context, ch *table.Chunk, attempt int) (int64, int64, uint64, error) {
 		if ch == parent {
@@ -2091,7 +2096,7 @@ func TestSplitChildrenGoAheadOfGatedRetries(t *testing.T) {
 	cfg := fastConfig()
 	cfg.RetryDelay = time.Millisecond
 	cfg.RetryFlushWait = time.Hour
-	cfg.MinPassInterval = time.Hour
+	cfg.minPassInterval = time.Hour
 	cfg.MaxHotAttempts = 4
 
 	var (

@@ -116,8 +116,9 @@ type workResult struct {
 	readDuration time.Duration
 
 	// permanent is true iff this is a retry that failed with the source
-	// CRC unchanged AND no Recopier is configured — i.e. real divergence
-	// with no self-heal path. Run will exit with ErrPermanentDivergence.
+	// CRC unchanged in a run that does not repair (RunContinuous) — i.e.
+	// real divergence with no self-heal path. The run exits with
+	// ErrPermanentDivergence.
 	permanent bool
 
 	// permanentEvidence describes what proved the divergence, for the error

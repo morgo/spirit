@@ -82,8 +82,7 @@ case-collision races, so LWW map dedup is safe and considerably faster.
 When the watermark optimization is disabled at the end of the copy phase,
 `SetWatermarkOptimization` drains the map inline and the subscription
 switches into queue mode for the cutover/checksum window. The
-post-cutover checksum (with `FixDifferences=true`) repairs any residual
-divergence.
+post-copy checksum repairs any residual divergence.
 
 Memory-comparable PKs always use the buffered map, since map-key
 equality matches MySQL row identity.
@@ -175,9 +174,8 @@ PK appears at most once at flush time, holding the latest row image
 MySQL emitted for it. Any row transiently deleted by REPLACE's
 conflict resolution is therefore guaranteed to have its own event in
 the buffer (or arriving shortly) — its row image isn't lost,
-just temporarily not yet applied. The post-cutover checksum (with
-`FixDifferences=true`) is the backstop for anything that slips
-through.
+just temporarily not yet applied. The post-copy checksum, which
+repairs, is the backstop for anything that slips through.
 
 See `TestBufferedMapSwapPairFlushesViaReplace` (unit) and
 `TestSwapPairEndToEndViaReplace` (end-to-end) for the regression gates.
@@ -304,8 +302,8 @@ This is the same mechanism as [issue #746](https://github.com/block/spirit/issue
 
 | Flow | Backstop | Net effect today |
 |---|---|---|
-| `migrate`, `move` | Mandatory pre-cutover checksum with `FixDifferences=true` | Repaired before cutover. Cost: `differencesFound > 0`, a chunk recopy, and a "checksum found differences" signal that looks alarming |
-| `sync` (continuous) | Continuous checksum + `mysqlRecopier`, *lazy* | Real exposure: the target can serve a missing/stale/phantom row from copy time until a later checksum pass covers that chunk |
+| `migrate`, `move` | Mandatory pre-cutover checksum, which repairs | Repaired before cutover. Cost: `differencesFound > 0`, a chunk recopy, and a "checksum found differences" signal that looks alarming |
+| `sync` (continuous) | Initial checksum + `mysqlRecopier`, then a continuous checksum that does not repair | Real exposure: the target can serve a missing/stale/phantom row from copy time until the initial checksum covers that chunk; a divergence found after the first clean pass stops the sync |
 | Library consumers of pkg/copier + pkg/change with no checksum | None | Silent data loss |
 
 This is the same reliance already accepted knowingly for collation-imprecise key comparisons ([issue #479](https://github.com/block/spirit/issues/479), "checksum will fix any discrepancies") — except the visibility window affects every key type, not just collated strings.

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/block/mysql"
+	"github.com/block/spirit/pkg/checksum"
 	"github.com/block/spirit/pkg/flags"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
@@ -51,8 +52,12 @@ func TestSyncContinuousChecksumFirstCleanPass(t *testing.T) {
 	// On a quiet table, the first clean pass should be quick.
 	h.await(runner.FirstCleanPass(), 30*time.Second, "FirstCleanPass")
 
+	// FirstCleanPass fires in the initial Run; the counters below belong to
+	// the run in progress, so wait for continuous verification to complete a
+	// pass of its own.
+	h.eventually(func() bool { return runner.ChecksumStats().PassesCompleted >= 1 },
+		30*time.Second, "a continuous pass completes")
 	stats := runner.ChecksumStats()
-	require.GreaterOrEqual(t, stats.PassesCompleted, uint64(1), "at least one pass should have completed")
 	require.False(t, stats.FirstCleanPassAt.IsZero(), "FirstCleanPassAt should be set")
 	require.Equal(t, uint64(0), stats.PermanentFailures, "no permanent failures expected on a quiet table")
 
@@ -175,4 +180,55 @@ func TestSyncContinuousChecksumWithBackgroundWrites(t *testing.T) {
 func TestSyncChecksumRetryFlushWaitFollowsFlushInterval(t *testing.T) {
 	r := &Runner{sync: &Sync{FlushInterval: 5 * time.Minute}}
 	require.Equal(t, 10*time.Minute, r.checksumConfig().RetryFlushWait)
+}
+
+// TestSyncContinuousChecksumAbortsOnDivergence pins the sync lifecycle: the
+// initial verification repairs, and continuous verification after it does
+// not. A target row changed behind the sync's back after the first clean pass
+// is a divergence nothing in the change stream explains, so the sync stops
+// with ErrPermanentDivergence and leaves the row as it found it.
+func TestSyncContinuousChecksumAbortsOnDivergence(t *testing.T) {
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	src := cfg.Clone()
+	src.DBName = "sync_checksum_abort_src"
+	dest := cfg.Clone()
+	dest.DBName = "sync_checksum_abort_dest"
+
+	testutils.RunSQL(t, `DROP DATABASE IF EXISTS sync_checksum_abort_src`)
+	testutils.RunSQL(t, `CREATE DATABASE sync_checksum_abort_src`)
+	testutils.RunSQL(t, `CREATE TABLE sync_checksum_abort_src.t1 (id INT PRIMARY KEY, val VARCHAR(255))`)
+	testutils.RunSQL(t, `INSERT INTO sync_checksum_abort_src.t1 VALUES (1,'one'),(2,'two'),(3,'three')`)
+	testutils.RunSQL(t, `DROP DATABASE IF EXISTS sync_checksum_abort_dest`)
+	t.Cleanup(func() {
+		testutils.RunSQL(t, `DROP DATABASE IF EXISTS sync_checksum_abort_src`)
+		testutils.RunSQL(t, `DROP DATABASE IF EXISTS sync_checksum_abort_dest`)
+	})
+
+	runner, err := NewRunner(&Sync{
+		SourceDSN:     src.FormatDSN(),
+		TargetDSN:     dest.FormatDSN(),
+		Common:        flags.Common{Threads: 2, WriteThreads: 2},
+		FlushInterval: 100 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	h := startRunner(t, runner)
+	h.await(runner.ChecksumReady(), 60*time.Second, "ChecksumReady")
+	h.await(runner.FirstCleanPass(), 30*time.Second, "FirstCleanPass")
+
+	testutils.RunSQL(t, `UPDATE sync_checksum_abort_dest.t1 SET val = 'corrupted' WHERE id = 2`)
+
+	select {
+	case err := <-h.done:
+		h.returned, h.runErr, h.reported = true, err, true
+		require.ErrorIs(t, err, checksum.ErrPermanentDivergence)
+	case <-time.After(60 * time.Second):
+		t.Fatalf("sync did not stop on a divergence within 60s; checksum stats=%+v", runner.ChecksumStats())
+	}
+
+	var val string
+	require.NoError(t, runner.target.DB.QueryRowContext(t.Context(),
+		`SELECT val FROM sync_checksum_abort_dest.t1 WHERE id = 2`).Scan(&val))
+	require.Equal(t, "corrupted", val, "continuous verification does not repair")
+	h.stop()
 }

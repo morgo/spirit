@@ -42,14 +42,14 @@
 //       divergence. Before acting on it, if a change feed is present, the
 //       checker drains it (Flush) and re-reads: a target merely behind on
 //       applying buffered changes (apply lag) reconciles here and passes, so
-//       only a mismatch that survives a full drain is acted on at all. With a
-//       Recopier configured (production case), the checker then logs the
-//       differing rows and invokes it to overwrite the chunk on the target
-//       from the source; on success the chunk counts as resolved for
-//       pass-completion purposes (in the per-pass "recopies" bucket), but the
-//       pass is no longer clean — the repaired rows were never observed equal,
-//       so they are re-verified by the next pass's fresh walk. Without a
-//       Recopier configured it returns ErrPermanentDivergence.
+//       only a mismatch that survives a full drain is acted on at all. Run
+//       then logs the differing rows and invokes the Recopier to overwrite
+//       the chunk on the target from the source; on success the chunk counts
+//       as resolved for pass-completion purposes (in the per-pass "recopies"
+//       bucket), but the pass is no longer clean — the repaired rows were
+//       never observed equal, so they are re-verified by the next pass's
+//       fresh walk. RunContinuous never repairs: it logs the rows and returns
+//       ErrPermanentDivergence.
 //
 // Two successive source changes trigger subdivision.
 // Large ranges yield up to eleven children; mismatching descendants above 128
@@ -118,19 +118,6 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-// ErrPermanentDivergence is returned by Run when a chunk fails twice in a
-// row with the source CRC unchanged AND no Recopier is configured — i.e.
-// the target has data the source does not, the source is not racing, and
-// the checker has no way to self-heal. With a Recopier configured this
-// error is never returned: stable divergence triggers a Recopy and the
-// chunk is counted in the per-pass "recopies" bucket.
-//
-// Apply lag cannot produce it when a feed is supplied: a stable mismatch
-// drains the feed and re-reads before the verdict. Without a feed (library
-// callers only) the mismatch is taken at face value, so lag longer than the
-// retry delay can false-positive.
-var ErrPermanentDivergence = errors.New("checksum: permanent divergence detected")
-
 // ErrVerificationUnresolved is returned by RunUntilClean when MaxPasses passes
 // have completed and none of them was clean — every pass still ended with
 // ranges that were repaired, or that were changing too fast to verify. Nothing
@@ -172,11 +159,11 @@ const (
 // them; production never overrides them. Keeping them here makes the pacing
 // identical across every caller (migrate, sync).
 var (
-	// LocklessMinPassInterval is the production value callers pass as
-	// MinPassInterval: the minimum time between passes, so a small table whose
+	// LocklessMinPassInterval is RunContinuous's pacing for every checker:
+	// the minimum time between passes, so a small table whose
 	// pass finishes in seconds doesn't re-scan back-to-back during a possibly
-	// days-long sentinel wait. (Not a constructor default — a zero MinPassInterval
-	// legitimately means "back-to-back", which the package's own tests rely on.)
+	// days-long sentinel wait. It is not configurable: every caller runs
+	// continuous verification at the same pace.
 	LocklessMinPassInterval = 1 * time.Hour
 	// DefaultLocklessRetryDelay is the constructor default for RetryDelay: the
 	// wait before re-reading a mismatched chunk. It is short because it is not
@@ -223,10 +210,11 @@ type LocklessChecker struct {
 	chunker   table.Chunker
 	feeds     []change.Source
 
-	// recopier is the repair path, and its presence *is* the repair policy: a
-	// confirmed divergence is repaired when there is one and returns
-	// ErrPermanentDivergence when there is not. See newRecopier for how the
-	// factory chooses one.
+	// recopier is the repair path Run uses. Read it through repairer, which
+	// withholds it from RunContinuous: a confirmed divergence is repaired by
+	// Run and returns ErrPermanentDivergence from RunContinuous. It is nil
+	// only for the package's own tests (CheckerConfig.noRepair), which then
+	// get ErrPermanentDivergence from Run too.
 	recopier Recopier
 
 	// ownsFeedFlush makes a run start and stop the feeds' periodic flush, the
@@ -278,7 +266,8 @@ type LocklessChecker struct {
 	// confirmedDifferences counts divergences that survived a drain of every
 	// feed (or were settled against the change stream): each one is repaired
 	// or reported. Unlike mismatchesDetected it excludes apply lag, and unlike
-	// every other counter it is never reset. See ConfirmedDifferences.
+	// every other counter it is never reset. Tests read it to tell a
+	// confirmed divergence apart from lag that reconciled on retry.
 	confirmedDifferences atomic.Uint64
 	retryQueueDepth      atomic.Int64
 	hotChunkCount        atomic.Int64
@@ -318,8 +307,8 @@ type LocklessChecker struct {
 // sourceDBs and targetDBs are connections to the two copies being compared, and
 // are the same single handle when one server holds both. chunker must be Open
 // before a run; the checker Resets it between passes but does not close it.
-// feeds may be empty; they are advisory. recopier may be nil, which is what
-// makes a confirmed divergence fatal rather than repairable.
+// feeds may be empty; they are advisory. recopier is nil only in tests that
+// want a confirmed divergence reported rather than repaired.
 func newLocklessChecker(
 	sourceDBs, targetDBs []*sql.DB,
 	chunker table.Chunker,
@@ -373,6 +362,17 @@ func newLocklessChecker(
 		return splitHotChunk(ctx, sourceDBs[0], chunk, rows)
 	}
 	return c
+}
+
+// repairer returns the Recopier a confirmed divergence is rewritten through,
+// or nil when it must be reported instead. That is decided by the mode, not by
+// configuration: Run repairs and RunContinuous does not. continuous is sticky,
+// and Run is never called after RunContinuous.
+func (c *LocklessChecker) repairer() Recopier {
+	if c.continuous.Load() {
+		return nil
+	}
+	return c.recopier
 }
 
 // sameServer reports whether one handle holds both copies, which is what the
@@ -604,14 +604,15 @@ func (c *LocklessChecker) RunUntilClean(ctx context.Context) error {
 
 // RunContinuous verifies the table in the background for as long as ctx lives,
 // which is the continuous half of the Checker contract. It is the same pass
-// loop as Run with two differences: there is no pass budget, because the point
-// is to keep verifying; and a cancellation is reported as nil, because a
-// background verifier being shut down is not a failure. Any other error —
-// including ErrPermanentDivergence — is returned and should abort a cutover.
+// loop as Run with three differences: there is no pass budget, because the
+// point is to keep verifying; nothing is repaired, so a confirmed divergence
+// returns ErrPermanentDivergence; and a cancellation is reported as nil,
+// because a background verifier being shut down is not a failure. Any error
+// it returns should abort a cutover.
 //
-// Following a finite run, the first continuous pass waits MinPassInterval
-// rather than re-walking the table immediately behind the pass that just
-// verified it.
+// Following a finite run, the first continuous pass waits
+// LocklessMinPassInterval rather than re-walking the table immediately behind
+// the pass that just verified it.
 func (c *LocklessChecker) RunContinuous(ctx context.Context) error {
 	c.continuous.Store(true)
 	return c.run(ctx, false)
@@ -633,7 +634,7 @@ func (c *LocklessChecker) ContinuousActive() bool {
 // On cancellation this returns ctx.Err() (typically context.Canceled or
 // context.DeadlineExceeded) for a finite run, and nil for a continuous one.
 // A permanent failure — a chunk that mismatched twice in a row with the source
-// CRC unchanged and no Recopier configured — returns ErrPermanentDivergence.
+// CRC unchanged, in a run that does not repair — returns ErrPermanentDivergence.
 // Errors from the chunker walker (chunker.Next failures) are wrapped.
 //
 // MaxQueueSize is a soft backpressure threshold rather than a hard cap:
@@ -693,11 +694,10 @@ func (c *LocklessChecker) run(ctx context.Context, untilClean bool) error {
 	return err
 }
 
-// passInterval is how long the pass loop waits between passes. Zero in the
-// configuration means back-to-back, which is useful in tests and far too heavy
-// in production, so each mode substitutes the interval that suits it: the
-// continuous gate uses LocklessMinPassInterval, and the finite gate uses
-// RetryDelay. The finite gate re-walks only to re-verify what the previous pass
+// passInterval is how long the pass loop waits between passes. Each mode has
+// the interval that suits it: the continuous gate uses LocklessMinPassInterval,
+// and the finite gate uses RetryDelay. Tests override both with the unexported
+// CheckerConfig.minPassInterval. The finite gate re-walks only to re-verify what the previous pass
 // repaired or deferred, and something is waiting on the answer (the cut-over),
 // so pacing it in minutes would stall a migration that is otherwise ready.
 // RetryDelay is short (DefaultLocklessRetryDelay), and that is enough here:
@@ -705,8 +705,8 @@ func (c *LocklessChecker) run(ctx context.Context, untilClean bool) error {
 // is gated on a feed flush (see gateOnFlush), and a repair is re-verifiable as
 // soon as it returns. This wait only paces the re-walk itself.
 func (c *LocklessChecker) passInterval(continuous bool) time.Duration {
-	if c.cfg.MinPassInterval != 0 {
-		return c.cfg.MinPassInterval
+	if c.cfg.minPassInterval != 0 {
+		return c.cfg.minPassInterval
 	}
 	if continuous {
 		return LocklessMinPassInterval
@@ -780,9 +780,9 @@ func (c *LocklessChecker) runPasses(ctx context.Context, untilClean bool, minPas
 	var lastPassStart time.Time
 	for passNum := uint64(1); ; passNum++ {
 		if passNum > 1 {
-			// Pace passes: wait until MinPassInterval has elapsed since the
+			// Pace passes: wait until passInterval has elapsed since the
 			// previous pass STARTED (a pass that already ran longer incurs no
-			// extra wait). The first pass is never delayed. 0 = back-to-back.
+			// extra wait). The first pass is never delayed.
 			if wait := minPassInterval - time.Since(lastPassStart); wait > 0 {
 				c.cfg.Logger.Debug("lockless checksum waiting before next pass",
 					"pass_number", passNum, "wait", wait.Round(time.Second).String())
@@ -1311,8 +1311,9 @@ func (c *LocklessChecker) checkHotSnapshot(ctx context.Context, res *workResult,
 // compared against.
 func (c *LocklessChecker) resolveSettledDivergence(ctx context.Context, res *workResult) {
 	chunk := res.item.chunk
-	c.confirmedDifferences.Add(1) // before any repair; see ConfirmedDifferences
-	if c.recopier == nil {
+	c.confirmedDifferences.Add(1) // before any repair
+	recopier := c.repairer()
+	if recopier == nil {
 		c.logRowDifferences(ctx, chunk, "hot chunk has diverged")
 		res.permanent = true
 		res.permanentEvidence = fmt.Sprintf("settled against the change stream after %d attempts, %d rows still outstanding; see the logged row differences",
@@ -1320,7 +1321,7 @@ func (c *LocklessChecker) resolveSettledDivergence(ctx context.Context, res *wor
 		return
 	}
 	c.logRowDifferences(ctx, chunk, "recopying diverged hot chunk")
-	if err := c.recopier.Recopy(ctx, chunk); err != nil {
+	if err := recopier.Recopy(ctx, chunk); err != nil {
 		res.err = fmt.Errorf("recopy hot chunk %s: %w", chunk.String(), err)
 		return
 	}
@@ -1443,16 +1444,14 @@ func (c *LocklessChecker) executeWork(ctx context.Context, item *workItem) *work
 		// genuine divergence. Fall through.
 	}
 
-	// Confirmed stable divergence. Self-heal by recopying the chunk when a
-	// Recopier is configured and the caller has not declared divergence fatal;
-	// otherwise surface ErrPermanentDivergence so the caller (a library user
-	// running a read-only verification) sees it as an error. Counted before
-	// the repair, so a caller gating on ConfirmedDifferences never sees a
-	// rewritten range as clean.
+	// Confirmed stable divergence. Run self-heals by recopying the chunk;
+	// RunContinuous surfaces ErrPermanentDivergence so the caller aborts
+	// rather than rewriting rows while a cutover may be imminent. Counted
+	// before the repair, so a rewritten range is never reported as clean.
 	c.confirmedDifferences.Add(1)
-	if c.recopier != nil {
+	if recopier := c.repairer(); recopier != nil {
 		c.logRowDifferences(ctx, item.chunk, "recopying diverged chunk")
-		if err := c.recopier.Recopy(ctx, item.chunk); err != nil {
+		if err := recopier.Recopy(ctx, item.chunk); err != nil {
 			res.err = fmt.Errorf("recopy chunk %s: %w", item.chunk.String(), err)
 			return res
 		}
@@ -1750,9 +1749,8 @@ func (c *LocklessChecker) bucketPassed(item *workItem, recopied bool) {
 		c.passedUnder5AttemptsThisPass.Add(1)
 	default:
 		// 5+ retry attempts. Fold any 10+ outliers into the same bucket;
-		// with a Recopier configured those are rare (stable divergence
-		// would trigger recopy before then) and the precision isn't
-		// worth a separate bucket.
+		// those are rare (stable divergence is resolved before then) and
+		// the precision isn't worth a separate bucket.
 		c.passedUnder10AttemptsThisPass.Add(1)
 	}
 }
@@ -1880,17 +1878,6 @@ func (c *LocklessChecker) Stats() LocklessCheckerStats {
 // persisted watermark and forces re-verification on resume.
 func (c *LocklessChecker) DifferencesFound() uint64 {
 	return c.mismatchesDetected.Load()
-}
-
-// ConfirmedDifferences returns the lifetime number of chunks judged diverged
-// after every feed was drained, or settled diverged against the change stream:
-// the ones that are repaired or reported, and never apply lag that reconciled
-// on retry. It is counted before a repair starts and never reset, so it is the
-// signal for "this checker has seen the copy wrong", which DifferencesFound is
-// too noisy to be: an optimistic read of a table taking writes mismatches
-// routinely.
-func (c *LocklessChecker) ConfirmedDifferences() uint64 {
-	return c.confirmedDifferences.Load()
 }
 
 // FirstCleanPass returns a channel that is closed the first time a pass

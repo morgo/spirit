@@ -92,7 +92,7 @@ func (f *shardedFixture) checker(t *testing.T, fix bool) Checker {
 	config := NewCheckerDefaultConfig()
 	config.Lockless = true
 	config.Applier = f.applier
-	config.FixDifferences = fix
+	config.noRepair = !fix
 	config.RetryDelay = 10 * time.Millisecond
 	checker, err := NewChecker(f.sources, f.chunker, f.feeds, config)
 	require.NoError(t, err)
@@ -170,7 +170,7 @@ func TestShardedPairCancellation(t *testing.T) {
 	require.ErrorIs(t, err, ErrPermanentDivergence, "row-count mismatch from pair-cancellation must be detected")
 }
 
-// With FixDifferences, a divergence anywhere in an N:M topology is repaired
+// Run repairs: a divergence anywhere in an N:M topology is repaired
 // by deleting the range on every target and re-applying every source's rows
 // through the sharded applier — which re-routes each row to its shard, so a
 // row that landed on the wrong target is moved rather than duplicated.

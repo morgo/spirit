@@ -148,7 +148,7 @@ func TestLocklessHotSnapshotGate(t *testing.T) {
 			cfg := fastConfig()
 			cfg.RetryDelay = time.Millisecond
 			cfg.MaxHotAttempts = 4
-			cfg.MinPassInterval = time.Hour
+			cfg.minPassInterval = time.Hour
 			c := newTestChecker(t, chunker, cfg, func(_ context.Context, _ *table.Chunk, attempt int) (int64, int64, uint64, error) {
 				return int64(attempt), 0, 1, nil // aggregate keeps changing forever
 			})

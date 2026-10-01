@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"testing"
 
+	"github.com/block/spirit/pkg/applier"
 	"github.com/block/spirit/pkg/change"
 	"github.com/block/spirit/pkg/checksum"
 	"github.com/block/spirit/pkg/status"
@@ -76,6 +77,7 @@ func TestLocklessCheckpointPersistsChecksumWatermark(t *testing.T) {
 	require.NotEmpty(t, watermark, "control: traditional checksum persists a clean watermark")
 	cfg := checksum.NewCheckerDefaultConfig()
 	cfg.Lockless = true
+	cfg.Applier = &applier.MockApplier{}
 	var err error
 	r.checker, err = checksum.NewChecker([]*sql.DB{r.db}, r.checksumChunker, []change.Source{r.replClient}, cfg)
 	require.NoError(t, err)

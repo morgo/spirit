@@ -95,9 +95,9 @@ func TestMoveSentinelDropReleasesCutover(t *testing.T) {
 //
 // Sequential by design: it shortens package-level pass and retry timing.
 func TestMoveContinuousChecksumAbortsThenResumeRepairs(t *testing.T) {
-	prev := continuousChecksumMinInterval
-	continuousChecksumMinInterval = 500 * time.Millisecond
-	t.Cleanup(func() { continuousChecksumMinInterval = prev })
+	prev := checksum.LocklessMinPassInterval
+	checksum.LocklessMinPassInterval = 500 * time.Millisecond
+	t.Cleanup(func() { checksum.LocklessMinPassInterval = prev })
 	// The confirming retry would otherwise wait for a periodic feed flush (30s),
 	// past the test's sentinel wait limit. The gate is not what this covers.
 	prevFlushWait := checksum.DefaultLocklessRetryFlushWait

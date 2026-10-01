@@ -898,17 +898,15 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context, resumePosi
 	if r.migration.EnableExperimentalLocklessChecksum {
 		r.logger.Warn("experimental lockless checksum enabled; verification uses optimistic reads, cutover locking is unchanged")
 	}
+	// Repair policy is not configured: both checkers repair in Run (the initial
+	// checksum) and report in RunContinuous (the sentinel wait).
 	r.checker, err = checksum.NewChecker([]*sql.DB{r.db}, r.checksumChunker, []change.Source{r.replClient}, &checksum.CheckerConfig{
-		// Repair policy is not set here: NewChecker derives it from
-		// FixDifferences below, so both checkers answer a divergence the same
-		// way (repair it, re-verify next pass, fail if it keeps coming back).
 		Lockless:        r.migration.EnableExperimentalLocklessChecksum,
 		Watermark:       checksumWatermark,
 		Concurrency:     r.migration.Threads,
 		TargetChunkTime: table.ChunkerDefaultTarget,
 		DBConfig:        r.dbConfig,
 		Logger:          r.logger,
-		FixDifferences:  true,
 		MaxRetries:      3,
 		YieldTimeout:    r.migration.ChecksumYieldTimeout,
 		MetricsSink:     r.metricsSink,

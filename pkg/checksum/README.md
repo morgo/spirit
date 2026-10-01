@@ -38,7 +38,7 @@ checksum exists, and it is a stronger one: **two optimizations in the copy
 phase are known not to be correct on their own, and a repairing checksum is
 what makes them safe.** They are not latent bugs awaiting a fix — they are
 positions taken deliberately, because the airtight alternative costs more than
-the repair does. Automatic repair (`FixDifferences`) is in the checksum *for
+the repair does. Automatic repair is in the checksum's `Run` *for
 this reason*, and the initial checksum before cutover is therefore a
 *component of the copy algorithm* rather than an audit of it. Which of the two
 checkers runs makes no difference; both repair.
@@ -55,12 +55,10 @@ the cases themselves:**
 2. **Repair is scoped to the initial checksum.** It exists to absorb exactly
    this copy-phase exposure. The continuous checksum that runs during a
    deferred cutover is a different question — by then nothing should be
-   diverging, so on `move` repair is deliberately *off* there
-   (`FixDifferences: false` in `continuousCheckerConfig`) and a divergence that
-   survives a full feed drain returns `ErrPermanentDivergence` and aborts:
-   visibility is preferred over a silent recopy while cutover may be imminent.
-   Migration currently reuses its one repairing checker for both its initial
-   and continuous passes, so its continuous pass does still repair — see
+   diverging, so `RunContinuous` never repairs, for any caller: a divergence
+   that survives a full feed drain returns `ErrPermanentDivergence` and aborts.
+   Visibility is preferred over a silent recopy while cutover may be imminent,
+   and the resumed run's initial checksum repairs it — see
    [Who repairs, and when](#who-repairs-and-when).
 
 Three mechanisms are involved, all in `pkg/change` (see [that package's
@@ -556,8 +554,8 @@ windows, not a growing tax.
 Note what is *not* claimed: settling is **not** one-off work per row. Each
 continuous pass calls `chunker.Reset()` and re-walks from the start, so a row
 that stays hot can be settled again on every pass. What stops that from being
-continuous is pacing, not convergence — `MinPassInterval`
-(`LocklessMinPassInterval`, 1 hour in production) puts an hour between passes,
+continuous is pacing, not convergence — `LocklessMinPassInterval`
+(1 hour) puts an hour between passes,
 so a permanently hot row costs one bounded escalation per hour. The finite
 pre-cut-over gate is the case with no such gap, and it is bounded by
 `MaxPasses` instead.
@@ -816,17 +814,16 @@ in the section for the checker they belong to, and are ignored by the other. `Yi
 is snapshot-only — lockless reads are short by construction and hold no snapshot
 to yield — and the retry, splitting and pacing fields are lockless-only.
 
-Repair policy is `FixDifferences`, for both checkers, so a caller does not
-have to know which one it picked to say whether a divergence should be healed or
-should abort. The factory turns it into the `Recopier` the checker repairs
-through, built over the one `Applier` both share, and the presence
-of that recopier *is* the policy: with one, a confirmed divergence is repaired and
-verification continues; without one, a mismatch is reported as an error
-(`ErrPermanentDivergence` for lockless verification). `MaxRetries` bounds whole-run attempts for both. Migration reuses the factory
-result through `Checker.RunContinuous`, which owns pacing, chunker resets, feed
-flushing, and safe cancellation. `ContinuousActive` reports whether a pass is running rather than
-waiting for the next interval, so callers can report throttling accurately. Snapshot passes use the same configured repair/retry policy as the
-initial gate. Lockless passes retain their optimistic retry/defer behavior.
+Repair policy is not configured: it follows the method called, for both
+checkers. `Run` repairs — a confirmed divergence is rewritten from the source
+through the `Recopier` the factory builds over the required `Applier`, and
+verification continues. `RunContinuous` never repairs — a confirmed divergence
+returns `ErrPermanentDivergence`. `MaxRetries` bounds whole-run attempts for
+both. Every runner reuses the one factory result for `RunContinuous`, which owns
+pacing, chunker resets, feed flushing, and safe cancellation. `ContinuousActive`
+reports whether a pass is running rather than waiting for the next interval, so
+callers can report throttling accurately. Lockless passes retain their
+optimistic retry/defer behavior in both modes.
 
 Once `RunContinuous` starts, `ResumeWatermark` stays empty, including after a
 clean background pass. Copy progress is retained, but a restarted migration must
@@ -854,11 +851,6 @@ Snapshot checkers suppress evidence after differences. Lockless verification has
 no equivalent gate and does not need one — optimistic reads mismatch routinely on
 a table taking writes and almost all of those resolve on retry, so gating on the
 mismatch counter would discard the watermark on essentially every real migration.
-(A caller that must know whether a *separate* lockless checker ever saw the copy
-wrong — move, gating its checkpoint on the sentinel-wait checker — reads
-`LocklessChecker.ConfirmedDifferences()`: divergences confirmed after every feed
-was drained, or settled against the stream, counted before any repair and never
-reset. `DifferencesFound()` includes the lag that reconciled.)
 What makes the prefix trustworthy instead is that a chunk is reported to the
 chunker only once it has resolved clean, so a chunk that was repaired, deferred
 as hot, or split parks the watermark below itself and a resumed run re-verifies
@@ -1112,7 +1104,7 @@ precision is only taken from the source when the source is itself a
 
 ## Chunk repair
 
-When a chunk mismatches and `FixDifferences` is set, the chunk is *repaired* rather than the run failing immediately. Every implementation repairs the same way:
+When a chunk mismatches during `Run`, the chunk is *repaired* rather than the run failing immediately. Every implementation repairs the same way:
 
 1. `DELETE` the chunk's key range on the target — this is what removes rows the source no longer has, which a pure upsert could never do.
 2. `SELECT` the chunk's rows from the source into Spirit.
@@ -1134,15 +1126,14 @@ The read is not synchronized with the change feed: a row deleted on the source a
 
 ### Who repairs, and when
 
-`FixDifferences` is a per-run policy, not a property of a checker, and the runners do not all set it:
+Repair follows the method called, not a configuration field, and it is the same for every runner and both checkers:
 
-| Run | `FixDifferences` | A divergence means |
+| Method | Used for | A divergence means |
 |---|---|---|
-| Initial checksum — `migrate`, `move`, `sync` | `true` | Repair the chunk, re-verify it on a later pass, fail only if it keeps coming back |
-| `move` continuous checksum (sentinel wait) | `false` | `ErrPermanentDivergence`; the move aborts |
-| `migrate` continuous checksum (sentinel wait) | `true` (same checker object as its initial pass) | Repaired, as in the initial pass |
+| `Run` | Initial checksum — `migrate`, `move`, `sync` | Repair the chunk, re-verify it on a later pass, fail only if it keeps coming back |
+| `RunContinuous` | Sentinel wait — `migrate`, `move`; after the initial checksum — `sync` | `ErrPermanentDivergence`; the run aborts |
 
-The reason repair exists at all is the [copy-phase exposure](#not-only-bugs-two-copy-phase-optimizations-are-unsafe-by-design) the initial checksum stands behind: the row copy runs with optimizations that are only correct *given* a repairing check afterwards. A continuous pass is in a different position. It runs after that check has already passed and after the optimizations were disabled, so nothing should be diverging any more — and while a cut-over may be moments away, a loud failure is worth more than a quiet recopy. That is why `move` turns repair off there; a resumed move blanks the checksum watermark and its initial checksum repairs the chunk. Migration has not been split this way: it builds one checker with `FixDifferences: true` and reuses it for `RunContinuous`.
+The reason repair exists at all is the [copy-phase exposure](#not-only-bugs-two-copy-phase-optimizations-are-unsafe-by-design) the initial checksum stands behind: the row copy runs with optimizations that are only correct *given* a repairing check afterwards. A continuous pass is in a different position. It runs after that check has already passed and after the optimizations were disabled, so nothing should be diverging any more — and while a cut-over may be moments away, a loud failure is worth more than a quiet recopy. That is why `RunContinuous` never repairs. Migration and move clear the persisted checksum watermark before continuous verification starts, so the resumed run's initial checksum is a full pass that repairs the chunk. Sync has no cut-over, but the same reasoning holds: after its first clean pass nothing should diverge, so a divergence stops the sync rather than being rewritten silently.
 
 ## Pacing and scaling
 
@@ -1180,7 +1171,7 @@ Concurrency is gated by a resizable `autoscale.Limiter` rather than `errgroup.Se
 
 One constraint shapes all of this: the `REPEATABLE READ` transaction pool **cannot grow** once the table lock is released. Every transaction takes its snapshot under that lock, so they all see one point in time; a transaction started later would read a newer snapshot and could compare a chunk against changes its siblings cannot see. The pool is therefore provisioned at the autoscale ceiling up front, whether or not scaling is enabled. Over-provisioning costs one connection per idle transaction and no extra history retention, since every read view pins from the same instant. What it does cost is lock-window time: each transaction is started serially under the lock, so the ceiling lengthens that window in direct proportion. That cost is why `autoscale.ReadBounds` caps the read side at half the instance rather than all of it — for this pool a ceiling is not a hypothesis, it is spent whether or not scaling reaches it.
 
-`LocklessChecker` uses ordinary reads rather than a pinned snapshot pool. It supports load throttling and autoscaling through its worker limiter; `MinPassInterval` and its retry queue govern pass/retry pacing.
+`LocklessChecker` uses ordinary reads rather than a pinned snapshot pool. It supports load throttling and autoscaling through its worker limiter; `LocklessMinPassInterval` and its retry queue govern pass/retry pacing.
 
 Each pass logs a `checksum chunk size distribution` line (chunk count, duration p50/p90/max, row p50/max, and how many chunks hit `table.MaxDynamicRowSize`). The row-capped count is the useful one: the checksum aggregates server-side and returns one row per chunk, so its chunks are far cheaper than the copier's, and if most are pinned at the row ceiling then that — not the `table.ChunkerDefaultTarget` time budget — is what bounds them.
 
@@ -1272,9 +1263,9 @@ identified. It defers, and the ordinary retries carry it.
 
 When a chunk's source CRC is stable across the retry window but the target still disagrees, that is a **stable divergence**. How the checker reacts is governed by whether it has a `Recopier`:
 
-- **With one**, a stable divergence is *repaired* by recopying that chunk from the source: `DELETE` the key range on the target, re-`SELECT` from the source, and re-apply through the same write path the change feed uses. Migration, move's initial checksum and sync ask for this — they set `FixDifferences` — so each self-heals a divergence and gives up only when repeated passes keep re-finding one. `chunkRepairer` repairs through the applier, deleting the range on every target and reading it from every source (`spirit migrate`, `spirit move`); `mysqlRecopier` is the cross-server one (`spirit sync`). Recopies are serialized and run under a cancellation-detached, time-bounded (10 minute) context, so a chunk is never left deleted-but-not-rewritten.
-- **Without one**, a stable divergence is fatal: `Run` returns `ErrPermanentDivergence` and the caller aborts. Move's continuous checksum selects this: the initial checksum already passed, so a divergence found while waiting on the sentinel is surfaced rather than repaired near cutover. A resumed move's initial checksum repairs it.
+- **With one**, a stable divergence is *repaired* by recopying that chunk from the source: `DELETE` the key range on the target, re-`SELECT` from the source, and re-apply through the same write path the change feed uses. `Run` always has one — the factory requires an `Applier` to build it from — so the initial checksum of migration, move and sync each self-heals a divergence and gives up only when repeated passes keep re-finding one. `chunkRepairer` repairs through the applier, deleting the range on every target and reading it from every source (`spirit migrate`, `spirit move`); `mysqlRecopier` is the cross-server one (`spirit sync`). Recopies are serialized and run under a cancellation-detached, time-bounded (10 minute) context, so a chunk is never left deleted-but-not-rewritten.
+- **Without one**, a stable divergence is fatal: the checker returns `ErrPermanentDivergence` and the caller aborts. `RunContinuous` withholds the recopier for this: the initial checksum already passed, so a divergence found while waiting on the sentinel is surfaced rather than repaired near cutover. A resumed run's initial checksum repairs it.
 
 Before either policy acts, the change feed is drained and the chunk re-read, so a target that was merely behind on applying buffered changes is not mistaken for a diverged one. On a confirmed divergence the checker logs a line per differing row (mismatched, missing on the target, missing on the source), the same diagnostic the snapshot checker emits.
 
-Passes are paced by `MinPassInterval` so a small table is not re-checksummed back-to-back; the finite gate substitutes `RetryDelay` for an unset interval rather than the continuous default, because a cut-over is waiting on the answer. `MaxPasses` bounds the finite gate: a range that never converges returns `ErrVerificationUnresolved` instead of keeping the caller in an endless re-walk with no error and no end. `FirstCleanPass` exposes a channel that closes the first time a pass completes with every chunk read-verified equal and zero recopies — the signal that the target is known consistent.
+Continuous passes are paced by `LocklessMinPassInterval` so a small table is not re-checksummed back-to-back; the finite gate paces by `RetryDelay` instead, because a cut-over is waiting on the answer. `MaxPasses` bounds the finite gate: a range that never converges returns `ErrVerificationUnresolved` instead of keeping the caller in an endless re-walk with no error and no end. `FirstCleanPass` exposes a channel that closes the first time a pass completes with every chunk read-verified equal and zero recopies — the signal that the target is known consistent.

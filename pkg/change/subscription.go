@@ -16,8 +16,8 @@ import (
 // exists because collation-equivalent keys ("A" and "a") hash to different
 // map slots but resolve to the same MySQL row — map iteration would apply
 // events out of order. During the copy phase the chunker's later SELECT
-// covers in-window case-collision races, and the post-cutover checksum
-// (with FixDifferences=true) repairs any residual divergence. The
+// covers in-window case-collision races, and the post-copy checksum
+// repairs any residual divergence. The
 // transition happens inside SetWatermarkOptimization, which drains the
 // outgoing store inline.
 //
