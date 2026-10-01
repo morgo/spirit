@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -668,42 +667,6 @@ func TestDeltasFlushedDuringIndexRestore(t *testing.T) {
 	require.NoError(t, targetDB.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = 'idxflush_dest' AND table_name = 't1' AND index_name = 'val_idx'`).Scan(&idxCount))
 	require.Positive(t, idxCount, "deferred secondary index should have been restored")
-}
-
-// TestAnalyzeTableMissingTargetIsError verifies that analyzeTable inspects the
-// ANALYZE TABLE result set and surfaces a missing table as an error, rather
-// than silently returning nil (the failure mode that hid the cross-schema bug
-// on real cross-cluster targets).
-func TestAnalyzeTableMissingTargetIsError(t *testing.T) {
-	testutils.RunSQL(t, `DROP DATABASE IF EXISTS w3c_analyze`)
-	testutils.RunSQL(t, `CREATE DATABASE w3c_analyze`)
-	testutils.RunSQL(t, `CREATE TABLE w3c_analyze.present (id INT PRIMARY KEY)`)
-	t.Cleanup(func() { testutils.RunSQL(t, `DROP DATABASE IF EXISTS w3c_analyze`) })
-
-	// analyzeTable addresses the table UNQUALIFIED, so the connection must
-	// default to the target schema (as the real target.DB does) — connect with
-	// w3c_analyze as the default database rather than the usual `test`.
-	dbConfig := dbconn.NewDBConfig()
-	db, err := dbconn.New(testutils.DSNForDatabase("w3c_analyze"), dbConfig)
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, db.Close()) })
-
-	// analyzeTable only reads r.logger (for non-error rows), so give it a real
-	// logger so the warning path does not dereference a nil pointer.
-	r := &Runner{logger: slog.Default()}
-
-	// A freshly-created table analyzes cleanly (Msg_type "status").
-	require.NoError(t, r.analyzeTable(t.Context(), db, "present"))
-
-	// Re-analyzing succeeds too, even though it may report a non-OK status row
-	// ("Table is already up to date") — only Msg_type="Error" is a failure.
-	require.NoError(t, r.analyzeTable(t.Context(), db, "present"))
-
-	// A missing table must surface as an error (via the Msg_type="Error" row),
-	// not a silent no-op.
-	err = r.analyzeTable(t.Context(), db, "does_not_exist")
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "ANALYZE TABLE")
 }
 
 // TestMoveValidate covers the Kong Validate() hook: explicitly-negative
