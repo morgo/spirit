@@ -113,9 +113,11 @@ type Index struct {
 	// InlineDerived marks a UNIQUE index that indexNormalizer synthesized
 	// from an inline column-level UNIQUE (`c INT UNIQUE`). Its name is only a
 	// guess at the server-assigned one (the column name, suffixed on collision),
-	// so diffIndexes pairs it with an equivalent live unique index by column set
-	// even when the names differ, rather than emitting a spurious DROP+ADD.
-	// Not serialized: it is a diff-time hint, not part of the logical schema.
+	// so diffIndexes pairs it with an equivalent unique index on the other side
+	// by column set even when the names differ, and compares the pair under
+	// that side's name (see pairInlineUniqueNames) rather than emitting a
+	// spurious DROP+ADD. Not serialized: it is a diff-time hint, not part of
+	// the logical schema.
 	InlineDerived bool `json:"-"`
 }
 
@@ -1997,12 +1999,69 @@ func (ct *CreateTable) calculateColumnPositioning(target *CreateTable, sourceCol
 // option change. To make such a change actually take effect, the DROP and ADD
 // must run as two separate ALTER statements. Those are returned via the second
 // value as standalone clause-lists (each becomes its own ALTER statement).
+// pairInlineUniqueNames reconciles the names of unique indexes that one side
+// declared inline (`c INT UNIQUE`). indexNormalizer names such an index after
+// its column, which is only a guess at the name the server assigned: the live
+// table may call it c_2, or whatever an earlier definition left behind. A
+// unique index on the same column set whose name differs, when at least one
+// side's name is a guess, is the same index, so the guessed side takes the
+// other side's name and the two then meet in diffIndexes' name-keyed walk,
+// where their options and visibility are compared like any other pair.
+//
+// The pair used to be left out of the diff altogether, which hid an option
+// difference: a live `UNIQUE KEY c_2 (c) COMMENT 'x'` matched an inline
+// `c INT UNIQUE` with nothing emitted, so a declaration could never clear a
+// comment or INVISIBLE from the live index. Two explicitly named unique
+// indexes that differ only in name are not paired: that is a real rename
+// (DROP + ADD). When only one side's name is a guess it takes the explicit
+// one; when both are, the target takes the source's, so a live name is never
+// changed. The lists are modified in place.
+func pairInlineUniqueNames(sourceIdxList, targetIdxList []Index) {
+	sourceNames := make(map[string]bool, len(sourceIdxList))
+	for i := range sourceIdxList {
+		sourceNames[sourceIdxList[i].Name] = true
+	}
+	targetNames := make(map[string]bool, len(targetIdxList))
+	for i := range targetIdxList {
+		targetNames[targetIdxList[i].Name] = true
+	}
+	paired := make(map[int]bool) // target positions already paired
+	for i := range sourceIdxList {
+		sourceIdx := &sourceIdxList[i]
+		if sourceIdx.Type != "UNIQUE" || targetNames[sourceIdx.Name] {
+			continue // not unique, or already met by name
+		}
+		for j := range targetIdxList {
+			targetIdx := &targetIdxList[j]
+			if targetIdx.Type != "UNIQUE" || sourceNames[targetIdx.Name] || paired[j] {
+				continue
+			}
+			if !sourceIdx.InlineDerived && !targetIdx.InlineDerived {
+				continue // both explicitly named: a genuine rename
+			}
+			if !indexColumnsIdenticalIgnoreName(sourceIdx, targetIdx) {
+				continue
+			}
+			paired[j] = true
+			if targetIdx.InlineDerived {
+				targetIdx.Name = sourceIdx.Name
+			} else {
+				sourceIdx.Name = targetIdx.Name
+			}
+			break
+		}
+	}
+}
+
 func (ct *CreateTable) diffIndexes(target *CreateTable) (clauses []string, separateStatements [][]string) {
 	// Inline column-level UNIQUE / PRIMARY KEY have already been materialized
 	// into ct.Indexes by normalization (see indexNormalizer, primaryKeyNormalizer),
-	// so both index sets can be walked directly.
-	sourceIdxList := ct.Indexes
-	targetIdxList := target.Indexes
+	// so both index sets can be walked directly. The lists are copied because
+	// pairInlineUniqueNames renames entries, and the caller's tables must not
+	// change under a diff.
+	sourceIdxList := slices.Clone(ct.Indexes)
+	targetIdxList := slices.Clone(target.Indexes)
+	pairInlineUniqueNames(sourceIdxList, targetIdxList)
 
 	// Build maps for easier lookup
 	sourceIndexes := make(map[string]*Index)
@@ -2013,45 +2072,6 @@ func (ct *CreateTable) diffIndexes(target *CreateTable) (clauses []string, separ
 	targetIndexes := make(map[string]*Index)
 	for i := range targetIdxList {
 		targetIndexes[targetIdxList[i].Name] = &targetIdxList[i]
-	}
-
-	// Safety net for inline-derived names: the synthesized name is only a
-	// guess at what the server assigned. Pair unique indexes that cover the
-	// same column set but carry different names whenever at least one side's
-	// name came from an inline declaration, so we never DROP a live unique
-	// index (or ADD a duplicate) that the other side's inline UNIQUE already
-	// expresses. Two explicitly named unique indexes that differ only in name
-	// are NOT paired — that is a real rename (DROP + ADD).
-	matchedSourceUnique := make(map[string]bool) // source name -> matched
-	matchedTargetUnique := make(map[string]bool) // target name -> matched
-	for i := range sourceIdxList {
-		sourceIdx := &sourceIdxList[i]
-		if sourceIdx.Type != "UNIQUE" {
-			continue
-		}
-		if _, exactMatch := targetIndexes[sourceIdx.Name]; exactMatch {
-			continue // handled by the normal name-based path
-		}
-		for j := range targetIdxList {
-			targetIdx := &targetIdxList[j]
-			if targetIdx.Type != "UNIQUE" {
-				continue
-			}
-			if _, exactMatch := sourceIndexes[targetIdx.Name]; exactMatch {
-				continue // this target index already has a name match in source
-			}
-			if matchedTargetUnique[targetIdx.Name] {
-				continue // already paired with another source index
-			}
-			if !sourceIdx.InlineDerived && !targetIdx.InlineDerived {
-				continue // both explicitly named: a genuine rename
-			}
-			if indexColumnsIdenticalIgnoreName(sourceIdx, targetIdx) {
-				matchedSourceUnique[sourceIdx.Name] = true
-				matchedTargetUnique[targetIdx.Name] = true
-				break
-			}
-		}
 	}
 
 	// Collect DROP operations and sort by name for deterministic output
@@ -2072,9 +2092,6 @@ func (ct *CreateTable) diffIndexes(target *CreateTable) (clauses []string, separ
 
 	for i := range sourceIdxList {
 		sourceIdx := &sourceIdxList[i]
-		if matchedSourceUnique[sourceIdx.Name] {
-			continue // equivalent unique index exists in target under an inline-derived pairing
-		}
 		targetIdx, existsInTarget := targetIndexes[sourceIdx.Name]
 
 		if !existsInTarget {
@@ -2117,9 +2134,6 @@ func (ct *CreateTable) diffIndexes(target *CreateTable) (clauses []string, separ
 	// Collect ADD operations and sort by name for deterministic output
 	var addClauses []string
 	for _, targetIdx := range targetIdxList {
-		if matchedTargetUnique[targetIdx.Name] {
-			continue // equivalent unique index exists in source under an inline-derived pairing
-		}
 		sourceIdx, existsInSource := sourceIndexes[targetIdx.Name]
 
 		if !existsInSource {

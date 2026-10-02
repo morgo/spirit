@@ -325,3 +325,35 @@ func TestDiffMySQLContracts(t *testing.T) {
 		})
 	}
 }
+
+// TestDiffContractInlineUniqueKeepsLiveName checks the pairing of an inline
+// `c INT UNIQUE` with a live unique index under another name: the emitted
+// ALTER keeps the live name and brings the index's options in line with the
+// declaration, and the result diffs clean. The SHOW CREATE TABLE text differs
+// from the declaration's by the index name, which is why this is not a
+// diffContract case.
+func TestDiffContractInlineUniqueKeepsLiveName(t *testing.T) {
+	t.Parallel()
+	_, db := testutils.CreateUniqueTestDatabase(t)
+	ctx := t.Context()
+	_, err := db.ExecContext(ctx, "CREATE TABLE t (id INT PRIMARY KEY, c INT, UNIQUE KEY c_2 (c) COMMENT 'x' INVISIBLE)")
+	require.NoError(t, err)
+	dst, err := ParseCreateTable("CREATE TABLE t (id INT PRIMARY KEY, c INT UNIQUE)")
+	require.NoError(t, err)
+	src, err := ParseCreateTable(showCreateTable(t, db, "t"))
+	require.NoError(t, err)
+	stmts, err := src.Diff(dst, nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, stmts, "the live index carries a comment and is invisible; the declaration has neither")
+	for _, stmt := range stmts {
+		_, err = db.ExecContext(ctx, stmt.Statement)
+		require.NoError(t, err, stmt.Statement)
+	}
+	live := showCreateTable(t, db, "t")
+	require.Contains(t, live, "UNIQUE KEY `c_2` (`c`)\n", "the live name is kept and the options are cleared")
+	again, err := ParseCreateTable(live)
+	require.NoError(t, err)
+	stmts, err = again.Diff(dst, nil)
+	require.NoError(t, err)
+	require.Empty(t, stmts)
+}

@@ -146,6 +146,29 @@ func TestDiff(t *testing.T) {
 			expected: "",
 		},
 		{
+			// The pairing compares the pair under the live name, so an option
+			// the declaration does not carry is cleared from the live index
+			// instead of being hidden by the pairing.
+			name:     "InlineUniqueAdoptsLiveNameAndClearsComment",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, UNIQUE KEY c_2 (c) COMMENT 'x')",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT UNIQUE)",
+			expected: "ALTER TABLE `t1` DROP INDEX `c_2`, ADD UNIQUE INDEX `c_2` (`c`)",
+		},
+		{
+			name:     "InlineUniqueAdoptsLiveNameAndRestoresVisibility",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, UNIQUE KEY c_2 (c) INVISIBLE)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT UNIQUE)",
+			expected: "ALTER TABLE `t1` ALTER INDEX `c_2` VISIBLE",
+		},
+		{
+			// The other direction: a source written inline against a target
+			// with an explicit name and a comment takes the target's name.
+			name:     "InlineSourceUniqueAdoptsTargetName",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT UNIQUE)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, UNIQUE KEY uniq_c (c) COMMENT 'x')",
+			expected: "ALTER TABLE `t1` DROP INDEX `uniq_c`, ADD UNIQUE INDEX `uniq_c` (`c`) COMMENT 'x'",
+		},
+		{
 			// Name collision with an unnamed table-level key: the server
 			// names indexes in declaration order, so the inline unique claims
 			// `c` and the unnamed KEY (c, d) is pushed to `c_2`. The parsed
