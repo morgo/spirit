@@ -60,14 +60,8 @@ func TestStatementScopeChecks(t *testing.T) {
 	}{
 		{
 			name:    "drop primary key is refused",
-			stmt:    "ALTER TABLE t1 DROP PRIMARY KEY",
+			stmt:    "ALTER TABLE t1 DROP PRIMARY KEY, ADD PRIMARY KEY (anothercol)",
 			wantErr: "dropping primary key is not supported",
-		},
-		{
-			// Comparing the re-added key's columns to the table's needs the
-			// table; the statement alone decides without it.
-			name: "drop primary key added back passes without table metadata",
-			stmt: "ALTER TABLE t1 DROP PRIMARY KEY, ADD PRIMARY KEY (anothercol)",
 		},
 		{
 			name:    "add foreign key is refused",

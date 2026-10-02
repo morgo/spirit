@@ -27,10 +27,8 @@ import (
 // string when it is not available: coverage then narrows to the checks that need
 // only the statement — the ENUM/SET checks, which compare a redeclared column
 // against its current type, the missing-primary-key refusal, which reads the
-// current key definition, the primary key check's comparison of a key the
-// statement drops and adds back against the current one, and the primary key
-// collation prediction, which reads the key columns' current charsets and
-// collations, are skipped. The
+// current key definition, and the primary key collation prediction, which
+// reads the key columns' current charsets and collations, are skipped. The
 // definition must also reflect the table's true key set: SHOW CREATE TABLE
 // output collected with show_gipk_in_create_table_and_information_schema
 // disabled omits a generated invisible primary key and misreports the table as
