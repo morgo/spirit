@@ -109,10 +109,15 @@ func formatColumnDefinition(col *Column) string {
 		parts = append(parts, genClause)
 	}
 
-	// Nullable
-	if !col.Nullable {
+	// Nullable. A nullable AUTO_INCREMENT column writes its NULL after the
+	// AUTO_INCREMENT attribute: MySQL applies the attributes in order and
+	// AUTO_INCREMENT implies NOT NULL, so `int NULL AUTO_INCREMENT` is stored
+	// NOT NULL (see autoIncrementNotNullNormalizer).
+	nullAfterAutoInc := col.Nullable && col.AutoInc
+	switch {
+	case !col.Nullable:
 		parts = append(parts, "NOT NULL")
-	} else {
+	case !nullAfterAutoInc:
 		parts = append(parts, "NULL")
 	}
 
@@ -122,11 +127,32 @@ func formatColumnDefinition(col *Column) string {
 		parts = append(parts, fmt.Sprintf("SRID %d", *col.SRID))
 	}
 
+	// The attributes MySQL reports between the type and the DEFAULT. Each of
+	// these, like INVISIBLE and SECONDARY_ENGINE_ATTRIBUTE below, has to be
+	// re-emitted on every MODIFY: MySQL replaces the whole column definition,
+	// so an attribute left out of the MODIFY is silently cleared.
+	if col.NotSecondary {
+		parts = append(parts, "NOT SECONDARY")
+	}
+	if col.Storage != nil {
+		parts = append(parts, "STORAGE "+*col.Storage)
+	}
+	if col.ColumnFormat != nil {
+		parts = append(parts, "COLUMN_FORMAT "+*col.ColumnFormat)
+	}
+
 	// Default value (not permitted on generated columns)
 	if col.Default != nil && col.GeneratedExpr == nil {
-		defaultVal := *col.Default
+		defaultVal, kind := *col.Default, col.DefaultKind
+		if col.DefaultAsWritten != nil && !col.DefaultIsExpr {
+			// The literal as the schema spelled it, which MySQL reads the
+			// same way it would in a CREATE TABLE. Default is the reading
+			// the rules compare, which can name another value (see
+			// Column.DefaultAsWritten).
+			defaultVal, kind = col.DefaultAsWritten.Text, col.DefaultAsWritten.Kind
+		}
 		switch {
-		case col.DefaultIsExpr && col.DefaultKind == DefaultKindString:
+		case col.DefaultIsExpr && kind == DefaultKindString:
 			// Expression default whose expression is a string literal,
 			// e.g. DEFAULT ('{}') — the only default form MySQL accepts on
 			// BLOB/TEXT/JSON/GEOMETRY columns. The stored value is raw, so
@@ -135,17 +161,17 @@ func formatColumnDefinition(col *Column) string {
 		case col.DefaultIsExpr:
 			// Expression defaults must be wrapped in parentheses, e.g. DEFAULT (json_object())
 			parts = append(parts, fmt.Sprintf("DEFAULT (%s)", defaultVal))
-		case col.DefaultKind == DefaultKindString:
+		case kind == DefaultKindString:
 			// Quoted string literal. The stored value is the true raw value
 			// (unescaped at parse time), so quote+escape exactly once. This
 			// must bypass the needsQuotes heuristic: a literal 'TRUE' or
 			// 'NULL' or '2020' has to stay quoted, otherwise MySQL would
 			// store the keyword/number instead of the string.
 			parts = append(parts, fmt.Sprintf("DEFAULT '%s'", sqlescape.EscapeString(defaultVal)))
-		case col.DefaultKind == DefaultKindBitLiteral,
-			col.DefaultKind == DefaultKindHexLiteral,
-			col.DefaultKind == DefaultKindNumber,
-			col.DefaultKind == DefaultKindKeywordBool:
+		case kind == DefaultKindBitLiteral,
+			kind == DefaultKindHexLiteral,
+			kind == DefaultKindNumber,
+			kind == DefaultKindKeywordBool:
 			// A literal MySQL reports and accepts unquoted. The recorded text
 			// is already the canonical spelling of its kind — a bit literal is
 			// restored in the minimal form MySQL reports (b'0101' as b'101'),
@@ -170,11 +196,25 @@ func formatColumnDefinition(col *Column) string {
 	// Auto increment
 	if col.AutoInc {
 		parts = append(parts, "AUTO_INCREMENT")
+		if nullAfterAutoInc {
+			parts = append(parts, "NULL")
+		}
+	}
+
+	// Invisible column (MySQL 8.0.23+), reported after AUTO_INCREMENT and
+	// before COMMENT.
+	if col.Invisible {
+		parts = append(parts, "INVISIBLE")
 	}
 
 	// Comment
 	if col.Comment != nil {
 		parts = append(parts, fmt.Sprintf("COMMENT '%s'", sqlescape.EscapeString(*col.Comment)))
+	}
+
+	// SECONDARY_ENGINE_ATTRIBUTE is the last attribute MySQL reports.
+	if col.SecondaryEngineAttribute != nil {
+		parts = append(parts, fmt.Sprintf("SECONDARY_ENGINE_ATTRIBUTE='%s'", sqlescape.EscapeString(*col.SecondaryEngineAttribute)))
 	}
 
 	// NOTE: column-level CHECK constraints are deliberately not emitted here.
@@ -267,6 +307,11 @@ func formatAddIndex(idx *Index) string {
 		parts = append(parts, "INVISIBLE")
 	}
 
+	// SECONDARY_ENGINE_ATTRIBUTE, last as SHOW CREATE TABLE reports it.
+	if idx.SecondaryEngineAttribute != nil {
+		parts = append(parts, fmt.Sprintf("SECONDARY_ENGINE_ATTRIBUTE='%s'", sqlescape.EscapeString(*idx.SecondaryEngineAttribute)))
+	}
+
 	return strings.Join(parts, " ")
 }
 
@@ -292,18 +337,22 @@ func formatAddConstraint(constr *Constraint) string {
 	case "FOREIGN KEY":
 		columns := sqlescape.EscapeIdentifierList(constr.Columns)
 		refColumns := sqlescape.EscapeIdentifierList(constr.References.Columns)
+		refTable := sqlescape.EscapeIdentifier(constr.References.Table)
+		if constr.References.Schema != "" {
+			refTable = sqlescape.EscapeIdentifier(constr.References.Schema) + "." + refTable
+		}
 
 		var fkClause string
 		if constr.Name != "" {
 			fkClause = fmt.Sprintf("ADD CONSTRAINT %s FOREIGN KEY (%s) REFERENCES %s (%s)",
 				sqlescape.EscapeIdentifier(constr.Name),
 				columns,
-				sqlescape.EscapeIdentifier(constr.References.Table),
+				refTable,
 				refColumns)
 		} else {
 			fkClause = fmt.Sprintf("ADD FOREIGN KEY (%s) REFERENCES %s (%s)",
 				columns,
-				sqlescape.EscapeIdentifier(constr.References.Table),
+				refTable,
 				refColumns)
 		}
 

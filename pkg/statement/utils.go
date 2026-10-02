@@ -90,23 +90,6 @@ func ptrEqual[T comparable](a, b *T) bool {
 	return *a == *b
 }
 
-// getPreviousColumn returns the name of the column directly before
-// `name` in the given slice, or "" if `name` is the first column or
-// not found. Used by diffColumns to decide whether an ADD COLUMN needs
-// an AFTER clause. Matches `name` case-insensitively, since MySQL
-// column identifiers are case-insensitive.
-func getPreviousColumn(columns []Column, name string) string {
-	for i, col := range columns {
-		if strings.EqualFold(col.Name, name) {
-			if i == 0 {
-				return ""
-			}
-			return columns[i-1].Name
-		}
-	}
-	return ""
-}
-
 // numericColumnTypes are the column types whose DEFAULT value is a number.
 // MySQL's SHOW CREATE TABLE always renders a numeric default in quoted form
 // (e.g. `bigint DEFAULT '0'`, `tinyint(1) DEFAULT '1'`) regardless of whether

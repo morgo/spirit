@@ -7,7 +7,8 @@ import (
 	"testing"
 	"unicode"
 
-	_ "github.com/block/mysql"
+	drivermysql "github.com/block/mysql"
+	"github.com/block/spirit/pkg/parser/mysql"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/stretchr/testify/assert"
@@ -71,9 +72,9 @@ func TestDiffIntegrationFulltextParser(t *testing.T) {
 
 	stmts, err := source.Diff(target, nil)
 	require.NoError(t, err)
-	require.Len(t, stmts, 2, "option-only index change must be two separate statements")
-	require.Equal(t, "ALTER TABLE `diff_ft_parser` DROP INDEX `ft_b`", stmts[0].Statement)
-	require.Equal(t, "ALTER TABLE `diff_ft_parser` ADD FULLTEXT INDEX `ft_b` (`b`) WITH PARSER ngram", stmts[1].Statement)
+	require.Len(t, stmts, 2, "option-only index change must be a swap and a rename")
+	require.Equal(t, "ALTER TABLE `diff_ft_parser` ADD FULLTEXT INDEX `_ft_b_new` (`b`) WITH PARSER ngram, DROP INDEX `ft_b`", stmts[0].Statement)
+	require.Equal(t, "ALTER TABLE `diff_ft_parser` RENAME INDEX `_ft_b_new` TO `ft_b`", stmts[1].Statement)
 
 	// Execute the emitted statements exactly as the Runner would, and verify
 	// the parser change actually took effect — no extra manual ALTERs.
@@ -233,9 +234,9 @@ func TestDiffIntegrationKeyBlockSize(t *testing.T) {
 
 	stmts, err := source.Diff(target, nil)
 	require.NoError(t, err)
-	require.Len(t, stmts, 2, "option-only index change must be two separate statements")
-	require.Equal(t, "ALTER TABLE `diff_kbs` DROP INDEX `idx_b`", stmts[0].Statement)
-	require.Equal(t, "ALTER TABLE `diff_kbs` ADD INDEX `idx_b` (`b`) KEY_BLOCK_SIZE=8", stmts[1].Statement)
+	require.Len(t, stmts, 2, "option-only index change must be a swap and a rename")
+	require.Equal(t, "ALTER TABLE `diff_kbs` ADD INDEX `_idx_b_new` (`b`) KEY_BLOCK_SIZE=8, DROP INDEX `idx_b`", stmts[0].Statement)
+	require.Equal(t, "ALTER TABLE `diff_kbs` RENAME INDEX `_idx_b_new` TO `idx_b`", stmts[1].Statement)
 
 	// Execute the emitted statements exactly as the Runner would, and verify
 	// KEY_BLOCK_SIZE actually took effect — no extra manual ALTERs.
@@ -409,8 +410,8 @@ func TestDiffIntegrationForeignKeyNoAction(t *testing.T) {
 
 	// A genuine action change (NO ACTION -> CASCADE) still produces a diff,
 	// and applying it converges. The desired FK uses a different constraint
-	// name because MySQL rejects a same-name DROP FOREIGN KEY + ADD
-	// CONSTRAINT within a single ALTER (Error 1826).
+	// name, which fits one ALTER; the same-name change, which MySQL rejects
+	// in one ALTER (error 1826), is TestDiffIntegrationForeignKeySameNameReadd.
 	desiredCascade, err := ParseCreateTable(
 		"CREATE TABLE diff_fkna_child (id int primary key, pid int, KEY fk_fkna_pid (pid), " +
 			"CONSTRAINT fk_fkna_pid2 FOREIGN KEY (pid) REFERENCES diff_fkna_parent (id) ON DELETE CASCADE)")
@@ -425,6 +426,116 @@ func TestDiffIntegrationForeignKeyNoAction(t *testing.T) {
 	require.NoError(t, err)
 	stmts, err = source.Diff(desiredCascade, nil)
 	require.NoError(t, err)
+	require.Nil(t, stmts)
+}
+
+// TestDiffIntegrationForeignKeySameNameReadd verifies against MySQL that a
+// foreign key whose definition changes under the same name is replaced in
+// one ALTER under a fresh name. MySQL rejects the same-name pair in one ALTER
+// (error 1826, "Duplicate foreign key constraint name").
+func TestDiffIntegrationForeignKeySameNameReadd(t *testing.T) {
+	_ = testutils.NewTestTable(t, "diff_fkrd_parent",
+		"CREATE TABLE diff_fkrd_parent (id int primary key)")
+	tt := testutils.NewTestTable(t, "diff_fkrd_child",
+		"CREATE TABLE diff_fkrd_child (id int primary key, pid int, KEY pid (pid), "+
+			"CONSTRAINT fk_fkrd_pid FOREIGN KEY (pid) REFERENCES diff_fkrd_parent (id))")
+
+	// Document the server behavior the replacement name depends on.
+	_, err := tt.DB.ExecContext(t.Context(), "ALTER TABLE diff_fkrd_child DROP FOREIGN KEY fk_fkrd_pid, "+
+		"ADD CONSTRAINT fk_fkrd_pid FOREIGN KEY (pid) REFERENCES diff_fkrd_parent (id) ON DELETE CASCADE")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "Error 1826")
+
+	targetSQL := "CREATE TABLE diff_fkrd_child (id int primary key, pid int, b int, KEY pid (pid), " +
+		"CONSTRAINT fk_fkrd_pid FOREIGN KEY (pid) REFERENCES diff_fkrd_parent (id) ON DELETE CASCADE)"
+	stmts := diffLiveTable(t, tt.DB, tt.Name, targetSQL)
+	require.Len(t, stmts, 1)
+	require.Equal(t, "ALTER TABLE `diff_fkrd_child` ADD COLUMN `b` int NULL, DROP FOREIGN KEY `fk_fkrd_pid`, "+
+		"ADD CONSTRAINT `_fk_fkrd_pid_new` FOREIGN KEY (`pid`) REFERENCES `diff_fkrd_parent` (`id`) ON DELETE CASCADE", stmts[0].Statement)
+
+	// The table is never without the constraint: a row with no parent is
+	// refused before the statement and after it.
+	orphan := "INSERT INTO diff_fkrd_child (id, pid) VALUES (100, 999)"
+	requireOrphanRefused := func() {
+		t.Helper()
+		_, err := tt.DB.ExecContext(t.Context(), orphan)
+		require.Error(t, err, "the child table must stay constrained")
+		var mysqlErr *drivermysql.MySQLError
+		require.ErrorAs(t, err, &mysqlErr)
+		// MySQL can report either the generic or detailed foreign-key
+		// violation. Both prove the orphan was refused by the constraint.
+		require.Contains(t, []uint16{mysql.ErrNoReferencedRow, mysql.ErrNoReferencedRow2}, mysqlErr.Number)
+	}
+	requireOrphanRefused()
+	execStatements(t, tt.DB, stmts)
+	requireOrphanRefused()
+
+	// The foreign key keeps the replacement name; the next diff pairs it
+	// with the desired one by definition.
+	live := showCreateTable(t, tt.DB, tt.Name)
+	require.Contains(t, live, "CONSTRAINT `_fk_fkrd_pid_new` FOREIGN KEY (`pid`) REFERENCES `diff_fkrd_parent` (`id`) ON DELETE CASCADE")
+	require.NotContains(t, live, "CONSTRAINT `fk_fkrd_pid`")
+	requireConverged(t, tt.DB, tt.Name, targetSQL)
+
+	// A later change under the desired name fits one ALTER under the two
+	// names, and brings the name back.
+	targetSQL = "CREATE TABLE diff_fkrd_child (id int primary key, pid int, b int, KEY pid (pid), " +
+		"CONSTRAINT fk_fkrd_pid FOREIGN KEY (pid) REFERENCES diff_fkrd_parent (id) ON DELETE SET NULL)"
+	stmts = diffLiveTable(t, tt.DB, tt.Name, targetSQL)
+	require.Len(t, stmts, 1)
+	require.Equal(t, "ALTER TABLE `diff_fkrd_child` DROP FOREIGN KEY `_fk_fkrd_pid_new`, "+
+		"ADD CONSTRAINT `fk_fkrd_pid` FOREIGN KEY (`pid`) REFERENCES `diff_fkrd_parent` (`id`) ON DELETE SET NULL", stmts[0].Statement)
+	requireOrphanRefused()
+	execStatements(t, tt.DB, stmts)
+	requireOrphanRefused()
+	live = showCreateTable(t, tt.DB, tt.Name)
+	require.Contains(t, live, "CONSTRAINT `fk_fkrd_pid` FOREIGN KEY (`pid`) REFERENCES `diff_fkrd_parent` (`id`) ON DELETE SET NULL")
+	require.NotContains(t, live, "_new")
+	requireConverged(t, tt.DB, tt.Name, targetSQL)
+}
+
+// TestDiffIntegrationForeignKeyReferencedSchema verifies against MySQL that a
+// foreign key moved to a parent in another schema is a diff, and documents
+// how the referenced schema reads back: qualified only when it is another
+// schema, which is why a reference qualified with the table's own schema
+// compares equal to an unqualified one.
+func TestDiffIntegrationForeignKeyReferencedSchema(t *testing.T) {
+	// The child references otherDB first; it is created second so its
+	// database is dropped first on cleanup.
+	otherDB, other := testutils.CreateUniqueTestDatabase(t)
+	ownDB, db := testutils.CreateUniqueTestDatabase(t)
+	_, err := other.ExecContext(t.Context(), "CREATE TABLE parent (id int primary key)")
+	require.NoError(t, err)
+	_, err = db.ExecContext(t.Context(), "CREATE TABLE parent (id int primary key)")
+	require.NoError(t, err)
+	_, err = db.ExecContext(t.Context(), fmt.Sprintf("CREATE TABLE child (id int primary key, pid int, KEY pid (pid), "+
+		"CONSTRAINT fk_pid FOREIGN KEY (pid) REFERENCES `%s`.parent (id))", otherDB))
+	require.NoError(t, err)
+
+	live := showCreateTable(t, db, "child")
+	require.Contains(t, live, fmt.Sprintf("REFERENCES `%s`.`parent` (`id`)", otherDB))
+
+	// Repoint the foreign key at this schema's parent.
+	targetSQL := fmt.Sprintf("CREATE TABLE child (id int primary key, pid int, KEY pid (pid), "+
+		"CONSTRAINT fk_pid FOREIGN KEY (pid) REFERENCES `%s`.parent (id))", ownDB)
+	stmts := diffLiveTable(t, db, "child", targetSQL)
+	require.Len(t, stmts, 1)
+	require.Equal(t, fmt.Sprintf("ALTER TABLE `child` DROP FOREIGN KEY `fk_pid`, ADD CONSTRAINT `_fk_pid_new` FOREIGN KEY (`pid`) REFERENCES `%s`.`parent` (`id`)", ownDB), stmts[0].Statement)
+	execStatements(t, db, stmts)
+
+	// A reference into the table's own schema reads back unqualified ...
+	live = showCreateTable(t, db, "child")
+	require.Contains(t, live, "REFERENCES `parent` (`id`)")
+	require.NotContains(t, live, otherDB)
+	// ... and converges with the qualified desired definition.
+	requireConverged(t, db, "child", targetSQL)
+
+	// Repointing back to the other schema is a diff again.
+	stmts = diffLiveTable(t, db, "child", fmt.Sprintf("CREATE TABLE child (id int primary key, pid int, KEY pid (pid), "+
+		"CONSTRAINT fk_pid FOREIGN KEY (pid) REFERENCES `%s`.parent (id))", otherDB))
+	// The live reference is unqualified, so it cannot be told apart from
+	// a reference to any schema: this is the documented limitation of
+	// comparing a schema only when both sides are qualified.
 	require.Nil(t, stmts)
 }
 
@@ -1589,15 +1700,14 @@ func TestDiffIntegrationBooleanKeywordDefaultAcrossFoldingTypes(t *testing.T) {
 }
 
 // The types that store the keyword as something other than 1/0, with the
-// reading that puts each out of scope and the diff it still emits as a result.
-// Asserting the leftover diff alongside the reading is deliberate: a reading on
-// its own does not say whether the exclusion it justifies is the right one, and
-// scaled decimal is excluded for a reason this layer cannot fix — scale padding
-// belongs to numeric canonicalization. binary is excluded here too, because it
-// pads the keyword to the column width; binaryDefaultBytesNormalizer folds it
-// instead, and TestDiffIntegrationBinaryDefaultBytes covers it. year reads the
-// keyword as a year (TRUE stores '2001'); yearDefaultNormalizer folds it, and
-// TestDiffIntegrationYearDefaultCreatedAsDeclared covers it.
+// reading that puts each out of scope of the keyword fold. scaled decimal pads
+// the keyword to its scale, which belongs to numeric canonicalization:
+// numericDefaultNormalizer folds it to the padded value, so the table created
+// from the declaration has nothing left to apply. binary is excluded too,
+// because it pads the keyword to the column width; binaryDefaultBytesNormalizer
+// folds it instead, and TestDiffIntegrationBinaryDefaultBytes covers it. year
+// reads the keyword as a year (TRUE stores '2001'); yearDefaultNormalizer folds
+// it, and TestDiffIntegrationYearDefaultCreatedAsDeclared covers it.
 //
 // enum and set are excluded too but are deliberately not fixtures here. They
 // have no single reading to record: through 8.4 the keyword resolves to a
@@ -1614,11 +1724,7 @@ func TestDiffIntegrationBooleanKeywordDefaultOnExcludedTypes(t *testing.T) {
 	live := showCreateTable(t, tt.DB, tt.Name)
 	require.Contains(t, live, "`scaled` decimal(4,2) NOT NULL DEFAULT '1.00'")
 
-	// The table was created from this very declaration, so the statement here
-	// re-stores a value the column already holds.
-	stmts := diffLiveTable(t, tt.DB, tt.Name, declaredSQL)
-	require.Len(t, stmts, 1)
-	require.Contains(t, stmts[0].Statement, "MODIFY COLUMN `scaled`")
+	require.Nil(t, diffLiveTable(t, tt.DB, tt.Name, declaredSQL))
 }
 
 // A ZEROFILL integer's default is stored padded to the display width, so a
@@ -2536,7 +2642,7 @@ func TestDiffIntegrationBinaryDefaultBytesConverges(t *testing.T) {
 	stmts, err := live.Diff(desired, nil)
 	require.NoError(t, err)
 	require.Len(t, stmts, 1)
-	require.Contains(t, stmts[0].Statement, "DEFAULT 'a\\0\\0'")
+	require.Contains(t, stmts[0].Statement, "`a` binary(3) NULL DEFAULT 'a'") // the literal as written; MySQL pads it
 	testutils.RunSQL(t, stmts[0].Statement)
 
 	liveSQL := showCreateTable(t, tt.DB, tt.Name)
@@ -2569,7 +2675,7 @@ func TestDiffIntegrationBinaryDefaultBytesHexConverges(t *testing.T) {
 	stmts, err := live.Diff(desired, nil)
 	require.NoError(t, err)
 	require.Len(t, stmts, 1)
-	require.Contains(t, stmts[0].Statement, "`h` binary(3) NULL DEFAULT x'ff0000'")
+	require.Contains(t, stmts[0].Statement, "`h` binary(3) NULL DEFAULT x'ff'")
 	require.Contains(t, stmts[0].Statement, "`v` varbinary(4) NULL DEFAULT x'ff'")
 	testutils.RunSQL(t, stmts[0].Statement)
 
@@ -2713,10 +2819,10 @@ func TestDiffIntegrationBinaryLiteralDefaultsConverge(t *testing.T) {
 	stmts, err := live.Diff(desired, nil)
 	require.NoError(t, err)
 	require.Len(t, stmts, 1)
-	require.Contains(t, stmts[0].Statement, "`i` int NULL DEFAULT 26")
-	require.Contains(t, stmts[0].Statement, "`b` bit(8) NULL DEFAULT b'1100001'")
-	require.Contains(t, stmts[0].Statement, "`f` bit(1) NOT NULL DEFAULT b'0'")
-	require.Contains(t, stmts[0].Statement, "`v` varchar(4) NULL DEFAULT '\\''")
+	require.Contains(t, stmts[0].Statement, "`i` int NULL DEFAULT x'1a'")
+	require.Contains(t, stmts[0].Statement, "`b` bit(8) NULL DEFAULT x'61'")
+	require.Contains(t, stmts[0].Statement, "`f` bit(1) NOT NULL DEFAULT 0")
+	require.Contains(t, stmts[0].Statement, "`v` varchar(4) NULL DEFAULT x'27'")
 	testutils.RunSQL(t, stmts[0].Statement)
 
 	liveSQL := showCreateTable(t, tt.DB, tt.Name)
@@ -2979,8 +3085,8 @@ func TestDiffIntegrationCharDefaultSpacesConverges(t *testing.T) {
 	stmts, err := live.Diff(desired, nil)
 	require.NoError(t, err)
 	require.Len(t, stmts, 1)
-	require.Contains(t, stmts[0].Statement, "`c` char(4) NULL DEFAULT 'a'")
-	require.Contains(t, stmts[0].Statement, "`v` varchar(4) NULL DEFAULT 'ab  '")
+	require.Contains(t, stmts[0].Statement, "`c` char(4) NULL DEFAULT 'a  '")
+	require.Contains(t, stmts[0].Statement, "`v` varchar(4) NULL DEFAULT 'ab      '")
 	testutils.RunSQL(t, stmts[0].Statement)
 
 	var stored string
@@ -3084,8 +3190,8 @@ func TestDiffIntegrationEnumSetDefaultConverges(t *testing.T) {
 	stmts, err := live.Diff(desired, nil)
 	require.NoError(t, err)
 	require.Len(t, stmts, 1)
-	require.Contains(t, stmts[0].Statement, "`e` enum('a','B') NULL DEFAULT 'B'")
-	require.Contains(t, stmts[0].Statement, "`s` set('a','b','c') NULL DEFAULT 'a,c'")
+	require.Contains(t, stmts[0].Statement, "`e` enum('a','B') NULL DEFAULT 'b '")
+	require.Contains(t, stmts[0].Statement, "`s` set('a','b','c') NULL DEFAULT 'c,a '")
 	testutils.RunSQL(t, stmts[0].Statement)
 
 	var stored string
@@ -3293,6 +3399,423 @@ func TestDiffIntegrationEnumSetMemberSpacesNoTableDefault(t *testing.T) {
 			stmts, err = live.Diff(desired, nil)
 			require.NoError(t, err)
 			require.Nil(t, stmts, "re-diff after applying the ALTER must converge")
+		})
+	}
+}
+
+// TestDiffIntegrationVirtualToRegularKeepsValues verifies, on a populated
+// table, that a VIRTUAL generated column the target makes a regular column
+// keeps the values its expression produced. MySQL refuses the direct MODIFY
+// (error 3106), and a DROP+ADD of the regular column leaves it NULL because a
+// VIRTUAL column holds no data. The diff stages the change through a STORED
+// column, which MySQL fills from the expression and whose values a MODIFY
+// into a regular column keeps (see virtualToRegularIntermediate). Each case
+// also checks that the live table ends up as a direct CREATE of the target
+// and that a second diff is empty.
+func TestDiffIntegrationVirtualToRegularKeepsValues(t *testing.T) {
+	cases := []struct {
+		name   string
+		source string
+		target string
+		query  string // one row; every column must read as want
+		want   []int64
+	}{
+		{
+			name:   "regular column keeps the generated value",
+			source: "(id INT PRIMARY KEY, c INT, g INT AS (c + 1) VIRTUAL)",
+			target: "(id INT PRIMARY KEY, c INT, g INT)",
+			query:  "SELECT g FROM t",
+			want:   []int64{41},
+		},
+		{
+			name:   "type and attribute changes ride the second statement",
+			source: "(id INT PRIMARY KEY, c INT, g INT AS (c + 1) VIRTUAL)",
+			target: "(id INT PRIMARY KEY, c INT, g BIGINT NOT NULL DEFAULT 0, d INT)",
+			query:  "SELECT g FROM t",
+			want:   []int64{41},
+		},
+		{
+			name:   "the read column can go in the second statement",
+			source: "(id INT PRIMARY KEY, c INT, g INT AS (c + 1) VIRTUAL)",
+			target: "(id INT PRIMARY KEY, g INT)",
+			query:  "SELECT g FROM t",
+			want:   []int64{41},
+		},
+		{
+			name:   "a functional index and a CHECK reading the column are re-added",
+			source: "(id INT PRIMARY KEY, c INT, g INT AS (c + 1) VIRTUAL, KEY kf ((g + 1)), CONSTRAINT ck CHECK (g > 0))",
+			target: "(id INT PRIMARY KEY, c INT, g INT, KEY kf ((g + 1)), CONSTRAINT ck CHECK (g > 0))",
+			query:  "SELECT g FROM t",
+			want:   []int64{41},
+		},
+		{
+			name:   "a renamed equivalent CHECK is re-added for the column rebuild",
+			source: "(id INT PRIMARY KEY, c INT, g INT AS (c + 1) VIRTUAL, CONSTRAINT ck_old CHECK (g > 0))",
+			target: "(id INT PRIMARY KEY, c INT, g INT AS (c + 1) STORED, CONSTRAINT ck_new CHECK (g > 0))",
+			query:  "SELECT g FROM t",
+			want:   []int64{41},
+		},
+		{
+			name:   "a dependent generated column is recomputed from the kept value",
+			source: "(id INT PRIMARY KEY, c INT, g INT AS (c + 1) VIRTUAL, s INT AS (g + 1) STORED)",
+			target: "(id INT PRIMARY KEY, c INT, g INT, s INT AS (g + 1) STORED)",
+			query:  "SELECT g, s FROM t",
+			want:   []int64{41, 42},
+		},
+		{
+			// The STORED column s reads g, which is rebuilt. Rebuilding s with
+			// it would have dropped its values; the MODIFY keeps them.
+			name:   "a dependent STORED column becoming regular keeps its values",
+			source: "(id INT PRIMARY KEY, c INT, g INT AS (c + 1) VIRTUAL, s INT AS (g + 1) STORED)",
+			target: "(id INT PRIMARY KEY, c INT, g INT AS (c + 1) STORED, s INT)",
+			query:  "SELECT g, s FROM t",
+			want:   []int64{41, 42},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, db := testutils.CreateUniqueTestDatabase(t)
+			exec := func(stmt string) {
+				t.Helper()
+				_, err := db.ExecContext(t.Context(), stmt)
+				require.NoError(t, err, "executing: %s", stmt)
+			}
+			exec("CREATE TABLE t " + c.target)
+			expected := showCreateTable(t, db, "t")
+			exec("DROP TABLE t")
+
+			exec("CREATE TABLE t " + c.source)
+			exec("INSERT INTO t (id, c) VALUES (1, 40)")
+			stmts := diffLiveTable(t, db, "t", "CREATE TABLE t "+c.target)
+			require.NotEmpty(t, stmts)
+			execStatements(t, db, stmts)
+
+			got := make([]sql.NullInt64, len(c.want))
+			dest := make([]any, len(got))
+			for i := range got {
+				dest[i] = &got[i]
+			}
+			require.NoError(t, db.QueryRowContext(t.Context(), c.query).Scan(dest...))
+			for i, want := range c.want {
+				assert.Equal(t, sql.NullInt64{Int64: want, Valid: true}, got[i], "column %d of %q", i, c.query)
+			}
+			assert.Equal(t, expected, showCreateTable(t, db, "t"))
+			requireConverged(t, db, "t", "CREATE TABLE t "+c.target)
+		})
+	}
+}
+
+// TestDiffIntegrationFloatDefaultValueAsWritten verifies that the DEFAULT a
+// diff emits on a FLOAT column stores the value the schema's literal names,
+// and that a float is compared by that value, not by the six-significant-digit
+// reading SHOW CREATE TABLE reports. MySQL reports `float DEFAULT 1234567` as
+// '1234570'; 1234567, 1234568 and 1234570 are three different floats under
+// that one report, so emitting the report stored the wrong value and
+// comparing by it hid a change. A literal whose six-digit report reads back
+// as the same float converges. One that does not keeps diffing: the live
+// '1234570' is not 1234567, the MODIFY is emitted again with the literal as
+// written, and applying it stores the same value again. The stored value is
+// read back through CAST(... AS DOUBLE) and compared with a direct CREATE of
+// the target.
+func TestDiffIntegrationFloatDefaultValueAsWritten(t *testing.T) {
+	cases := []struct {
+		literal   string
+		emitted   string // the parser spells a positive exponent with its sign
+		converges bool
+	}{
+		{"0.1", "0.1", true},
+		{"1.23457", "1.23457", true},
+		{"1234570", "1234570", true},
+		{"1e-45", "1e-45", true},
+		{"1e38", "1e+38", true},
+		{"3.4e38", "3.4e+38", true},
+		{"1e15", "1e+15", true},
+		{"1.23456789", "1.23456789", false},
+		{"1234567", "1234567", false},
+		{"0.123456789", "0.123456789", false},
+		{"1.234567e-30", "1.234567e-30", false},
+		{"1.1754944e-38", "1.1754944e-38", false},
+		{"16777217", "16777217", false},
+	}
+	for _, c := range cases {
+		literal := c.literal
+		t.Run(literal, func(t *testing.T) {
+			_, db := testutils.CreateUniqueTestDatabase(t)
+			exec := func(stmt string) {
+				t.Helper()
+				_, err := db.ExecContext(t.Context(), stmt)
+				require.NoError(t, err, "executing: %s", stmt)
+			}
+			storedDefault := func() string {
+				t.Helper()
+				exec("TRUNCATE TABLE t")
+				exec("INSERT INTO t (id) VALUES (1)")
+				var v string
+				require.NoError(t, db.QueryRowContext(t.Context(), "SELECT CAST(f AS DOUBLE) FROM t").Scan(&v))
+				return v
+			}
+			target := "(id INT PRIMARY KEY, f FLOAT DEFAULT " + literal + ")"
+			exec("CREATE TABLE t " + target)
+			expectedCreate := showCreateTable(t, db, "t")
+			expectedValue := storedDefault()
+			exec("DROP TABLE t")
+
+			// Added through a diff, then changed through one.
+			exec("CREATE TABLE t (id INT PRIMARY KEY)")
+			stmts := diffLiveTable(t, db, "t", "CREATE TABLE t "+target)
+			require.Len(t, stmts, 1)
+			assert.Contains(t, stmts[0].Statement, "DEFAULT "+c.emitted, "the literal is emitted as written")
+			execStatements(t, db, stmts)
+			assert.Equal(t, expectedValue, storedDefault())
+			assert.Equal(t, expectedCreate, showCreateTable(t, db, "t"))
+
+			// The residual: converged, or the same MODIFY again, which
+			// changes nothing.
+			requireFloatResidual := func() {
+				t.Helper()
+				residual := diffLiveTable(t, db, "t", "CREATE TABLE t "+target)
+				if c.converges {
+					require.Nil(t, residual, "expected the live table to have converged")
+					return
+				}
+				require.Len(t, residual, 1, "a literal SHOW CREATE TABLE cannot spell keeps diffing")
+				assert.Equal(t, "ALTER TABLE `t` MODIFY COLUMN `f` float NULL DEFAULT "+c.emitted, residual[0].Statement)
+				execStatements(t, db, residual)
+				assert.Equal(t, expectedValue, storedDefault())
+				assert.Equal(t, expectedCreate, showCreateTable(t, db, "t"))
+			}
+			requireFloatResidual()
+
+			exec("ALTER TABLE t MODIFY COLUMN f FLOAT DEFAULT 1")
+			stmts = diffLiveTable(t, db, "t", "CREATE TABLE t "+target)
+			require.Len(t, stmts, 1)
+			execStatements(t, db, stmts)
+			assert.Equal(t, expectedValue, storedDefault())
+			assert.Equal(t, expectedCreate, showCreateTable(t, db, "t"))
+			requireFloatResidual()
+		})
+	}
+}
+
+// TestDiffIntegrationFloatDefaultChangeUnderOneReport verifies that a change
+// between two FLOAT defaults SHOW CREATE TABLE reports alike is still a
+// change: the live `float DEFAULT 1234567` reports as '1234570', the schema
+// now says 1234568, and the diff must emit the MODIFY (a reading that
+// compared the six-digit report would have called them equal) and store the
+// new value.
+func TestDiffIntegrationFloatDefaultChangeUnderOneReport(t *testing.T) {
+	_, db := testutils.CreateUniqueTestDatabase(t)
+	exec := func(stmt string) {
+		t.Helper()
+		_, err := db.ExecContext(t.Context(), stmt)
+		require.NoError(t, err, "executing: %s", stmt)
+	}
+	storedDefault := func() float64 {
+		t.Helper()
+		exec("TRUNCATE TABLE t")
+		exec("INSERT INTO t (id) VALUES (1)")
+		var v float64
+		require.NoError(t, db.QueryRowContext(t.Context(), "SELECT CAST(f AS DOUBLE) FROM t").Scan(&v))
+		return v
+	}
+	exec("CREATE TABLE t (id INT PRIMARY KEY, f FLOAT DEFAULT 1234567)")
+	require.Contains(t, showCreateTable(t, db, "t"), "DEFAULT '1234570'", "MySQL reports the float with six significant digits")
+	require.InDelta(t, 1234567, storedDefault(), 0)
+
+	stmts := diffLiveTable(t, db, "t", "CREATE TABLE t (id INT PRIMARY KEY, f FLOAT DEFAULT 1234568)")
+	require.Len(t, stmts, 1)
+	assert.Equal(t, "ALTER TABLE `t` MODIFY COLUMN `f` float NULL DEFAULT 1234568", stmts[0].Statement)
+	execStatements(t, db, stmts)
+	assert.InDelta(t, 1234568, storedDefault(), 0)
+	assert.Contains(t, showCreateTable(t, db, "t"), "DEFAULT '1234570'")
+}
+
+// TestDiffIntegrationTemporalDefaultTruncateFractional verifies, under the
+// default sql_mode and under TIME_TRUNCATE_FRACTIONAL, that a temporal
+// DEFAULT a diff emits stores the value MySQL reads for the written literal
+// under the session's own mode, and that temporalDefaultNormalizer reads a
+// fraction past the column's precision only where the two modes agree. MySQL
+// rounds such a fraction by default and truncates it under that mode; the
+// rule cannot see the session of the CREATE, and reading the literal under
+// an assumed mode made a schema compare equal to a value the table did not
+// hold (and emitting the rounded reading stored a value one unit too high
+// under the other mode). A literal whose extra digits round down converges
+// under both modes. One the modes disagree on, including a carry into year
+// 0000 that MySQL stores as the zero date, is left as written: it keeps
+// diffing under both modes, with the MODIFY carrying the literal as written,
+// and applying it again changes nothing.
+func TestDiffIntegrationTemporalDefaultTruncateFractional(t *testing.T) {
+	cases := []struct {
+		name      string
+		target    string
+		converges bool
+	}{
+		{"time", "(id INT PRIMARY KEY, c TIME DEFAULT '12:34:56.9')", false},
+		{"time with precision", "(id INT PRIMARY KEY, c TIME(1) DEFAULT '12:34:56.99')", false},
+		{"datetime", "(id INT PRIMARY KEY, c DATETIME DEFAULT '2024-01-01 23:59:59.9')", false},
+		{"timestamp", "(id INT PRIMARY KEY, c TIMESTAMP NULL DEFAULT '2024-01-01 23:59:59.9')", false},
+		{"date", "(id INT PRIMARY KEY, c DATE DEFAULT '2024-01-01 23:59:59.9')", false},
+		{"time from a number", "(id INT PRIMARY KEY, c TIME DEFAULT 1.55)", false},
+		{"datetime carry into year zero", "(id INT PRIMARY KEY, c DATETIME DEFAULT '0000-12-09 23:59:59.5')", false},
+		{"time below the half", "(id INT PRIMARY KEY, c TIME DEFAULT '12:34:56.4')", true},
+		{"time with precision below the half", "(id INT PRIMARY KEY, c TIME(1) DEFAULT '12:34:56.94')", true},
+		{"datetime below the half", "(id INT PRIMARY KEY, c DATETIME DEFAULT '2024-01-01 23:59:59.4')", true},
+		{"datetime with precision at the seventh digit", "(id INT PRIMARY KEY, c DATETIME(6) DEFAULT '2024-01-01 10:00:00.1234564999')", true},
+		{"date below the half", "(id INT PRIMARY KEY, c DATE DEFAULT '2024-01-01 23:59:59.4')", true},
+		{"time from a number below the half", "(id INT PRIMARY KEY, c TIME(1) DEFAULT 1.54)", true},
+		{"datetime in year zero below the half", "(id INT PRIMARY KEY, c DATETIME DEFAULT '0000-12-09 23:59:59.4')", true},
+	}
+	modes := []struct {
+		name    string
+		sqlMode string
+	}{
+		{"default", ""},
+		{"TIME_TRUNCATE_FRACTIONAL", "SET SESSION sql_mode = CONCAT(@@sql_mode, ',TIME_TRUNCATE_FRACTIONAL')"},
+	}
+	for _, mode := range modes {
+		for _, c := range cases {
+			t.Run(mode.name+"/"+c.name, func(t *testing.T) {
+				dbName, _ := testutils.CreateUniqueTestDatabase(t)
+				// One connection, so the SET SESSION applies to every statement.
+				db, err := sql.Open("block-mysql", testutils.DSNForDatabase(dbName))
+				require.NoError(t, err)
+				t.Cleanup(func() { require.NoError(t, db.Close()) })
+				db.SetMaxOpenConns(1)
+				exec := func(stmt string) {
+					t.Helper()
+					_, err := db.ExecContext(t.Context(), stmt)
+					require.NoError(t, err, "executing: %s", stmt)
+				}
+				if mode.sqlMode != "" {
+					exec(mode.sqlMode)
+				}
+
+				exec("CREATE TABLE t " + c.target)
+				expected := showCreateTable(t, db, "t")
+				exec("DROP TABLE t")
+
+				exec("CREATE TABLE t (id INT PRIMARY KEY)")
+				stmts := diffLiveTable(t, db, "t", "CREATE TABLE t "+c.target)
+				require.Len(t, stmts, 1)
+				execStatements(t, db, stmts)
+				assert.Equal(t, expected, showCreateTable(t, db, "t"), "the default must be what MySQL reads for the written literal under this session's mode")
+
+				again := diffLiveTable(t, db, "t", "CREATE TABLE t "+c.target)
+				if c.converges {
+					require.Nil(t, again, "a fraction the two modes agree on converges")
+					return
+				}
+				// The documented residual: a literal the two modes store
+				// differently is left as written, so it compares unequal to
+				// the live value under either mode, the same MODIFY is emitted
+				// again, and applying it changes nothing.
+				require.Len(t, again, 1, "a literal MySQL rounds under one sql_mode and truncates under the other keeps diffing; if this converges now, update temporalDefaultNormalizer's doc")
+				assert.Contains(t, again[0].Statement, "MODIFY COLUMN `c` ")
+				assert.Contains(t, again[0].Statement, "DEFAULT "+c.target[strings.LastIndex(c.target, "DEFAULT ")+len("DEFAULT "):len(c.target)-1], "the literal as written")
+				execStatements(t, db, again)
+				assert.Equal(t, expected, showCreateTable(t, db, "t"))
+			})
+		}
+	}
+}
+
+// TestDiffIntegrationExpressionDefaultIntroducerValues verifies that an
+// expression default whose charset introducer decides its value stores, when
+// added through a diff, the value a direct CREATE of the target stores, and
+// that the introducer is kept whatever reads the literal. The diff used to
+// fold an ASCII latin1 (or utf8mb3) literal to the bare literal everywhere
+// but beneath COLLATE, CHARSET(), COLLATION() and WEIGHT_STRING(), which
+// changed CHARSET(_latin1'a') from 'latin1' to 'utf8mb4', made
+// CONCAT(_latin1'a') COLLATE latin1_bin error 1253, and would have changed
+// UPPER(_latin5'i') from 'İ' to 'I' and STRCMP(_latin1'a', _latin1'a ') from
+// 0 to -1 (a PAD SPACE collation against a NO PAD one): an ASCII literal's
+// introducer can decide the value under any function.
+func TestDiffIntegrationExpressionDefaultIntroducerValues(t *testing.T) {
+	for _, expr := range []string{
+		"CHARSET(_latin1'a')",
+		"COLLATION(_utf8mb3'a')",
+		"CONCAT(_latin1'a') COLLATE latin1_bin",
+		"HEX(WEIGHT_STRING(_latin1'a'))",
+		"CHARSET(IF(id, _latin1'a', _latin1'b'))",
+		"UPPER(_latin5'i')",
+		"UPPER(_latin1'a')",
+		"STRCMP(_latin1'a', _latin1'a ')",
+		"STRCMP(_utf8mb3'a', _utf8mb3'a ')",
+		"LENGTH(_utf8mb3'a')",
+	} {
+		t.Run(expr, func(t *testing.T) {
+			_, db := testutils.CreateUniqueTestDatabase(t)
+			exec := func(stmt string) {
+				t.Helper()
+				_, err := db.ExecContext(t.Context(), stmt)
+				require.NoError(t, err, "executing: %s", stmt)
+			}
+			storedDefault := func() string {
+				t.Helper()
+				exec("TRUNCATE TABLE t")
+				exec("INSERT INTO t (id) VALUES (1)")
+				var v string
+				require.NoError(t, db.QueryRowContext(t.Context(), "SELECT c FROM t").Scan(&v))
+				return v
+			}
+			target := "(id INT PRIMARY KEY, c VARCHAR(64) DEFAULT (" + expr + "))"
+			exec("CREATE TABLE t " + target)
+			expectedCreate := showCreateTable(t, db, "t")
+			expectedValue := storedDefault()
+			exec("DROP TABLE t")
+
+			exec("CREATE TABLE t (id INT PRIMARY KEY)")
+			stmts := diffLiveTable(t, db, "t", "CREATE TABLE t "+target)
+			require.Len(t, stmts, 1)
+			execStatements(t, db, stmts)
+			assert.Equal(t, expectedValue, storedDefault(), "the expression default must keep its introducer: %s", stmts[0].Statement)
+			assert.Equal(t, expectedCreate, showCreateTable(t, db, "t"))
+			requireConverged(t, db, "t", "CREATE TABLE t "+target)
+		})
+	}
+}
+
+// TestDiffIntegrationExpressionGroupingValues verifies that an expression
+// whose operand grouping decides its value stores, when added through a diff,
+// the value a direct CREATE of the target stores. The diff used to regroup a
+// nested bitwise operator the way it regroups a nested AND, and MySQL
+// evaluates & | ^ on binary strings when both operands are binary strings and
+// on integers otherwise, so _binary'12' & (_binary'21' & 7) is 4 where the
+// regrouped (_binary'12' & _binary'21') & 7 is 0.
+func TestDiffIntegrationExpressionGroupingValues(t *testing.T) {
+	for _, expr := range []string{
+		"_binary'12' & (_binary'21' & 7)",
+		"_binary'12' | (_binary'21' | 7)",
+		"_binary'12' ^ (_binary'21' ^ 7)",
+	} {
+		t.Run(expr, func(t *testing.T) {
+			_, db := testutils.CreateUniqueTestDatabase(t)
+			exec := func(stmt string) {
+				t.Helper()
+				_, err := db.ExecContext(t.Context(), stmt)
+				require.NoError(t, err, "executing: %s", stmt)
+			}
+			storedDefault := func() string {
+				t.Helper()
+				exec("TRUNCATE TABLE t")
+				exec("INSERT INTO t (id) VALUES (1)")
+				var v string
+				require.NoError(t, db.QueryRowContext(t.Context(), "SELECT c FROM t").Scan(&v))
+				return v
+			}
+			target := "(id INT PRIMARY KEY, c INT DEFAULT (" + expr + "))"
+			exec("CREATE TABLE t " + target)
+			expectedCreate := showCreateTable(t, db, "t")
+			expectedValue := storedDefault()
+			exec("DROP TABLE t")
+
+			exec("CREATE TABLE t (id INT PRIMARY KEY)")
+			stmts := diffLiveTable(t, db, "t", "CREATE TABLE t "+target)
+			require.Len(t, stmts, 1)
+			execStatements(t, db, stmts)
+			assert.Equal(t, expectedValue, storedDefault(), "the expression default must keep its grouping: %s", stmts[0].Statement)
+			assert.Equal(t, expectedCreate, showCreateTable(t, db, "t"))
+			requireConverged(t, db, "t", "CREATE TABLE t "+target)
 		})
 	}
 }

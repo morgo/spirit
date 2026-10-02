@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -20,6 +21,12 @@ func TestDiff(t *testing.T) {
 		// separate DROP and ADD). When set, expected is ignored.
 		expectedStatements []string
 	}{
+		{
+			name:     "PrimaryKeyCommentChange",
+			source:   "CREATE TABLE t1 (id INT, PRIMARY KEY (id) COMMENT 'before')",
+			target:   "CREATE TABLE t1 (id INT, PRIMARY KEY (id) COMMENT 'after')",
+			expected: "ALTER TABLE `t1` DROP PRIMARY KEY, ADD PRIMARY KEY (`id`) COMMENT 'after'",
+		},
 		{
 			name:     "NoChanges",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY)",
@@ -66,7 +73,7 @@ func TestDiff(t *testing.T) {
 			name:     "ReorderColumn",
 			source:   "CREATE TABLE t1 (a INT, b INT, c INT)",
 			target:   "CREATE TABLE t1 (c INT, a INT, b INT)",
-			expected: "ALTER TABLE `t1` MODIFY COLUMN `c` int NULL FIRST, MODIFY COLUMN `a` int NULL AFTER `c`, MODIFY COLUMN `b` int NULL AFTER `a`",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `c` int NULL FIRST",
 		},
 		{
 			name:     "AddIndex",
@@ -146,6 +153,29 @@ func TestDiff(t *testing.T) {
 			expected: "",
 		},
 		{
+			// The pairing compares the pair under the live name, so an option
+			// the declaration does not carry is cleared from the live index
+			// instead of being hidden by the pairing.
+			name:     "InlineUniqueAdoptsLiveNameAndClearsComment",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, UNIQUE KEY c_2 (c) COMMENT 'x')",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT UNIQUE)",
+			expected: "ALTER TABLE `t1` DROP INDEX `c_2`, ADD UNIQUE INDEX `c_2` (`c`)",
+		},
+		{
+			name:     "InlineUniqueAdoptsLiveNameAndRestoresVisibility",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, UNIQUE KEY c_2 (c) INVISIBLE)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT UNIQUE)",
+			expected: "ALTER TABLE `t1` ALTER INDEX `c_2` VISIBLE",
+		},
+		{
+			// The other direction: a source written inline against a target
+			// with an explicit name and a comment takes the target's name.
+			name:     "InlineSourceUniqueAdoptsTargetName",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT UNIQUE)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, UNIQUE KEY uniq_c (c) COMMENT 'x')",
+			expected: "ALTER TABLE `t1` DROP INDEX `uniq_c`, ADD UNIQUE INDEX `uniq_c` (`c`) COMMENT 'x'",
+		},
+		{
 			// Name collision with an unnamed table-level key: the server
 			// names indexes in declaration order, so the inline unique claims
 			// `c` and the unnamed KEY (c, d) is pushed to `c_2`. The parsed
@@ -207,6 +237,360 @@ func TestDiff(t *testing.T) {
 			expected: "",
 		},
 		{
+			// AUTO_INCREMENT implies NOT NULL: MySQL stores every one of these
+			// as `int NOT NULL AUTO_INCREMENT`, so none of them is a change.
+			name:     "AutoIncrementImpliesNotNull",
+			source:   "CREATE TABLE t1 (id INT NOT NULL AUTO_INCREMENT, x INT PRIMARY KEY, UNIQUE KEY k (id))",
+			target:   "CREATE TABLE t1 (id INT AUTO_INCREMENT, x INT PRIMARY KEY, UNIQUE KEY k (id))",
+			expected: "",
+		},
+		{
+			name:     "AutoIncrementNullBeforeIsNotNull",
+			source:   "CREATE TABLE t1 (id INT NOT NULL AUTO_INCREMENT, x INT PRIMARY KEY, UNIQUE KEY k (id))",
+			target:   "CREATE TABLE t1 (id INT NULL AUTO_INCREMENT, x INT PRIMARY KEY, UNIQUE KEY k (id))",
+			expected: "",
+		},
+		{
+			name:     "AutoIncrementDefaultNullDropped",
+			source:   "CREATE TABLE t1 (id INT NOT NULL AUTO_INCREMENT, x INT PRIMARY KEY, UNIQUE KEY k (id))",
+			target:   "CREATE TABLE t1 (id INT AUTO_INCREMENT DEFAULT NULL, x INT PRIMARY KEY, UNIQUE KEY k (id))",
+			expected: "",
+		},
+		{
+			// A NULL after the AUTO_INCREMENT is the one spelling of a nullable
+			// AUTO_INCREMENT column, and the MODIFY has to keep that order or
+			// MySQL stores it NOT NULL.
+			name:     "AutoIncrementNullAfterIsNullable",
+			source:   "CREATE TABLE t1 (id INT NOT NULL AUTO_INCREMENT, x INT PRIMARY KEY, UNIQUE KEY k (id))",
+			target:   "CREATE TABLE t1 (id INT AUTO_INCREMENT NULL, x INT PRIMARY KEY, UNIQUE KEY k (id))",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `id` int AUTO_INCREMENT NULL",
+		},
+		{
+			// MySQL stores a literal default converted to the column's type and
+			// reports the result, so the declared spelling has to be read the
+			// same way or every run re-emits the same MODIFY.
+			name:     "NumericDefaultDecimalPadded",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c DECIMAL(6,2) DEFAULT '1.20')",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c DECIMAL(6,2) DEFAULT 1.2)",
+			expected: "",
+		},
+		{
+			name:     "NumericDefaultIntegerFromString",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT DEFAULT '1')",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT DEFAULT '001')",
+			expected: "",
+		},
+		{
+			name:     "NumericDefaultDoubleExponent",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c DOUBLE DEFAULT '1e16', d DOUBLE DEFAULT '100')",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c DOUBLE DEFAULT 10000000000000000, d DOUBLE DEFAULT 1e2)",
+			expected: "",
+		},
+		{
+			// A float is compared by its exact value, not by the six
+			// significant digits SHOW CREATE TABLE prints: the live '1.23457'
+			// is a different float from 1.23456789.
+			name:     "NumericDefaultFloatPastSixDigitsDiffers",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c FLOAT DEFAULT '1.23457')",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c FLOAT DEFAULT 1.23456789)",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `c` float NULL DEFAULT 1.23456789",
+		},
+		{
+			name:     "NumericDefaultFloatSixDigitsNoDiff",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c FLOAT DEFAULT '1.23457')",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c FLOAT DEFAULT 1.23457e0)",
+			expected: "",
+		},
+		{
+			name:     "NumericDefaultVarcharFromDecimal",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c VARCHAR(10) DEFAULT '1.50')",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c VARCHAR(10) DEFAULT 1.50)",
+			expected: "",
+		},
+		{
+			name:     "NumericDefaultAdded",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c DECIMAL(6,2))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c DECIMAL(6,2) DEFAULT 1.2)",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `c` decimal(6,2) NULL DEFAULT 1.2",
+		},
+		{
+			name:     "NumericDefaultChanged",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c DECIMAL(6,2) DEFAULT '1.20')",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c DECIMAL(6,2) DEFAULT 1.21)",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `c` decimal(6,2) NULL DEFAULT 1.21",
+		},
+		{
+			// MySQL stores a temporal literal in any of its accepted spellings
+			// and reports the stored value, so the declared spelling has to be
+			// read the same way or every run re-emits the same MODIFY.
+			name:     "TemporalDefaultDateWithoutTime",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c DATETIME DEFAULT '2020-01-01 00:00:00')",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c DATETIME DEFAULT '2020-1-1')",
+			expected: "",
+		},
+		{
+			name:     "TemporalDefaultFractionPadded",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c DATETIME(3) DEFAULT '2020-01-01 10:00:00.000')",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c DATETIME(3) DEFAULT '2020-01-01 10:00:00')",
+			expected: "",
+		},
+		{
+			name:     "TemporalDefaultDateFromNumber",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c DATE DEFAULT '2020-01-01')",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c DATE DEFAULT 20200101)",
+			expected: "",
+		},
+		{
+			name:     "TemporalDefaultTimeWithDays",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c TIME DEFAULT '26:03:04')",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c TIME DEFAULT '1 2:3:4.4')",
+			expected: "",
+		},
+		{
+			// MySQL rounds the fraction under its default sql_mode and
+			// truncates it under TIME_TRUNCATE_FRACTIONAL; the rule reads
+			// neither, so the literal diffs against both stored values.
+			name:     "TemporalDefaultFractionModeDependentDiffs",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c TIME DEFAULT '26:03:05')",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c TIME DEFAULT '1 2:3:4.5')",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `c` time NULL DEFAULT '1 2:3:4.5'",
+		},
+		{
+			name:     "TemporalDefaultAdded",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c DATETIME)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c DATETIME DEFAULT '2020-1-1')",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `c` datetime NULL DEFAULT '2020-1-1'",
+		},
+		{
+			name:     "TemporalDefaultChanged",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c TIME DEFAULT '01:02:00')",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c TIME DEFAULT '1:3')",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `c` time NULL DEFAULT '1:3'",
+		},
+		{
+			// MySQL stores an expression default in its own parenthesization
+			// and without unary pluses, like every other stored expression.
+			name:     "ExpressionDefaultNegatedLiteral",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT DEFAULT (-(1)))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT DEFAULT (-1))",
+			expected: "",
+		},
+		{
+			name:     "ExpressionDefaultUnaryPlus",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT DEFAULT (1))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT DEFAULT (+1))",
+			expected: "",
+		},
+		{
+			name:     "ExpressionDefaultNegatedArgument",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT DEFAULT (abs(-(1))))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT DEFAULT (abs(-1)))",
+			expected: "",
+		},
+		{
+			name:     "ExpressionDefaultChanged",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT DEFAULT (-(1)))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT DEFAULT (-2))",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `c` int NULL DEFAULT (-2)",
+		},
+		{
+			name:     "CheckUnaryPlus",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, CONSTRAINT chk CHECK ((`c` > 1)))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, CONSTRAINT chk CHECK (c > +1))",
+			expected: "",
+		},
+		{
+			name:     "GeneratedUnaryPlus",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, g INT GENERATED ALWAYS AS ((`c` + 1)) VIRTUAL)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, g INT GENERATED ALWAYS AS (+c + +1) VIRTUAL)",
+			expected: "",
+		},
+		// MySQL refuses to MODIFY a column to or from a VIRTUAL generated
+		// column (error 3106, "Changing the STORED status"); such a column is
+		// dropped and added back, at its position. Regular <-> STORED stays a
+		// MODIFY. See rebuiltColumns.
+		{
+			name:     "GeneratedVirtualToStoredIsRebuilt",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, g INT AS (c + 1) VIRTUAL)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, g INT AS (c + 1) STORED)",
+			expected: "ALTER TABLE `t1` DROP COLUMN `g`, ADD COLUMN `g` int GENERATED ALWAYS AS (`c`+1) STORED NULL",
+		},
+		{
+			name:     "GeneratedStoredToVirtualIsRebuilt",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, g INT AS (c + 1) STORED)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, g INT AS (c + 1) VIRTUAL)",
+			expected: "ALTER TABLE `t1` DROP COLUMN `g`, ADD COLUMN `g` int GENERATED ALWAYS AS (`c`+1) VIRTUAL NULL",
+		},
+		{
+			// A VIRTUAL column holds no data, so a DROP+ADD of the regular
+			// column would leave it NULL. It is rebuilt STORED first, which
+			// MySQL fills from the expression, then MODIFYed into a regular
+			// column, which keeps the values. See virtualToRegularIntermediate.
+			name:   "GeneratedVirtualToRegularIsStagedThroughStored",
+			source: "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, g INT AS (c + 1) VIRTUAL)",
+			target: "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, g INT)",
+			expectedStatements: []string{
+				"ALTER TABLE `t1` DROP COLUMN `g`, ADD COLUMN `g` int GENERATED ALWAYS AS (`c`+1) STORED NULL",
+				"ALTER TABLE `t1` MODIFY COLUMN `g` int NULL",
+			},
+		},
+		{
+			// The second statement carries the type and attribute changes,
+			// and everything else the diff emits.
+			name:   "GeneratedVirtualToRegularStagesOtherChangesSecond",
+			source: "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, g INT AS (c + 1) VIRTUAL)",
+			target: "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, g BIGINT NOT NULL DEFAULT 0, d INT)",
+			expectedStatements: []string{
+				"ALTER TABLE `t1` DROP COLUMN `g`, ADD COLUMN `g` int GENERATED ALWAYS AS (`c`+1) STORED NULL",
+				"ALTER TABLE `t1` MODIFY COLUMN `g` bigint NOT NULL DEFAULT 0, ADD COLUMN `d` int NULL",
+			},
+		},
+		{
+			// Dropping the column the expression read is fine in the second
+			// statement: the regular column no longer reads it.
+			name:   "GeneratedVirtualToRegularDropsReadColumnSecond",
+			source: "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, g INT AS (c + 1) VIRTUAL)",
+			target: "CREATE TABLE t1 (id INT PRIMARY KEY, g INT)",
+			expectedStatements: []string{
+				"ALTER TABLE `t1` DROP COLUMN `g`, ADD COLUMN `g` int GENERATED ALWAYS AS (`c`+1) STORED NULL",
+				"ALTER TABLE `t1` DROP COLUMN `c`, MODIFY COLUMN `g` int NULL",
+			},
+		},
+		{
+			// A STORED column reading a rebuilt column is not rebuilt with it
+			// when the target makes it regular: the MODIFY keeps its values,
+			// and MySQL accepts it in the same ALTER as the DROP.
+			name:     "GeneratedDependentToRegularIsModifiedNotRebuilt",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, g INT AS (c + 1) VIRTUAL, s INT AS (g + 1) STORED)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, g INT AS (c + 1) STORED, s INT)",
+			expected: "ALTER TABLE `t1` DROP COLUMN `g`, ADD COLUMN `g` int GENERATED ALWAYS AS (`c`+1) STORED NULL AFTER `c`, MODIFY COLUMN `s` int NULL",
+		},
+		{
+			name:     "RegularToGeneratedVirtualIsRebuilt",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, g INT)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, g INT AS (c + 1) VIRTUAL)",
+			expected: "ALTER TABLE `t1` DROP COLUMN `g`, ADD COLUMN `g` int GENERATED ALWAYS AS (`c`+1) VIRTUAL NULL",
+		},
+		{
+			name:     "RegularToGeneratedStoredIsModified",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, g INT)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, g INT AS (c + 1) STORED)",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `g` int GENERATED ALWAYS AS (`c`+1) STORED NULL",
+		},
+		{
+			name:     "GeneratedStoredToRegularIsModified",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, g INT AS (c + 1) STORED)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, g INT)",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `g` int NULL",
+		},
+		{
+			name:     "GeneratedExpressionChangeIsModified",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, g INT AS (c + 1) VIRTUAL)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, g INT AS (c + 2) VIRTUAL)",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `g` int GENERATED ALWAYS AS (`c`+2) VIRTUAL NULL",
+		},
+		{
+			name:     "GeneratedRebuildKeepsPosition",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, g INT AS (id + 1) VIRTUAL, c INT)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, g INT AS (id + 1) STORED, c INT)",
+			expected: "ALTER TABLE `t1` DROP COLUMN `g`, ADD COLUMN `g` int GENERATED ALWAYS AS (`id`+1) STORED NULL AFTER `id`",
+		},
+		{
+			// A plain key part on the column survives a DROP+ADD in one ALTER.
+			name:     "GeneratedRebuildKeepsPlainIndex",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, g INT AS (c + 1) VIRTUAL, KEY kg (g), KEY kcg (c, g))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, g INT AS (c + 1) STORED, KEY kg (g), KEY kcg (c, g))",
+			expected: "ALTER TABLE `t1` DROP COLUMN `g`, ADD COLUMN `g` int GENERATED ALWAYS AS (`c`+1) STORED NULL",
+		},
+		{
+			// A functional index reading the column blocks its DROP (error
+			// 3837) unless the same ALTER drops it; it is added back.
+			name:     "GeneratedRebuildReaddsFunctionalIndex",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, g INT AS (c + 1) VIRTUAL, KEY kf ((g + 1)))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, g INT AS (c + 1) STORED, KEY kf ((g + 1)))",
+			expected: "ALTER TABLE `t1` DROP COLUMN `g`, ADD COLUMN `g` int GENERATED ALWAYS AS (`c`+1) STORED NULL, DROP INDEX `kf`, ADD INDEX `kf` ((`g`+1))",
+		},
+		{
+			// A CHECK reading the column blocks its DROP (error 3959) unless
+			// the same ALTER drops it; the target's is added back.
+			name:     "GeneratedRebuildReaddsCheck",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, g INT AS (c + 1) VIRTUAL, CONSTRAINT ck CHECK (g > c))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, g INT AS (c + 1) STORED, CONSTRAINT ck CHECK (g > c))",
+			expected: "ALTER TABLE `t1` DROP COLUMN `g`, ADD COLUMN `g` int GENERATED ALWAYS AS (`c`+1) STORED NULL, DROP CHECK `ck`, ADD CONSTRAINT `ck` CHECK (`g`>`c`)",
+		},
+		{
+			// The re-add takes the target's text, even when the source's was
+			// an enforcement-only difference away from it.
+			name:     "GeneratedRebuildReaddsChangedCheck",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, g INT AS (c + 1) VIRTUAL, CONSTRAINT ck CHECK (g > c))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, g INT AS (c + 1) STORED, CONSTRAINT ck CHECK (g > c) NOT ENFORCED)",
+			expected: "ALTER TABLE `t1` DROP COLUMN `g`, ADD COLUMN `g` int GENERATED ALWAYS AS (`c`+1) STORED NULL, DROP CHECK `ck`, ADD CONSTRAINT `ck` CHECK (`g`>`c`) NOT ENFORCED",
+		},
+		{
+			// A generated column reading a rebuilt column blocks its DROP
+			// (error 3108) and is rebuilt with it.
+			name:     "GeneratedRebuildCascadesToDependents",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, g INT AS (id + 1) VIRTUAL, h INT AS (g + 1) VIRTUAL, c INT)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, g INT AS (id + 1) STORED, h INT AS (g + 1) VIRTUAL, c INT)",
+			expected: "ALTER TABLE `t1` DROP COLUMN `g`, DROP COLUMN `h`, ADD COLUMN `g` int GENERATED ALWAYS AS (`id`+1) STORED NULL AFTER `id`, ADD COLUMN `h` int GENERATED ALWAYS AS (`g`+1) VIRTUAL NULL AFTER `g`",
+		},
+		{
+			// MySQL reports a functional index key part wrapped in its own
+			// parentheses, KEY k (((`c` + 1))); the authored KEY k ((c+1)) is
+			// the same index.
+			name:     "FunctionalIndexParensConverge",
+			source:   "CREATE TABLE `t1` (`id` int NOT NULL, `c` int DEFAULT NULL, PRIMARY KEY (`id`), KEY `k` (((`c` + 1))))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k ((c+1)))",
+			expected: "",
+		},
+		{
+			name:     "FunctionalIndexAdded",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k ((c+1)))",
+			expected: "ALTER TABLE `t1` ADD INDEX `k` ((`c`+1))",
+		},
+		{
+			name:     "FunctionalIndexExpressionChanged",
+			source:   "CREATE TABLE `t1` (`id` int NOT NULL, `c` int DEFAULT NULL, PRIMARY KEY (`id`), KEY `k` (((`c` + 1))))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k ((c+2)))",
+			expected: "ALTER TABLE `t1` DROP INDEX `k`, ADD INDEX `k` ((`c`+2))",
+		},
+		{
+			// MySQL reports column references in a stored expression in the
+			// column's declared case; the authored spelling is the same
+			// expression (columnReferenceCaseNormalizer).
+			name:     "GeneratedColumnReferenceCaseConverges",
+			source:   "CREATE TABLE `t1` (`id` int NOT NULL, `c` int DEFAULT NULL, `g` int GENERATED ALWAYS AS ((`c` + 1)) STORED, PRIMARY KEY (`id`))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, g INT AS (C + 1) STORED)",
+			expected: "",
+		},
+		{
+			name:     "FunctionalIndexReferenceCaseConverges",
+			source:   "CREATE TABLE `t1` (`id` int NOT NULL, `c` int DEFAULT NULL, PRIMARY KEY (`id`), KEY `k` (((`c` + 1))))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k ((C+1)))",
+			expected: "",
+		},
+		{
+			name:     "CheckReferenceCaseConverges",
+			source:   "CREATE TABLE `t1` (`id` int NOT NULL, `c` int DEFAULT NULL, PRIMARY KEY (`id`), CONSTRAINT `t1_chk_1` CHECK ((`c` > 0)))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, CONSTRAINT t1_chk_1 CHECK (C > 0))",
+			expected: "",
+		},
+		{
+			name:     "PartitionReferenceCaseConverges",
+			source:   "CREATE TABLE `t1` (`id` int NOT NULL, PRIMARY KEY (`id`)) PARTITION BY HASH (`id`) PARTITIONS 2",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY) PARTITION BY HASH (ID) PARTITIONS 2",
+			expected: "",
+		},
+		{
+			// The respelling follows the declared column, so an emitted
+			// expression names the column as the table declares it.
+			name:     "GeneratedColumnEmittedInDeclaredCase",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, Col INT)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, Col INT, g INT AS (COL + 1) STORED)",
+			expected: "ALTER TABLE `t1` ADD COLUMN `g` int GENERATED ALWAYS AS (`Col`+1) STORED NULL",
+		},
+		{
 			// Reverse direction: the user's BOOLEAN schema as source, canonical
 			// tinyint(1) as target. Still equal — canonicalization is symmetric.
 			name:     "BooleanVsCanonicalTinyint",
@@ -217,13 +601,14 @@ func TestDiff(t *testing.T) {
 		{
 			// Adding WITH PARSER to an index with an unchanged column list is
 			// an option-only change. A combined DROP+ADD in a single ALTER is a
-			// MySQL no-op, so the diff must emit two separate statements.
+			// MySQL no-op, so the diff swaps the index for a replacement under
+			// a temporary name and renames it back in a final statement.
 			name:   "AddFulltextParser",
 			source: "CREATE TABLE t1 (id INT PRIMARY KEY, b TEXT, FULLTEXT KEY ft_b (b))",
 			target: "CREATE TABLE t1 (id INT PRIMARY KEY, b TEXT, FULLTEXT KEY ft_b (b) WITH PARSER ngram)",
 			expectedStatements: []string{
-				"ALTER TABLE `t1` DROP INDEX `ft_b`",
-				"ALTER TABLE `t1` ADD FULLTEXT INDEX `ft_b` (`b`) WITH PARSER ngram",
+				"ALTER TABLE `t1` ADD FULLTEXT INDEX `_ft_b_new` (`b`) WITH PARSER ngram, DROP INDEX `ft_b`",
+				"ALTER TABLE `t1` RENAME INDEX `_ft_b_new` TO `ft_b`",
 			},
 		},
 		{
@@ -231,8 +616,8 @@ func TestDiff(t *testing.T) {
 			source: "CREATE TABLE t1 (id INT PRIMARY KEY, b TEXT, FULLTEXT KEY ft_b (b) WITH PARSER ngram)",
 			target: "CREATE TABLE t1 (id INT PRIMARY KEY, b TEXT, FULLTEXT KEY ft_b (b))",
 			expectedStatements: []string{
-				"ALTER TABLE `t1` DROP INDEX `ft_b`",
-				"ALTER TABLE `t1` ADD FULLTEXT INDEX `ft_b` (`b`)",
+				"ALTER TABLE `t1` ADD FULLTEXT INDEX `_ft_b_new` (`b`), DROP INDEX `ft_b`",
+				"ALTER TABLE `t1` RENAME INDEX `_ft_b_new` TO `ft_b`",
 			},
 		},
 		{
@@ -251,27 +636,81 @@ func TestDiff(t *testing.T) {
 		},
 		{
 			// KEY_BLOCK_SIZE on an unchanged column list is an option-only
-			// change; emit it as two separate statements (see AddFulltextParser).
+			// change; it is swapped like AddFulltextParser.
 			name:   "AddIndexKeyBlockSize",
-			source: "CREATE TABLE t1 (id INT PRIMARY KEY, b VARCHAR(100), KEY idx_b (b))",
-			target: "CREATE TABLE t1 (id INT PRIMARY KEY, b VARCHAR(100), KEY idx_b (b) KEY_BLOCK_SIZE=8)",
+			source: "CREATE TABLE t1 (id INT PRIMARY KEY, b VARCHAR(100), KEY idx_b (b)) ROW_FORMAT=COMPRESSED",
+			target: "CREATE TABLE t1 (id INT PRIMARY KEY, b VARCHAR(100), KEY idx_b (b) KEY_BLOCK_SIZE=8) ROW_FORMAT=COMPRESSED",
 			expectedStatements: []string{
-				"ALTER TABLE `t1` DROP INDEX `idx_b`",
-				"ALTER TABLE `t1` ADD INDEX `idx_b` (`b`) KEY_BLOCK_SIZE=8",
+				"ALTER TABLE `t1` ADD INDEX `_idx_b_new` (`b`) KEY_BLOCK_SIZE=8, DROP INDEX `idx_b`",
+				"ALTER TABLE `t1` RENAME INDEX `_idx_b_new` TO `idx_b`",
 			},
 		},
 		{
 			name:   "RemoveIndexKeyBlockSize",
-			source: "CREATE TABLE t1 (id INT PRIMARY KEY, b VARCHAR(100), KEY idx_b (b) KEY_BLOCK_SIZE=8)",
-			target: "CREATE TABLE t1 (id INT PRIMARY KEY, b VARCHAR(100), KEY idx_b (b))",
+			source: "CREATE TABLE t1 (id INT PRIMARY KEY, b VARCHAR(100), KEY idx_b (b) KEY_BLOCK_SIZE=8) ROW_FORMAT=COMPRESSED",
+			target: "CREATE TABLE t1 (id INT PRIMARY KEY, b VARCHAR(100), KEY idx_b (b)) ROW_FORMAT=COMPRESSED",
 			expectedStatements: []string{
-				"ALTER TABLE `t1` DROP INDEX `idx_b`",
-				"ALTER TABLE `t1` ADD INDEX `idx_b` (`b`)",
+				"ALTER TABLE `t1` ADD INDEX `_idx_b_new` (`b`), DROP INDEX `idx_b`",
+				"ALTER TABLE `t1` RENAME INDEX `_idx_b_new` TO `idx_b`",
 			},
 		},
 		{
+			// The replacement's temporary name avoids every index name on
+			// either side, compared case-insensitively as MySQL does (error
+			// 1061 otherwise).
+			name:   "OptionOnlyChangeNextToTheTemporaryName",
+			source: "CREATE TABLE t1 (id INT PRIMARY KEY, b VARCHAR(100), KEY idx_b (b), KEY _IDX_B_new (id)) ROW_FORMAT=COMPRESSED",
+			target: "CREATE TABLE t1 (id INT PRIMARY KEY, b VARCHAR(100), KEY idx_b (b) KEY_BLOCK_SIZE=8, KEY _IDX_B_new (id)) ROW_FORMAT=COMPRESSED",
+			expectedStatements: []string{
+				"ALTER TABLE `t1` ADD INDEX `_idx_b_new2` (`b`) KEY_BLOCK_SIZE=8, DROP INDEX `idx_b`",
+				"ALTER TABLE `t1` RENAME INDEX `_idx_b_new2` TO `idx_b`",
+			},
+		},
+		{
+			// Every swap shares one statement, and every replacement is
+			// renamed back in one final statement.
+			name:   "TwoOptionOnlyChangesShareTheSwapAndTheRename",
+			source: "CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, KEY ka (a), KEY kb (b)) ROW_FORMAT=COMPRESSED",
+			target: "CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, KEY ka (a) KEY_BLOCK_SIZE=4, KEY kb (b) KEY_BLOCK_SIZE=4) ROW_FORMAT=COMPRESSED",
+			expectedStatements: []string{
+				"ALTER TABLE `t1` ADD INDEX `_ka_new` (`a`) KEY_BLOCK_SIZE=4, DROP INDEX `ka`, ADD INDEX `_kb_new` (`b`) KEY_BLOCK_SIZE=4, DROP INDEX `kb`",
+				"ALTER TABLE `t1` RENAME INDEX `_ka_new` TO `ka`, RENAME INDEX `_kb_new` TO `kb`",
+			},
+		},
+		{
+			// InnoDB builds one FULLTEXT index per ALTER (error 1795), so a
+			// FULLTEXT swap takes a statement of its own, after the shared
+			// one; the renames still share a statement.
+			name:   "FulltextSwapTakesItsOwnStatement",
+			source: "CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b TEXT, c TEXT, KEY ka (a), FULLTEXT KEY fb (b), FULLTEXT KEY fc (c)) ROW_FORMAT=COMPRESSED",
+			target: "CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b TEXT, c TEXT, KEY ka (a) KEY_BLOCK_SIZE=4, FULLTEXT KEY fb (b) WITH PARSER ngram, FULLTEXT KEY fc (c) WITH PARSER ngram) ROW_FORMAT=COMPRESSED",
+			expectedStatements: []string{
+				"ALTER TABLE `t1` ADD INDEX `_ka_new` (`a`) KEY_BLOCK_SIZE=4, DROP INDEX `ka`",
+				"ALTER TABLE `t1` ADD FULLTEXT INDEX `_fb_new` (`b`) WITH PARSER ngram, DROP INDEX `fb`",
+				"ALTER TABLE `t1` ADD FULLTEXT INDEX `_fc_new` (`c`) WITH PARSER ngram, DROP INDEX `fc`",
+				"ALTER TABLE `t1` RENAME INDEX `_ka_new` TO `ka`, RENAME INDEX `_fb_new` TO `fb`, RENAME INDEX `_fc_new` TO `fc`",
+			},
+		},
+		{
+			// An index declaring the table's own KEY_BLOCK_SIZE is reported
+			// without it (indexDefaultsNormalizer), so it is no change.
+			name:     "IndexKeyBlockSizeEqualToTheTableNoChange",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, b VARCHAR(100), KEY idx_b (b)) ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=4",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, b VARCHAR(100), KEY idx_b (b) KEY_BLOCK_SIZE=4) ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=4",
+			expected: "",
+		},
+		{
 			name:     "IndexKeyBlockSizeNoChange",
-			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, b VARCHAR(100), KEY idx_b (b) KEY_BLOCK_SIZE=8)",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, b VARCHAR(100), KEY idx_b (b) KEY_BLOCK_SIZE=8) ROW_FORMAT=COMPRESSED",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, b VARCHAR(100), KEY idx_b (b) KEY_BLOCK_SIZE=8) ROW_FORMAT=COMPRESSED",
+			expected: "",
+		},
+		{
+			// InnoDB drops an index KEY_BLOCK_SIZE on an uncompressed table,
+			// so it is not a change there (indexDefaultsNormalizer). The diff
+			// used to rebuild the index on every run.
+			name:     "IndexKeyBlockSizeIgnoredOnUncompressedTable",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, b VARCHAR(100), KEY idx_b (b))",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, b VARCHAR(100), KEY idx_b (b) KEY_BLOCK_SIZE=8)",
 			expected: "",
 		},
@@ -279,8 +718,8 @@ func TestDiff(t *testing.T) {
 			// An index rebuilt for an unrelated reason (here: a column list
 			// change) must preserve KEY_BLOCK_SIZE in the re-add.
 			name:     "IndexRebuildPreservesKeyBlockSize",
-			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, KEY idx_ab (a) KEY_BLOCK_SIZE=8)",
-			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, KEY idx_ab (a, b) KEY_BLOCK_SIZE=8)",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, KEY idx_ab (a) KEY_BLOCK_SIZE=8) ROW_FORMAT=COMPRESSED",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, KEY idx_ab (a, b) KEY_BLOCK_SIZE=8) ROW_FORMAT=COMPRESSED",
 			expected: "ALTER TABLE `t1` DROP INDEX `idx_ab`, ADD INDEX `idx_ab` (`a`, `b`) KEY_BLOCK_SIZE=8",
 		},
 		{
@@ -487,10 +926,39 @@ func TestDiff(t *testing.T) {
 			expected: "ALTER TABLE `t1` ALTER INDEX `idx_name` VISIBLE",
 		},
 		{
-			name:     "ModifyIndexType",
+			// InnoDB has no hash indexes: USING HASH builds a B-tree and is
+			// not reported, so it is not a change (indexDefaultsNormalizer).
+			name:     "UsingHashIsNoChangeOnInnoDB",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, name VARCHAR(100), INDEX idx_name (name))",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, name VARCHAR(100), INDEX idx_name (name) USING HASH)",
+			expected: "",
+		},
+		{
+			name:     "ModifyIndexTypeBtree",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, name VARCHAR(100), INDEX idx_name (name))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, name VARCHAR(100), INDEX idx_name (name) USING BTREE)",
+			expected: "ALTER TABLE `t1` DROP INDEX `idx_name`, ADD INDEX `idx_name` (`name`) USING BTREE",
+		},
+		{
+			name:     "ModifyIndexTypeHashOnMemoryEngine",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, name VARCHAR(100), INDEX idx_name (name)) ENGINE=MEMORY",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, name VARCHAR(100), INDEX idx_name (name) USING HASH) ENGINE=MEMORY",
 			expected: "ALTER TABLE `t1` DROP INDEX `idx_name`, ADD INDEX `idx_name` (`name`) USING HASH",
+		},
+		{
+			// VISIBLE is the default and is never reported, on a secondary
+			// index or on the primary key (where the ALTER INDEX used to be
+			// emitted with an empty name).
+			name:     "ExplicitVisibleIndexNoChange",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, name VARCHAR(100), INDEX idx_name (name))",
+			target:   "CREATE TABLE t1 (id INT, name VARCHAR(100), PRIMARY KEY (id) VISIBLE, INDEX idx_name (name) VISIBLE)",
+			expected: "",
+		},
+		{
+			name:     "ExplicitVisibleTargetRestoresVisibility",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, name VARCHAR(100), INDEX idx_name (name) INVISIBLE)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, name VARCHAR(100), INDEX idx_name (name) VISIBLE)",
+			expected: "ALTER TABLE `t1` ALTER INDEX `idx_name` VISIBLE",
 		},
 		{
 			name:     "AddIndexWithComment",
@@ -499,9 +967,8 @@ func TestDiff(t *testing.T) {
 			expected: "ALTER TABLE `t1` ADD INDEX `idx_name` (`name`) COMMENT 'name index'",
 		},
 
-		// Fulltext indexes
-		// Note: Spatial indexes can not be supported, because the TiDB parser does not support them.
-		// i.e. GEOMETRY, POINT, LINESTRING, and other spatial column types.
+		// Fulltext indexes. (Spatial indexes are covered next to the SRID
+		// cases in diff_column_options_test.go.)
 		{
 			name:     "AddFulltextIndex",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, content TEXT)",
@@ -514,6 +981,38 @@ func TestDiff(t *testing.T) {
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, content TEXT)",
 			expected: "ALTER TABLE `t1` DROP INDEX `idx_content`",
 		},
+		// InnoDB builds one FULLTEXT index per ALTER (error 1795): the first
+		// add stays in the combined ALTER, each further one is a statement
+		// of its own after it.
+		{
+			name:   "TwoFulltextAdditionsAreSplit",
+			source: "CREATE TABLE t1 (id INT PRIMARY KEY, a TEXT, b TEXT)",
+			target: "CREATE TABLE t1 (id INT PRIMARY KEY, a TEXT, b TEXT, FULLTEXT KEY k1 (a), FULLTEXT KEY k2 (b))",
+			expectedStatements: []string{
+				"ALTER TABLE `t1` ADD FULLTEXT INDEX `k1` (`a`)",
+				"ALTER TABLE `t1` ADD FULLTEXT INDEX `k2` (`b`)",
+			},
+		},
+		{
+			name:   "ThreeFulltextAdditionsAlongsideOtherChanges",
+			source: "CREATE TABLE t1 (id INT PRIMARY KEY, a TEXT, b TEXT)",
+			target: "CREATE TABLE t1 (id INT PRIMARY KEY, a TEXT, b TEXT, c TEXT, FULLTEXT KEY k1 (a), FULLTEXT KEY k2 (b), FULLTEXT KEY k3 (c), KEY kc (c(10)))",
+			expectedStatements: []string{
+				"ALTER TABLE `t1` ADD COLUMN `c` text NULL, ADD FULLTEXT INDEX `k1` (`a`), ADD INDEX `kc` (`c`(10))",
+				"ALTER TABLE `t1` ADD FULLTEXT INDEX `k2` (`b`)",
+				"ALTER TABLE `t1` ADD FULLTEXT INDEX `k3` (`c`)",
+			},
+		},
+		{
+			// A rebuilt FULLTEXT index counts as the one creation.
+			name:   "FulltextRebuiltAndAddedAreSplit",
+			source: "CREATE TABLE t1 (id INT PRIMARY KEY, a TEXT, b TEXT, FULLTEXT KEY k1 (a))",
+			target: "CREATE TABLE t1 (id INT PRIMARY KEY, a TEXT, b TEXT, FULLTEXT KEY k1 (a, b), FULLTEXT KEY k2 (b))",
+			expectedStatements: []string{
+				"ALTER TABLE `t1` DROP INDEX `k1`, ADD FULLTEXT INDEX `k1` (`a`, `b`)",
+				"ALTER TABLE `t1` ADD FULLTEXT INDEX `k2` (`b`)",
+			},
+		},
 		// Constraint Modifications
 		{
 			name:     "ModifyCheckConstraint",
@@ -522,13 +1021,261 @@ func TestDiff(t *testing.T) {
 			expected: "ALTER TABLE `t1` DROP CHECK `chk_age`, ADD CONSTRAINT `chk_age` CHECK (`age`>=18)",
 		},
 		{
-			// CHECK constraints with charset introducers like _utf8mb3 are normalized
-			// during parsing. MySQL generates different auto-names based on the original
-			// expression text, so the same logical constraint can have different names.
-			// The diff should recognize these as equivalent and produce no diff.
-			name:     "CheckConstraintCharsetIntroducerNoDiff",
+			// The _utf8mb3 MySQL reports on a literal stored from an older
+			// client is kept: the diff cannot tell an inert introducer from
+			// one that decides the value. The schema's bare spelling (and
+			// here its other name) diffs once; the re-added constraint,
+			// stored from a utf8mb4 session, then agrees.
+			name:     "CheckConstraintUTF8MB3IntroducerDiffers",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, type enum('A','B'), tok varchar(15), CONSTRAINT chk_tok_abc123 CHECK (type = _utf8mb3'A' AND tok IS NOT NULL OR type = _utf8mb3'B' AND tok IS NULL))",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, type enum('A','B'), tok varchar(15), CONSTRAINT chk_tok_def456 CHECK (type = 'A' AND tok IS NOT NULL OR type = 'B' AND tok IS NULL))",
+			expected: "ALTER TABLE `t1` DROP CHECK `chk_tok_abc123`, ADD CONSTRAINT `chk_tok_def456` CHECK (`type`='A' AND `tok` IS NOT NULL OR `type`='B' AND `tok` IS NULL)",
+		},
+		// Charset introducers. Every introducer a literal carries is kept
+		// except _utf8mb4, the one a bare literal parses to and the one MySQL
+		// writes on a bare literal stored from a utf8mb4 session: an
+		// introducer can change the value even of an ASCII literal
+		// (UPPER(_latin5'i') is 'İ', STRCMP(_latin1'a', _latin1'a ') is 0),
+		// and Spirit does not evaluate expressions. See restoreExprText.
+		{
+			name:     "GeneratedColumnBinaryIntroducerDiffers",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, g INT AS (CHAR_LENGTH('€')) STORED)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, g INT AS (CHAR_LENGTH(_binary'€')) STORED)",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `g` int GENERATED ALWAYS AS (CHAR_LENGTH(_BINARY'€')) STORED NULL",
+		},
+		{
+			name:     "ExpressionDefaultKeepsIntroducerUnderCollate",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c VARCHAR(10) DEFAULT ('a' COLLATE utf8mb4_bin))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c VARCHAR(10) DEFAULT (_latin1'a' COLLATE latin1_bin))",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `c` varchar(10) NULL DEFAULT (_LATIN1'a' COLLATE latin1_bin)",
+		},
+		{
+			// An introducer anywhere under COLLATE decides the charset the
+			// collation must belong to; folding it is error 1253.
+			name:     "ExpressionDefaultKeepsIntroducerUnderCollateFunction",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c VARCHAR(10) DEFAULT (CONCAT('a') COLLATE utf8mb4_bin))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c VARCHAR(10) DEFAULT (CONCAT(_latin1'a') COLLATE latin1_bin))",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `c` varchar(10) NULL DEFAULT (CONCAT(_LATIN1'a') COLLATE latin1_bin)",
+		},
+		{
+			// CHARSET() returns the charset the introducer names: 'latin1'
+			// against 'utf8mb4'. A different value, kept as written.
+			name:     "ExpressionDefaultKeepsIntroducerInsideCharset",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c VARCHAR(10) DEFAULT (CHARSET('a')))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c VARCHAR(10) DEFAULT (CHARSET(_latin1'a')))",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `c` varchar(10) NULL DEFAULT (charset(_latin1'a'))",
+		},
+		{
+			// The parser spells utf8mb3 as utf8, an alias MySQL accepts.
+			name:     "ExpressionDefaultKeepsIntroducerInsideCollation",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c VARCHAR(32) DEFAULT (COLLATION('a')))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c VARCHAR(32) DEFAULT (COLLATION(_utf8mb3'a')))",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `c` varchar(32) NULL DEFAULT (collation(_utf8'a'))",
+		},
+		{
+			// WEIGHT_STRING returns the collation weights, which differ per
+			// charset even for ASCII; the introducer is kept however deep.
+			name:     "GeneratedColumnKeepsIntroducerInsideWeightString",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, g VARCHAR(32) AS (HEX(WEIGHT_STRING('a'))) STORED)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, g VARCHAR(32) AS (HEX(WEIGHT_STRING(IF(id, _latin1'a', _latin1'b')))) STORED)",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `g` varchar(32) GENERATED ALWAYS AS (HEX(WEIGHT_STRING(IF(`id`, _LATIN1'a', _LATIN1'b')))) STORED NULL",
+		},
+		{
+			// An ASCII literal's introducer can still decide the value
+			// (UPPER(_latin5'i') is 'İ'), so it is kept and the expressions
+			// differ.
+			name:     "GeneratedColumnLatin1ASCIIIntroducerInsideUpperDiffers",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, g VARCHAR(10) AS (UPPER(_latin1'a')) STORED)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, g VARCHAR(10) AS (UPPER('a')) STORED)",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `g` varchar(10) GENERATED ALWAYS AS (UPPER('a')) STORED NULL",
+		},
+		{
+			name:     "GeneratedColumnLatin5IntroducerInsideUpperDiffers",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, g VARCHAR(10) AS (UPPER('i')) STORED)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, g VARCHAR(10) AS (UPPER(_latin5'i')) STORED)",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `g` varchar(10) GENERATED ALWAYS AS (UPPER(_LATIN5'i')) STORED NULL",
+		},
+		{
+			name:     "FunctionalIndexBinaryIntroducerDiffers",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, z VARCHAR(10), KEY fk ((CONCAT(z, 'x'))))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, z VARCHAR(10), KEY fk ((CONCAT(z, _binary'x'))))",
+			expected: "ALTER TABLE `t1` DROP INDEX `fk`, ADD INDEX `fk` ((CONCAT(`z`, _BINARY'x')))",
+		},
+		{
+			name:     "CheckLatin1ASCIIIntroducerDiffers",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c VARCHAR(10), CHECK (c <> _latin1'abc'))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c VARCHAR(10), CHECK (c <> 'abc'))",
+			expected: "ALTER TABLE `t1` DROP CHECK `t1_chk_1`, ADD CONSTRAINT `t1_chk_1` CHECK (`c`!='abc')",
+		},
+		{
+			name:     "CheckLatin1NonASCIIIntroducerDiffers",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c VARCHAR(10), CHECK (c <> _latin1'é'))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c VARCHAR(10), CHECK (c <> 'é'))",
+			expected: "ALTER TABLE `t1` DROP CHECK `t1_chk_1`, ADD CONSTRAINT `t1_chk_1` CHECK (`c`!='é')",
+		},
+		{
+			name:     "CheckUTF16IntroducerDiffers",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c VARCHAR(10), CHECK (c <> _utf16'x'))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c VARCHAR(10), CHECK (c <> 'x'))",
+			expected: "ALTER TABLE `t1` DROP CHECK `t1_chk_1`, ADD CONSTRAINT `t1_chk_1` CHECK (`c`!='x')",
+		},
+		{
+			// N'x' is _utf8mb3'x', kept like any other introducer.
+			name:     "CheckNationalLiteralDiffers",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c VARCHAR(10), CHECK (c <> N'x'))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c VARCHAR(10), CHECK (c <> 'x'))",
+			expected: "ALTER TABLE `t1` DROP CHECK `t1_chk_1`, ADD CONSTRAINT `t1_chk_1` CHECK (`c`!='x')",
+		},
+		{
+			// A literal-style default is a value: MySQL converts it to the
+			// column's charset and reports it with no introducer.
+			name:     "LiteralDefaultIntroducerNoDiff",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c VARCHAR(10) DEFAULT _latin1'x')",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c VARCHAR(10) DEFAULT 'x')",
+			expected: "",
+		},
+		// Column-level CHECKs. A column can carry several, each with its own
+		// name and enforcement; all of them are hoisted (columnCheckNormalizer).
+		// Keeping only the last one made a diff drop the others from the live
+		// table; dropping NOT ENFORCED made it start enforcing the constraint.
+		{
+			name:     "ColumnMultipleChecksAdded",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT CHECK (c > 0) CHECK (c < 10))",
+			expected: "ALTER TABLE `t1` ADD CONSTRAINT `t1_chk_1` CHECK (`c`>0), ADD CONSTRAINT `t1_chk_2` CHECK (`c`<10)",
+		},
+		{
+			name:     "ColumnMultipleChecksNoDiff",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, CONSTRAINT t1_chk_1 CHECK ((c > 0)), CONSTRAINT t1_chk_2 CHECK ((c < 10)))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT CHECK (c > 0) CHECK (c < 10))",
+			expected: "",
+		},
+		{
+			name:     "ColumnCheckNotEnforcedAdded",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT CONSTRAINT ck CHECK (c > 0) NOT ENFORCED)",
+			expected: "ALTER TABLE `t1` ADD CONSTRAINT `ck` CHECK (`c`>0) NOT ENFORCED",
+		},
+		{
+			name:     "ColumnCheckEnforcementToggled",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, CONSTRAINT ck CHECK ((c > 0)))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT CONSTRAINT ck CHECK (c > 0) NOT ENFORCED)",
+			expected: "ALTER TABLE `t1` ALTER CHECK `ck` NOT ENFORCED",
+		},
+		{
+			name:     "ColumnCheckNotEnforcedNoDiff",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, CONSTRAINT ck CHECK ((c > 0)) /*!80016 NOT ENFORCED */)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT CONSTRAINT ck CHECK (c > 0) NOT ENFORCED)",
+			expected: "",
+		},
+		// Invisible columns and the other per-column attributes MySQL
+		// reports: NOT SECONDARY, COLUMN_FORMAT, STORAGE and
+		// SECONDARY_ENGINE_ATTRIBUTE. They used to land in the unmodeled
+		// Options map, which Diff ignores: no diff when only they changed,
+		// and, because MODIFY COLUMN replaces the whole definition, silently
+		// cleared by any other change to the column.
+		{
+			name:     "InvisibleColumnAdded",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT INVISIBLE)",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `c` int NULL INVISIBLE",
+		},
+		{
+			name:     "InvisibleColumnRemoved",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT INVISIBLE)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT)",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `c` int NULL",
+		},
+		{
+			name:     "InvisibleColumnNoDiff",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, `c` int DEFAULT NULL /*!80023 INVISIBLE */)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT INVISIBLE)",
+			expected: "",
+		},
+		{
+			name:     "ExplicitVisibleColumnNoDiff",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT VISIBLE)",
+			expected: "",
+		},
+		{
+			name:     "CommentChangePreservesInvisible",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT INVISIBLE)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT INVISIBLE COMMENT 'x')",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `c` int NULL INVISIBLE COMMENT 'x'",
+		},
+		{
+			name:     "NotSecondaryAdded",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT NOT SECONDARY)",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `c` int NULL NOT SECONDARY",
+		},
+		{
+			name:     "NotSecondaryNoDiff",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, `c` int NOT SECONDARY DEFAULT NULL)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT NOT SECONDARY)",
+			expected: "",
+		},
+		{
+			// MySQL stores a JSON integer exactly and reports the change;
+			// comparing through float64 folded everything past 2^53 together.
+			name:     "SecondaryEngineAttributeLargeIntegerDiffers",
+			source:   `CREATE TABLE t1 (id INT PRIMARY KEY, c INT SECONDARY_ENGINE_ATTRIBUTE='{"x":9007199254740992}')`,
+			target:   `CREATE TABLE t1 (id INT PRIMARY KEY, c INT SECONDARY_ENGINE_ATTRIBUTE='{"x":9007199254740993}')`,
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `c` int NULL SECONDARY_ENGINE_ATTRIBUTE='{\\\"x\\\":9007199254740993}'",
+		},
+		{
+			name:   "IndexSecondaryEngineAttributeLargeIntegerDiffers",
+			source: `CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k (c) SECONDARY_ENGINE_ATTRIBUTE='{"x":9007199254740992}')`,
+			target: `CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k (c) SECONDARY_ENGINE_ATTRIBUTE='{"x":9007199254740993}')`,
+			expectedStatements: []string{
+				"ALTER TABLE `t1` ADD INDEX `_k_new` (`c`) SECONDARY_ENGINE_ATTRIBUTE='{\\\"x\\\":9007199254740993}', DROP INDEX `k`",
+				"ALTER TABLE `t1` RENAME INDEX `_k_new` TO `k`",
+			},
+		},
+		{
+			// MySQL reports 1e2 as 100.0 and an integer past uint64 as a double.
+			name:     "SecondaryEngineAttributeNumberFormsNoDiff",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, `c` int DEFAULT NULL /*!80021 SECONDARY_ENGINE_ATTRIBUTE '{\"w\": 1.2345678901234568e22, \"y\": 1.0, \"z\": 100.0}' */)",
+			target:   `CREATE TABLE t1 (id INT PRIMARY KEY, c INT SECONDARY_ENGINE_ATTRIBUTE='{"z":1e2,"y":1,"w":12345678901234567890123}')`,
+			expected: "",
+		},
+		{
+			name:     "SecondaryEngineAttributeAdded",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT)",
+			target:   `CREATE TABLE t1 (id INT PRIMARY KEY, c INT SECONDARY_ENGINE_ATTRIBUTE='{"x":1}')`,
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `c` int NULL SECONDARY_ENGINE_ATTRIBUTE='{\\\"x\\\":1}'",
+		},
+		{
+			// MySQL re-serializes the JSON (here with a space after the
+			// colon); the attribute is compared as a JSON document.
+			name:     "SecondaryEngineAttributeReserializedNoDiff",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, `c` int DEFAULT NULL /*!80021 SECONDARY_ENGINE_ATTRIBUTE '{\"x\": 1}' */)",
+			target:   `CREATE TABLE t1 (id INT PRIMARY KEY, c INT SECONDARY_ENGINE_ATTRIBUTE='{"x":1}')`,
+			expected: "",
+		},
+		{
+			name:     "CommentChangePreservesSecondaryEngineAttribute",
+			source:   `CREATE TABLE t1 (id INT PRIMARY KEY, c INT SECONDARY_ENGINE_ATTRIBUTE='{"x":1}')`,
+			target:   `CREATE TABLE t1 (id INT PRIMARY KEY, c INT SECONDARY_ENGINE_ATTRIBUTE='{"x":1}' COMMENT 'x')`,
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `c` int NULL COMMENT 'x' SECONDARY_ENGINE_ATTRIBUTE='{\\\"x\\\":1}'",
+		},
+		{
+			name:     "ColumnFormatAndStorageAdded",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT COLUMN_FORMAT FIXED STORAGE DISK)",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `c` int NULL STORAGE DISK COLUMN_FORMAT FIXED",
+		},
+		{
+			name:     "ColumnFormatAndStorageNoDiff",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, `c` int /*!50606 STORAGE DISK */ /*!50606 COLUMN_FORMAT FIXED */ DEFAULT NULL)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT COLUMN_FORMAT fixed STORAGE disk)",
+			expected: "",
+		},
+		{
+			name:     "ColumnFormatDefaultNoDiff",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT COLUMN_FORMAT DEFAULT STORAGE DEFAULT SECONDARY_ENGINE_ATTRIBUTE='')",
 			expected: "",
 		},
 		{
@@ -1162,19 +1909,19 @@ func TestDiff(t *testing.T) {
 			name:     "BooleanDefaultFalse",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, is_active BOOL)",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, is_active BOOL DEFAULT FALSE)",
-			expected: "ALTER TABLE `t1` MODIFY COLUMN `is_active` tinyint(1) NULL DEFAULT 0",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `is_active` tinyint(1) NULL DEFAULT FALSE",
 		},
 		{
 			name:     "BooleanDefaultTrue",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, is_active BOOL)",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, is_active BOOL DEFAULT TRUE)",
-			expected: "ALTER TABLE `t1` MODIFY COLUMN `is_active` tinyint(1) NULL DEFAULT 1",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `is_active` tinyint(1) NULL DEFAULT TRUE",
 		},
 		{
 			name:     "AddBooleanColumnWithDefault",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY)",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, is_instant BOOL DEFAULT FALSE)",
-			expected: "ALTER TABLE `t1` ADD COLUMN `is_instant` tinyint(1) NULL DEFAULT 0",
+			expected: "ALTER TABLE `t1` ADD COLUMN `is_instant` tinyint(1) NULL DEFAULT FALSE",
 		},
 		{
 			name:     "AddColumnFirst",
@@ -1186,7 +1933,7 @@ func TestDiff(t *testing.T) {
 			name:     "ChangeColumnOrder",
 			source:   "CREATE TABLE t1 (a INT, b INT, c INT)",
 			target:   "CREATE TABLE t1 (b INT, c INT, a INT)",
-			expected: "ALTER TABLE `t1` MODIFY COLUMN `b` int NULL FIRST, MODIFY COLUMN `c` int NULL AFTER `b`, MODIFY COLUMN `a` int NULL AFTER `c`",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `b` int NULL FIRST, MODIFY COLUMN `c` int NULL AFTER `b`",
 		},
 		// Binary/Blob Types
 		{
@@ -1327,16 +2074,144 @@ func TestDiff(t *testing.T) {
 			expected: "ALTER TABLE `t1` ADD CONSTRAINT `fk_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE SET NULL",
 		},
 		{
+			// MySQL rejects a DROP FOREIGN KEY and an ADD CONSTRAINT under the
+			// same name in one ALTER (error 1826), so the new definition is
+			// added under a replacement name next to the DROP, and keeps it:
+			// the table is never without the constraint, and a foreign key is
+			// paired by definition whatever its name (below).
 			name:     "ChangeForeignKeyAction",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE RESTRICT)",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)",
-			expected: "ALTER TABLE `t1` DROP FOREIGN KEY `fk_user`, ADD CONSTRAINT `fk_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE",
+			expected: "ALTER TABLE `t1` DROP FOREIGN KEY `fk_user`, ADD CONSTRAINT `_fk_user_new` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE",
 		},
 		{
 			name:     "AddOnDeleteToExistingForeignKey",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id))",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)",
-			expected: "ALTER TABLE `t1` DROP FOREIGN KEY `fk_user`, ADD CONSTRAINT `fk_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE",
+			expected: "ALTER TABLE `t1` DROP FOREIGN KEY `fk_user`, ADD CONSTRAINT `_fk_user_new` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE",
+		},
+		{
+			// The replacement name avoids every index and constraint name on
+			// either side: MySQL names the index it creates for a foreign
+			// key after the constraint.
+			name:     "ChangeForeignKeyActionReplacementNameTaken",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, KEY _fk_user_new (user_id), CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, KEY _fk_user_new (user_id), CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)",
+			expected: "ALTER TABLE `t1` DROP FOREIGN KEY `fk_user`, ADD CONSTRAINT `_fk_user_new2` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE",
+		},
+		{
+			// An index the target adds under the name is avoided: MySQL
+			// renames the index it created for the foreign key after the new
+			// constraint, so the ALTER would fail with error 1061.
+			name:     "ReplacementNameAvoidsATargetOnlyIndex",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, c INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, c INT, KEY _fk_user_new (c), CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)",
+			expected: "ALTER TABLE `t1` ADD INDEX `_fk_user_new` (`c`), DROP FOREIGN KEY `fk_user`, ADD CONSTRAINT `_fk_user_new2` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE",
+		},
+		{
+			// A foreign key the target adds under the name is avoided for
+			// the same reason (error 1061).
+			name:     "ReplacementNameAvoidsATargetOnlyForeignKey",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, c INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, c INT, CONSTRAINT _fk_user_new FOREIGN KEY (c) REFERENCES users(id), CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)",
+			expected: "ALTER TABLE `t1` DROP FOREIGN KEY `fk_user`, ADD CONSTRAINT `_fk_user_new2` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE, ADD CONSTRAINT `_fk_user_new` FOREIGN KEY (`c`) REFERENCES `users` (`id`)",
+		},
+		{
+			// A foreign key the same ALTER drops is avoided: MySQL keeps the
+			// index it created for that foreign key, under the same name, so
+			// the ALTER would fail with error 1061.
+			name:     "ReplacementNameAvoidsASourceOnlyForeignKey",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, c INT, CONSTRAINT _fk_user_new FOREIGN KEY (c) REFERENCES users(id), CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, c INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)",
+			expected: "ALTER TABLE `t1` DROP FOREIGN KEY `_fk_user_new`, DROP FOREIGN KEY `fk_user`, ADD CONSTRAINT `_fk_user_new2` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE",
+		},
+		{
+			// An index the same ALTER drops is avoided too. MySQL would
+			// accept its name, but the rule is every name on either side.
+			name:     "ReplacementNameAvoidsASourceOnlyIndex",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, c INT, KEY _fk_user_new (c), CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, c INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)",
+			expected: "ALTER TABLE `t1` DROP INDEX `_fk_user_new`, DROP FOREIGN KEY `fk_user`, ADD CONSTRAINT `_fk_user_new2` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE",
+		},
+		{
+			// The foreign key keeps the replacement name, and is paired with
+			// the target's by definition, as any renamed foreign key is.
+			name:     "ForeignKeyUnderReplacementNameNoDiff",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT _fk_user_new FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)",
+			expected: "",
+		},
+		{
+			// A later change under the desired name fits one ALTER under
+			// the two names, and brings the name back.
+			name:     "ForeignKeyUnderReplacementNameChangedAgain",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT _fk_user_new FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL)",
+			expected: "ALTER TABLE `t1` DROP FOREIGN KEY `_fk_user_new`, ADD CONSTRAINT `fk_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE SET NULL",
+		},
+		{
+			name:     "ForeignKeyRenamedWithSameDefinitionNoDiff",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_old FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)",
+			expected: "",
+		},
+		{
+			// A foreign key changed under a new name fits one ALTER.
+			name:     "ChangeForeignKeyActionUnderNewName",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE RESTRICT)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user2 FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)",
+			expected: "ALTER TABLE `t1` DROP FOREIGN KEY `fk_user`, ADD CONSTRAINT `fk_user2` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE",
+		},
+		{
+			// Foreign key names are case-insensitive in MySQL, so a name that
+			// differs only in case collides the same way (error 1826).
+			name:     "ChangeForeignKeyActionUnderCaseChangedName",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE RESTRICT)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT FK_USER FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)",
+			expected: "ALTER TABLE `t1` DROP FOREIGN KEY `fk_user`, ADD CONSTRAINT `_FK_USER_new` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE",
+		},
+		{
+			// The new definitions join the primary ALTER under replacement
+			// names, next to every other change; a foreign key under a new
+			// name joins it under its own.
+			name:     "ForeignKeyReplacementsJoinOtherChanges",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, CONSTRAINT fk_a FOREIGN KEY (a) REFERENCES pa(id), CONSTRAINT fk_b FOREIGN KEY (b) REFERENCES pb(id))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, c INT, CONSTRAINT fk_a FOREIGN KEY (a) REFERENCES pa(id) ON DELETE CASCADE, CONSTRAINT fk_b FOREIGN KEY (b) REFERENCES pb(id) ON DELETE SET NULL, CONSTRAINT fk_c FOREIGN KEY (c) REFERENCES pc(id))",
+			expected: "ALTER TABLE `t1` ADD COLUMN `c` int NULL, DROP FOREIGN KEY `fk_a`, DROP FOREIGN KEY `fk_b`, ADD CONSTRAINT `_fk_a_new` FOREIGN KEY (`a`) REFERENCES `pa` (`id`) ON DELETE CASCADE, ADD CONSTRAINT `_fk_b_new` FOREIGN KEY (`b`) REFERENCES `pb` (`id`) ON DELETE SET NULL, ADD CONSTRAINT `fk_c` FOREIGN KEY (`c`) REFERENCES `pc` (`id`)",
+		},
+		// Schema-qualified references. SHOW CREATE TABLE qualifies a
+		// reference only when the parent is in another schema, and a parsed
+		// CREATE TABLE does not know its own schema, so two references differ
+		// only when both are qualified with different schemas.
+		{
+			name:     "AddForeignKeyToOtherSchema",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES db2.users(id))",
+			expected: "ALTER TABLE `t1` ADD CONSTRAINT `fk_user` FOREIGN KEY (`user_id`) REFERENCES `db2`.`users` (`id`)",
+		},
+		{
+			name:     "ForeignKeyReferencedSchemaChanged",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES db1.users(id))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES db2.users(id))",
+			expected: "ALTER TABLE `t1` DROP FOREIGN KEY `fk_user`, ADD CONSTRAINT `_fk_user_new` FOREIGN KEY (`user_id`) REFERENCES `db2`.`users` (`id`)",
+		},
+		{
+			name:     "ForeignKeyQualifiedMatchesUnqualified",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES db1.users(id))",
+			expected: "",
+		},
+		{
+			name:     "ForeignKeyUnqualifiedMatchesQualified",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES db1.users(id))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id))",
+			expected: "",
+		},
+		{
+			name:     "ForeignKeySameSchemaSpelledEqual",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES db1.users(id))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES `db1`.`users`(id))",
+			expected: "",
 		},
 		{
 			// NO ACTION is MySQL's default referential action, and SHOW CREATE
@@ -1375,13 +2250,13 @@ func TestDiff(t *testing.T) {
 			name:     "ForeignKeyAddRestrictStillDiffs",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id))",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE RESTRICT)",
-			expected: "ALTER TABLE `t1` DROP FOREIGN KEY `fk_user`, ADD CONSTRAINT `fk_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE RESTRICT",
+			expected: "ALTER TABLE `t1` DROP FOREIGN KEY `fk_user`, ADD CONSTRAINT `_fk_user_new` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE RESTRICT",
 		},
 		{
 			name:     "ForeignKeyCascadeToNoAction",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE NO ACTION)",
-			expected: "ALTER TABLE `t1` DROP FOREIGN KEY `fk_user`, ADD CONSTRAINT `fk_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`)",
+			expected: "ALTER TABLE `t1` DROP FOREIGN KEY `fk_user`, ADD CONSTRAINT `_fk_user_new` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`)",
 		},
 
 		// Composite Primary Key Changes
@@ -1705,7 +2580,157 @@ func TestDiff(t *testing.T) {
 			name:     "ReorderUppercaseColumns",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, A INT NOT NULL, B INT NOT NULL)",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, B INT NOT NULL, A INT NOT NULL)",
-			expected: "ALTER TABLE `t1` MODIFY COLUMN `B` int NOT NULL AFTER `id`, MODIFY COLUMN `A` int NOT NULL AFTER `B`",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `B` int NOT NULL AFTER `id`",
+		},
+		// Positioning follows the clauses through the way MySQL applies them
+		// (see calculateColumnPositioning). Dropping a column used to count
+		// as an implicit move for its successor, so the reorder below was
+		// never emitted and the live table ended up as (id, b, d).
+		{
+			name:     "ReorderAfterDrop",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, c INT, d INT)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, d INT, b INT)",
+			expected: "ALTER TABLE `t1` DROP COLUMN `a`, DROP COLUMN `c`, MODIFY COLUMN `d` int NULL AFTER `id`",
+		},
+		{
+			name:     "DropWithoutReorderNoPosition",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, c INT)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, b INT, c INT)",
+			expected: "ALTER TABLE `t1` DROP COLUMN `a`",
+		},
+		{
+			name:     "AddInMiddleThenReorder",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, x INT, b INT, a INT)",
+			expected: "ALTER TABLE `t1` ADD COLUMN `x` int NULL AFTER `id`, MODIFY COLUMN `b` int NULL AFTER `x`",
+		},
+		{
+			name:     "MoveLastColumnFirst",
+			source:   "CREATE TABLE t1 (a INT, b INT, c INT, d INT)",
+			target:   "CREATE TABLE t1 (d INT, a INT, b INT, c INT)",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `d` int NULL FIRST",
+		},
+		// Table options SHOW CREATE TABLE reports that Diff used to discard.
+		// Each is cleared by the value MySQL reads back as unset.
+		{
+			name:     "TableStatsOptionsAdded",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY) STATS_PERSISTENT=0 STATS_AUTO_RECALC=1 STATS_SAMPLE_PAGES=42",
+			expected: "ALTER TABLE `t1` STATS_PERSISTENT=0, STATS_AUTO_RECALC=1, STATS_SAMPLE_PAGES=42",
+		},
+		{
+			name:     "TableStatsOptionsReset",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY) STATS_PERSISTENT=0 STATS_AUTO_RECALC=1 STATS_SAMPLE_PAGES=42",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY)",
+			expected: "ALTER TABLE `t1` STATS_PERSISTENT=DEFAULT, STATS_AUTO_RECALC=DEFAULT, STATS_SAMPLE_PAGES=DEFAULT",
+		},
+		{
+			name:     "TableStatsOptionsDefaultNoDiff",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY) STATS_PERSISTENT=DEFAULT STATS_AUTO_RECALC=DEFAULT STATS_SAMPLE_PAGES=DEFAULT",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY)",
+			expected: "",
+		},
+		{
+			name:     "TableStatsPersistentToggled",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY) STATS_PERSISTENT=1",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY) STATS_PERSISTENT=0",
+			expected: "ALTER TABLE `t1` STATS_PERSISTENT=0",
+		},
+		{
+			name:     "AutoextendSizeSuffixNoDiff",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY) /*!80023 AUTOEXTEND_SIZE=4194304 */ ENGINE=InnoDB",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY) AUTOEXTEND_SIZE=4M",
+			expected: "",
+		},
+		{
+			name:     "AutoextendSizeAdded",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY) AUTOEXTEND_SIZE=4M",
+			expected: "ALTER TABLE `t1` AUTOEXTEND_SIZE=4194304",
+		},
+		{
+			name:     "AutoextendSizeReset",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY) AUTOEXTEND_SIZE=4M",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY)",
+			expected: "ALTER TABLE `t1` AUTOEXTEND_SIZE=0",
+		},
+		{
+			name:     "TableSecondaryEngineAttributeAdded",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY) SECONDARY_ENGINE_ATTRIBUTE='{\"t\":1}'",
+			expected: "ALTER TABLE `t1` SECONDARY_ENGINE_ATTRIBUTE='{\\\"t\\\":1}'",
+		},
+		{
+			name:     "TableSecondaryEngineAttributeReset",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY) SECONDARY_ENGINE_ATTRIBUTE='{\"t\":1}'",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY)",
+			expected: "ALTER TABLE `t1` SECONDARY_ENGINE_ATTRIBUTE=''",
+		},
+		{
+			name:     "TableSecondaryEngineAttributeReserializedNoDiff",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY) /*!80021 SECONDARY_ENGINE_ATTRIBUTE='{\"t\": 1}' */",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY) SECONDARY_ENGINE_ATTRIBUTE='{\"t\":1}'",
+			expected: "",
+		},
+		{
+			name:     "TableStorageHintsAdded",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY) MIN_ROWS=10 MAX_ROWS=1000 AVG_ROW_LENGTH=100 PACK_KEYS=1 CHECKSUM=1 DELAY_KEY_WRITE=1",
+			expected: "ALTER TABLE `t1` MIN_ROWS=10, MAX_ROWS=1000, AVG_ROW_LENGTH=100, PACK_KEYS=1, CHECKSUM=1, DELAY_KEY_WRITE=1",
+		},
+		{
+			name:     "TableStorageHintsReset",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY) MIN_ROWS=10 MAX_ROWS=1000 AVG_ROW_LENGTH=100 PACK_KEYS=1 CHECKSUM=1 DELAY_KEY_WRITE=1",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY)",
+			expected: "ALTER TABLE `t1` MIN_ROWS=0, MAX_ROWS=0, AVG_ROW_LENGTH=0, PACK_KEYS=DEFAULT, CHECKSUM=0, DELAY_KEY_WRITE=0",
+		},
+		{
+			// The table-level KEY_BLOCK_SIZE goes with ROW_FORMAT, which the
+			// default options ignore (see TestDiffWithOptions for the rest).
+			name:     "TableKeyBlockSizeIgnoredByDefault",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY) ROW_FORMAT=COMPRESSED",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY) ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=4",
+			expected: "",
+		},
+		// An index's SECONDARY_ENGINE_ATTRIBUTE. Adding or removing it alone
+		// is an option-only change: a combined DROP+ADD is a MySQL no-op that
+		// leaves the attribute as it was, so the index is swapped for a
+		// replacement under a temporary name.
+		{
+			name:   "IndexSecondaryEngineAttributeAdded",
+			source: "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k (c))",
+			target: "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k (c) SECONDARY_ENGINE_ATTRIBUTE='{\"k\":1}')",
+			expectedStatements: []string{
+				"ALTER TABLE `t1` ADD INDEX `_k_new` (`c`) SECONDARY_ENGINE_ATTRIBUTE='{\\\"k\\\":1}', DROP INDEX `k`",
+				"ALTER TABLE `t1` RENAME INDEX `_k_new` TO `k`",
+			},
+		},
+		{
+			name:   "IndexSecondaryEngineAttributeRemoved",
+			source: "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k (c) SECONDARY_ENGINE_ATTRIBUTE='{\"k\":1}')",
+			target: "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k (c))",
+			expectedStatements: []string{
+				"ALTER TABLE `t1` ADD INDEX `_k_new` (`c`), DROP INDEX `k`",
+				"ALTER TABLE `t1` RENAME INDEX `_k_new` TO `k`",
+			},
+		},
+		{
+			name:     "IndexSecondaryEngineAttributeReserializedNoDiff",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k (c) /*!80021 SECONDARY_ENGINE_ATTRIBUTE '{\"k\": 1}' */)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k (c) SECONDARY_ENGINE_ATTRIBUTE='{\"k\":1}')",
+			expected: "",
+		},
+		{
+			name:     "IndexRebuildPreservesSecondaryEngineAttribute",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k (c) COMMENT 'a' SECONDARY_ENGINE_ATTRIBUTE='{\"k\":1}')",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k (c) COMMENT 'b' SECONDARY_ENGINE_ATTRIBUTE='{\"k\":1}')",
+			expected: "ALTER TABLE `t1` DROP INDEX `k`, ADD INDEX `k` (`c`) COMMENT 'b' SECONDARY_ENGINE_ATTRIBUTE='{\\\"k\\\":1}'",
+		},
+		{
+			name:     "IndexVisibilityChangeKeepsSecondaryEngineAttribute",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k (c) SECONDARY_ENGINE_ATTRIBUTE='{\"k\":1}')",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k (c) SECONDARY_ENGINE_ATTRIBUTE='{\"k\":1}' INVISIBLE)",
+			expected: "ALTER TABLE `t1` ALTER INDEX `k` INVISIBLE",
 		},
 		// Partitioning. The sources below are shaped like SHOW CREATE TABLE
 		// output, which always prints a per-partition `ENGINE = InnoDB` that
@@ -2136,6 +3161,68 @@ func TestDiff_DiffOptions(t *testing.T) {
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY) ROW_FORMAT=COMPRESSED",
 			opts:     &DiffOptions{IgnoreAutoIncrement: true, IgnoreEngine: true, IgnoreRowFormat: false},
 			expected: "ALTER TABLE `t1` ROW_FORMAT=COMPRESSED",
+		},
+		// The table-level KEY_BLOCK_SIZE is the compressed page size and goes
+		// with ROW_FORMAT: ignored with it, and cleared in the same statement
+		// as a row format change, which InnoDB otherwise rejects.
+		{
+			name:     "KeyBlockSizeDetectedWithRowFormat",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY) ROW_FORMAT=COMPRESSED",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY) ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=4",
+			opts:     &DiffOptions{IgnoreAutoIncrement: true, IgnoreEngine: true, IgnoreRowFormat: false},
+			expected: "ALTER TABLE `t1` KEY_BLOCK_SIZE=4",
+		},
+		{
+			name:     "KeyBlockSizeClearedWithRowFormatChange",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY) ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=4",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY) ROW_FORMAT=DYNAMIC",
+			opts:     &DiffOptions{IgnoreAutoIncrement: true, IgnoreEngine: true, IgnoreRowFormat: false},
+			expected: "ALTER TABLE `t1` ROW_FORMAT=DYNAMIC, KEY_BLOCK_SIZE=0",
+		},
+		{
+			name:     "KeyBlockSizeIgnoredWithRowFormat",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY) ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=4",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY) ROW_FORMAT=DYNAMIC",
+			opts:     nil,
+			expected: "",
+		},
+		// A target without a row format clears the source's with
+		// ROW_FORMAT=DEFAULT, the option MySQL stores as none; a target that
+		// writes ROW_FORMAT=DEFAULT out is the same target.
+		{
+			name:     "RowFormatClearedWhenTargetOmitsIt",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY) ROW_FORMAT=COMPACT",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY)",
+			opts:     &DiffOptions{IgnoreAutoIncrement: true, IgnoreEngine: true, IgnoreRowFormat: false},
+			expected: "ALTER TABLE `t1` ROW_FORMAT=DEFAULT",
+		},
+		{
+			name:     "RowFormatDefaultParsesAsNone",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY) ROW_FORMAT=COMPACT",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY) ROW_FORMAT=DEFAULT",
+			opts:     &DiffOptions{IgnoreAutoIncrement: true, IgnoreEngine: true, IgnoreRowFormat: false},
+			expected: "ALTER TABLE `t1` ROW_FORMAT=DEFAULT",
+		},
+		{
+			name:     "RowFormatDefaultAgainstNoneIsNoop",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY) ROW_FORMAT=DEFAULT",
+			opts:     &DiffOptions{IgnoreAutoIncrement: true, IgnoreEngine: true, IgnoreRowFormat: false},
+			expected: "",
+		},
+		{
+			name:     "RowFormatAndKeyBlockSizeClearedTogether",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY) ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=8",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY)",
+			opts:     &DiffOptions{IgnoreAutoIncrement: true, IgnoreEngine: true, IgnoreRowFormat: false},
+			expected: "ALTER TABLE `t1` ROW_FORMAT=DEFAULT, KEY_BLOCK_SIZE=0",
+		},
+		{
+			name:     "RowFormatClearIgnoredByDefault",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY) ROW_FORMAT=COMPACT",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY)",
+			opts:     nil,
+			expected: "",
 		},
 
 		// Combined: ignore everything possible, still detect column + index changes
@@ -2688,4 +3775,93 @@ func TestDiffPartitionStorageOptionChange(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A table-level KEY_BLOCK_SIZE change (compared under IgnoreRowFormat: false)
+// emits only the new size. On a table that stays compressed MySQL keeps the old
+// size on the existing indexes, so that change does not converge; compressed
+// tables are out of scope, and the diff does not re-create the indexes (the
+// primary key would need a DROP PRIMARY KEY, which Spirit refuses).
+func TestDiffTableKeyBlockSizeChange(t *testing.T) {
+	compared := NewDiffOptions()
+	compared.IgnoreRowFormat = false
+	tests := []struct {
+		name     string
+		source   string
+		target   string
+		opts     *DiffOptions
+		expected []string
+	}{
+		{
+			name:     "Resized",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k (c), UNIQUE KEY u (c, id)) ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=8",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k (c), UNIQUE KEY u (c, id)) ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=4",
+			opts:     compared,
+			expected: []string{"ALTER TABLE `t1` KEY_BLOCK_SIZE=4"},
+		},
+		{
+			name:     "ToTheImplicitSize",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k (c)) ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=4",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k (c)) ROW_FORMAT=COMPRESSED",
+			opts:     compared,
+			expected: []string{"ALTER TABLE `t1` KEY_BLOCK_SIZE=0"},
+		},
+		{
+			// A table without an explicit size stores none on its indexes, so
+			// they take the new one on their own: this one converges.
+			name:     "FromTheImplicitSize",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k (c)) ROW_FORMAT=COMPRESSED",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k (c)) ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=4",
+			opts:     compared,
+			expected: []string{"ALTER TABLE `t1` KEY_BLOCK_SIZE=4"},
+		},
+		{
+			// InnoDB drops every index KEY_BLOCK_SIZE when the table stops
+			// being compressed.
+			name:     "ToUncompressed",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k (c)) ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=8",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k (c)) ROW_FORMAT=DYNAMIC",
+			opts:     compared,
+			expected: []string{"ALTER TABLE `t1` ROW_FORMAT=DYNAMIC, KEY_BLOCK_SIZE=0"},
+		},
+		{
+			name:     "IgnoredByDefault",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k (c)) ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=8",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k (c)) ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=4",
+			opts:     nil,
+			expected: nil,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			source, err := ParseCreateTable(tt.source)
+			require.NoError(t, err)
+			target, err := ParseCreateTable(tt.target)
+			require.NoError(t, err)
+			stmts, err := source.Diff(target, tt.opts)
+			require.NoError(t, err)
+			var got []string
+			for _, s := range stmts {
+				got = append(got, s.Statement)
+			}
+			assert.Equal(t, tt.expected, got)
+		})
+	}
+}
+
+// replacementName stays inside MySQL's 64-character identifier limit and
+// clear of every name in use, whatever its case.
+func TestReplacementName(t *testing.T) {
+	taken := map[string]bool{"k": true, "_k_new": true, "_k_new2": true}
+	assert.Equal(t, "_k_new3", replacementName("k", taken))
+	assert.True(t, taken["_k_new3"], "the chosen name is taken from then on")
+	assert.Equal(t, "_K_new4", replacementName("K", taken), "names are compared case-insensitively, and the given case kept")
+
+	long := strings.Repeat("é", 64)
+	got := replacementName(long, map[string]bool{})
+	assert.Len(t, []rune(got), 64)
+	assert.Equal(t, "_"+strings.Repeat("é", 59)+"_new", got)
+	got = replacementName(long, map[string]bool{strings.ToLower(got): true})
+	assert.Len(t, []rune(got), 64)
+	assert.Equal(t, "_"+strings.Repeat("é", 58)+"_new2", got)
 }

@@ -4,6 +4,8 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+
+	"github.com/block/spirit/pkg/utils"
 )
 
 // This file holds the comparison helpers used by Diff to decide whether two
@@ -14,8 +16,9 @@ import (
 // columnExtendedAttributesEqual compares the column attributes beyond the
 // basic type/nullability/default set: ON UPDATE (TIMESTAMP/DATETIME
 // auto-update), GENERATED ALWAYS AS expressions (including STORED vs
-// VIRTUAL), and SRID. These are semantically critical — omitting them from a
-// MODIFY COLUMN silently removes the behavior from the live table.
+// VIRTUAL), SRID, INVISIBLE, NOT SECONDARY, COLUMN_FORMAT, STORAGE and
+// SECONDARY_ENGINE_ATTRIBUTE. These are semantically critical — omitting them
+// from a MODIFY COLUMN silently removes the behavior from the live table.
 //
 // Column-level CHECK constraints are intentionally NOT compared here: the
 // parser hoists them into table-level CreateTable.Constraints (see
@@ -35,11 +38,44 @@ func columnExtendedAttributesEqual(a, b *Column) bool {
 	if !ptrEqual(a.SRID, b.SRID) {
 		return false
 	}
-	return true
+	if a.Invisible != b.Invisible || a.NotSecondary != b.NotSecondary {
+		return false
+	}
+	if !ptrEqual(a.ColumnFormat, b.ColumnFormat) || !ptrEqual(a.Storage, b.Storage) {
+		return false
+	}
+	return engineAttributeEqual(a.SecondaryEngineAttribute, b.SecondaryEngineAttribute)
+}
+
+// engineAttributeEqual compares two SECONDARY_ENGINE_ATTRIBUTE values. MySQL
+// stores the attribute as a JSON document and reports it re-serialized — keys
+// reordered, a space after every colon and comma, 1e2 as 100.0 — so the text
+// a user wrote rarely matches SHOW CREATE TABLE byte for byte. Two values are
+// equal when they are the same JSON document, with numbers compared as MySQL
+// stores them (utils.JSONEqual): an integer exactly, so a change from
+// 9007199254740992 to 9007199254740993, which MySQL stores and reports, is a
+// change here too, rather than two equal float64s. A value that is not valid
+// JSON (MySQL rejects it, but the parser does not) is compared as text.
+func engineAttributeEqual(a, b *string) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	if *a == *b {
+		return true
+	}
+	equal, valid := utils.JSONEqual(*a, *b)
+	return valid && equal
 }
 
 // indexesEqual checks if two indexes are equal
 func indexesEqual(a, b *Index) bool {
+	return indexesEqualIgnoreVisibility(a, b) && ptrEqual(a.Invisible, b.Invisible)
+}
+
+// indexesEqualIgnoreVisibility checks if two indexes are equal, ignoring the
+// Invisible attribute: visibility alone is changed in place with ALTER INDEX,
+// every other difference rebuilds the index.
+func indexesEqualIgnoreVisibility(a, b *Index) bool {
 	if a.Name != b.Name {
 		return false
 	}
@@ -56,9 +92,6 @@ func indexesEqual(a, b *Index) bool {
 	} else if !slices.EqualFunc(a.Columns, b.Columns, strings.EqualFold) {
 		return false
 	}
-	if !ptrEqual(a.Invisible, b.Invisible) {
-		return false
-	}
 	if !ptrEqual(a.Using, b.Using) {
 		return false
 	}
@@ -71,40 +104,7 @@ func indexesEqual(a, b *Index) bool {
 	if !ptrEqual(a.ParserName, b.ParserName) {
 		return false
 	}
-	return true
-}
-
-// indexesEqualIgnoreVisibility checks if two indexes are equal, ignoring the Invisible attribute
-func indexesEqualIgnoreVisibility(a, b *Index) bool {
-	if a.Name != b.Name {
-		return false
-	}
-	if a.Type != b.Type {
-		return false
-	}
-	// Compare using ColumnList if available, otherwise fall back to Columns.
-	// Referenced column names are matched case-insensitively.
-	if len(a.ColumnList) > 0 && len(b.ColumnList) > 0 {
-		if !indexColumnListsEqual(a.ColumnList, b.ColumnList) {
-			return false
-		}
-	} else if !slices.EqualFunc(a.Columns, b.Columns, strings.EqualFold) {
-		return false
-	}
-	// Skip Invisible comparison
-	if !ptrEqual(a.Using, b.Using) {
-		return false
-	}
-	if !ptrEqual(a.Comment, b.Comment) {
-		return false
-	}
-	if !ptrEqual(a.KeyBlockSize, b.KeyBlockSize) {
-		return false
-	}
-	if !ptrEqual(a.ParserName, b.ParserName) {
-		return false
-	}
-	return true
+	return engineAttributeEqual(a.SecondaryEngineAttribute, b.SecondaryEngineAttribute)
 }
 
 // indexColumnListIdentical reports whether two indexes have the same name,
@@ -153,7 +153,9 @@ func indexNeedsSeparateRebuild(source, target *Index) bool {
 	if !ptrEqual(source.KeyBlockSize, target.KeyBlockSize) {
 		return true
 	}
-	return false
+	// Same no-op: a combined DROP+ADD that only adds the attribute leaves the
+	// index without it.
+	return !engineAttributeEqual(source.SecondaryEngineAttribute, target.SecondaryEngineAttribute)
 }
 
 // indexColumnListsEqual checks if two index column lists are equal
@@ -239,6 +241,12 @@ func constraintsEqualIgnoreNameAndEnforcement(a, b *Constraint) bool {
 	}
 	if a.References != nil {
 		if a.References.Table != b.References.Table {
+			return false
+		}
+		// A schema is compared only when both references are qualified: an
+		// unqualified reference means the table's own schema, which a parsed
+		// CREATE TABLE does not know (see ForeignKeyReference).
+		if a.References.Schema != "" && b.References.Schema != "" && a.References.Schema != b.References.Schema {
 			return false
 		}
 		if !slices.Equal(a.References.Columns, b.References.Columns) {

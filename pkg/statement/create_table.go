@@ -18,6 +18,7 @@ import (
 	"github.com/block/spirit/pkg/parser/mysql"
 	"github.com/block/spirit/pkg/parser/types"
 	"github.com/block/spirit/pkg/table"
+	"github.com/block/spirit/pkg/utils"
 )
 
 // CreateTable represents a parsed CREATE TABLE statement with structured data
@@ -35,32 +36,65 @@ type CreateTable struct {
 
 // Column represents a table column definition
 type Column struct {
-	Raw             *ast.ColumnDef    `json:"-"`
-	Name            string            `json:"name"`
-	Type            string            `json:"type"`
-	Length          *int              `json:"length,omitempty"` // nil = no width; 0 is a real width (varchar(0))
-	Precision       *int              `json:"precision,omitempty"`
-	Scale           *int              `json:"scale,omitempty"`
-	Unsigned        *bool             `json:"unsigned,omitempty"`
-	Zerofill        *bool             `json:"zerofill,omitempty"`    // ZEROFILL display attribute (implies unsigned)
-	EnumValues      []string          `json:"enum_values,omitempty"` // Permitted values for ENUM type
-	SetValues       []string          `json:"set_values,omitempty"`  // Permitted values for SET type
-	Nullable        bool              `json:"nullable"`
-	Default         *string           `json:"default,omitempty"`
-	DefaultIsExpr   bool              `json:"default_is_expr,omitempty"`  // true when default is an expression (needs parens), e.g. DEFAULT (json_object())
-	DefaultKind     DefaultKind       `json:"default_kind,omitempty"`     // the literal form the default was written as, read off the AST — see DefaultKind
-	OnUpdate        *string           `json:"on_update,omitempty"`        // ON UPDATE expression for TIMESTAMP/DATETIME, e.g. "current_timestamp"
-	GeneratedExpr   *string           `json:"generated_expr,omitempty"`   // Expression for GENERATED ALWAYS AS (...) columns
-	GeneratedStored bool              `json:"generated_stored,omitempty"` // true = STORED, false = VIRTUAL (only meaningful when GeneratedExpr is set)
-	Check           *string           `json:"check,omitempty"`            // Column-level CHECK (...) constraint expression
-	SRID            *uint32           `json:"srid,omitempty"`             // SRID attribute for spatial columns
-	AutoInc         bool              `json:"auto_increment"`
-	PrimaryKey      bool              `json:"primary_key"`
-	Unique          bool              `json:"unique"`
-	Comment         *string           `json:"comment,omitempty"`
-	Charset         *string           `json:"charset,omitempty"`
-	Collation       *string           `json:"collation,omitempty"`
-	Options         map[string]string `json:"options,omitempty"`
+	Raw             *ast.ColumnDef `json:"-"`
+	Name            string         `json:"name"`
+	Type            string         `json:"type"`
+	Length          *int           `json:"length,omitempty"` // nil = no width; 0 is a real width (varchar(0))
+	Precision       *int           `json:"precision,omitempty"`
+	Scale           *int           `json:"scale,omitempty"`
+	Unsigned        *bool          `json:"unsigned,omitempty"`
+	Zerofill        *bool          `json:"zerofill,omitempty"`    // ZEROFILL display attribute (implies unsigned)
+	EnumValues      []string       `json:"enum_values,omitempty"` // Permitted values for ENUM type
+	SetValues       []string       `json:"set_values,omitempty"`  // Permitted values for SET type
+	Nullable        bool           `json:"nullable"`
+	Default         *string        `json:"default,omitempty"`
+	DefaultIsExpr   bool           `json:"default_is_expr,omitempty"`  // true when default is an expression (needs parens), e.g. DEFAULT (json_object())
+	DefaultKind     DefaultKind    `json:"default_kind,omitempty"`     // the literal form the default was written as, read off the AST — see DefaultKind
+	OnUpdate        *string        `json:"on_update,omitempty"`        // ON UPDATE expression for TIMESTAMP/DATETIME, e.g. "current_timestamp"
+	GeneratedExpr   *string        `json:"generated_expr,omitempty"`   // Expression for GENERATED ALWAYS AS (...) columns
+	GeneratedStored bool           `json:"generated_stored,omitempty"` // true = STORED, false = VIRTUAL (only meaningful when GeneratedExpr is set)
+	// DefaultAsWritten is the literal DEFAULT as the schema spelled it, kept
+	// for emission. Default holds the value MySQL stores for that literal, as
+	// the normalization rules read it (the text SHOW CREATE TABLE reports
+	// where that text is exact), and Diff compares it. The two can name
+	// different values: MySQL reports a float with six significant digits, so
+	// the live `float DEFAULT 1234567` reads back as '1234570', and a MODIFY
+	// that emitted that text would store 1234570. The written literal is the
+	// one MySQL reads itself, so emitting it stores exactly what a CREATE
+	// TABLE with it would have.
+	// Nil for an expression default, which is emitted from Default, and when a
+	// rule rewrites the emitted form on purpose (charUTF8MB4DefaultNormalizer).
+	// Not compared: see columnFieldsNotCompared.
+	DefaultAsWritten *DefaultLiteral `json:"default_as_written,omitempty"`
+	Checks           []ColumnCheck   `json:"checks,omitempty"`        // Column-level CHECK constraints, in declaration order; hoisted into Constraints by columnCheckNormalizer
+	SRID             *uint32         `json:"srid,omitempty"`          // SRID attribute for spatial columns
+	Invisible        bool            `json:"invisible,omitempty"`     // INVISIBLE (MySQL 8.0.23+); VISIBLE is the default and is not recorded
+	NotSecondary     bool            `json:"not_secondary,omitempty"` // NOT SECONDARY: excluded from the secondary engine
+	ColumnFormat     *string         `json:"column_format,omitempty"` // COLUMN_FORMAT FIXED|DYNAMIC; DEFAULT is not recorded
+	Storage          *string         `json:"storage,omitempty"`       // STORAGE DISK|MEMORY; DEFAULT is not recorded
+	// SecondaryEngineAttribute is the SECONDARY_ENGINE_ATTRIBUTE JSON text as
+	// written. MySQL reports it re-serialized, so it is compared as JSON
+	// (engineAttributeEqual) and emitted as written.
+	SecondaryEngineAttribute *string           `json:"secondary_engine_attribute,omitempty"`
+	AutoInc                  bool              `json:"auto_increment"`
+	PrimaryKey               bool              `json:"primary_key"`
+	Unique                   bool              `json:"unique"`
+	Comment                  *string           `json:"comment,omitempty"`
+	Charset                  *string           `json:"charset,omitempty"`
+	Collation                *string           `json:"collation,omitempty"`
+	Options                  map[string]string `json:"options,omitempty"`
+}
+
+// ColumnCheck is a column-level CHECK constraint as written in a column
+// definition: `c INT [CONSTRAINT name] CHECK (expr) [NOT ENFORCED]`. A column
+// can carry any number of them. MySQL stores each as a table-level constraint,
+// which is how SHOW CREATE TABLE reports them, so columnCheckNormalizer moves
+// them to CreateTable.Constraints at parse time and the slice is empty on a
+// parsed CreateTable.
+type ColumnCheck struct {
+	Name        string `json:"name,omitempty"` // the CONSTRAINT name, or "" for MySQL to number it
+	Expression  string `json:"expression"`
+	NotEnforced bool   `json:"not_enforced,omitempty"`
 }
 
 // IndexColumn represents a column or expression in an index
@@ -73,24 +107,33 @@ type IndexColumn struct {
 
 // Index represents an index definition
 type Index struct {
-	Raw          *ast.Constraint   `json:"-"`
-	Name         string            `json:"name"`
-	Type         string            `json:"type"`                  // PRIMARY KEY, UNIQUE, INDEX, FULLTEXT, SPATIAL
-	Columns      []string          `json:"columns"`               // Deprecated: use ColumnList for full details
-	ColumnList   []IndexColumn     `json:"column_list,omitempty"` // Full column specifications including prefix/expression
-	Invisible    *bool             `json:"invisible,omitempty"`
-	Using        *string           `json:"using,omitempty"` // BTREE, HASH, RTREE
-	Comment      *string           `json:"comment,omitempty"`
+	Raw        *ast.Constraint `json:"-"`
+	Name       string          `json:"name"`
+	Type       string          `json:"type"`                  // PRIMARY KEY, UNIQUE, INDEX, FULLTEXT, SPATIAL
+	Columns    []string        `json:"columns"`               // Deprecated: use ColumnList for full details
+	ColumnList []IndexColumn   `json:"column_list,omitempty"` // Full column specifications including prefix/expression
+	Invisible  *bool           `json:"invisible,omitempty"`
+	Using      *string         `json:"using,omitempty"` // BTREE, HASH, RTREE
+	Comment    *string         `json:"comment,omitempty"`
+	// KeyBlockSize is the index's own KEY_BLOCK_SIZE; nil when none is set or
+	// it equals the table's, which SHOW CREATE TABLE omits
+	// (indexDefaultsNormalizer).
 	KeyBlockSize *uint64           `json:"key_block_size,omitempty"`
 	ParserName   *string           `json:"parser_name,omitempty"`
 	Options      map[string]string `json:"options,omitempty"`
+	// SecondaryEngineAttribute is the index's SECONDARY_ENGINE_ATTRIBUTE JSON
+	// text as written; compared as JSON (engineAttributeEqual) because MySQL
+	// reports it re-serialized, and emitted as written.
+	SecondaryEngineAttribute *string `json:"secondary_engine_attribute,omitempty"`
 
 	// InlineDerived marks a UNIQUE index that indexNormalizer synthesized
 	// from an inline column-level UNIQUE (`c INT UNIQUE`). Its name is only a
 	// guess at the server-assigned one (the column name, suffixed on collision),
-	// so diffIndexes pairs it with an equivalent live unique index by column set
-	// even when the names differ, rather than emitting a spurious DROP+ADD.
-	// Not serialized: it is a diff-time hint, not part of the logical schema.
+	// so diffIndexes pairs it with an equivalent unique index on the other side
+	// by column set even when the names differ, and compares the pair under
+	// that side's name (see pairInlineUniqueNames) rather than emitting a
+	// spurious DROP+ADD. Not serialized: it is a diff-time hint, not part of
+	// the logical schema.
 	InlineDerived bool `json:"-"`
 }
 
@@ -271,12 +314,54 @@ func (c *Column) declaresNull() bool {
 	return false
 }
 
-// ForeignKeyReference represents a foreign key reference
+// declaresNullAfterAutoIncrement reports whether a NULL attribute follows the
+// AUTO_INCREMENT attribute in the column definition. MySQL applies the
+// attributes in order — AUTO_INCREMENT implies NOT NULL and a later NULL
+// clears it — so this is the one spelling of a nullable AUTO_INCREMENT column
+// (see autoIncrementNotNullNormalizer). A column built without a Raw
+// definition declares nothing.
+func (c *Column) declaresNullAfterAutoIncrement() bool {
+	if c.Raw == nil {
+		return false
+	}
+	seenAutoInc, nullAfter := false, false
+	for _, opt := range c.Raw.Options {
+		switch opt.Tp { //nolint:exhaustive
+		case ast.ColumnOptionAutoIncrement:
+			seenAutoInc, nullAfter = true, false
+		case ast.ColumnOptionNull:
+			nullAfter = seenAutoInc
+		}
+	}
+	return nullAfter
+}
+
+// ForeignKeyReference represents a foreign key reference.
+//
+// Schema is the referenced table's schema when the reference is qualified
+// (REFERENCES db.parent) and empty when it is not. SHOW CREATE TABLE
+// qualifies a reference only when the parent is in another schema, and a
+// reference qualified with the table's own schema reads back unqualified, so
+// an empty Schema means the table's own schema — which a parsed CREATE TABLE
+// does not know. Two references therefore compare equal unless both are
+// qualified and name different schemas (see
+// constraintsEqualIgnoreNameAndEnforcement); a desired REFERENCES db2.parent
+// is not told apart from a live REFERENCES parent, whichever schema that is.
 type ForeignKeyReference struct {
+	Schema   string   `json:"schema,omitempty"`
 	Table    string   `json:"table"`
 	Columns  []string `json:"columns"`
 	OnDelete *string  `json:"on_delete,omitempty"`
 	OnUpdate *string  `json:"on_update,omitempty"`
+}
+
+// referencedTable returns the referenced table as a definition spells it,
+// schema-qualified when the reference is.
+func (r *ForeignKeyReference) referencedTable() string {
+	if r.Schema != "" {
+		return r.Schema + "." + r.Table
+	}
+	return r.Table
 }
 
 // TableOptions represents table-level options
@@ -287,6 +372,29 @@ type TableOptions struct {
 	Comment       *string `json:"comment,omitempty"`
 	AutoIncrement *uint64 `json:"auto_increment,omitempty"`
 	RowFormat     *string `json:"row_format,omitempty"`
+	// KeyBlockSize is the table-level KEY_BLOCK_SIZE, the compressed page
+	// size in KiB. It belongs with ROW_FORMAT (it implies COMPRESSED and
+	// InnoDB rejects it with any other row format), so Diff treats the two
+	// together under DiffOptions.IgnoreRowFormat. 0 means unset.
+	KeyBlockSize *uint64 `json:"key_block_size,omitempty"`
+	// AutoextendSize is AUTOEXTEND_SIZE in bytes. MySQL accepts it with a
+	// K/M/G suffix (4M) and reports it in bytes (4194304). 0 means unset.
+	AutoextendSize *uint64 `json:"autoextend_size,omitempty"`
+	// The following are reported by SHOW CREATE TABLE only when set; each
+	// has a value MySQL treats as "unset" that Diff emits to clear it.
+	StatsPersistent  *bool   `json:"stats_persistent,omitempty"`   // STATS_PERSISTENT=0|1; DEFAULT is not recorded
+	StatsAutoRecalc  *bool   `json:"stats_auto_recalc,omitempty"`  // STATS_AUTO_RECALC=0|1; DEFAULT is not recorded
+	StatsSamplePages *uint64 `json:"stats_sample_pages,omitempty"` // STATS_SAMPLE_PAGES=n; 0 and DEFAULT are not recorded
+	PackKeys         *bool   `json:"pack_keys,omitempty"`          // PACK_KEYS=0|1; DEFAULT is not recorded
+	Checksum         bool    `json:"checksum,omitempty"`           // CHECKSUM=1
+	DelayKeyWrite    bool    `json:"delay_key_write,omitempty"`    // DELAY_KEY_WRITE=1
+	AvgRowLength     *uint64 `json:"avg_row_length,omitempty"`     // 0 is not recorded
+	MinRows          *uint64 `json:"min_rows,omitempty"`           // 0 is not recorded
+	MaxRows          *uint64 `json:"max_rows,omitempty"`           // 0 is not recorded
+	// SecondaryEngineAttribute is the table's SECONDARY_ENGINE_ATTRIBUTE JSON
+	// text as written; compared as JSON (engineAttributeEqual) because MySQL
+	// reports it re-serialized, and emitted as written. '' is not recorded.
+	SecondaryEngineAttribute *string `json:"secondary_engine_attribute,omitempty"`
 }
 
 // PartitionOptions represents table partitioning configuration
@@ -837,6 +945,11 @@ func (ct *CreateTable) parseColumn(col *ast.ColumnDef) Column {
 					defaultRaw := fmt.Sprintf("%v", restoreValueExprText(defaultExpr, !column.DefaultIsExpr))
 					column.Default = &defaultRaw
 				}
+				if !column.DefaultIsExpr {
+					// Keep the literal for emission before the normalization
+					// rules rewrite Default to MySQL's reading of it.
+					column.DefaultAsWritten = &DefaultLiteral{Text: *column.Default, Kind: column.DefaultKind}
+				}
 			}
 		case ast.ColumnOptionComment:
 			if opt.Expr != nil {
@@ -869,12 +982,18 @@ func (ct *CreateTable) parseColumn(col *ast.ColumnDef) Column {
 				}
 			}
 		case ast.ColumnOptionCheck:
-			// Column-level CHECK (expr). Note that MySQL normalizes these to
-			// table-level constraints in SHOW CREATE TABLE output, so this is
-			// only seen when parsing user-written (non-canonical) statements.
+			// Column-level CHECK (expr). MySQL reports these as table-level
+			// constraints in SHOW CREATE TABLE, so this is only seen when
+			// parsing user-written statements. A column may carry several,
+			// each with its own name and enforcement; every one is kept, in
+			// order, for columnCheckNormalizer to hoist.
 			if opt.Expr != nil {
 				if exprStr, ok := restoreExpressionText(opt.Expr); ok {
-					column.Check = &exprStr
+					column.Checks = append(column.Checks, ColumnCheck{
+						Name:        opt.ConstraintName,
+						Expression:  exprStr,
+						NotEnforced: !opt.Enforced,
+					})
 				}
 			}
 		case ast.ColumnOptionSrid:
@@ -883,6 +1002,26 @@ func (ct *CreateTable) parseColumn(col *ast.ColumnDef) Column {
 			// parser unwraps as a regular column option.
 			srid := opt.Srid
 			column.SRID = &srid
+		case ast.ColumnOptionVisibility:
+			// VISIBLE is the default and MySQL reports nothing for it, so
+			// only INVISIBLE is recorded and an explicit VISIBLE compares
+			// equal to its absence. SHOW CREATE TABLE emits INVISIBLE as
+			// /*!80023 INVISIBLE */. The last one written wins.
+			column.Invisible = strings.EqualFold(opt.StrValue, "INVISIBLE")
+		case ast.ColumnOptionNotSecondary:
+			column.NotSecondary = true
+		case ast.ColumnOptionColumnFormat:
+			column.ColumnFormat = nonDefaultKeyword(opt.StrValue)
+		case ast.ColumnOptionStorage:
+			column.Storage = nonDefaultKeyword(opt.StrValue)
+		case ast.ColumnOptionSecondaryEngineAttribute:
+			// SECONDARY_ENGINE_ATTRIBUTE='' clears the attribute; MySQL then
+			// reports nothing, so the empty string is recorded as absent.
+			column.SecondaryEngineAttribute = nil
+			if opt.StrValue != "" {
+				attr := opt.StrValue
+				column.SecondaryEngineAttribute = &attr
+			}
 		default:
 			// Store unknown options for flexibility
 			column.Options[fmt.Sprintf("option_%d", opt.Tp)] = opt.StrValue
@@ -895,6 +1034,17 @@ func (ct *CreateTable) parseColumn(col *ast.ColumnDef) Column {
 	}
 
 	return column
+}
+
+// nonDefaultKeyword returns the uppercased keyword of a COLUMN_FORMAT or
+// STORAGE option, or nil for DEFAULT: that keyword means the option is unset,
+// and MySQL reports nothing for it.
+func nonDefaultKeyword(keyword string) *string {
+	upper := strings.ToUpper(keyword)
+	if upper == "DEFAULT" {
+		return nil
+	}
+	return &upper
 }
 
 // parseIndex converts a constraint to an Index struct
@@ -962,6 +1112,11 @@ func (ct *CreateTable) parseIndex(constraint *ast.Constraint) Index {
 			parserName := opt.ParserName.String()
 			index.ParserName = &parserName
 		}
+
+		if opt.SecondaryEngineAttr != "" {
+			attr := opt.SecondaryEngineAttr
+			index.SecondaryEngineAttribute = &attr
+		}
 	}
 
 	// Clean up options map if empty
@@ -1017,6 +1172,7 @@ func (ct *CreateTable) parseConstraint(constraint *ast.Constraint) Constraint {
 		constr.Type = "FOREIGN KEY"
 		if constraint.Refer != nil {
 			fkRef := &ForeignKeyReference{
+				Schema:  constraint.Refer.Table.Schema.String(),
 				Table:   constraint.Refer.Table.Name.String(),
 				Columns: ct.parseIndexColumns(constraint.Refer.IndexPartSpecifications),
 			}
@@ -1046,7 +1202,7 @@ func (ct *CreateTable) parseConstraint(constraint *ast.Constraint) Constraint {
 			// Generate definition string
 			definition := fmt.Sprintf("FOREIGN KEY (%s) REFERENCES %s (%s)",
 				strings.Join(constr.Columns, ", "),
-				constr.References.Table,
+				constr.References.referencedTable(),
 				strings.Join(constr.References.Columns, ", "))
 			if fkRef.OnDelete != nil {
 				definition += fmt.Sprintf(" ON DELETE %s", *fkRef.OnDelete)
@@ -1098,10 +1254,7 @@ func (ct *CreateTable) parseIndexColumnList(keys []*ast.IndexPartSpecification) 
 			}
 		} else if key.Expr != nil {
 			// Expression index (functional index)
-			var sb strings.Builder
-			rCtx := format.NewRestoreCtx(format.DefaultRestoreFlags|format.RestoreStringWithoutCharset, &sb)
-			if err := key.Expr.Restore(rCtx); err == nil {
-				expr := sb.String()
+			if expr, ok := restoreExprText(key.Expr, format.DefaultRestoreFlags); ok {
 				col.Expression = &expr
 			}
 		}
@@ -1144,22 +1297,96 @@ func (ct *CreateTable) parseTableOptions(options []*ast.TableOption) *TableOptio
 				tableOpts.AutoIncrement = &option.UintValue
 				hasOptions = true
 			}
-		case ast.TableOptionRowFormat:
+		case ast.TableOptionKeyBlockSize:
 			if option.UintValue > 0 {
+				tableOpts.KeyBlockSize = &option.UintValue
+				hasOptions = true
+			}
+		case ast.TableOptionAutoextendSize:
+			// The grammar yields the bare byte count in UintValue and a
+			// suffixed size (4M) in StrValue. A suffixed value MySQL would
+			// not accept is left unset: the CREATE TABLE itself is invalid.
+			size := option.UintValue
+			if option.StrValue != "" {
+				parsed, err := utils.ParseSizeNumber(option.StrValue)
+				if err != nil {
+					break
+				}
+				size = parsed
+			}
+			if size > 0 {
+				tableOpts.AutoextendSize = &size
+				hasOptions = true
+			}
+		case ast.TableOptionStatsPersistent:
+			if !option.Default {
+				tableOpts.StatsPersistent = new(option.UintValue != 0)
+				hasOptions = true
+			}
+		case ast.TableOptionStatsAutoRecalc:
+			if !option.Default {
+				tableOpts.StatsAutoRecalc = new(option.UintValue != 0)
+				hasOptions = true
+			}
+		case ast.TableOptionStatsSamplePages:
+			if !option.Default && option.UintValue > 0 {
+				tableOpts.StatsSamplePages = &option.UintValue
+				hasOptions = true
+			}
+		case ast.TableOptionPackKeys:
+			if !option.Default {
+				tableOpts.PackKeys = new(option.UintValue != 0)
+				hasOptions = true
+			}
+		case ast.TableOptionCheckSum:
+			if option.UintValue != 0 {
+				tableOpts.Checksum = true
+				hasOptions = true
+			}
+		case ast.TableOptionDelayKeyWrite:
+			if option.UintValue != 0 {
+				tableOpts.DelayKeyWrite = true
+				hasOptions = true
+			}
+		case ast.TableOptionAvgRowLength:
+			if option.UintValue > 0 {
+				tableOpts.AvgRowLength = &option.UintValue
+				hasOptions = true
+			}
+		case ast.TableOptionMinRows:
+			if option.UintValue > 0 {
+				tableOpts.MinRows = &option.UintValue
+				hasOptions = true
+			}
+		case ast.TableOptionMaxRows:
+			if option.UintValue > 0 {
+				tableOpts.MaxRows = &option.UintValue
+				hasOptions = true
+			}
+		case ast.TableOptionSecondaryEngineAttribute:
+			if option.StrValue != "" {
+				tableOpts.SecondaryEngineAttribute = &option.StrValue
+				hasOptions = true
+			}
+		case ast.TableOptionRowFormat:
+			// ROW_FORMAT=DEFAULT is the absence of a row format: MySQL stores
+			// nothing for it, SHOW CREATE TABLE omits it, and the table takes
+			// the engine default (innodb_default_row_format), so it is parsed
+			// as no row format, the same as a definition that leaves the
+			// option out.
+			if option.UintValue > 0 && option.UintValue != ast.RowFormatDefault {
 				var rowFormat string
 
 				switch option.UintValue {
-				case 1: // RowFormatDefault
-					rowFormat = "DEFAULT"
-				case 2: // RowFormatDynamic
+				case ast.RowFormatDynamic:
 					rowFormat = "DYNAMIC"
-				case 3: // RowFormatFixed
+				case ast.RowFormatFixed:
 					rowFormat = "FIXED"
-				case 4: // RowFormatCompressed
+				case ast.RowFormatCompressed:
 					rowFormat = "COMPRESSED"
-				case 5: // RowFormatRedundant
+				case ast.RowFormatRedundant:
 					rowFormat = "REDUNDANT"
-				case 6: // RowFormatCompact
+				case ast.RowFormatCompact:
 					rowFormat = "COMPACT"
 				default:
 					rowFormat = fmt.Sprintf("UNKNOWN_%d", option.UintValue)
@@ -1214,6 +1441,16 @@ func (to *TableOptions) getRowFormat() *string {
 	return to.RowFormat
 }
 
+// deref returns the options by value, or the zero value for a nil receiver
+// (a table with no options at all), so callers can read the fields without
+// a nil check per option.
+func (to *TableOptions) deref() TableOptions {
+	if to == nil {
+		return TableOptions{}
+	}
+	return *to
+}
+
 func (to *TableOptions) getAutoIncrement() *string {
 	if to == nil || to.AutoIncrement == nil {
 		return nil
@@ -1255,10 +1492,7 @@ func (ct *CreateTable) parsePartitionOptions(partition *ast.PartitionOptions) *P
 	// Parse expression for HASH and RANGE
 	if partition.Expr != nil {
 		// Restore the full expression using the AST
-		var sb strings.Builder
-		rCtx := format.NewRestoreCtx(format.DefaultRestoreFlags|format.RestoreStringWithoutCharset, &sb)
-		if err := partition.Expr.Restore(rCtx); err == nil {
-			expr := sb.String()
+		if expr, ok := restoreExprText(partition.Expr, format.DefaultRestoreFlags); ok {
 			partOpts.Expression = &expr
 		}
 	}
@@ -1500,11 +1734,15 @@ func (ct *CreateTable) parseExpression(expr ast.ExprNode) any {
 
 // Diff compares this CreateTable (source) with another CreateTable (target)
 // and returns ALTER TABLE statements needed to transform source into target.
-// Most changes produce a single statement, but some (e.g. changing partition type)
-// require multiple sequential statements.
+// Most changes produce a single statement, but some require multiple
+// sequential statements: a spatial index dropped before the primary ALTER
+// changes its column's SRID; an option-only index rebuild, a foreign key
+// added back under the name the primary ALTER drops, or a partition clause
+// that cannot share an ALTER after it. See pkg/statement/README.md,
+// "Statement Planning".
 // Returns nil if the tables are identical.
-// Returns an error if target has a primary key column that declares NULL, a
-// table MySQL refuses to create.
+// Returns an error if target has a primary key column that declares NULL, or
+// changes primary key options MySQL would ignore in a combined DROP and ADD.
 // If opts is nil, NewDiffOptions() defaults are used.
 func (ct *CreateTable) Diff(target *CreateTable, opts *DiffOptions) ([]*AbstractStatement, error) {
 	if opts == nil {
@@ -1517,21 +1755,78 @@ func (ct *CreateTable) Diff(target *CreateTable, opts *DiffOptions) ([]*Abstract
 		return nil, fmt.Errorf("invalid target table %q: %w", target.TableName, err)
 	}
 
+	// A VIRTUAL generated column that the target makes a regular column is
+	// converted in two statements so that it keeps its values: the first
+	// rebuilds it as a STORED generated column, which MySQL fills from the
+	// expression; the second is this diff from that intermediate table, in
+	// which the column is a MODIFY (see virtualToRegularIntermediate).
+	if intermediate := ct.virtualToRegularIntermediate(target); intermediate != nil {
+		first, err := ct.Diff(intermediate, opts)
+		if err != nil {
+			return nil, err
+		}
+		rest, err := intermediate.Diff(target, opts)
+		if err != nil {
+			return nil, err
+		}
+		return append(first, rest...), nil
+	}
+
 	var alterClauses []string
 
+	// The columns MySQL cannot MODIFY into their target definition are
+	// dropped and added back instead, and the index and constraint diffs
+	// re-add what reads them (see rebuiltColumns).
+	rebuilt := ct.rebuiltColumns(target)
+
 	// 1. Diff columns (DROP, ADD, MODIFY)
-	columnClauses := ct.diffColumns(target, opts)
+	columnClauses := ct.diffColumns(target, opts, rebuilt)
 	alterClauses = append(alterClauses, columnClauses...)
 
-	// 2. Diff indexes (DROP, ADD). Option-only index changes (same column
-	// list, different WITH PARSER / KEY_BLOCK_SIZE / etc.) are returned as
-	// separate statements because MySQL no-ops a combined DROP+ADD of the same
-	// index in a single ALTER.
-	indexClauses, separateIndexStatements := ct.diffIndexes(target)
+	// 2. Diff indexes (DROP, ADD). An index whose options alone change (same
+	// column list, different WITH PARSER / KEY_BLOCK_SIZE / etc.) is replaced
+	// in statements of its own after the primary ALTER, because MySQL no-ops
+	// a combined DROP+ADD of the same index in a single ALTER (see
+	// diffIndexes). A spatial index on a column whose SRID changes
+	// is dropped in a statement of its own before the primary ALTER, because
+	// MySQL rejects the SRID change while the index exists, even when the
+	// same ALTER drops it (error 3644); the target's index is added back in
+	// the primary ALTER.
+	var preStatements [][]string
+	spatialDrops := ct.spatialIndexesBlockingSRIDChange(target)
+	if len(spatialDrops) > 0 {
+		drops := make([]string, 0, len(spatialDrops))
+		for name := range spatialDrops {
+			drops = append(drops, fmt.Sprintf("DROP INDEX %s", sqlescape.EscapeIdentifier(name)))
+		}
+		slices.Sort(drops)
+		preStatements = append(preStatements, drops)
+	}
+	// A foreign key can create an implicit index in the primary ALTER.
+	// Share reservations between both planners so later index swaps avoid
+	// those indexes, including ones named after a replacement foreign key.
+	takenNames := make(map[string]bool)
+	for _, schema := range []*CreateTable{ct, target} {
+		for _, idx := range schema.GetIndexes() {
+			takenNames[strings.ToLower(idx.Name)] = true
+		}
+		for _, constraint := range schema.Constraints {
+			takenNames[strings.ToLower(constraint.Name)] = true
+			if constraint.Type == "FOREIGN KEY" && constraint.Name == "" && len(constraint.Columns) > 0 {
+				takenNames[strings.ToLower(constraint.Columns[0])] = true
+			}
+		}
+	}
+	indexClauses, separateIndexStatements, err := ct.diffIndexes(target, rebuilt, spatialDrops, takenNames)
+	if err != nil {
+		return nil, err
+	}
 	alterClauses = append(alterClauses, indexClauses...)
 
-	// 3. Diff constraints (DROP, ADD)
-	constraintClauses := ct.diffConstraints(target)
+	// 3. Diff constraints (DROP, ADD). A foreign key added back under a name
+	// the same diff drops takes a replacement name, because MySQL rejects the
+	// same-name DROP and ADD in one ALTER (error 1826).
+	constraintClauses := ct.diffConstraints(target, rebuilt, takenNames)
 	alterClauses = append(alterClauses, constraintClauses...)
 
 	// 4. Diff table options
@@ -1562,12 +1857,22 @@ func (ct *CreateTable) Diff(target *CreateTable, opts *DiffOptions) ([]*Abstract
 		}
 	}
 
-	// Option-only index changes run as their own ALTER statements, after the
-	// primary ALTER so they observe any column changes the re-add depends on.
+	// Index replacements run as their own ALTER statements, after the
+	// primary ALTER so they observe any column or table option change the
+	// replacement depends on.
 	additionalStatements = append(additionalStatements, separateIndexStatements...)
 
 	// Build the result
 	var results []*AbstractStatement
+
+	// Statements the primary ALTER depends on (a spatial index drop)
+	for _, clauses := range preStatements {
+		stmt, err := ct.buildAlterStatement(clauses, "")
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, stmt)
+	}
 
 	// Primary statement (columns, indexes, constraints, table options, and
 	// any partition clause that can share an ALTER with them)
@@ -1624,8 +1929,117 @@ func (ct *CreateTable) buildAlterStatement(clauses []string, partitionClause str
 	}, nil
 }
 
-// diffColumns compares columns and returns ALTER clauses for differences
-func (ct *CreateTable) diffColumns(target *CreateTable, opts *DiffOptions) []string {
+// rebuiltColumns returns the lowercased names of the columns, present in both
+// tables, that the ALTER has to drop and add back rather than MODIFY. MySQL
+// refuses to change a column to or from a VIRTUAL generated column in place
+// (error 3106, "Changing the STORED status"), in every direction: VIRTUAL to
+// STORED, STORED to VIRTUAL, VIRTUAL to a regular column and a regular column
+// to VIRTUAL. Only the regular/STORED pair is a MODIFY. A generated column
+// holds no data of its own, so dropping one loses nothing: MySQL recomputes
+// it from the new expression when it adds the column. A VIRTUAL column that
+// becomes a regular column is the exception, because the regular column has
+// to keep the values the expression produced; Diff never asks this function
+// about that transition directly but stages it through a STORED intermediate
+// first (see virtualToRegularIntermediate), from which the regular column is
+// a MODIFY that keeps the values.
+//
+// A generated column that reads a rebuilt column blocks its DROP (error 3108)
+// and is rebuilt with it, transitively — unless the target makes it a regular
+// column. Then it is left to the MODIFY, which MySQL accepts in the same
+// ALTER as the DROP of the column it read, because the modified column no
+// longer reads anything; the rebuild would have dropped a STORED column's
+// values for nothing. The index and constraint diffs drop and re-add the
+// functional indexes and CHECK constraints that read a rebuilt column (errors
+// 3837 and 3959); an index that names the column as a plain key part survives
+// the rebuild on its own. A foreign key on a rebuilt column is not handled:
+// MySQL rejects the DROP (error 1828), and the diff lets that error surface
+// rather than drop a referential constraint.
+func (ct *CreateTable) rebuiltColumns(target *CreateTable) map[string]bool {
+	targetColumns := make(map[string]*Column, len(target.Columns))
+	for i := range target.Columns {
+		targetColumns[strings.ToLower(target.Columns[i].Name)] = &target.Columns[i]
+	}
+	rebuilt := make(map[string]bool)
+	for i := range ct.Columns {
+		sourceCol := &ct.Columns[i]
+		name := strings.ToLower(sourceCol.Name)
+		if targetCol, ok := targetColumns[name]; ok && isVirtualGenerated(sourceCol) != isVirtualGenerated(targetCol) {
+			rebuilt[name] = true
+		}
+	}
+	if len(rebuilt) == 0 {
+		return rebuilt
+	}
+	p := parser.New()
+	for changed := true; changed; {
+		changed = false
+		for i := range ct.Columns {
+			sourceCol := &ct.Columns[i]
+			name := strings.ToLower(sourceCol.Name)
+			if rebuilt[name] || sourceCol.GeneratedExpr == nil {
+				continue
+			}
+			if targetCol, kept := targetColumns[name]; !kept || targetCol.GeneratedExpr == nil {
+				continue // dropped anyway, or modified into a regular column
+			}
+			if expressionReadsAny(p, *sourceCol.GeneratedExpr, rebuilt) {
+				rebuilt[name] = true
+				changed = true
+			}
+		}
+	}
+	return rebuilt
+}
+
+// virtualToRegularIntermediate returns the table ct becomes once every VIRTUAL
+// generated column that target declares as a regular column has been rebuilt
+// as a STORED generated column with its source expression, or nil when there
+// is no such column. Diff converts those columns through it in two statements.
+//
+// MySQL refuses the direct MODIFY (error 3106) and a DROP+ADD of the regular
+// column leaves it NULL: a VIRTUAL column holds no data, so there is nothing
+// for the added column to inherit, and the values the expression produced are
+// lost (a row with c=40 under `g INT AS (c+1) VIRTUAL` reads g=41 before and
+// NULL after). A STORED column is filled from the expression when it is added,
+// and MySQL does keep the values of a STORED column that a MODIFY turns into a
+// regular one. So the first statement rebuilds the column STORED, at its place
+// and with whatever reads it (the ordinary rebuild, see rebuiltColumns), and
+// the second MODIFYs it into the target definition, type and attribute changes
+// included, alongside everything else the diff emits. The intermediate differs
+// from ct only in the STORED keyword of those columns, so the first statement
+// changes nothing else, and the expression still reads the source columns,
+// which the second statement is free to drop or change.
+func (ct *CreateTable) virtualToRegularIntermediate(target *CreateTable) *CreateTable {
+	targetColumns := make(map[string]*Column, len(target.Columns))
+	for i := range target.Columns {
+		targetColumns[strings.ToLower(target.Columns[i].Name)] = &target.Columns[i]
+	}
+	var intermediate *CreateTable
+	for i := range ct.Columns {
+		sourceCol := &ct.Columns[i]
+		targetCol, ok := targetColumns[strings.ToLower(sourceCol.Name)]
+		if !ok || !isVirtualGenerated(sourceCol) || targetCol.GeneratedExpr != nil {
+			continue
+		}
+		if intermediate == nil {
+			copied := *ct
+			copied.Columns = slices.Clone(ct.Columns)
+			intermediate = &copied
+		}
+		intermediate.Columns[i].GeneratedStored = true
+	}
+	return intermediate
+}
+
+// isVirtualGenerated reports whether col is a VIRTUAL generated column.
+func isVirtualGenerated(col *Column) bool {
+	return col.GeneratedExpr != nil && !col.GeneratedStored
+}
+
+// diffColumns compares columns and returns ALTER clauses for differences.
+// rebuilt names the columns that are dropped and added back instead of
+// modified (see rebuiltColumns).
+func (ct *CreateTable) diffColumns(target *CreateTable, opts *DiffOptions, rebuilt map[string]bool) []string {
 	var clauses []string
 
 	// Build maps for easier lookup. Keys are lowercased so identifier
@@ -1641,20 +2055,25 @@ func (ct *CreateTable) diffColumns(target *CreateTable, opts *DiffOptions) []str
 		targetColumns[strings.ToLower(target.Columns[i].Name)] = &target.Columns[i]
 	}
 
-	// Collect DROP operations and sort by name for deterministic output
+	// Collect DROP operations and sort by name for deterministic output. A
+	// rebuilt column is dropped here and leaves the source map, so the target
+	// walk below adds it back as it would a new column, position included.
 	var dropClauses []string
 	for _, sourceCol := range ct.Columns {
-		if _, exists := targetColumns[strings.ToLower(sourceCol.Name)]; !exists {
+		name := strings.ToLower(sourceCol.Name)
+		if _, exists := targetColumns[name]; !exists || rebuilt[name] {
 			dropClauses = append(dropClauses, fmt.Sprintf("DROP COLUMN %s", sqlescape.EscapeIdentifier(sourceCol.Name)))
+		}
+		if rebuilt[name] {
+			delete(sourceColumns, name)
 		}
 	}
 	slices.Sort(dropClauses)
 	clauses = append(clauses, dropClauses...)
 
-	// Determine which columns need explicit positioning
-	// A column needs explicit positioning if:
-	// 1. It's a new column (ADD) - always needs position
-	// 2. Its previous column changed (explicit reorder)
+	// Determine which columns need explicit positioning: every new column,
+	// and every existing column that is not where the target wants it once
+	// the clauses before it have been applied (see calculateColumnPositioning).
 	needsExplicitPosition := ct.calculateColumnPositioning(target, sourceColumns, targetColumns)
 
 	// Whether this ALTER sets the table default to the server's utf8mb4
@@ -1766,79 +2185,216 @@ func withChangedCollationNamed(source, col *Column, sourceTable, targetTable *Cr
 	return &named
 }
 
-// calculateColumnPositioning determines which columns need explicit positioning (FIRST/AFTER).
-// Returns a map of column names (lowercased) that need explicit positioning.
-// Map keys are lowercased to match the source/target column maps built by
-// the caller, since column identifiers in MySQL are case-insensitive.
+// calculateColumnPositioning decides which target columns need an explicit
+// FIRST/AFTER clause. It returns the set of their names, lowercased to match
+// the source/target column maps built by the caller (MySQL column identifiers
+// are case-insensitive). sourceColumns holds the source columns the ALTER
+// keeps: a rebuilt column (see rebuiltColumns) is absent from it, and is
+// simulated as the DROP followed by the ADD the caller emits for it.
+//
+// It simulates what MySQL does with the clauses diffColumns emits. MySQL first
+// removes the dropped columns and replaces the definitions of the modified
+// ones in place, then processes the positioned clauses (ADD/MODIFY with FIRST
+// or AFTER) one at a time in statement order, each one taking the column out
+// of wherever it currently is and re-inserting it at the named place. Walking
+// the target in order against that evolving list, a column already at its
+// target position needs no clause; one that is not is moved there, which the
+// caller renders as FIRST or AFTER the preceding target column. The invariant
+// is that after step i the first i+1 columns of the simulated list are the
+// first i+1 target columns, so every later AFTER names a column that is
+// already where it belongs.
+//
+// Comparing each column's predecessor between source and target, the previous
+// approach, did not follow the clauses through: dropping a column counted as
+// an "implicit" move for its successor, so `(id, a, b, c, d)` to `(id, d, b)`
+// emitted no position for d and left the live table as `(id, b, d)`.
 func (ct *CreateTable) calculateColumnPositioning(target *CreateTable, sourceColumns, targetColumns map[string]*Column) map[string]bool {
 	needsExplicitPosition := make(map[string]bool)
 
-	var prevColumn string
-	for _, targetCol := range target.Columns {
-		_, existsInSource := sourceColumns[strings.ToLower(targetCol.Name)]
-
-		if !existsInSource {
-			// New columns always need explicit positioning
-			needsExplicitPosition[strings.ToLower(targetCol.Name)] = true
-		} else {
-			// Existing column - check if its position changed
-			sourcePrevCol := getPreviousColumn(ct.Columns, targetCol.Name)
-
-			// Check if this is an implicit or explicit position change
-			_, prevColExistedInSource := sourceColumns[strings.ToLower(prevColumn)]
-			_, sourcePrevColStillExists := targetColumns[strings.ToLower(sourcePrevCol)]
-
-			implicitChange := false
-			switch {
-			case prevColumn == "" && sourcePrevCol == "":
-				// Both first, no real change
-				implicitChange = true
-			case prevColumn != "" && !prevColExistedInSource:
-				// Previous column is new, position change is implicit
-				implicitChange = true
-			case sourcePrevCol != "" && !sourcePrevColStillExists:
-				// Previous column was dropped, position change is implicit
-				implicitChange = true
-			case strings.EqualFold(prevColumn, sourcePrevCol):
-				// Same previous column, check if we need cascading
-				// Cascading happens if the previous column was repositioned
-				if prevColumn != "" && needsExplicitPosition[strings.ToLower(prevColumn)] && prevColExistedInSource {
-					// Previous column was repositioned, so this column needs repositioning too
-					needsExplicitPosition[strings.ToLower(targetCol.Name)] = true
-				}
-				implicitChange = true
-			default:
-				// Explicit reorder - previous column changed and both exist
-				implicitChange = false
-			}
-
-			if !implicitChange {
-				needsExplicitPosition[strings.ToLower(targetCol.Name)] = true
-			}
+	// The surviving source columns in source order: the list as it stands
+	// once the DROP COLUMN clauses have taken effect.
+	current := make([]string, 0, len(target.Columns))
+	for _, col := range ct.Columns {
+		name := strings.ToLower(col.Name)
+		if _, kept := targetColumns[name]; !kept {
+			continue
 		}
+		if _, kept := sourceColumns[name]; !kept {
+			continue // rebuilt: dropped, then added by the target walk
+		}
+		current = append(current, name)
+	}
 
-		prevColumn = targetCol.Name
+	for pos, targetCol := range target.Columns {
+		name := strings.ToLower(targetCol.Name)
+		if _, existsInSource := sourceColumns[name]; !existsInSource {
+			// ADD COLUMN takes its place in the list; at the end the caller
+			// omits the AFTER clause, which appends, and the simulation here
+			// is the same either way.
+			current = slices.Insert(current, pos, name)
+			needsExplicitPosition[name] = true
+			continue
+		}
+		if pos < len(current) && current[pos] == name {
+			continue
+		}
+		// Out of place: MySQL takes it out and re-inserts it after the
+		// preceding target column, which by the invariant is at pos-1.
+		idx := slices.Index(current, name)
+		current = slices.Delete(current, idx, idx+1)
+		current = slices.Insert(current, pos, name)
+		needsExplicitPosition[name] = true
 	}
 
 	return needsExplicitPosition
 }
 
+// pairInlineUniqueNames reconciles the names of unique indexes that one side
+// declared inline (`c INT UNIQUE`). indexNormalizer names such an index after
+// its column, which is only a guess at the name the server assigned: the live
+// table may call it c_2, or whatever an earlier definition left behind. A
+// unique index on the same column set whose name differs, when at least one
+// side's name is a guess, is the same index, so the guessed side takes the
+// other side's name and the two then meet in diffIndexes' name-keyed walk,
+// where their options and visibility are compared like any other pair.
+//
+// The pair used to be left out of the diff altogether, which hid an option
+// difference: a live `UNIQUE KEY c_2 (c) COMMENT 'x'` matched an inline
+// `c INT UNIQUE` with nothing emitted, so a declaration could never clear a
+// comment or INVISIBLE from the live index. Two explicitly named unique
+// indexes that differ only in name are not paired: that is a real rename
+// (DROP + ADD). When only one side's name is a guess it takes the explicit
+// one; when both are, the target takes the source's, so a live name is never
+// changed. The lists are modified in place.
+func pairInlineUniqueNames(sourceIdxList, targetIdxList []Index) {
+	sourceNames := make(map[string]bool, len(sourceIdxList))
+	for i := range sourceIdxList {
+		sourceNames[sourceIdxList[i].Name] = true
+	}
+	targetNames := make(map[string]bool, len(targetIdxList))
+	for i := range targetIdxList {
+		targetNames[targetIdxList[i].Name] = true
+	}
+	paired := make(map[int]bool) // target positions already paired
+	for i := range sourceIdxList {
+		sourceIdx := &sourceIdxList[i]
+		if sourceIdx.Type != "UNIQUE" || targetNames[sourceIdx.Name] {
+			continue // not unique, or already met by name
+		}
+		for j := range targetIdxList {
+			targetIdx := &targetIdxList[j]
+			if targetIdx.Type != "UNIQUE" || sourceNames[targetIdx.Name] || paired[j] {
+				continue
+			}
+			if !sourceIdx.InlineDerived && !targetIdx.InlineDerived {
+				continue // both explicitly named: a genuine rename
+			}
+			if !indexColumnsIdenticalIgnoreName(sourceIdx, targetIdx) {
+				continue
+			}
+			paired[j] = true
+			if targetIdx.InlineDerived {
+				targetIdx.Name = sourceIdx.Name
+			} else {
+				sourceIdx.Name = targetIdx.Name
+			}
+			break
+		}
+	}
+}
+
+// spatialIndexesBlockingSRIDChange returns the names of the source's spatial
+// indexes on a column whose SRID attribute the target changes: added, removed
+// or different. MySQL refuses to change a column's SRID while a spatial index
+// is on it (error 3644), even when the same ALTER drops the index, so Diff
+// drops them in a statement of its own before the primary ALTER and passes
+// them to diffIndexes as already gone, which adds the target's index on the
+// column, if any, back in the primary ALTER. Any other change to such a
+// column, and an SRID change on a column with no spatial index, is a plain
+// MODIFY.
+func (ct *CreateTable) spatialIndexesBlockingSRIDChange(target *CreateTable) map[string]bool {
+	targetColumns := make(map[string]*Column, len(target.Columns))
+	for i := range target.Columns {
+		targetColumns[strings.ToLower(target.Columns[i].Name)] = &target.Columns[i]
+	}
+	sridChanged := make(map[string]bool)
+	for i := range ct.Columns {
+		sourceCol := &ct.Columns[i]
+		name := strings.ToLower(sourceCol.Name)
+		if targetCol, ok := targetColumns[name]; ok && !ptrEqual(sourceCol.SRID, targetCol.SRID) {
+			sridChanged[name] = true
+		}
+	}
+	if len(sridChanged) == 0 {
+		return nil
+	}
+	blocking := make(map[string]bool)
+	for i := range ct.Indexes {
+		idx := &ct.Indexes[i]
+		if idx.Type != "SPATIAL" {
+			continue
+		}
+		for _, part := range idx.ColumnList {
+			if sridChanged[strings.ToLower(part.Name)] {
+				blocking[idx.Name] = true
+			}
+		}
+	}
+	return blocking
+}
+
 // diffIndexes compares indexes and returns ALTER clauses for differences.
 //
 // Most index changes are emitted into the combined ALTER (the returned
-// []string). However, an index whose column list is identical but whose
-// options differ (e.g. WITH PARSER or KEY_BLOCK_SIZE) cannot be changed by a
-// combined `DROP INDEX x, ADD INDEX x (<same cols>)` in a single ALTER: MySQL
-// pairs the two clauses up and keeps the existing index, silently ignoring the
-// option change. To make such a change actually take effect, the DROP and ADD
-// must run as two separate ALTER statements. Those are returned via the second
-// value as standalone clause-lists (each becomes its own ALTER statement).
-func (ct *CreateTable) diffIndexes(target *CreateTable) (clauses []string, separateStatements [][]string) {
+// []string). An index whose column list is identical but whose options differ
+// (WITH PARSER, KEY_BLOCK_SIZE, SECONDARY_ENGINE_ATTRIBUTE) cannot be changed
+// by a combined `DROP INDEX x, ADD INDEX x (<same cols>)` in a single ALTER:
+// MySQL pairs the two clauses up and keeps the existing index, silently
+// ignoring the option change. Such an index is swapped for a replacement in
+// statements of its own (see swap below), returned via the second value as
+// standalone clause-lists (each becomes its own ALTER statement) that run
+// after the combined ALTER.
+//
+// rebuilt names the columns dropped and added back by diffColumns (see
+// rebuiltColumns). A functional index that reads one blocks the DROP COLUMN
+// (error 3837) unless the same ALTER drops it, so it is dropped and added back
+// from the target's definition in the combined ALTER. An index that names the
+// column as a plain key part survives the rebuild on its own.
+//
+// droppedBefore names the source indexes a statement before this ALTER has
+// already dropped (see spatialIndexesBlockingSRIDChange). They are diffed as
+// absent from the source: a same-named target index is a plain ADD.
+func (ct *CreateTable) diffIndexes(target *CreateTable, rebuilt, droppedBefore, takenNames map[string]bool) (clauses []string, separateStatements [][]string, err error) {
 	// Inline column-level UNIQUE / PRIMARY KEY have already been materialized
 	// into ct.Indexes by normalization (see indexNormalizer, primaryKeyNormalizer),
-	// so both index sets can be walked directly.
-	sourceIdxList := ct.Indexes
-	targetIdxList := target.Indexes
+	// so both index sets can be walked directly. The lists are copied because
+	// pairInlineUniqueNames renames entries, and the caller's tables must not
+	// change under a diff.
+	sourceIdxList := slices.DeleteFunc(slices.Clone(ct.Indexes), func(idx Index) bool {
+		return droppedBefore[idx.Name]
+	})
+	targetIdxList := slices.Clone(target.Indexes)
+	pairInlineUniqueNames(sourceIdxList, targetIdxList)
+
+	var p *parser.Parser
+	readsRebuilt := func(idx *Index) bool {
+		if len(rebuilt) == 0 {
+			return false
+		}
+		if p == nil {
+			p = parser.New()
+		}
+		for _, part := range idx.ColumnList {
+			if part.Expression != nil && expressionReadsAny(p, *part.Expression, rebuilt) {
+				return true
+			}
+		}
+		return false
+	}
+	// rebuiltIndexes are the source indexes dropped in the primary ALTER to
+	// be added back below from the target's definition, whatever it is:
+	// those reading a rebuilt column.
+	rebuiltIndexes := make(map[string]bool)
 
 	// Build maps for easier lookup
 	sourceIndexes := make(map[string]*Index)
@@ -1851,45 +2407,6 @@ func (ct *CreateTable) diffIndexes(target *CreateTable) (clauses []string, separ
 		targetIndexes[targetIdxList[i].Name] = &targetIdxList[i]
 	}
 
-	// Safety net for inline-derived names: the synthesized name is only a
-	// guess at what the server assigned. Pair unique indexes that cover the
-	// same column set but carry different names whenever at least one side's
-	// name came from an inline declaration, so we never DROP a live unique
-	// index (or ADD a duplicate) that the other side's inline UNIQUE already
-	// expresses. Two explicitly named unique indexes that differ only in name
-	// are NOT paired — that is a real rename (DROP + ADD).
-	matchedSourceUnique := make(map[string]bool) // source name -> matched
-	matchedTargetUnique := make(map[string]bool) // target name -> matched
-	for i := range sourceIdxList {
-		sourceIdx := &sourceIdxList[i]
-		if sourceIdx.Type != "UNIQUE" {
-			continue
-		}
-		if _, exactMatch := targetIndexes[sourceIdx.Name]; exactMatch {
-			continue // handled by the normal name-based path
-		}
-		for j := range targetIdxList {
-			targetIdx := &targetIdxList[j]
-			if targetIdx.Type != "UNIQUE" {
-				continue
-			}
-			if _, exactMatch := sourceIndexes[targetIdx.Name]; exactMatch {
-				continue // this target index already has a name match in source
-			}
-			if matchedTargetUnique[targetIdx.Name] {
-				continue // already paired with another source index
-			}
-			if !sourceIdx.InlineDerived && !targetIdx.InlineDerived {
-				continue // both explicitly named: a genuine rename
-			}
-			if indexColumnsIdenticalIgnoreName(sourceIdx, targetIdx) {
-				matchedSourceUnique[sourceIdx.Name] = true
-				matchedTargetUnique[targetIdx.Name] = true
-				break
-			}
-		}
-	}
-
 	// Collect DROP operations and sort by name for deterministic output
 	var dropClauses []string
 
@@ -1899,21 +2416,54 @@ func (ct *CreateTable) diffIndexes(target *CreateTable) (clauses []string, separ
 	// guards against emitting "DROP PRIMARY KEY" twice from the source loop.
 	pkDropAdded := false
 
-	// optionOnlyChanged tracks index names whose column list is unchanged but
-	// whose options differ (e.g. WITH PARSER / KEY_BLOCK_SIZE). These must be
-	// emitted as separate DROP + ADD statements rather than combined into one
-	// ALTER, because MySQL no-ops a combined DROP+ADD of the same name and
-	// column list. Such indexes are routed out of dropClauses/addClauses below.
-	optionOnlyChanged := make(map[string]bool)
+	// replaced tracks the indexes re-created outside the primary ALTER:
+	// those whose column list is unchanged but whose options differ (WITH
+	// PARSER, KEY_BLOCK_SIZE, SECONDARY_ENGINE_ATTRIBUTE). MySQL pairs a
+	// same-name, same-columns DROP+ADD in one ALTER and keeps the old index,
+	// so each is re-created by swap instead; they are routed out of
+	// dropClauses, the additions and the visibility clauses below.
+	replaced := make(map[string]bool)
+
+	// swap re-creates an index as the target defines it, after the primary
+	// ALTER: the replacement is added under a temporary name and the old
+	// index dropped in the same statement, and a final statement renames
+	// every replacement back. Every swapped index shares one statement, so
+	// the table is rebuilt once for all of them, except a FULLTEXT index,
+	// which takes a statement of its own (InnoDB builds one FULLTEXT index
+	// per ALTER, error 1795). Adding before dropping is what gets the swap
+	// through where a standalone DROP INDEX is refused: the only index on an
+	// AUTO_INCREMENT column (error 1075) or the index a foreign key depends
+	// on (error 1553). The temporary name avoids every reserved index and
+	// constraint name, compared case-insensitively as MySQL does. A run that stops
+	// between the statements leaves the index under the temporary name; the
+	// next diff drops that one and adds the target's.
+	var swapClauses []string     // every swap but a FULLTEXT one: one statement
+	var fulltextSwaps [][]string // one statement per FULLTEXT swap
+	var renames []string
+	swap := func(sourceIdx, targetIdx *Index) {
+		replaced[sourceIdx.Name] = true
+		tmp := replacementName(sourceIdx.Name, takenNames)
+		replacement := *targetIdx
+		replacement.Name = tmp
+		pair := []string{
+			formatAddIndex(&replacement),
+			fmt.Sprintf("DROP INDEX %s", sqlescape.EscapeIdentifier(sourceIdx.Name)),
+		}
+		if targetIdx.Type == "FULLTEXT" {
+			fulltextSwaps = append(fulltextSwaps, pair)
+		} else {
+			swapClauses = append(swapClauses, pair...)
+		}
+		renames = append(renames, fmt.Sprintf("RENAME INDEX %s TO %s",
+			sqlescape.EscapeIdentifier(tmp), sqlescape.EscapeIdentifier(sourceIdx.Name)))
+	}
 
 	for i := range sourceIdxList {
 		sourceIdx := &sourceIdxList[i]
-		if matchedSourceUnique[sourceIdx.Name] {
-			continue // equivalent unique index exists in target under an inline-derived pairing
-		}
 		targetIdx, existsInTarget := targetIndexes[sourceIdx.Name]
 
-		if !existsInTarget {
+		switch {
+		case !existsInTarget:
 			// Index removed completely
 			if sourceIdx.Type == "PRIMARY KEY" {
 				if !pkDropAdded {
@@ -1923,25 +2473,31 @@ func (ct *CreateTable) diffIndexes(target *CreateTable) (clauses []string, separ
 			} else {
 				dropClauses = append(dropClauses, fmt.Sprintf("DROP INDEX %s", sqlescape.EscapeIdentifier(sourceIdx.Name)))
 			}
-		} else if !indexesEqual(sourceIdx, targetIdx) && !indexesEqualIgnoreVisibility(sourceIdx, targetIdx) {
+		case readsRebuilt(sourceIdx):
+			rebuiltIndexes[sourceIdx.Name] = true
+			dropClauses = append(dropClauses, fmt.Sprintf("DROP INDEX %s", sqlescape.EscapeIdentifier(sourceIdx.Name)))
+		case !indexesEqual(sourceIdx, targetIdx) && !indexesEqualIgnoreVisibility(sourceIdx, targetIdx):
 			// Index exists but changed (and not just visibility) - need to drop and re-add
 			switch {
 			case sourceIdx.Type == "PRIMARY KEY":
+				// MySQL keeps these options when the same columns are dropped
+				// and added together. A primary key cannot use the temporary
+				// name swap used for secondary indexes, so fail before returning
+				// any statements instead of planning a perpetual no-op.
+				if indexNeedsSeparateRebuild(sourceIdx, targetIdx) {
+					return nil, nil, fmt.Errorf("cannot diff table %q: changing PRIMARY KEY options without changing its columns is unsupported (KEY_BLOCK_SIZE, WITH PARSER, or SECONDARY_ENGINE_ATTRIBUTE)", ct.TableName)
+				}
 				// Only add if not already added above
 				if !pkDropAdded {
 					dropClauses = append(dropClauses, "DROP PRIMARY KEY")
 					pkDropAdded = true
 				}
 			case indexNeedsSeparateRebuild(sourceIdx, targetIdx):
-				// A no-op-prone option (WITH PARSER / KEY_BLOCK_SIZE) changed on
-				// an unchanged column list. A combined DROP+ADD in one ALTER
-				// would be a MySQL no-op, so emit two separate statements that
-				// MySQL will actually apply.
-				optionOnlyChanged[sourceIdx.Name] = true
-				separateStatements = append(separateStatements,
-					[]string{fmt.Sprintf("DROP INDEX %s", sqlescape.EscapeIdentifier(sourceIdx.Name))},
-					[]string{formatAddIndex(targetIdx)},
-				)
+				// A no-op-prone option (WITH PARSER / KEY_BLOCK_SIZE /
+				// SECONDARY_ENGINE_ATTRIBUTE) changed on an unchanged column
+				// list. A combined DROP+ADD in one ALTER would be a MySQL
+				// no-op, so the index is swapped for a replacement.
+				swap(sourceIdx, targetIdx)
 			default:
 				dropClauses = append(dropClauses, fmt.Sprintf("DROP INDEX %s", sqlescape.EscapeIdentifier(sourceIdx.Name)))
 			}
@@ -1949,41 +2505,72 @@ func (ct *CreateTable) diffIndexes(target *CreateTable) (clauses []string, separ
 	}
 	slices.Sort(dropClauses)
 	clauses = append(clauses, dropClauses...)
+	if len(swapClauses) > 0 {
+		separateStatements = append(separateStatements, swapClauses)
+	}
+	separateStatements = append(separateStatements, fulltextSwaps...)
+	if len(renames) > 0 {
+		separateStatements = append(separateStatements, renames)
+	}
 
-	// Collect ADD operations and sort by name for deterministic output
-	var addClauses []string
-	for _, targetIdx := range targetIdxList {
-		if matchedTargetUnique[targetIdx.Name] {
-			continue // equivalent unique index exists in source under an inline-derived pairing
-		}
+	// Collect ADD operations and sort by clause text for deterministic output
+	type addition struct {
+		clause   string
+		fulltext bool
+	}
+	var additions []addition
+	add := func(idx *Index) {
+		additions = append(additions, addition{clause: formatAddIndex(idx), fulltext: idx.Type == "FULLTEXT"})
+	}
+	for i := range targetIdxList {
+		targetIdx := &targetIdxList[i]
 		sourceIdx, existsInSource := sourceIndexes[targetIdx.Name]
 
-		if !existsInSource {
+		switch {
+		case !existsInSource:
 			// New index - add it
-			addClauses = append(addClauses, formatAddIndex(&targetIdx))
-		} else if !indexesEqual(sourceIdx, &targetIdx) {
+			add(targetIdx)
+		case rebuiltIndexes[targetIdx.Name]:
+			// Dropped above for a column rebuild; add it back as the target
+			// defines it.
+			add(targetIdx)
+		case !indexesEqual(sourceIdx, targetIdx):
 			// Index exists but changed - check if only visibility changed
-			if indexesEqualIgnoreVisibility(sourceIdx, &targetIdx) {
+			if indexesEqualIgnoreVisibility(sourceIdx, targetIdx) {
 				// Only visibility changed - skip for now, handle in ALTER INDEX section
 				continue
 			}
-			// Option-only changes are emitted as separate statements above.
-			if optionOnlyChanged[targetIdx.Name] {
+			// A replaced index is re-created by its swap statements above.
+			if replaced[targetIdx.Name] {
 				continue
 			}
 			// Other changes - need to drop and re-add (drop already handled above)
-			addClauses = append(addClauses, formatAddIndex(&targetIdx))
+			add(targetIdx)
 		}
 	}
-	slices.Sort(addClauses)
-	clauses = append(clauses, addClauses...)
+	slices.SortFunc(additions, func(a, b addition) int { return strings.Compare(a.clause, b.clause) })
+	// InnoDB builds one FULLTEXT index per ALTER TABLE (error 1795, "InnoDB
+	// presently supports one FULLTEXT index creation at a time"), however the
+	// statement is otherwise shaped. The first FULLTEXT add stays in the
+	// combined ALTER; each further one runs as a statement of its own after
+	// it.
+	fulltextAdded := false
+	for _, a := range additions {
+		if a.fulltext && fulltextAdded {
+			separateStatements = append(separateStatements, []string{a.clause})
+			continue
+		}
+		fulltextAdded = fulltextAdded || a.fulltext
+		clauses = append(clauses, a.clause)
+	}
 
 	// Collect ALTER INDEX operations for visibility changes (must come after DROP/ADD)
 	var alterClauses []string
 	for _, targetIdx := range targetIdxList {
 		sourceIdx, existsInSource := sourceIndexes[targetIdx.Name]
 
-		if existsInSource && !indexesEqual(sourceIdx, &targetIdx) && indexesEqualIgnoreVisibility(sourceIdx, &targetIdx) {
+		if existsInSource && !rebuiltIndexes[targetIdx.Name] && !replaced[targetIdx.Name] &&
+			!indexesEqual(sourceIdx, &targetIdx) && indexesEqualIgnoreVisibility(sourceIdx, &targetIdx) {
 			// Only visibility changed
 			targetVisible := targetIdx.Invisible == nil || !*targetIdx.Invisible
 			if targetVisible {
@@ -1996,12 +2583,86 @@ func (ct *CreateTable) diffIndexes(target *CreateTable) (clauses []string, separ
 	slices.Sort(alterClauses)
 	clauses = append(clauses, alterClauses...)
 
-	return clauses, separateStatements
+	return clauses, separateStatements, nil
 }
 
-// diffConstraints compares constraints and returns ALTER clauses for differences
-func (ct *CreateTable) diffConstraints(target *CreateTable) []string {
-	var clauses []string
+// replacementName names the replacement of an index swap (see diffIndexes),
+// which is renamed back afterwards, or of a foreign key re-created under its
+// own name (see diffConstraints), which keeps it: the object's own name
+// wrapped as _<name>_new, like the shadow table, cut to MySQL's 64-character
+// identifier limit and numbered until it is free. taken holds the lowercased
+// names in use (MySQL compares them case-insensitively), and the chosen name
+// is added to it.
+func replacementName(name string, taken map[string]bool) string {
+	const maxLen = mysql.MaxIndexIdentifierLen
+	for n := 1; ; n++ {
+		suffix := "_new"
+		if n > 1 {
+			suffix += strconv.Itoa(n)
+		}
+		base := []rune(name)
+		if room := maxLen - 1 - len(suffix); len(base) > room {
+			base = base[:room]
+		}
+		candidate := "_" + string(base) + suffix
+		if key := strings.ToLower(candidate); !taken[key] {
+			taken[key] = true
+			return candidate
+		}
+	}
+}
+
+// diffConstraints compares constraints and returns the ALTER clauses for the
+// differences, plus the clauses that cannot share the primary ALTER, each
+// inner slice one statement to run after it.
+//
+// rebuilt names the columns dropped and added back by diffColumns (see
+// rebuiltColumns). A CHECK constraint that reads one blocks the DROP COLUMN
+// (error 3959) unless the same ALTER drops it, so the source's is dropped and
+// the target's added back in the combined ALTER, each decided on its own text
+// and outside the pairing below, which would otherwise find the pair equal and
+// emit nothing. MySQL accepts the DROP CHECK and the ADD CONSTRAINT under the
+// same name in one statement.
+//
+// It does not accept that for a foreign key: a DROP FOREIGN KEY and an ADD
+// CONSTRAINT under the same name in one ALTER fail with error 1826, "Duplicate
+// foreign key constraint name", and foreign key names are case-insensitive
+// (and unique per schema), so a name differing only in case fails the same
+// way. Such a foreign key is re-created under a replacement name instead: the
+// ALTER drops the old constraint and adds the new definition as _<name>_new
+// (see replacementName) in the same statement, so the table is never without
+// it. Dropping in one statement and re-adding in the next would leave the
+// child table unconstrained in between: a row with no parent inserted then is
+// accepted, and the re-add fails on it. The foreign key keeps the replacement
+// name. Moving it to its own name afterwards would be a second ADD FOREIGN
+// KEY, a table copy when foreign_key_checks is on, for a name the diff does
+// not compare: a foreign key is paired by definition whatever its name
+// (constraintsEqualIgnoreName, below), so the next diff finds the table
+// converged, and a later change under the desired name fits one ALTER under
+// the two names and brings the name back. The replacement name avoids every
+// constraint and index name on either side of the diff (MySQL names the index
+// it creates for a foreign key after the constraint when the columns have
+// none); a collision with a foreign key of another table in the schema fails
+// the ALTER with error 1826, and nothing has changed.
+func (ct *CreateTable) diffConstraints(target *CreateTable, rebuilt, takenNames map[string]bool) (clauses []string) {
+
+	var p *parser.Parser
+	readsRebuilt := func(c *Constraint) bool {
+		if len(rebuilt) == 0 || c.Type != "CHECK" || c.Expression == nil {
+			return false
+		}
+		if p == nil {
+			p = parser.New()
+		}
+		return expressionReadsAny(p, *c.Expression, rebuilt)
+	}
+	// droppedForRebuild are the source CHECKs dropped for a column rebuild;
+	// a same-named target constraint is added back whatever its text.
+	droppedForRebuild := make(map[string]bool)
+	// droppedForeignKeys are the lowercased names of the foreign keys this
+	// diff drops; a target foreign key under one of them is added under a
+	// replacement name (see above).
+	droppedForeignKeys := make(map[string]bool)
 
 	// Build maps for easier lookup
 	sourceConstraints := make(map[string]*Constraint)
@@ -2027,14 +2688,17 @@ func (ct *CreateTable) diffConstraints(target *CreateTable) []string {
 		if _, exactMatch := targetConstraints[sourceConstr.Name]; exactMatch {
 			continue // will be handled by the normal name-based path
 		}
+		if readsRebuilt(sourceConstr) {
+			continue // dropped and re-added for the column rebuild
+		}
 		// No exact name match — look for an expression-equivalent target constraint
 		for j := range target.Constraints {
 			targetConstr := &target.Constraints[j]
 			if _, exactMatch := sourceConstraints[targetConstr.Name]; exactMatch {
 				continue // this target constraint already has a name match in source
 			}
-			if matchedTargetByExpression[targetConstr.Name] {
-				continue // already paired with another source constraint
+			if matchedTargetByExpression[targetConstr.Name] || readsRebuilt(targetConstr) {
+				continue // already paired with another source constraint, or re-added for a rebuild
 			}
 			if constraintsEqualIgnoreName(sourceConstr, targetConstr) {
 				matchedSourceByExpression[sourceConstr.Name] = true
@@ -2055,10 +2719,14 @@ func (ct *CreateTable) diffConstraints(target *CreateTable) []string {
 			continue // equivalent constraint exists in target under a different name
 		}
 		targetConstr, exists := targetConstraints[sourceConstr.Name]
+		rebuild := readsRebuilt(sourceConstr)
+		if rebuild {
+			droppedForRebuild[sourceConstr.Name] = true
+		}
 
 		// Drop if constraint doesn't exist in target OR if it changed
-		if !exists || !constraintsEqual(sourceConstr, targetConstr) {
-			if exists && constraintsEqualExceptEnforcement(sourceConstr, targetConstr) {
+		if rebuild || !exists || !constraintsEqual(sourceConstr, targetConstr) {
+			if !rebuild && exists && constraintsEqualExceptEnforcement(sourceConstr, targetConstr) {
 				// Only the [NOT] ENFORCED state changed: use MySQL's targeted
 				// ALTER CHECK clause instead of DROP+ADD. Flipping to NOT
 				// ENFORCED is then metadata-only (INSTANT-capable); flipping
@@ -2074,6 +2742,7 @@ func (ct *CreateTable) diffConstraints(target *CreateTable) []string {
 			switch sourceConstr.Type {
 			case "FOREIGN KEY":
 				dropClauses = append(dropClauses, fmt.Sprintf("DROP FOREIGN KEY %s", sqlescape.EscapeIdentifier(sourceConstr.Name)))
+				droppedForeignKeys[strings.ToLower(sourceConstr.Name)] = true
 			case "CHECK":
 				dropClauses = append(dropClauses, fmt.Sprintf("DROP CHECK %s", sqlescape.EscapeIdentifier(sourceConstr.Name)))
 			}
@@ -2084,17 +2753,26 @@ func (ct *CreateTable) diffConstraints(target *CreateTable) []string {
 	slices.Sort(enforcementClauses)
 	clauses = append(clauses, enforcementClauses...)
 
-	// Collect ADD operations and sort by name for deterministic output
+	// Collect ADD operations and sort by name for deterministic output. A
+	// foreign key added back under a name this ALTER drops is added under a
+	// replacement name (error 1826, see above).
 	var addClauses []string
 	for _, targetConstr := range target.Constraints {
 		if matchedTargetByExpression[targetConstr.Name] {
 			continue // equivalent constraint exists in source under a different name
 		}
 		sourceConstr, existsInSource := sourceConstraints[targetConstr.Name]
+		rebuild := droppedForRebuild[targetConstr.Name] || readsRebuilt(&targetConstr)
 
-		if !existsInSource || !constraintsEqual(sourceConstr, &targetConstr) {
-			if existsInSource && constraintsEqualExceptEnforcement(sourceConstr, &targetConstr) {
+		if rebuild || !existsInSource || !constraintsEqual(sourceConstr, &targetConstr) {
+			if !rebuild && existsInSource && constraintsEqualExceptEnforcement(sourceConstr, &targetConstr) {
 				continue // enforcement-only change; handled by ALTER CHECK above
+			}
+			if targetConstr.Type == "FOREIGN KEY" && droppedForeignKeys[strings.ToLower(targetConstr.Name)] {
+				replacement := targetConstr
+				replacement.Name = replacementName(targetConstr.Name, takenNames)
+				addClauses = append(addClauses, formatAddConstraint(&replacement))
+				continue
 			}
 			addClauses = append(addClauses, formatAddConstraint(&targetConstr))
 		}
@@ -2153,13 +2831,42 @@ func (ct *CreateTable) diffTableOptions(target *CreateTable, opts *DiffOptions) 
 		}
 	}
 
-	// Compare ROW_FORMAT
+	source, dest := ct.TableOptions.deref(), target.TableOptions.deref()
+
+	// optionClause appends name=<target value> when the target sets the
+	// option, or name=<reset> when only the source does. ALTER TABLE has no
+	// way to leave a table option out, so each one is cleared by the value
+	// MySQL reads back as unset.
+	optionClause := func(name string, sourceValue, targetValue *string, reset string) {
+		if ptrEqual(sourceValue, targetValue) {
+			return
+		}
+		if targetValue != nil {
+			clauses = append(clauses, name+"="+*targetValue)
+		} else {
+			clauses = append(clauses, name+"="+reset)
+		}
+	}
+
+	// Compare ROW_FORMAT and, with it, the table-level KEY_BLOCK_SIZE: the
+	// compressed page size that implies ROW_FORMAT=COMPRESSED. The two have
+	// to move together — InnoDB rejects an ALTER to another row format while
+	// a KEY_BLOCK_SIZE is set, so the clearing KEY_BLOCK_SIZE=0 goes in the
+	// same statement as the ROW_FORMAT.
 	if !opts.IgnoreRowFormat {
 		if !ptrEqual(ct.TableOptions.getRowFormat(), target.TableOptions.getRowFormat()) {
 			if rowFormat := target.TableOptions.getRowFormat(); rowFormat != nil {
 				clauses = append(clauses, fmt.Sprintf("ROW_FORMAT=%s", *rowFormat))
+			} else {
+				// The target names no row format, so the table it describes
+				// has the engine default, which is what ROW_FORMAT=DEFAULT
+				// sets: it clears the stored option, and SHOW CREATE TABLE
+				// then omits it like the target does. Without it a table
+				// stuck on ROW_FORMAT=COMPACT could never be brought back.
+				clauses = append(clauses, "ROW_FORMAT=DEFAULT")
 			}
 		}
+		optionClause("KEY_BLOCK_SIZE", uintText(source.KeyBlockSize), uintText(dest.KeyBlockSize), "0")
 	}
 
 	// Compare AUTO_INCREMENT
@@ -2172,7 +2879,57 @@ func (ct *CreateTable) diffTableOptions(target *CreateTable, opts *DiffOptions) 
 		}
 	}
 
+	// The remaining options are always compared. They are declared schema
+	// (SHOW CREATE TABLE reports each one that is set), and before they were
+	// modelled a declared STATS_PERSISTENT=0 or SECONDARY_ENGINE_ATTRIBUTE
+	// was silently never applied. Emitted in the order SHOW CREATE TABLE
+	// reports them.
+	optionClause("MIN_ROWS", uintText(source.MinRows), uintText(dest.MinRows), "0")
+	optionClause("MAX_ROWS", uintText(source.MaxRows), uintText(dest.MaxRows), "0")
+	optionClause("AVG_ROW_LENGTH", uintText(source.AvgRowLength), uintText(dest.AvgRowLength), "0")
+	optionClause("PACK_KEYS", boolText(source.PackKeys), boolText(dest.PackKeys), "DEFAULT")
+	optionClause("STATS_PERSISTENT", boolText(source.StatsPersistent), boolText(dest.StatsPersistent), "DEFAULT")
+	optionClause("STATS_AUTO_RECALC", boolText(source.StatsAutoRecalc), boolText(dest.StatsAutoRecalc), "DEFAULT")
+	optionClause("STATS_SAMPLE_PAGES", uintText(source.StatsSamplePages), uintText(dest.StatsSamplePages), "DEFAULT")
+	optionClause("CHECKSUM", flagText(source.Checksum), flagText(dest.Checksum), "0")
+	optionClause("DELAY_KEY_WRITE", flagText(source.DelayKeyWrite), flagText(dest.DelayKeyWrite), "0")
+	optionClause("AUTOEXTEND_SIZE", uintText(source.AutoextendSize), uintText(dest.AutoextendSize), "0")
+	if !engineAttributeEqual(source.SecondaryEngineAttribute, dest.SecondaryEngineAttribute) {
+		attr := ""
+		if dest.SecondaryEngineAttribute != nil {
+			attr = sqlescape.EscapeString(*dest.SecondaryEngineAttribute)
+		}
+		clauses = append(clauses, "SECONDARY_ENGINE_ATTRIBUTE='"+attr+"'")
+	}
+
 	return clauses
+}
+
+// uintText, boolText and flagText render an optional table option value as
+// the text its ALTER clause carries, or nil when the option is unset, so that
+// every option diffs through the same optionClause path in diffTableOptions.
+func uintText(v *uint64) *string {
+	if v == nil {
+		return nil
+	}
+	return new(strconv.FormatUint(*v, 10))
+}
+
+func boolText(v *bool) *string {
+	if v == nil {
+		return nil
+	}
+	if *v {
+		return new("1")
+	}
+	return new("0")
+}
+
+func flagText(v bool) *string {
+	if !v {
+		return nil
+	}
+	return new("1")
 }
 
 // columnsEqualWithContext checks if two columns are equal, considering table

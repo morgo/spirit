@@ -235,12 +235,12 @@ func TestFunctionAliasConverges(t *testing.T) {
 		{
 			name:     "vector default",
 			authored: "CREATE TABLE t (id int NOT NULL PRIMARY KEY, v vector(3) DEFAULT (STRING_TO_VECTOR('[1,2,3]')))",
-			live:     "CREATE TABLE t (id int NOT NULL PRIMARY KEY, v vector(3) DEFAULT (to_vector(_latin1'[1,2,3]')))",
+			live:     "CREATE TABLE t (id int NOT NULL PRIMARY KEY, v vector(3) DEFAULT (to_vector(_utf8mb4'[1,2,3]')))",
 		},
 		{
-			name:     "expression default with a charset introducer",
+			name:     "expression default with the session's introducer",
 			authored: "CREATE TABLE t (id int NOT NULL PRIMARY KEY, c varchar(10) DEFAULT (LCASE('AB')))",
-			live:     "CREATE TABLE t (id int NOT NULL PRIMARY KEY, c varchar(10) DEFAULT (lower(_latin1'AB')))",
+			live:     "CREATE TABLE t (id int NOT NULL PRIMARY KEY, c varchar(10) DEFAULT (lower(_utf8mb4'AB')))",
 		},
 		{
 			name:     "timestamp expression default",
