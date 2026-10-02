@@ -1589,15 +1589,14 @@ func TestDiffIntegrationBooleanKeywordDefaultAcrossFoldingTypes(t *testing.T) {
 }
 
 // The types that store the keyword as something other than 1/0, with the
-// reading that puts each out of scope and the diff it still emits as a result.
-// Asserting the leftover diff alongside the reading is deliberate: a reading on
-// its own does not say whether the exclusion it justifies is the right one, and
-// scaled decimal is excluded for a reason this layer cannot fix — scale padding
-// belongs to numeric canonicalization. binary is excluded here too, because it
-// pads the keyword to the column width; binaryDefaultBytesNormalizer folds it
-// instead, and TestDiffIntegrationBinaryDefaultBytes covers it. year reads the
-// keyword as a year (TRUE stores '2001'); yearDefaultNormalizer folds it, and
-// TestDiffIntegrationYearDefaultCreatedAsDeclared covers it.
+// reading that puts each out of scope of the keyword fold. scaled decimal pads
+// the keyword to its scale, which belongs to numeric canonicalization:
+// numericDefaultNormalizer folds it to the padded value, so the table created
+// from the declaration has nothing left to apply. binary is excluded too,
+// because it pads the keyword to the column width; binaryDefaultBytesNormalizer
+// folds it instead, and TestDiffIntegrationBinaryDefaultBytes covers it. year
+// reads the keyword as a year (TRUE stores '2001'); yearDefaultNormalizer folds
+// it, and TestDiffIntegrationYearDefaultCreatedAsDeclared covers it.
 //
 // enum and set are excluded too but are deliberately not fixtures here. They
 // have no single reading to record: through 8.4 the keyword resolves to a
@@ -1614,11 +1613,7 @@ func TestDiffIntegrationBooleanKeywordDefaultOnExcludedTypes(t *testing.T) {
 	live := showCreateTable(t, tt.DB, tt.Name)
 	require.Contains(t, live, "`scaled` decimal(4,2) NOT NULL DEFAULT '1.00'")
 
-	// The table was created from this very declaration, so the statement here
-	// re-stores a value the column already holds.
-	stmts := diffLiveTable(t, tt.DB, tt.Name, declaredSQL)
-	require.Len(t, stmts, 1)
-	require.Contains(t, stmts[0].Statement, "MODIFY COLUMN `scaled`")
+	require.Nil(t, diffLiveTable(t, tt.DB, tt.Name, declaredSQL))
 }
 
 // A ZEROFILL integer's default is stored padded to the display width, so a

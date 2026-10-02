@@ -429,6 +429,102 @@ func TestDiffMySQLContracts(t *testing.T) {
 			target:   "(id INT PRIMARY KEY) PARTITION BY HASH (ID) PARTITIONS 2",
 			wantNoop: true,
 		},
+
+		// Numeric literal defaults (numericDefaultNormalizer): MySQL stores the
+		// literal converted to the column's type and reports the result.
+		{
+			name:   "decimal default converges",
+			source: "(id INT PRIMARY KEY, c DECIMAL(6,2))",
+			target: "(id INT PRIMARY KEY, c DECIMAL(6,2) DEFAULT 1.2)",
+		},
+		{
+			name:   "decimal default changed",
+			source: "(id INT PRIMARY KEY, c DECIMAL(6,2) DEFAULT 1.2)",
+			target: "(id INT PRIMARY KEY, c DECIMAL(6,2) DEFAULT 1.235)",
+		},
+		{
+			name:     "decimal default already padded is a no-op",
+			source:   "(id INT PRIMARY KEY, c DECIMAL(6,2) DEFAULT 1.2)",
+			target:   "(id INT PRIMARY KEY, c DECIMAL(6,2) DEFAULT '1.20')",
+			wantNoop: true,
+		},
+		{
+			name:   "decimal default from the keyword converges",
+			source: "(id INT PRIMARY KEY, c DECIMAL(4,2) NOT NULL)",
+			target: "(id INT PRIMARY KEY, c DECIMAL(4,2) NOT NULL DEFAULT TRUE)",
+		},
+		{
+			name:   "integer default from a padded string converges",
+			source: "(id INT PRIMARY KEY, c INT)",
+			target: "(id INT PRIMARY KEY, c INT DEFAULT '001')",
+		},
+		{
+			name:   "integer default from a float literal converges",
+			source: "(id INT PRIMARY KEY, c INT)",
+			target: "(id INT PRIMARY KEY, c INT DEFAULT 2.5e0)",
+		},
+		{
+			name:     "unsigned integer default from a negative string that rounds to zero is a no-op",
+			source:   "(id INT PRIMARY KEY, c INT UNSIGNED DEFAULT 0)",
+			target:   "(id INT PRIMARY KEY, c INT UNSIGNED DEFAULT '-0.4')",
+			wantNoop: true,
+		},
+		{
+			name:   "double default from an exponent converges",
+			source: "(id INT PRIMARY KEY, c DOUBLE)",
+			target: "(id INT PRIMARY KEY, c DOUBLE DEFAULT 1e2)",
+		},
+		{
+			name:   "double default in exponent notation converges",
+			source: "(id INT PRIMARY KEY, c DOUBLE)",
+			target: "(id INT PRIMARY KEY, c DOUBLE DEFAULT 123456789012345678)",
+		},
+		{
+			name:   "double default below the fixed range converges",
+			source: "(id INT PRIMARY KEY, c DOUBLE)",
+			target: "(id INT PRIMARY KEY, c DOUBLE DEFAULT 0.0000000000000001234)",
+		},
+		{
+			name:   "double default with a scale converges",
+			source: "(id INT PRIMARY KEY, c DOUBLE(10,3))",
+			target: "(id INT PRIMARY KEY, c DOUBLE(10,3) DEFAULT 2.0005)",
+		},
+		{
+			name:   "float default rounded to six digits converges",
+			source: "(id INT PRIMARY KEY, c FLOAT)",
+			target: "(id INT PRIMARY KEY, c FLOAT DEFAULT 1.23456789)",
+		},
+		{
+			name:     "float default spelled past six digits is a no-op",
+			source:   "(id INT PRIMARY KEY, c FLOAT DEFAULT 1.23457)",
+			target:   "(id INT PRIMARY KEY, c FLOAT DEFAULT 1.23456789)",
+			wantNoop: true,
+		},
+		{
+			name:   "float denormal default converges",
+			source: "(id INT PRIMARY KEY, c FLOAT)",
+			target: "(id INT PRIMARY KEY, c FLOAT DEFAULT 1e-45)",
+		},
+		{
+			name:   "float default with a scale converges",
+			source: "(id INT PRIMARY KEY, c FLOAT(7,4))",
+			target: "(id INT PRIMARY KEY, c FLOAT(7,4) DEFAULT 1.5)",
+		},
+		{
+			name:   "varchar default from a decimal literal converges",
+			source: "(id INT PRIMARY KEY, c VARCHAR(10))",
+			target: "(id INT PRIMARY KEY, c VARCHAR(10) DEFAULT 1.50)",
+		},
+		{
+			name:   "varchar default from a float literal converges",
+			source: "(id INT PRIMARY KEY, c VARCHAR(10))",
+			target: "(id INT PRIMARY KEY, c VARCHAR(10) DEFAULT 1.5E+2)",
+		},
+		{
+			name:   "binary default from a decimal literal is padded",
+			source: "(id INT PRIMARY KEY, c BINARY(5))",
+			target: "(id INT PRIMARY KEY, c BINARY(5) DEFAULT 1.5)",
+		},
 	}
 	for _, c := range contracts {
 		t.Run(c.name, func(t *testing.T) {

@@ -102,12 +102,14 @@ func TestBinaryDefaultBytesLeavesOtherDefaultsAlone(t *testing.T) {
 	}{
 		{"binary(0), whose only default has nothing to pad", "`b` binary(0) DEFAULT ''", "", DefaultKindString},
 		{"a default longer than the width, which MySQL rejects", "`b` binary(3) DEFAULT 'abcd'", "abcd", DefaultKindString},
-		{"a decimal, which MySQL formats itself", "`b` binary(3) DEFAULT 1.5", "1.5", DefaultKindNumber},
+		// A decimal or float literal is not this rule's: numericDefaultNormalizer
+		// formats it as MySQL does and pads it on binary.
+		{"a decimal, which MySQL formats itself", "`b` binary(3) DEFAULT 1.5", "1.5", DefaultKindString},
 		{"an expression default, which MySQL stores unpadded", "`b` binary(3) DEFAULT ('a')", "a", DefaultKindString},
 		{"binary wider than MySQL accepts", "`b` binary(1000000000) DEFAULT ''", "", DefaultKindString},
 		{"a varbinary default longer than the width", "`b` varbinary(3) DEFAULT x'61626364'", "x'61626364'", DefaultKindHexLiteral},
-		{"a varbinary decimal", "`b` varbinary(3) DEFAULT 1.5", "1.5", DefaultKindNumber},
-		{"an exponent, which is not an integer", "`b` binary(3) DEFAULT 1e0", "1e+00", DefaultKindNumber},
+		{"a varbinary decimal", "`b` varbinary(3) DEFAULT 1.5", "1.5", DefaultKindString},
+		{"an exponent, which is not an integer", "`b` binary(3) DEFAULT 1e0", "1\x00\x00", DefaultKindString},
 		{"char on a character charset", "`b` char(3) DEFAULT 'a'", "a", DefaultKindString},
 		{"NULL", "`b` binary(3) DEFAULT NULL", "NULL", DefaultKindUnknown},
 	}

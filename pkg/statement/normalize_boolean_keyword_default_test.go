@@ -117,9 +117,9 @@ func TestBooleanKeywordDefaultLeavesOtherTypesAlone(t *testing.T) {
 		want   string
 	}{
 		{
-			name:   "decimal applies its scale, so 1 is not what is stored",
+			name:   "decimal applies its scale, so 1 is not what is stored; numericDefaultNormalizer folds it to the padded value",
 			column: "`a` decimal(4,2) NOT NULL DEFAULT TRUE",
-			want:   "TRUE",
+			want:   "1.00",
 		},
 		{
 			name:   "year reads the keyword as a year, which yearDefaultNormalizer folds to 2001",

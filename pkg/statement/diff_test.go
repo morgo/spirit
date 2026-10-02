@@ -259,6 +259,51 @@ func TestDiff(t *testing.T) {
 			expected: "ALTER TABLE `t1` MODIFY COLUMN `id` int AUTO_INCREMENT NULL",
 		},
 		{
+			// MySQL stores a literal default converted to the column's type and
+			// reports the result, so the declared spelling has to be read the
+			// same way or every run re-emits the same MODIFY.
+			name:     "NumericDefaultDecimalPadded",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c DECIMAL(6,2) DEFAULT '1.20')",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c DECIMAL(6,2) DEFAULT 1.2)",
+			expected: "",
+		},
+		{
+			name:     "NumericDefaultIntegerFromString",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT DEFAULT '1')",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT DEFAULT '001')",
+			expected: "",
+		},
+		{
+			name:     "NumericDefaultDoubleExponent",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c DOUBLE DEFAULT '1e16', d DOUBLE DEFAULT '100')",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c DOUBLE DEFAULT 10000000000000000, d DOUBLE DEFAULT 1e2)",
+			expected: "",
+		},
+		{
+			name:     "NumericDefaultFloatSixDigits",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c FLOAT DEFAULT '1.23457')",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c FLOAT DEFAULT 1.23456789)",
+			expected: "",
+		},
+		{
+			name:     "NumericDefaultVarcharFromDecimal",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c VARCHAR(10) DEFAULT '1.50')",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c VARCHAR(10) DEFAULT 1.50)",
+			expected: "",
+		},
+		{
+			name:     "NumericDefaultAdded",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c DECIMAL(6,2))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c DECIMAL(6,2) DEFAULT 1.2)",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `c` decimal(6,2) NULL DEFAULT 1.20",
+		},
+		{
+			name:     "NumericDefaultChanged",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c DECIMAL(6,2) DEFAULT '1.20')",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c DECIMAL(6,2) DEFAULT 1.21)",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `c` decimal(6,2) NULL DEFAULT 1.21",
+		},
+		{
 			// MySQL reports a functional index key part wrapped in its own
 			// parentheses, KEY k (((`c` + 1))); the authored KEY k ((c+1)) is
 			// the same index.
@@ -2764,7 +2809,7 @@ func TestDiff_IgnoreNotNullRelaxation(t *testing.T) {
 			reference: "CREATE TABLE t1 (id INT PRIMARY KEY, customer_id BIGINT NULL DEFAULT '0')",
 			validated: "CREATE TABLE t1 (id INT PRIMARY KEY, customer_id BIGINT NOT NULL)",
 			relax:     true,
-			expected:  "ALTER TABLE `t1` MODIFY COLUMN `customer_id` bigint NULL DEFAULT '0'",
+			expected:  "ALTER TABLE `t1` MODIFY COLUMN `customer_id` bigint NULL DEFAULT 0",
 		},
 	}
 
