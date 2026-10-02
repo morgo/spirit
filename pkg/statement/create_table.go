@@ -291,23 +291,60 @@ type TableOptions struct {
 
 // PartitionOptions represents table partitioning configuration
 type PartitionOptions struct {
-	Type         string                `json:"type"`                   // RANGE, LIST, HASH, KEY
-	Expression   *string               `json:"expression,omitempty"`   // For HASH and RANGE
-	Columns      []string              `json:"columns,omitempty"`      // For KEY, RANGE COLUMNS, LIST COLUMNS
-	Linear       bool                  `json:"linear,omitempty"`       // For LINEAR HASH/KEY
-	Partitions   uint64                `json:"partitions,omitempty"`   // Number of partitions
-	Definitions  []PartitionDefinition `json:"definitions,omitempty"`  // Individual partition definitions
-	SubPartition *SubPartitionOptions  `json:"subpartition,omitempty"` // Subpartitioning options
+	Type         string                `json:"type"`                    // RANGE, LIST, HASH, KEY
+	Expression   *string               `json:"expression,omitempty"`    // For HASH, RANGE and LIST
+	Columns      []string              `json:"columns,omitempty"`       // For KEY, RANGE COLUMNS, LIST COLUMNS
+	Linear       bool                  `json:"linear,omitempty"`        // For LINEAR HASH/KEY
+	KeyAlgorithm uint64                `json:"key_algorithm,omitempty"` // For KEY: ALGORITHM=1; 0 is MySQL's default (2)
+	Partitions   uint64                `json:"partitions,omitempty"`    // Number of partitions
+	Definitions  []PartitionDefinition `json:"definitions,omitempty"`   // Individual partition definitions
+	SubPartition *SubPartitionOptions  `json:"subpartition,omitempty"`  // Subpartitioning options
 }
 
 // PartitionDefinition represents a single partition definition
 type PartitionDefinition struct {
-	Name          string                   `json:"name"`
-	Values        *PartitionValues         `json:"values,omitempty"` // VALUES LESS THAN or VALUES IN
-	Comment       *string                  `json:"comment,omitempty"`
-	Engine        *string                  `json:"engine,omitempty"`
-	Options       map[string]any           `json:"options,omitempty"`
+	Name    string           `json:"name"`
+	Values  *PartitionValues `json:"values,omitempty"` // VALUES LESS THAN or VALUES IN
+	Comment *string          `json:"comment,omitempty"`
+	Engine  *string          `json:"engine,omitempty"`
+	PartitionStorage
+	Options       map[string]any           `json:"options,omitempty"` // Options MySQL does not accept on a partition
 	SubPartitions []SubPartitionDefinition `json:"subpartitions,omitempty"`
+}
+
+// PartitionStorage holds the storage options of a partition or subpartition
+// definition. A partition with named subpartitions holds none: MySQL stores
+// them on each subpartition (see partitionOptionsNormalizer).
+type PartitionStorage struct {
+	DataDirectory  *string `json:"data_directory,omitempty"`
+	IndexDirectory *string `json:"index_directory,omitempty"` // InnoDB rejects it (error 1031)
+	MaxRows        *uint64 `json:"max_rows,omitempty"`
+	MinRows        *uint64 `json:"min_rows,omitempty"`
+	Tablespace     *string `json:"tablespace,omitempty"`
+	Nodegroup      *uint64 `json:"nodegroup,omitempty"`
+}
+
+// parsePartitionStorageOption stores opt in s if it is a storage option, and
+// reports whether it was one.
+func parsePartitionStorageOption(opt *ast.TableOption, s *PartitionStorage) bool {
+	str, n := opt.StrValue, opt.UintValue
+	switch opt.Tp { //nolint:exhaustive // every other option is not a storage option
+	case ast.TableOptionDataDirectory:
+		s.DataDirectory = &str
+	case ast.TableOptionIndexDirectory:
+		s.IndexDirectory = &str
+	case ast.TableOptionMaxRows:
+		s.MaxRows = &n
+	case ast.TableOptionMinRows:
+		s.MinRows = &n
+	case ast.TableOptionTablespace:
+		s.Tablespace = &str
+	case ast.TableOptionNodegroup:
+		s.Nodegroup = &n
+	default:
+		return false
+	}
+	return true
 }
 
 // PartitionValues represents the VALUES clause in partition definitions
@@ -336,21 +373,45 @@ type partitionStringLiteral string
 // SHOW CREATE TABLE's bare-keyword form.
 type partitionMaxValue struct{}
 
+// partitionNullValue is a sentinel for the NULL literal in a LIST partition's
+// VALUES IN list. Stored as the plain string "NULL" it would be emitted as
+// the string literal 'NULL', which is a different value: a REORGANIZE built
+// from it moves the NULL rows into no partition, and MySQL deletes them
+// without an error.
+type partitionNullValue struct{}
+
+// partitionValueTuple is one multi-column value of a LIST COLUMNS partition,
+// e.g. each of (1, 2) and (3, 4) in VALUES IN ((1, 2), (3, 4)). Keeping the
+// tuple as one element of PartitionValues.Values preserves which values go
+// together: flattened to 1, 2, 3, 4, the clause can't be emitted (MySQL
+// error 1653) and a regrouping of the same values compares equal.
+type partitionValueTuple []any
+
+// partitionExprValue is a partition value written as an expression rather
+// than a literal, e.g. 10+10 or TO_DAYS('2030-01-01'). It renders bare:
+// quoted, it would be the string '10+10', which MySQL rejects (error 1697).
+// MySQL evaluates the expression when it stores the partition, and the
+// partition-bound-constants rule folds the ones it can evaluate offline into
+// the literal MySQL reports.
+type partitionExprValue string
+
 // SubPartitionOptions represents subpartitioning configuration
 type SubPartitionOptions struct {
-	Type       string   `json:"type"`                 // HASH, KEY
-	Expression *string  `json:"expression,omitempty"` // For HASH
-	Columns    []string `json:"columns,omitempty"`    // For KEY
-	Linear     bool     `json:"linear,omitempty"`     // For LINEAR HASH/KEY
-	Count      uint64   `json:"count,omitempty"`      // Number of subpartitions
+	Type         string   `json:"type"`                    // HASH, KEY
+	Expression   *string  `json:"expression,omitempty"`    // For HASH
+	Columns      []string `json:"columns,omitempty"`       // For KEY
+	Linear       bool     `json:"linear,omitempty"`        // For LINEAR HASH/KEY
+	KeyAlgorithm uint64   `json:"key_algorithm,omitempty"` // For KEY: ALGORITHM=1; 0 is MySQL's default (2)
+	Count        uint64   `json:"count,omitempty"`         // Number of subpartitions
 }
 
 // SubPartitionDefinition represents a single subpartition definition
 type SubPartitionDefinition struct {
-	Name    string         `json:"name"`
-	Comment *string        `json:"comment,omitempty"`
-	Engine  *string        `json:"engine,omitempty"`
-	Options map[string]any `json:"options,omitempty"`
+	Name    string  `json:"name"`
+	Comment *string `json:"comment,omitempty"`
+	Engine  *string `json:"engine,omitempty"`
+	PartitionStorage
+	Options map[string]any `json:"options,omitempty"` // Options MySQL does not accept on a subpartition
 }
 
 // tableSchema represents a parsed CREATE TABLE statement with flexible access
@@ -1187,6 +1248,10 @@ func (ct *CreateTable) parsePartitionOptions(partition *ast.PartitionOptions) *P
 		partOpts.Type = fmt.Sprintf("UNKNOWN_%d", partition.Tp)
 	}
 
+	if partition.KeyAlgorithm != nil {
+		partOpts.KeyAlgorithm = partition.KeyAlgorithm.Type
+	}
+
 	// Parse expression for HASH and RANGE
 	if partition.Expr != nil {
 		// Restore the full expression using the AST
@@ -1235,15 +1300,17 @@ func (ct *CreateTable) parsePartitionDefinition(def *ast.PartitionDefinition) Pa
 
 	// Parse partition options
 	for _, opt := range def.Options {
-		switch opt.Tp {
-		case ast.TableOptionComment:
+		switch {
+		case opt.Tp == ast.TableOptionComment:
 			if opt.StrValue != "" {
 				partDef.Comment = &opt.StrValue
 			}
-		case ast.TableOptionEngine:
+		case opt.Tp == ast.TableOptionEngine:
 			if opt.StrValue != "" {
 				partDef.Engine = &opt.StrValue
 			}
+		case parsePartitionStorageOption(opt, &partDef.PartitionStorage):
+			// Stored by parsePartitionStorageOption.
 		default:
 			// Store other options in the options map
 			partDef.Options[fmt.Sprintf("option_%d", opt.Tp)] = opt.StrValue
@@ -1299,13 +1366,12 @@ func (ct *CreateTable) parsePartitionClause(clause ast.PartitionDefinitionClause
 			if len(valList) == 1 {
 				values.Values = append(values.Values, ct.parsePartitionValue(valList[0]))
 			} else {
-				// Multiple values in a single clause
-				subValues := make([]any, 0, len(valList))
+				// A multi-column LIST COLUMNS value: keep it as one tuple.
+				tuple := make(partitionValueTuple, 0, len(valList))
 				for _, expr := range valList {
-					subValues = append(subValues, ct.parsePartitionValue(expr))
+					tuple = append(tuple, ct.parsePartitionValue(expr))
 				}
-
-				values.Values = append(values.Values, subValues...)
+				values.Values = append(values.Values, tuple)
 			}
 		}
 
@@ -1318,16 +1384,32 @@ func (ct *CreateTable) parsePartitionClause(clause ast.PartitionDefinitionClause
 // parsePartitionValue parses a single partition value expression. The
 // MAXVALUE keyword becomes the partitionMaxValue sentinel so it is emitted
 // bare (never as the string literal 'MAXVALUE', which MySQL rejects with
-// error 1697). String literals (LIST/RANGE COLUMNS on a string column) are
-// wrapped in partitionStringLiteral carrying their true raw value, so
-// emission can quote them unconditionally. Numeric literals and expressions
-// (e.g. YEAR(col)) fall back to the Restored text form as plain strings.
+// error 1697), and NULL becomes partitionNullValue for the same reason.
+// String literals (LIST/RANGE COLUMNS on a string column) are wrapped in
+// partitionStringLiteral carrying their true raw value, so emission can
+// quote them unconditionally. Numeric literals become their text as plain
+// strings, and anything else (e.g. 10+10, TO_DAYS('2030-01-01')) becomes a
+// partitionExprValue.
+//
+// Parentheses around a value carry no meaning, so they are dropped first:
+// otherwise ('y') would be read as an expression rather than the string
+// 'y', and (NULL) as something other than NULL.
 func (ct *CreateTable) parsePartitionValue(expr ast.ExprNode) any {
+	expr = unwrapParenExpr(expr)
 	if _, isMax := expr.(*ast.MaxValueExpr); isMax {
 		return partitionMaxValue{}
 	}
+	if v, ok := expr.(*ast.ValueExpr); ok && v.Kind() == ast.KindNull {
+		return partitionNullValue{}
+	}
 	if literal, isStr := stringLiteralValue(expr); isStr {
 		return partitionStringLiteral(literal)
+	}
+	if _, isLiteral := expr.(*ast.ValueExpr); isLiteral {
+		return ct.parseExpression(expr)
+	}
+	if text, ok := restoreExpressionText(expr); ok {
+		return partitionExprValue(text)
 	}
 	return ct.parseExpression(expr)
 }
@@ -1342,6 +1424,9 @@ func (ct *CreateTable) parseSubPartitionOptions(sub *ast.PartitionMethod) *SubPa
 		Linear: sub.Linear,
 		Count:  sub.Num,
 	}
+	if sub.KeyAlgorithm != nil {
+		subOpts.KeyAlgorithm = sub.KeyAlgorithm.Type
+	}
 
 	// Parse subpartition type
 	switch sub.Tp {
@@ -1355,8 +1440,7 @@ func (ct *CreateTable) parseSubPartitionOptions(sub *ast.PartitionMethod) *SubPa
 
 	// Parse expression for HASH
 	if sub.Expr != nil {
-		expr := ct.parseExpression(sub.Expr)
-		if exprStr, ok := expr.(string); ok && exprStr != "" {
+		if exprStr, ok := restoreExpressionText(sub.Expr); ok && exprStr != "" {
 			subOpts.Expression = &exprStr
 		}
 	}
@@ -1379,17 +1463,20 @@ func (ct *CreateTable) parseSubPartitionDefinition(sub *ast.SubPartitionDefiniti
 		Options: make(map[string]any),
 	}
 
-	// Parse subpartition options
+	// Parse subpartition options. An empty COMMENT is kept: it stops the
+	// partition's comment from applying, and partitionOptionsNormalizer drops
+	// it after that.
 	for _, opt := range sub.Options {
-		switch opt.Tp {
-		case ast.TableOptionComment:
-			if opt.StrValue != "" {
-				subDef.Comment = &opt.StrValue
-			}
-		case ast.TableOptionEngine:
+		switch {
+		case opt.Tp == ast.TableOptionComment:
+			comment := opt.StrValue
+			subDef.Comment = &comment
+		case opt.Tp == ast.TableOptionEngine:
 			if opt.StrValue != "" {
 				subDef.Engine = &opt.StrValue
 			}
+		case parsePartitionStorageOption(opt, &subDef.PartitionStorage):
+			// Stored by parsePartitionStorageOption.
 		default:
 			// Store other options in the options map
 			subDef.Options[fmt.Sprintf("option_%d", opt.Tp)] = opt.StrValue
@@ -1451,12 +1538,28 @@ func (ct *CreateTable) Diff(target *CreateTable, opts *DiffOptions) ([]*Abstract
 	tableOptionClauses := ct.diffTableOptions(target, opts)
 	alterClauses = append(alterClauses, tableOptionClauses...)
 
-	// 5. Diff partition options — may produce additional statements
+	// 5. Diff partition options. MySQL's grammar puts a partition clause
+	// after the alter list, separated by a space rather than a comma, and
+	// some partition clauses can't share an ALTER with anything else. See
+	// partitionDiff.
+	var partitionClause string
 	var additionalStatements [][]string
 	if !opts.IgnorePartitioning {
-		partitionClauses, extraStatements := ct.diffPartitionOptions(target)
-		alterClauses = append(alterClauses, partitionClauses...)
-		additionalStatements = extraStatements
+		pd := ct.diffPartitionOptions(target)
+		switch {
+		case pd.standalone != "" && len(alterClauses) == 0:
+			alterClauses = []string{pd.standalone}
+		case pd.standalone != "" && pd.standaloneInplace && !ct.partitionKeyColumnsChanged(target, opts):
+			// The cheap clause is metadata-only, so running it as its own
+			// statement costs less than folding a repartition (a full table
+			// copy) into the primary ALTER. It runs after the primary ALTER,
+			// so that ALTER must not change a column the partitioning reads:
+			// a converted value (e.g. a DECIMAL rounded up) could then fall
+			// past the last existing partition before the new one is added.
+			additionalStatements = append(additionalStatements, []string{pd.standalone})
+		default:
+			partitionClause = pd.repartition
+		}
 	}
 
 	// Option-only index changes run as their own ALTER statements, after the
@@ -1466,18 +1569,19 @@ func (ct *CreateTable) Diff(target *CreateTable, opts *DiffOptions) ([]*Abstract
 	// Build the result
 	var results []*AbstractStatement
 
-	// Primary statement (columns, indexes, constraints, table options, and simple partition changes)
-	if len(alterClauses) > 0 {
-		stmt, err := ct.buildAlterStatement(alterClauses)
+	// Primary statement (columns, indexes, constraints, table options, and
+	// any partition clause that can share an ALTER with them)
+	if len(alterClauses) > 0 || partitionClause != "" {
+		stmt, err := ct.buildAlterStatement(alterClauses, partitionClause)
 		if err != nil {
 			return nil, err
 		}
 		results = append(results, stmt)
 	}
 
-	// Additional statements (e.g. second ALTER for partition type changes)
+	// Additional statements (e.g. ADD PARTITION alongside a column change)
 	for _, clauses := range additionalStatements {
-		stmt, err := ct.buildAlterStatement(clauses)
+		stmt, err := ct.buildAlterStatement(clauses, "")
 		if err != nil {
 			return nil, err
 		}
@@ -1491,9 +1595,15 @@ func (ct *CreateTable) Diff(target *CreateTable, opts *DiffOptions) ([]*Abstract
 	return results, nil
 }
 
-// buildAlterStatement constructs and parses an ALTER TABLE statement from clauses.
-func (ct *CreateTable) buildAlterStatement(clauses []string) (*AbstractStatement, error) {
+// buildAlterStatement constructs and parses an ALTER TABLE statement from
+// clauses. A non-empty partitionClause (PARTITION BY or REMOVE PARTITIONING)
+// is appended after the comma-separated clauses with a space, the only
+// position MySQL accepts it in when there are other clauses.
+func (ct *CreateTable) buildAlterStatement(clauses []string, partitionClause string) (*AbstractStatement, error) {
 	alter := strings.Join(clauses, ", ")
+	if partitionClause != "" {
+		alter = strings.TrimSpace(alter + " " + partitionClause)
+	}
 	alterStmt := fmt.Sprintf("ALTER TABLE %s %s", sqlescape.EscapeIdentifier(ct.TableName), alter)
 
 	p := parser.New()
@@ -2189,48 +2299,155 @@ func (ct *CreateTable) columnsEqualWithContext(a, b *Column, target *CreateTable
 	return true
 }
 
-// diffPartitionOptions compares partition options and returns ALTER clauses for differences.
-// The first return value contains clauses for the primary ALTER statement.
-// The second return value contains clause sets for additional ALTER statements needed
-// when a change cannot be expressed in a single statement (e.g. changing partition type
-// requires REMOVE PARTITIONING followed by a separate PARTITION BY).
-func (ct *CreateTable) diffPartitionOptions(target *CreateTable) ([]string, [][]string) {
+// partitionKeyColumnsChanged reports whether any column the target's
+// partitioning reads (its COLUMNS list, or the columns in its expression)
+// differs between ct and target. A generated column counts as reading the
+// columns its expression reads, transitively: RANGE (g) with g AS (FLOOR(d))
+// moves rows between partitions when d changes type, even though g's own
+// definition is unchanged. It returns true when the columns can't be
+// determined, so callers fall back to the conservative path.
+func (ct *CreateTable) partitionKeyColumnsChanged(target *CreateTable, opts *DiffOptions) bool {
+	if target.Partition == nil {
+		return false
+	}
+	p := parser.New()
+	pending := slices.Clone(target.Partition.Columns)
+	if target.Partition.Expression != nil {
+		var ok bool
+		pending, ok = expressionColumnNames(p, *target.Partition.Expression)
+		if !ok {
+			return true
+		}
+	}
+	// KEY () reads the primary key, and an expression without a column is
+	// not valid partitioning: neither names its columns here.
+	if len(pending) == 0 {
+		return true
+	}
+	seen := make(map[string]bool)
+	for len(pending) > 0 {
+		name := pending[len(pending)-1]
+		pending = pending[:len(pending)-1]
+		if seen[strings.ToLower(name)] {
+			continue
+		}
+		seen[strings.ToLower(name)] = true
+		sourceCol, targetCol := findColumn(ct.Columns, name), findColumn(target.Columns, name)
+		if sourceCol == nil || targetCol == nil || !ct.columnsEqualWithContext(sourceCol, targetCol, target, opts) {
+			return true
+		}
+		for _, col := range []*Column{sourceCol, targetCol} {
+			if col.GeneratedExpr == nil {
+				continue
+			}
+			deps, ok := expressionColumnNames(p, *col.GeneratedExpr)
+			if !ok {
+				return true
+			}
+			pending = append(pending, deps...)
+		}
+	}
+	return false
+}
+
+// findColumn returns the column named name (case-insensitively, as MySQL
+// compares column names), or nil.
+func findColumn(cols Columns, name string) *Column {
+	for i := range cols {
+		if strings.EqualFold(cols[i].Name, name) {
+			return &cols[i]
+		}
+	}
+	return nil
+}
+
+// partitionDiff is the partition change needed to move a table from its
+// current partitioning to the target's.
+//
+// MySQL's ALTER TABLE grammar has two kinds of partition clause:
+//   - PARTITION BY and REMOVE PARTITIONING can follow other alter clauses,
+//     but only as the last clause and separated by a space, not a comma.
+//     PARTITION BY also works on an already-partitioned table, replacing its
+//     partitioning (including its type) in one copy.
+//   - ADD PARTITION, COALESCE PARTITION and REORGANIZE PARTITION are
+//     standalone: they cannot share an ALTER with any other alter clause.
+//     When other clauses change too, the repartition is folded into their
+//     ALTER instead, unless the standalone clause is metadata-only.
+type partitionDiff struct {
+	// repartition is the general clause for the change: PARTITION BY ... or
+	// REMOVE PARTITIONING. Empty when partitioning is unchanged.
+	repartition string
+	// standalone is a cheaper clause for the same change, used when it can
+	// run on its own. Empty when there is none.
+	standalone string
+	// standaloneInplace is set when standalone is metadata-only (appending
+	// RANGE/LIST partitions), so it is worth a separate statement even when
+	// other clauses change too.
+	standaloneInplace bool
+}
+
+// diffPartitionOptions compares partition options and returns the change
+// needed to make the source's partitioning match the target's.
+func (ct *CreateTable) diffPartitionOptions(target *CreateTable) partitionDiff {
 	sourcePartition := ct.Partition
 	targetPartition := target.Partition
 
-	// Case 1: No partitioning in either table - no changes
-	if sourcePartition == nil && targetPartition == nil {
-		return nil, nil
+	switch {
+	case sourcePartition == nil && targetPartition == nil:
+		return partitionDiff{}
+	case targetPartition == nil:
+		return partitionDiff{repartition: "REMOVE PARTITIONING"}
+	case partitionOptionsEqual(sourcePartition, targetPartition):
+		return partitionDiff{}
 	}
 
-	// Case 2: Remove partitioning (source has partitioning, target doesn't)
-	if sourcePartition != nil && targetPartition == nil {
-		return []string{"REMOVE PARTITIONING"}, nil
+	pd := partitionDiff{repartition: formatPartitionOptions(targetPartition)}
+	if sourcePartition == nil {
+		return pd
 	}
 
-	// Case 3: Add partitioning (source doesn't have partitioning, target does)
-	if sourcePartition == nil && targetPartition != nil {
-		return []string{formatPartitionOptions(targetPartition)}, nil
-	}
-
-	// Case 4: Both have partitioning - check if they're different
-	if !partitionOptionsEqual(sourcePartition, targetPartition) {
-		// Special case: For HASH/KEY partitions where only the partition count changed
-		// (no explicit definitions), we can use ADD PARTITION or COALESCE PARTITION
-		if isCountOnly, countDiff := isPartitionCountOnlyChange(sourcePartition, targetPartition); isCountOnly {
-			if countDiff > 0 {
-				return []string{fmt.Sprintf("ADD PARTITION PARTITIONS %d", countDiff)}, nil
-			}
-			return []string{fmt.Sprintf("COALESCE PARTITION %d", -countDiff)}, nil
+	// HASH/KEY partitions where only the count changed (no explicit
+	// definitions): ADD PARTITION / COALESCE PARTITION. Both redistribute
+	// every row, so they are no cheaper than a repartition once other
+	// clauses already force a copy.
+	if isCountOnly, countDiff := isPartitionCountOnlyChange(sourcePartition, targetPartition); isCountOnly {
+		if countDiff > 0 {
+			pd.standalone = fmt.Sprintf("ADD PARTITION PARTITIONS %d", countDiff)
+		} else {
+			pd.standalone = fmt.Sprintf("COALESCE PARTITION %d", -countDiff)
 		}
-
-		// For all other partition changes (e.g. changing partition type from HASH to RANGE),
-		// MySQL requires two separate ALTER TABLE statements:
-		// 1. REMOVE PARTITIONING
-		// 2. PARTITION BY ...
-		// The first goes into the primary statement, the second is returned as an additional statement.
-		return []string{"REMOVE PARTITIONING"}, [][]string{{formatPartitionOptions(targetPartition)}}
+		return pd
 	}
 
-	return nil, nil
+	// RANGE/LIST partitions appended after the existing ones: ADD PARTITION
+	// is in-place and metadata-only.
+	if added := appendedPartitions(sourcePartition, targetPartition); len(added) > 0 {
+		defs := make([]string, 0, len(added))
+		for i := range added {
+			defs = append(defs, formatPartitionDefinition(&added[i]))
+		}
+		pd.standalone = fmt.Sprintf("ADD PARTITION (%s)", strings.Join(defs, ", "))
+		pd.standaloneInplace = true
+		return pd
+	}
+
+	// A contiguous run of RANGE/LIST partitions split, merged or redefined
+	// (e.g. splitting a new month out of a MAXVALUE partition): REORGANIZE
+	// PARTITION. MySQL only rewrites the reorganized partitions, but spirit
+	// still copies the whole table: REORGANIZE rejects LOCK=NONE.
+	if names, into := reorganizedPartitions(sourcePartition, targetPartition); len(names) > 0 {
+		defs := make([]string, 0, len(into))
+		for i := range into {
+			defs = append(defs, formatPartitionDefinition(&into[i]))
+		}
+		pd.standalone = fmt.Sprintf("REORGANIZE PARTITION %s INTO (%s)",
+			sqlescape.EscapeIdentifierList(names), strings.Join(defs, ", "))
+		return pd
+	}
+
+	// Any other change (partition type, expression, dropped trailing
+	// partitions, subpartitioning) is a repartition. DROP PARTITION is never
+	// used: it deletes the partition's rows, where a repartition fails loudly
+	// (error 1526) if a row no longer has a partition to live in.
+	return pd
 }

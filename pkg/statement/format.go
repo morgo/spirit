@@ -348,6 +348,9 @@ func formatPartitionOptions(partOpts *PartitionOptions) string {
 			parts = append(parts, fmt.Sprintf("(%s)", sqlescape.EscapeIdentifierList(partOpts.Columns)))
 		}
 	case "KEY":
+		if partOpts.KeyAlgorithm != 0 {
+			parts = append(parts, fmt.Sprintf("ALGORITHM=%d", partOpts.KeyAlgorithm))
+		}
 		if len(partOpts.Columns) > 0 {
 			parts = append(parts, fmt.Sprintf("(%s)", sqlescape.EscapeIdentifierList(partOpts.Columns)))
 		} else {
@@ -363,7 +366,9 @@ func formatPartitionOptions(partOpts *PartitionOptions) string {
 			parts = append(parts, fmt.Sprintf("(%s)", sqlescape.EscapeIdentifierList(partOpts.Columns)))
 		}
 	case "LIST":
-		if len(partOpts.Columns) > 0 {
+		if partOpts.Expression != nil {
+			parts = append(parts, fmt.Sprintf("(%s)", *partOpts.Expression))
+		} else if len(partOpts.Columns) > 0 {
 			// LIST COLUMNS
 			parts[len(parts)-1] = "LIST COLUMNS"
 			parts = append(parts, fmt.Sprintf("(%s)", sqlescape.EscapeIdentifierList(partOpts.Columns)))
@@ -377,10 +382,9 @@ func formatPartitionOptions(partOpts *PartitionOptions) string {
 
 	// Add the subpartitioning clause. MySQL's grammar places SUBPARTITION BY
 	// (and its SUBPARTITIONS count) after the partition method and before the
-	// partition definition list. Emitting it is not optional: the only way Diff
-	// changes a partitioned table's layout is REMOVE PARTITIONING followed by a
-	// fresh PARTITION BY, so a missing clause silently drops the table's
-	// subpartitioning.
+	// partition definition list. Emitting it is not optional: Diff changes a
+	// partitioned table's layout with a fresh PARTITION BY, so a missing clause
+	// silently drops the table's subpartitioning.
 	if partOpts.SubPartition != nil {
 		parts = append(parts, formatSubPartitionOptions(partOpts.SubPartition))
 	}
@@ -425,6 +429,9 @@ func formatSubPartitionOptions(subOpts *SubPartitionOptions) string {
 			parts = append(parts, fmt.Sprintf("(%s)", sqlescape.EscapeIdentifierList(subOpts.Columns)))
 		}
 	case "KEY":
+		if subOpts.KeyAlgorithm != 0 {
+			parts = append(parts, fmt.Sprintf("ALGORITHM=%d", subOpts.KeyAlgorithm))
+		}
 		if len(subOpts.Columns) > 0 {
 			parts = append(parts, fmt.Sprintf("(%s)", sqlescape.EscapeIdentifierList(subOpts.Columns)))
 		} else {
@@ -472,6 +479,7 @@ func formatPartitionDefinition(def *PartitionDefinition) string {
 	if def.Comment != nil {
 		parts = append(parts, fmt.Sprintf("COMMENT = '%s'", sqlescape.EscapeString(*def.Comment)))
 	}
+	parts = append(parts, formatPartitionStorage(&def.PartitionStorage)...)
 
 	// Explicitly named subpartitions, when the definition carries them. MySQL
 	// only reports subpartition names from SHOW CREATE TABLE when they were
@@ -489,15 +497,41 @@ func formatPartitionDefinition(def *PartitionDefinition) string {
 	return strings.Join(parts, " ")
 }
 
-// formatSubPartitionDefinition formats a single named subpartition. Only the
-// name and comment are emitted; a subpartition's ENGINE always matches the
-// table's (see partitionDefinitionEqual) and is therefore not diffed.
+// formatSubPartitionDefinition formats a single named subpartition. Its
+// ENGINE is not emitted: it always matches the table's (see
+// partitionDefinitionEqual) and is therefore not diffed.
 func formatSubPartitionDefinition(sub *SubPartitionDefinition) string {
 	parts := []string{"SUBPARTITION " + sqlescape.EscapeIdentifier(sub.Name)}
 
 	if sub.Comment != nil {
 		parts = append(parts, fmt.Sprintf("COMMENT = '%s'", sqlescape.EscapeString(*sub.Comment)))
 	}
+	parts = append(parts, formatPartitionStorage(&sub.PartitionStorage)...)
 
 	return strings.Join(parts, " ")
+}
+
+// formatPartitionStorage formats a partition's storage options. Without them
+// a REORGANIZE or repartition would silently drop them.
+func formatPartitionStorage(s *PartitionStorage) []string {
+	var parts []string
+	if s.DataDirectory != nil {
+		parts = append(parts, fmt.Sprintf("DATA DIRECTORY = '%s'", sqlescape.EscapeString(*s.DataDirectory)))
+	}
+	if s.IndexDirectory != nil {
+		parts = append(parts, fmt.Sprintf("INDEX DIRECTORY = '%s'", sqlescape.EscapeString(*s.IndexDirectory)))
+	}
+	if s.MaxRows != nil {
+		parts = append(parts, fmt.Sprintf("MAX_ROWS = %d", *s.MaxRows))
+	}
+	if s.MinRows != nil {
+		parts = append(parts, fmt.Sprintf("MIN_ROWS = %d", *s.MinRows))
+	}
+	if s.Tablespace != nil {
+		parts = append(parts, "TABLESPACE = "+sqlescape.EscapeIdentifier(*s.Tablespace))
+	}
+	if s.Nodegroup != nil {
+		parts = append(parts, fmt.Sprintf("NODEGROUP = %d", *s.Nodegroup))
+	}
+	return parts
 }

@@ -276,8 +276,8 @@ func isPartitionCountOnlyChange(source, target *PartitionOptions) (bool, int) {
 		return false, 0
 	}
 
-	// Must have same linear flag
-	if source.Linear != target.Linear {
+	// Must have same linear flag and KEY algorithm
+	if source.Linear != target.Linear || source.KeyAlgorithm != target.KeyAlgorithm {
 		return false, 0
 	}
 
@@ -300,6 +300,151 @@ func isPartitionCountOnlyChange(source, target *PartitionOptions) (bool, int) {
 	}
 
 	return true, int(target.Partitions) - int(source.Partitions)
+}
+
+// sameRangeOrListScheme reports whether source and target are the same RANGE
+// or LIST partitioning (type, expression, columns, subpartitioning), so they
+// can differ only in their partition definitions.
+func sameRangeOrListScheme(source, target *PartitionOptions) bool {
+	if source.Type != target.Type || (source.Type != "RANGE" && source.Type != "LIST") {
+		return false
+	}
+	if !ptrEqual(source.Expression, target.Expression) ||
+		!slices.Equal(source.Columns, target.Columns) ||
+		source.Linear != target.Linear ||
+		!subPartitionOptionsEqual(source.SubPartition, target.SubPartition) {
+		return false
+	}
+	// A PARTITIONS n count, if written at all, must agree with the
+	// definitions on each side. SHOW CREATE TABLE never prints it for RANGE
+	// or LIST.
+	return partitionCountMatchesDefinitions(source) && partitionCountMatchesDefinitions(target) &&
+		len(source.Definitions) > 0 && len(target.Definitions) > 0
+}
+
+func partitionCountMatchesDefinitions(p *PartitionOptions) bool {
+	return p.Partitions == 0 || p.Partitions == uint64(len(p.Definitions))
+}
+
+// appendedPartitions returns the partition definitions target appends to
+// source when that is the only difference: the same RANGE/LIST partitioning,
+// with source's definitions an unchanged prefix of target's. It returns nil
+// for any other change.
+func appendedPartitions(source, target *PartitionOptions) []PartitionDefinition {
+	if !sameRangeOrListScheme(source, target) || len(target.Definitions) <= len(source.Definitions) {
+		return nil
+	}
+	for i := range source.Definitions {
+		if !partitionDefinitionEqual(&source.Definitions[i], &target.Definitions[i]) {
+			return nil
+		}
+	}
+	return target.Definitions[len(source.Definitions):]
+}
+
+// reorganizedPartitions describes target as source with one contiguous run of
+// RANGE/LIST partitions replaced: the names of the source partitions in the
+// run, and the target definitions that replace them. It returns nil when the
+// change is anything else, or when REORGANIZE PARTITION can't express it
+// without changing which rows the table can hold:
+//   - RANGE: the run must end at the same upper bound on both sides. MySQL
+//     rejects anything else (error 1520), apart from extending the last
+//     partition, which is not detected here.
+//   - LIST: the run must hold the same set of values on both sides. MySQL
+//     does not check this: a REORGANIZE that leaves a value out silently
+//     deletes the rows holding it, where a PARTITION BY fails with 1526.
+func reorganizedPartitions(source, target *PartitionOptions) ([]string, []PartitionDefinition) {
+	if !sameRangeOrListScheme(source, target) {
+		return nil, nil
+	}
+	src, tgt := source.Definitions, target.Definitions
+	shorter := min(len(src), len(tgt))
+	prefix := 0
+	for prefix < shorter && partitionDefinitionEqual(&src[prefix], &tgt[prefix]) {
+		prefix++
+	}
+	suffix := 0
+	for suffix < shorter-prefix && partitionDefinitionEqual(&src[len(src)-1-suffix], &tgt[len(tgt)-1-suffix]) {
+		suffix++
+	}
+	// A partition inserted or removed between two unchanged ones leaves one
+	// side of the run empty. Widen the run by the next partition, which takes
+	// the rows of the inserted or removed range.
+	if (len(src)-prefix-suffix == 0 || len(tgt)-prefix-suffix == 0) && suffix > 0 {
+		suffix--
+	}
+	// A RANGE run whose last boundary moved is widened by the next
+	// partition, so that it ends at a boundary both sides share.
+	if source.Type == "RANGE" && suffix > 0 && len(src)-prefix-suffix > 0 && len(tgt)-prefix-suffix > 0 &&
+		!partitionValuesEqual(src[len(src)-suffix-1].Values, tgt[len(tgt)-suffix-1].Values) {
+		suffix--
+	}
+	from := src[prefix : len(src)-suffix]
+	into := tgt[prefix : len(tgt)-suffix]
+	if len(from) == 0 || len(into) == 0 {
+		return nil, nil
+	}
+	switch source.Type {
+	case "RANGE":
+		if !partitionValuesEqual(from[len(from)-1].Values, into[len(into)-1].Values) {
+			return nil, nil
+		}
+	case "LIST":
+		if !listValuesEqual(from, into) {
+			return nil, nil
+		}
+	}
+	names := make([]string, 0, len(from))
+	for i := range from {
+		names = append(names, from[i].Name)
+	}
+	return names, into
+}
+
+// listValuesEqual reports whether two runs of LIST partitions hold the same
+// set of values, regardless of which partition holds each one. A
+// multi-column LIST COLUMNS value counts as one value (its whole tuple).
+//
+// A value left as an expression (one partitionBoundConstantNormalizer could
+// not fold) disqualifies the run. Its text says nothing about the value
+// MySQL stored: UNIX_TIMESTAMP('2030-01-01 00:00:00') evaluates by the
+// session time zone, so the same text can name a different value when the
+// REORGANIZE runs, and a LIST REORGANIZE silently deletes the rows of a
+// value it leaves out. PARTITION BY fails with error 1526 instead.
+func listValuesEqual(a, b []PartitionDefinition) bool {
+	counts := make(map[string]int)
+	for i := range a {
+		if a[i].Values == nil || a[i].Values.Type != "IN" {
+			return false
+		}
+		for _, v := range a[i].Values.Values {
+			if isUnresolvedPartitionValue(v) {
+				return false
+			}
+			counts[formatPartitionValue(v)]++
+		}
+	}
+	for i := range b {
+		if b[i].Values == nil || b[i].Values.Type != "IN" {
+			return false
+		}
+		for _, v := range b[i].Values.Values {
+			if isUnresolvedPartitionValue(v) {
+				return false
+			}
+			k := formatPartitionValue(v)
+			if counts[k] == 0 {
+				return false
+			}
+			counts[k]--
+		}
+	}
+	for _, n := range counts {
+		if n != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // partitionOptionsEqual checks if two partition options are equal
@@ -326,8 +471,8 @@ func partitionOptionsEqual(a, b *PartitionOptions) bool {
 		return false
 	}
 
-	// Compare linear flag
-	if a.Linear != b.Linear {
+	// Compare linear flag and KEY algorithm
+	if a.Linear != b.Linear || a.KeyAlgorithm != b.KeyAlgorithm {
 		return false
 	}
 
@@ -370,6 +515,9 @@ func partitionDefinitionEqual(a, b *PartitionDefinition) bool {
 	if !ptrEqual(a.Comment, b.Comment) {
 		return false
 	}
+	if !partitionStorageEqual(&a.PartitionStorage, &b.PartitionStorage) {
+		return false
+	}
 
 	// The per-partition ENGINE clause is deliberately not compared. MySQL
 	// requires every partition to use the table's storage engine, so the clause
@@ -377,7 +525,7 @@ func partitionDefinitionEqual(a, b *PartitionDefinition) bool {
 	// TABLE always prints it (`PARTITION p0 VALUES LESS THAN (2020) ENGINE =
 	// InnoDB`) while human-authored SQL almost never does. Comparing it made
 	// every partitioned table diff against its own live definition, emitting a
-	// REMOVE PARTITIONING + PARTITION BY pair on every run.
+	// repartition on every run.
 
 	// Compare explicitly named subpartitions. This is symmetric: MySQL echoes
 	// subpartition names back from SHOW CREATE TABLE when, and only when, they
@@ -400,7 +548,30 @@ func partitionDefinitionEqual(a, b *PartitionDefinition) bool {
 // partitions, a subpartition's ENGINE is not compared (see
 // partitionDefinitionEqual).
 func subPartitionDefinitionEqual(a, b *SubPartitionDefinition) bool {
-	return a.Name == b.Name && ptrEqual(a.Comment, b.Comment)
+	return a.Name == b.Name && ptrEqual(a.Comment, b.Comment) &&
+		partitionStorageEqual(&a.PartitionStorage, &b.PartitionStorage)
+}
+
+// partitionStorageEqual checks if two partitions' storage options are equal.
+func partitionStorageEqual(a, b *PartitionStorage) bool {
+	return ptrEqual(a.DataDirectory, b.DataDirectory) &&
+		ptrEqual(a.IndexDirectory, b.IndexDirectory) &&
+		ptrEqual(a.MaxRows, b.MaxRows) &&
+		ptrEqual(a.MinRows, b.MinRows) &&
+		ptrEqual(a.Tablespace, b.Tablespace) &&
+		ptrEqual(a.Nodegroup, b.Nodegroup)
+}
+
+// isUnresolvedPartitionValue reports whether a partition value, or any
+// element of a LIST COLUMNS tuple, is an expression rather than a constant.
+func isUnresolvedPartitionValue(v any) bool {
+	switch v := v.(type) {
+	case partitionExprValue:
+		return true
+	case partitionValueTuple:
+		return slices.ContainsFunc(v, isUnresolvedPartitionValue)
+	}
+	return false
 }
 
 // partitionValuesEqual checks if two partition values are equal
@@ -420,13 +591,12 @@ func partitionValuesEqual(a, b *PartitionValues) bool {
 		return false
 	}
 
-	// Today both sides come from the same parsePartitionClause path and
-	// are always Go strings, so reflect.DeepEqual and the old
-	// fmt.Sprintf("%v") string compare are equivalent. The change is
-	// forward-compatibility: if parsePartitionClause ever preserves the
-	// AST literal kind (so e.g. an int literal stays an int rather than
-	// being Restored to its string form), DeepEqual will distinguish
-	// "5" from 5 where %v would collapse them. No behaviour change today.
+	// A value's Go type carries its kind: a plain string is a number,
+	// partitionStringLiteral a quoted string, partitionNullValue NULL,
+	// partitionMaxValue MAXVALUE, partitionExprValue an unfolded
+	// expression and partitionValueTuple a LIST COLUMNS tuple.
+	// reflect.DeepEqual compares kind and value, so 1, '1' and NULL stay
+	// distinct, and tuples compare element by element.
 	for i := range a.Values {
 		if !reflect.DeepEqual(a.Values[i], b.Values[i]) {
 			return false
@@ -457,7 +627,7 @@ func subPartitionOptionsEqual(a, b *SubPartitionOptions) bool {
 		return false
 	}
 
-	if a.Linear != b.Linear {
+	if a.Linear != b.Linear || a.KeyAlgorithm != b.KeyAlgorithm {
 		return false
 	}
 

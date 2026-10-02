@@ -1,6 +1,7 @@
 package statement
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -1231,7 +1232,7 @@ func TestDiff(t *testing.T) {
 			name:     "AddListPartition",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, region VARCHAR(50))",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, region VARCHAR(50)) PARTITION BY LIST COLUMNS(region) (PARTITION pNorth VALUES IN('US', 'CA'), PARTITION pSouth VALUES IN('MX', 'BR'))",
-			expected: "ALTER TABLE `t1` PARTITION BY LIST COLUMNS (`region`) (PARTITION `pNorth` VALUES IN ('US', 'CA'), PARTITION `pSouth` VALUES IN ('MX', 'BR'))",
+			expected: "ALTER TABLE `t1` PARTITION BY LIST COLUMNS (`region`) (PARTITION `pNorth` VALUES IN ('CA', 'US'), PARTITION `pSouth` VALUES IN ('BR', 'MX'))",
 		},
 		{
 			name:     "RemovePartition",
@@ -1739,15 +1740,14 @@ func TestDiff(t *testing.T) {
 			expected: "",
 		},
 		// A real subpartitioning change must round-trip the whole clause,
-		// including SUBPARTITION BY: the second statement replaces the
+		// including SUBPARTITION BY: the PARTITION BY replaces the
 		// partitioning wholesale, so anything it omits is dropped.
 		{
 			name:   "ChangeSubpartitionCount",
 			source: "CREATE TABLE t1 (dt DATE NOT NULL, PRIMARY KEY (dt)) PARTITION BY RANGE (year(`dt`)) SUBPARTITION BY HASH (dayofmonth(`dt`)) SUBPARTITIONS 2 (PARTITION p0 VALUES LESS THAN (2020) ENGINE = InnoDB, PARTITION p1 VALUES LESS THAN MAXVALUE ENGINE = InnoDB)",
 			target: "CREATE TABLE t1 (dt DATE NOT NULL, PRIMARY KEY (dt)) PARTITION BY RANGE (YEAR(dt)) SUBPARTITION BY HASH (dayofmonth(dt)) SUBPARTITIONS 4 (PARTITION p0 VALUES LESS THAN (2020), PARTITION p1 VALUES LESS THAN MAXVALUE)",
 			expectedStatements: []string{
-				"ALTER TABLE `t1` REMOVE PARTITIONING",
-				"ALTER TABLE `t1` PARTITION BY RANGE (YEAR(`dt`)) SUBPARTITION BY HASH (dayofmonth(`dt`)) SUBPARTITIONS 4 (PARTITION `p0` VALUES LESS THAN (2020), PARTITION `p1` VALUES LESS THAN MAXVALUE)",
+				"ALTER TABLE `t1` PARTITION BY RANGE (YEAR(`dt`)) SUBPARTITION BY HASH (DAYOFMONTH(`dt`)) SUBPARTITIONS 4 (PARTITION `p0` VALUES LESS THAN (2020), PARTITION `p1` VALUES LESS THAN MAXVALUE)",
 			},
 		},
 		{
@@ -1755,7 +1755,6 @@ func TestDiff(t *testing.T) {
 			source: "CREATE TABLE t1 (dt DATE NOT NULL, PRIMARY KEY (dt)) PARTITION BY RANGE (year(`dt`)) (PARTITION p0 VALUES LESS THAN (2020) ENGINE = InnoDB, PARTITION p1 VALUES LESS THAN MAXVALUE ENGINE = InnoDB)",
 			target: "CREATE TABLE t1 (dt DATE NOT NULL, PRIMARY KEY (dt)) PARTITION BY RANGE (YEAR(dt)) SUBPARTITION BY LINEAR KEY (dt) SUBPARTITIONS 2 (PARTITION p0 VALUES LESS THAN (2020), PARTITION p1 VALUES LESS THAN MAXVALUE)",
 			expectedStatements: []string{
-				"ALTER TABLE `t1` REMOVE PARTITIONING",
 				"ALTER TABLE `t1` PARTITION BY RANGE (YEAR(`dt`)) SUBPARTITION BY LINEAR KEY (`dt`) SUBPARTITIONS 2 (PARTITION `p0` VALUES LESS THAN (2020), PARTITION `p1` VALUES LESS THAN MAXVALUE)",
 			},
 		},
@@ -1764,7 +1763,6 @@ func TestDiff(t *testing.T) {
 			source: "CREATE TABLE t1 (dt DATE NOT NULL, PRIMARY KEY (dt)) PARTITION BY RANGE (year(`dt`)) SUBPARTITION BY HASH (dayofmonth(`dt`)) SUBPARTITIONS 2 (PARTITION p0 VALUES LESS THAN (2020) ENGINE = InnoDB, PARTITION p1 VALUES LESS THAN MAXVALUE ENGINE = InnoDB)",
 			target: "CREATE TABLE t1 (dt DATE NOT NULL, PRIMARY KEY (dt)) PARTITION BY RANGE (YEAR(dt)) (PARTITION p0 VALUES LESS THAN (2020), PARTITION p1 VALUES LESS THAN MAXVALUE)",
 			expectedStatements: []string{
-				"ALTER TABLE `t1` REMOVE PARTITIONING",
 				"ALTER TABLE `t1` PARTITION BY RANGE (YEAR(`dt`)) (PARTITION `p0` VALUES LESS THAN (2020), PARTITION `p1` VALUES LESS THAN MAXVALUE)",
 			},
 		},
@@ -1773,7 +1771,6 @@ func TestDiff(t *testing.T) {
 			source: "CREATE TABLE t1 (dt DATE NOT NULL, PRIMARY KEY (dt)) PARTITION BY RANGE (year(`dt`)) SUBPARTITION BY KEY (dt) (PARTITION p0 VALUES LESS THAN (2020) (SUBPARTITION s0 COMMENT = 'sc0' ENGINE = InnoDB, SUBPARTITION s1 ENGINE = InnoDB))",
 			target: "CREATE TABLE t1 (dt DATE NOT NULL, PRIMARY KEY (dt)) PARTITION BY RANGE (YEAR(dt)) SUBPARTITION BY KEY (dt) (PARTITION p0 VALUES LESS THAN (2030) (SUBPARTITION s0 COMMENT 'sc0', SUBPARTITION s1))",
 			expectedStatements: []string{
-				"ALTER TABLE `t1` REMOVE PARTITIONING",
 				"ALTER TABLE `t1` PARTITION BY RANGE (YEAR(`dt`)) SUBPARTITION BY KEY (`dt`) SUBPARTITIONS 2 (PARTITION `p0` VALUES LESS THAN (2030) (SUBPARTITION `s0` COMMENT = 'sc0', SUBPARTITION `s1`))",
 			},
 		},
@@ -1785,8 +1782,7 @@ func TestDiff(t *testing.T) {
 			source: "CREATE TABLE t1 (dt DATE NOT NULL, PRIMARY KEY (dt)) PARTITION BY RANGE (year(`dt`)) (PARTITION p0 VALUES LESS THAN (2020) COMMENT = 'keep me' ENGINE = InnoDB)",
 			target: "CREATE TABLE t1 (dt DATE NOT NULL, PRIMARY KEY (dt)) PARTITION BY RANGE (YEAR(dt)) SUBPARTITION BY HASH (dayofmonth(dt)) SUBPARTITIONS 2 (PARTITION p0 VALUES LESS THAN (2020) COMMENT 'keep me')",
 			expectedStatements: []string{
-				"ALTER TABLE `t1` REMOVE PARTITIONING",
-				"ALTER TABLE `t1` PARTITION BY RANGE (YEAR(`dt`)) SUBPARTITION BY HASH (dayofmonth(`dt`)) SUBPARTITIONS 2 (PARTITION `p0` VALUES LESS THAN (2020) COMMENT = 'keep me')",
+				"ALTER TABLE `t1` PARTITION BY RANGE (YEAR(`dt`)) SUBPARTITION BY HASH (DAYOFMONTH(`dt`)) SUBPARTITIONS 2 (PARTITION `p0` VALUES LESS THAN (2020) COMMENT = 'keep me')",
 			},
 		},
 	}
@@ -2290,20 +2286,367 @@ func TestDiff_IgnoreNotNullRelaxation(t *testing.T) {
 	}
 }
 
-// TestDiff_ChangePartitionType tests the multi-statement case where changing
-// partition type requires REMOVE PARTITIONING followed by a separate PARTITION BY.
-func TestDiff_ChangePartitionType(t *testing.T) {
-	ct1, err := ParseCreateTable("CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT) PARTITION BY HASH(user_id) PARTITIONS 4")
-	require.NoError(t, err)
-
-	ct2, err := ParseCreateTable("CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT) PARTITION BY KEY(id) PARTITIONS 4")
-	require.NoError(t, err)
-
-	stmts, err := ct1.Diff(ct2, nil)
-	require.NoError(t, err)
-	require.Len(t, stmts, 2, "changing partition type should produce two statements")
-	require.Equal(t, "ALTER TABLE `t1` REMOVE PARTITIONING", stmts[0].Statement)
-	require.Equal(t, "ALTER TABLE `t1` PARTITION BY KEY (`id`) PARTITIONS 4", stmts[1].Statement)
+// TestDiffPartitionChanges covers how a partition change is emitted. MySQL
+// only accepts PARTITION BY / REMOVE PARTITIONING after other alter clauses
+// when separated by a space, and ADD/COALESCE PARTITION not alongside other
+// alter clauses at all.
+func TestDiffPartitionChanges(t *testing.T) {
+	const rangeBase = "CREATE TABLE t1 (id INT NOT NULL, b INT, PRIMARY KEY (id)) PARTITION BY RANGE (id) (PARTITION p0 VALUES LESS THAN (10), PARTITION p1 VALUES LESS THAN (20))"
+	tests := []struct {
+		name     string
+		source   string
+		target   string
+		expected []string
+	}{
+		{
+			// A repartition replaces the partitioning, type included, in one
+			// statement: no REMOVE PARTITIONING first.
+			name:     "ChangeType",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT) PARTITION BY HASH(user_id) PARTITIONS 4",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT) PARTITION BY KEY(id) PARTITIONS 4",
+			expected: []string{"ALTER TABLE `t1` PARTITION BY KEY (`id`) PARTITIONS 4"},
+		},
+		{
+			name:     "ChangeTypeWithColumn",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT) PARTITION BY HASH(user_id) PARTITIONS 4",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, c INT) PARTITION BY KEY(id) PARTITIONS 4",
+			expected: []string{"ALTER TABLE `t1` ADD COLUMN `c` int NULL PARTITION BY KEY (`id`) PARTITIONS 4"},
+		},
+		{
+			name:     "AddPartitioningWithColumn",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, b INT)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, b INT, c INT) PARTITION BY HASH(id) PARTITIONS 2",
+			expected: []string{"ALTER TABLE `t1` ADD COLUMN `c` int NULL PARTITION BY HASH (`id`) PARTITIONS 2"},
+		},
+		{
+			name:     "RemovePartitioningWithColumn",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, b INT) PARTITION BY HASH(id) PARTITIONS 2",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, b INT, c INT)",
+			expected: []string{"ALTER TABLE `t1` ADD COLUMN `c` int NULL REMOVE PARTITIONING"},
+		},
+		{
+			name:     "CoalesceAlone",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, b INT) PARTITION BY HASH(id) PARTITIONS 4",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, b INT) PARTITION BY HASH(id) PARTITIONS 2",
+			expected: []string{"ALTER TABLE `t1` COALESCE PARTITION 2"},
+		},
+		{
+			// COALESCE can't share an ALTER, and rehashes every row anyway, so
+			// it is folded into the column change as a repartition.
+			name:     "CoalesceWithColumn",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, b INT) PARTITION BY HASH(id) PARTITIONS 4",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, b INT, c INT) PARTITION BY HASH(id) PARTITIONS 2",
+			expected: []string{"ALTER TABLE `t1` ADD COLUMN `c` int NULL PARTITION BY HASH (`id`) PARTITIONS 2"},
+		},
+		{
+			name:     "AddHashPartitionsWithColumn",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, b INT) PARTITION BY HASH(id) PARTITIONS 2",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, b INT, c INT) PARTITION BY HASH(id) PARTITIONS 4",
+			expected: []string{"ALTER TABLE `t1` ADD COLUMN `c` int NULL PARTITION BY HASH (`id`) PARTITIONS 4"},
+		},
+		{
+			// Appending RANGE partitions is metadata-only ADD PARTITION.
+			name:     "AppendRangePartitions",
+			source:   rangeBase,
+			target:   "CREATE TABLE t1 (id INT NOT NULL, b INT, PRIMARY KEY (id)) PARTITION BY RANGE (id) (PARTITION p0 VALUES LESS THAN (10), PARTITION p1 VALUES LESS THAN (20), PARTITION p2 VALUES LESS THAN (30), PARTITION pmax VALUES LESS THAN MAXVALUE)",
+			expected: []string{"ALTER TABLE `t1` ADD PARTITION (PARTITION `p2` VALUES LESS THAN (30), PARTITION `pmax` VALUES LESS THAN MAXVALUE)"},
+		},
+		{
+			// ADD PARTITION can't share an ALTER, but is cheaper as its own
+			// statement than a repartition folded into the column change.
+			name:   "AppendRangePartitionWithColumn",
+			source: rangeBase,
+			target: "CREATE TABLE t1 (id INT NOT NULL, b INT, c INT, PRIMARY KEY (id)) PARTITION BY RANGE (id) (PARTITION p0 VALUES LESS THAN (10), PARTITION p1 VALUES LESS THAN (20), PARTITION p2 VALUES LESS THAN (30))",
+			expected: []string{
+				"ALTER TABLE `t1` ADD COLUMN `c` int NULL",
+				"ALTER TABLE `t1` ADD PARTITION (PARTITION `p2` VALUES LESS THAN (30))",
+			},
+		},
+		{
+			// The separate ADD PARTITION would run after the MODIFY, which can
+			// move a stored partition-key value past the last existing
+			// partition (9.996 rounds to 10.00). Folded into one PARTITION BY,
+			// MySQL places rows against the target partitions.
+			name:     "AppendRangePartitionWithPartitionKeyChange",
+			source:   "CREATE TABLE t1 (id INT NOT NULL, d DECIMAL(10,3) NOT NULL, PRIMARY KEY (id, d)) PARTITION BY RANGE (FLOOR(d)) (PARTITION p0 VALUES LESS THAN (10))",
+			target:   "CREATE TABLE t1 (id INT NOT NULL, d DECIMAL(10,2) NOT NULL, PRIMARY KEY (id, d)) PARTITION BY RANGE (FLOOR(d)) (PARTITION p0 VALUES LESS THAN (10), PARTITION p1 VALUES LESS THAN (20))",
+			expected: []string{"ALTER TABLE `t1` MODIFY COLUMN `d` decimal(10,2) NOT NULL PARTITION BY RANGE (FLOOR(`d`)) (PARTITION `p0` VALUES LESS THAN (10), PARTITION `p1` VALUES LESS THAN (20))"},
+		},
+		{
+			name:     "AppendRangeColumnsPartitionWithPartitionKeyChange",
+			source:   "CREATE TABLE t1 (id INT NOT NULL, d DATETIME NOT NULL, PRIMARY KEY (id, d)) PARTITION BY RANGE COLUMNS (d) (PARTITION p0 VALUES LESS THAN ('2026-11-01'))",
+			target:   "CREATE TABLE t1 (id INT NOT NULL, d DATE NOT NULL, PRIMARY KEY (id, d)) PARTITION BY RANGE COLUMNS (d) (PARTITION p0 VALUES LESS THAN ('2026-11-01'), PARTITION p1 VALUES LESS THAN ('2026-12-01'))",
+			expected: []string{"ALTER TABLE `t1` MODIFY COLUMN `d` date NOT NULL PARTITION BY RANGE COLUMNS (`d`) (PARTITION `p0` VALUES LESS THAN ('2026-11-01'), PARTITION `p1` VALUES LESS THAN ('2026-12-01'))"},
+		},
+		{
+			// The partitioning reads d through the generated column g.
+			name:     "AppendRangePartitionWithGeneratedPartitionKeyChange",
+			source:   "CREATE TABLE t1 (d DECIMAL(10,3), g INT AS (FLOOR(d)) STORED) PARTITION BY RANGE (g) (PARTITION p0 VALUES LESS THAN (10))",
+			target:   "CREATE TABLE t1 (d DECIMAL(10,2), g INT AS (FLOOR(d)) STORED) PARTITION BY RANGE (g) (PARTITION p0 VALUES LESS THAN (10), PARTITION p1 VALUES LESS THAN (20))",
+			expected: []string{"ALTER TABLE `t1` MODIFY COLUMN `d` decimal(10,2) NULL PARTITION BY RANGE (`g`) (PARTITION `p0` VALUES LESS THAN (10), PARTITION `p1` VALUES LESS THAN (20))"},
+		},
+		{
+			// A column the partitioning does not read can still change separately.
+			name:     "AppendRangePartitionWithUnrelatedGeneratedColumnChange",
+			source:   "CREATE TABLE t1 (d DECIMAL(10,3), e INT, g INT AS (FLOOR(d)) STORED) PARTITION BY RANGE (g) (PARTITION p0 VALUES LESS THAN (10))",
+			target:   "CREATE TABLE t1 (d DECIMAL(10,3), e BIGINT, g INT AS (FLOOR(d)) STORED) PARTITION BY RANGE (g) (PARTITION p0 VALUES LESS THAN (10), PARTITION p1 VALUES LESS THAN (20))",
+			expected: []string{"ALTER TABLE `t1` MODIFY COLUMN `e` bigint NULL", "ALTER TABLE `t1` ADD PARTITION (PARTITION `p1` VALUES LESS THAN (20))"},
+		},
+		{
+			name:     "KeyAlgorithmChange",
+			source:   "CREATE TABLE t1 (id INT NOT NULL PRIMARY KEY) PARTITION BY KEY ALGORITHM=1 (id) PARTITIONS 2",
+			target:   "CREATE TABLE t1 (id INT NOT NULL PRIMARY KEY) PARTITION BY KEY ALGORITHM=2 (id) PARTITIONS 2",
+			expected: []string{"ALTER TABLE `t1` PARTITION BY KEY (`id`) PARTITIONS 2"},
+		},
+		{
+			name:     "KeyAlgorithmWithCountChange",
+			source:   "CREATE TABLE t1 (id INT NOT NULL PRIMARY KEY) PARTITION BY KEY (id) PARTITIONS 2",
+			target:   "CREATE TABLE t1 (id INT NOT NULL PRIMARY KEY) PARTITION BY KEY ALGORITHM=1 (id) PARTITIONS 3",
+			expected: []string{"ALTER TABLE `t1` PARTITION BY KEY ALGORITHM=1 (`id`) PARTITIONS 3"},
+		},
+		{
+			name:     "AppendWithSubpartitionKeyAlgorithmChange",
+			source:   "CREATE TABLE t1 (id INT NOT NULL PRIMARY KEY) PARTITION BY RANGE (id) SUBPARTITION BY KEY ALGORITHM=1 (id) SUBPARTITIONS 2 (PARTITION p0 VALUES LESS THAN (10))",
+			target:   "CREATE TABLE t1 (id INT NOT NULL PRIMARY KEY) PARTITION BY RANGE (id) SUBPARTITION BY KEY (id) SUBPARTITIONS 2 (PARTITION p0 VALUES LESS THAN (10), PARTITION p1 VALUES LESS THAN (20))",
+			expected: []string{"ALTER TABLE `t1` PARTITION BY RANGE (`id`) SUBPARTITION BY KEY (`id`) SUBPARTITIONS 2 (PARTITION `p0` VALUES LESS THAN (10), PARTITION `p1` VALUES LESS THAN (20))"},
+		},
+		{
+			name:     "AppendExpressionBound",
+			source:   "CREATE TABLE t1 (id INT NOT NULL PRIMARY KEY) PARTITION BY RANGE (id) (PARTITION p0 VALUES LESS THAN (10))",
+			target:   "CREATE TABLE t1 (id INT NOT NULL PRIMARY KEY) PARTITION BY RANGE (id) (PARTITION p0 VALUES LESS THAN (10), PARTITION p1 VALUES LESS THAN (UNIX_TIMESTAMP('2031-01-01 00:00:00')))",
+			expected: []string{"ALTER TABLE `t1` ADD PARTITION (PARTITION `p1` VALUES LESS THAN (UNIX_TIMESTAMP('2031-01-01 00:00:00')))"},
+		},
+		{
+			// A LIST value left as an expression may evaluate differently
+			// when the ALTER runs (UNIX_TIMESTAMP reads the session time
+			// zone), and a LIST REORGANIZE deletes the rows of a value it
+			// loses. PARTITION BY fails with 1526 instead.
+			name:     "ListExpressionValueCommentChange",
+			source:   "CREATE TABLE t1 (id BIGINT NOT NULL PRIMARY KEY) PARTITION BY LIST (id) (PARTITION p0 VALUES IN (1), PARTITION p1 VALUES IN (UNIX_TIMESTAMP('2030-01-01 00:00:00')) COMMENT 'old')",
+			target:   "CREATE TABLE t1 (id BIGINT NOT NULL PRIMARY KEY) PARTITION BY LIST (id) (PARTITION p0 VALUES IN (1), PARTITION p1 VALUES IN (UNIX_TIMESTAMP('2030-01-01 00:00:00')) COMMENT 'new')",
+			expected: []string{"ALTER TABLE `t1` PARTITION BY LIST (`id`) (PARTITION `p0` VALUES IN (1), PARTITION `p1` VALUES IN (UNIX_TIMESTAMP('2030-01-01 00:00:00')) COMMENT = 'new')"},
+		},
+		{
+			name:     "ListColumnsExpressionInTupleCommentChange",
+			source:   "CREATE TABLE t1 (a BIGINT NOT NULL, b INT NOT NULL, PRIMARY KEY (a, b)) PARTITION BY LIST COLUMNS (a, b) (PARTITION p0 VALUES IN ((UNIX_TIMESTAMP('2030-01-01 00:00:00'), 1)) COMMENT 'old')",
+			target:   "CREATE TABLE t1 (a BIGINT NOT NULL, b INT NOT NULL, PRIMARY KEY (a, b)) PARTITION BY LIST COLUMNS (a, b) (PARTITION p0 VALUES IN ((UNIX_TIMESTAMP('2030-01-01 00:00:00'), 1)) COMMENT 'new')",
+			expected: []string{"ALTER TABLE `t1` PARTITION BY LIST COLUMNS (`a`, `b`) (PARTITION `p0` VALUES IN ((UNIX_TIMESTAMP('2030-01-01 00:00:00'), 1)) COMMENT = 'new')"},
+		},
+		{
+			// A folded constant is a value, so it still qualifies.
+			name:     "ListFoldedValueCommentChange",
+			source:   "CREATE TABLE t1 (id INT NOT NULL PRIMARY KEY) PARTITION BY LIST (id) (PARTITION p0 VALUES IN (1), PARTITION p1 VALUES IN (10 + 10) COMMENT 'old')",
+			target:   "CREATE TABLE t1 (id INT NOT NULL PRIMARY KEY) PARTITION BY LIST (id) (PARTITION p0 VALUES IN (1), PARTITION p1 VALUES IN (20) COMMENT 'new')",
+			expected: []string{"ALTER TABLE `t1` REORGANIZE PARTITION `p1` INTO (PARTITION `p1` VALUES IN (20) COMMENT = 'new')"},
+		},
+		{
+			name:     "PartitionMaxRowsChange",
+			source:   "CREATE TABLE t1 (id INT NOT NULL PRIMARY KEY) PARTITION BY RANGE (id) (PARTITION p0 VALUES LESS THAN (10), PARTITION p1 VALUES LESS THAN (20) MAX_ROWS = 100)",
+			target:   "CREATE TABLE t1 (id INT NOT NULL PRIMARY KEY) PARTITION BY RANGE (id) (PARTITION p0 VALUES LESS THAN (10), PARTITION p1 VALUES LESS THAN (20) MAX_ROWS = 200)",
+			expected: []string{"ALTER TABLE `t1` REORGANIZE PARTITION `p1` INTO (PARTITION `p1` VALUES LESS THAN (20) MAX_ROWS = 200)"},
+		},
+		{
+			name:     "PartitionStorageOptionsEmitted",
+			source:   "CREATE TABLE t1 (id INT NOT NULL PRIMARY KEY) PARTITION BY RANGE (id) (PARTITION p0 VALUES LESS THAN (10))",
+			target:   "CREATE TABLE t1 (id INT NOT NULL PRIMARY KEY) PARTITION BY RANGE (id) (PARTITION p0 VALUES LESS THAN (10) COMMENT 'c' DATA DIRECTORY '/data/' INDEX DIRECTORY '/idx' MAX_ROWS 9 MIN_ROWS 1 TABLESPACE ts1 NODEGROUP 0)",
+			expected: []string{"ALTER TABLE `t1` REORGANIZE PARTITION `p0` INTO (PARTITION `p0` VALUES LESS THAN (10) COMMENT = 'c' DATA DIRECTORY = '/data' INDEX DIRECTORY = '/idx' MAX_ROWS = 9 MIN_ROWS = 1 TABLESPACE = `ts1` NODEGROUP = 0)"},
+		},
+		{
+			name:     "AppendWithStorageOptions",
+			source:   "CREATE TABLE t1 (id INT NOT NULL PRIMARY KEY) PARTITION BY RANGE (id) (PARTITION p0 VALUES LESS THAN (10))",
+			target:   "CREATE TABLE t1 (id INT NOT NULL PRIMARY KEY) PARTITION BY RANGE (id) (PARTITION p0 VALUES LESS THAN (10), PARTITION p1 VALUES LESS THAN (20) MAX_ROWS = 5)",
+			expected: []string{"ALTER TABLE `t1` ADD PARTITION (PARTITION `p1` VALUES LESS THAN (20) MAX_ROWS = 5)"},
+		},
+		{
+			name:     "SubpartitionStorageOptionChange",
+			source:   "CREATE TABLE t1 (id INT NOT NULL PRIMARY KEY) PARTITION BY RANGE (id) SUBPARTITION BY HASH (id) (PARTITION p0 VALUES LESS THAN (10) (SUBPARTITION s0, SUBPARTITION s1))",
+			target:   "CREATE TABLE t1 (id INT NOT NULL PRIMARY KEY) PARTITION BY RANGE (id) SUBPARTITION BY HASH (id) (PARTITION p0 VALUES LESS THAN (10) MAX_ROWS = 9 (SUBPARTITION s0 MAX_ROWS = 5, SUBPARTITION s1))",
+			expected: []string{"ALTER TABLE `t1` REORGANIZE PARTITION `p0` INTO (PARTITION `p0` VALUES LESS THAN (10) (SUBPARTITION `s0` MAX_ROWS = 5, SUBPARTITION `s1` MAX_ROWS = 9))"},
+		},
+		{
+			// MySQL prints a partition's options on each named subpartition.
+			name:     "PartitionOptionsOnNamedSubpartitionsNoDiff",
+			source:   "CREATE TABLE t1 (id INT NOT NULL PRIMARY KEY) PARTITION BY RANGE (id) SUBPARTITION BY HASH (id) (PARTITION p0 VALUES LESS THAN (10) (SUBPARTITION s0 COMMENT = 'c' MAX_ROWS = 9, SUBPARTITION s1 COMMENT = 'c' MAX_ROWS = 9))",
+			target:   "CREATE TABLE t1 (id INT NOT NULL PRIMARY KEY) PARTITION BY RANGE (id) SUBPARTITION BY HASH (id) (PARTITION p0 VALUES LESS THAN (10) COMMENT 'c' MAX_ROWS = 9 (SUBPARTITION s0, SUBPARTITION s1))",
+			expected: []string{},
+		},
+		{
+			name:     "FilePerTableTablespaceNoDiff",
+			source:   "CREATE TABLE t1 (id INT NOT NULL PRIMARY KEY) PARTITION BY RANGE (id) (PARTITION p0 VALUES LESS THAN (10) TABLESPACE = `innodb_file_per_table`, PARTITION p1 VALUES LESS THAN (20) TABLESPACE = `innodb_file_per_table`)",
+			target:   "CREATE TABLE t1 (id INT NOT NULL PRIMARY KEY) PARTITION BY RANGE (id) (PARTITION p0 VALUES LESS THAN (10), PARTITION p1 VALUES LESS THAN (20))",
+			expected: []string{},
+		},
+		{
+			name:     "AppendListPartition",
+			source:   "CREATE TABLE t1 (id INT NOT NULL, PRIMARY KEY (id)) PARTITION BY LIST (id) (PARTITION p0 VALUES IN (1, 2))",
+			target:   "CREATE TABLE t1 (id INT NOT NULL, PRIMARY KEY (id)) PARTITION BY LIST (id) (PARTITION p0 VALUES IN (1, 2), PARTITION p1 VALUES IN (3))",
+			expected: []string{"ALTER TABLE `t1` ADD PARTITION (PARTITION `p1` VALUES IN (3))"},
+		},
+		{
+			name:     "AppendRangeColumnsPartition",
+			source:   "CREATE TABLE t1 (a INT NOT NULL, b INT NOT NULL, PRIMARY KEY (a, b)) PARTITION BY RANGE COLUMNS (a, b) (PARTITION p0 VALUES LESS THAN (10, 10))",
+			target:   "CREATE TABLE t1 (a INT NOT NULL, b INT NOT NULL, PRIMARY KEY (a, b)) PARTITION BY RANGE COLUMNS (a, b) (PARTITION p0 VALUES LESS THAN (10, 10), PARTITION p1 VALUES LESS THAN (20, MAXVALUE))",
+			expected: []string{"ALTER TABLE `t1` ADD PARTITION (PARTITION `p1` VALUES LESS THAN (20, MAXVALUE))"},
+		},
+		{
+			name:     "AppendSubpartitionedRangePartition",
+			source:   "CREATE TABLE t1 (dt DATE NOT NULL, PRIMARY KEY (dt)) PARTITION BY RANGE (YEAR(dt)) SUBPARTITION BY HASH (dayofmonth(dt)) SUBPARTITIONS 2 (PARTITION p0 VALUES LESS THAN (2020))",
+			target:   "CREATE TABLE t1 (dt DATE NOT NULL, PRIMARY KEY (dt)) PARTITION BY RANGE (YEAR(dt)) SUBPARTITION BY HASH (dayofmonth(dt)) SUBPARTITIONS 2 (PARTITION p0 VALUES LESS THAN (2020), PARTITION p1 VALUES LESS THAN (2030))",
+			expected: []string{"ALTER TABLE `t1` ADD PARTITION (PARTITION `p1` VALUES LESS THAN (2030))"},
+		},
+		{
+			// Dropping a partition is a repartition, never DROP PARTITION:
+			// DROP PARTITION deletes the partition's rows.
+			name:     "DropRangePartition",
+			source:   rangeBase,
+			target:   "CREATE TABLE t1 (id INT NOT NULL, b INT, PRIMARY KEY (id)) PARTITION BY RANGE (id) (PARTITION p0 VALUES LESS THAN (10))",
+			expected: []string{"ALTER TABLE `t1` PARTITION BY RANGE (`id`) (PARTITION `p0` VALUES LESS THAN (10))"},
+		},
+		{
+			// Inserting a partition between two others splits the next one.
+			name:     "SplitRangePartition",
+			source:   rangeBase,
+			target:   "CREATE TABLE t1 (id INT NOT NULL, b INT, PRIMARY KEY (id)) PARTITION BY RANGE (id) (PARTITION p0 VALUES LESS THAN (10), PARTITION p1a VALUES LESS THAN (15), PARTITION p1 VALUES LESS THAN (20))",
+			expected: []string{"ALTER TABLE `t1` REORGANIZE PARTITION `p1` INTO (PARTITION `p1a` VALUES LESS THAN (15), PARTITION `p1` VALUES LESS THAN (20))"},
+		},
+		{
+			// The usual rolling-window change: split next month out of the
+			// MAXVALUE partition.
+			name:     "SplitMaxvaluePartition",
+			source:   "CREATE TABLE t1 (d DATE NOT NULL, PRIMARY KEY (d)) PARTITION BY RANGE COLUMNS (d) (PARTITION p202610 VALUES LESS THAN ('2026-11-01'), PARTITION pmax VALUES LESS THAN (MAXVALUE))",
+			target:   "CREATE TABLE t1 (d DATE NOT NULL, PRIMARY KEY (d)) PARTITION BY RANGE COLUMNS (d) (PARTITION p202610 VALUES LESS THAN ('2026-11-01'), PARTITION p202611 VALUES LESS THAN ('2026-12-01'), PARTITION pmax VALUES LESS THAN (MAXVALUE))",
+			expected: []string{"ALTER TABLE `t1` REORGANIZE PARTITION `pmax` INTO (PARTITION `p202611` VALUES LESS THAN ('2026-12-01'), PARTITION `pmax` VALUES LESS THAN MAXVALUE)"},
+		},
+		{
+			name:     "MergeRangePartitions",
+			source:   "CREATE TABLE t1 (id INT NOT NULL, PRIMARY KEY (id)) PARTITION BY RANGE (id) (PARTITION p0 VALUES LESS THAN (10), PARTITION p1 VALUES LESS THAN (20), PARTITION p2 VALUES LESS THAN (30))",
+			target:   "CREATE TABLE t1 (id INT NOT NULL, PRIMARY KEY (id)) PARTITION BY RANGE (id) (PARTITION p0 VALUES LESS THAN (10), PARTITION p2 VALUES LESS THAN (30))",
+			expected: []string{"ALTER TABLE `t1` REORGANIZE PARTITION `p1`, `p2` INTO (PARTITION `p2` VALUES LESS THAN (30))"},
+		},
+		{
+			name:     "RenameRangePartition",
+			source:   rangeBase,
+			target:   "CREATE TABLE t1 (id INT NOT NULL, b INT, PRIMARY KEY (id)) PARTITION BY RANGE (id) (PARTITION p0 VALUES LESS THAN (10), PARTITION q1 VALUES LESS THAN (20))",
+			expected: []string{"ALTER TABLE `t1` REORGANIZE PARTITION `p1` INTO (PARTITION `q1` VALUES LESS THAN (20))"},
+		},
+		{
+			// Moving a range boundary inside the run is fine; the run still
+			// ends at 20.
+			name:     "MoveRangeBoundary",
+			source:   rangeBase,
+			target:   "CREATE TABLE t1 (id INT NOT NULL, b INT, PRIMARY KEY (id)) PARTITION BY RANGE (id) (PARTITION p0 VALUES LESS THAN (5), PARTITION p1 VALUES LESS THAN (20))",
+			expected: []string{"ALTER TABLE `t1` REORGANIZE PARTITION `p0`, `p1` INTO (PARTITION `p0` VALUES LESS THAN (5), PARTITION `p1` VALUES LESS THAN (20))"},
+		},
+		{
+			// Shrinking the table's range is not a REORGANIZE (MySQL error
+			// 1520): a repartition fails if rows fall outside the new range.
+			name:     "ShrinkLastRangePartition",
+			source:   rangeBase,
+			target:   "CREATE TABLE t1 (id INT NOT NULL, b INT, PRIMARY KEY (id)) PARTITION BY RANGE (id) (PARTITION p0 VALUES LESS THAN (10), PARTITION p1 VALUES LESS THAN (15))",
+			expected: []string{"ALTER TABLE `t1` PARTITION BY RANGE (`id`) (PARTITION `p0` VALUES LESS THAN (10), PARTITION `p1` VALUES LESS THAN (15))"},
+		},
+		{
+			name:     "MoveListValue",
+			source:   "CREATE TABLE t1 (id INT NOT NULL, PRIMARY KEY (id)) PARTITION BY LIST (id) (PARTITION p0 VALUES IN (1, 2), PARTITION p1 VALUES IN (3), PARTITION p2 VALUES IN (4))",
+			target:   "CREATE TABLE t1 (id INT NOT NULL, PRIMARY KEY (id)) PARTITION BY LIST (id) (PARTITION p0 VALUES IN (1), PARTITION p1 VALUES IN (2, 3), PARTITION p2 VALUES IN (4))",
+			expected: []string{"ALTER TABLE `t1` REORGANIZE PARTITION `p0`, `p1` INTO (PARTITION `p0` VALUES IN (1), PARTITION `p1` VALUES IN (2, 3))"},
+		},
+		{
+			// A LIST REORGANIZE that leaves a value out silently deletes the
+			// rows holding it, so dropping a value is a repartition, which
+			// fails (error 1526) instead.
+			name:     "DropListValue",
+			source:   "CREATE TABLE t1 (id INT NOT NULL, PRIMARY KEY (id)) PARTITION BY LIST (id) (PARTITION p0 VALUES IN (1, 2), PARTITION p1 VALUES IN (3))",
+			target:   "CREATE TABLE t1 (id INT NOT NULL, PRIMARY KEY (id)) PARTITION BY LIST (id) (PARTITION p0 VALUES IN (1), PARTITION p1 VALUES IN (3))",
+			expected: []string{"ALTER TABLE `t1` PARTITION BY LIST (`id`) (PARTITION `p0` VALUES IN (1), PARTITION `p1` VALUES IN (3))"},
+		},
+		{
+			name:     "DropListPartition",
+			source:   "CREATE TABLE t1 (id INT NOT NULL, PRIMARY KEY (id)) PARTITION BY LIST (id) (PARTITION p0 VALUES IN (1, 2), PARTITION p1 VALUES IN (3), PARTITION p2 VALUES IN (4))",
+			target:   "CREATE TABLE t1 (id INT NOT NULL, PRIMARY KEY (id)) PARTITION BY LIST (id) (PARTITION p0 VALUES IN (1, 2), PARTITION p2 VALUES IN (4))",
+			expected: []string{"ALTER TABLE `t1` PARTITION BY LIST (`id`) (PARTITION `p0` VALUES IN (1, 2), PARTITION `p2` VALUES IN (4))"},
+		},
+		{
+			// Multi-column LIST COLUMNS values are tuples, and are emitted as
+			// tuples.
+			name:     "AddMultiColumnListPartitioning",
+			source:   "CREATE TABLE t1 (a INT NOT NULL, b INT NOT NULL, PRIMARY KEY (a, b))",
+			target:   "CREATE TABLE t1 (a INT NOT NULL, b INT NOT NULL, PRIMARY KEY (a, b)) PARTITION BY LIST COLUMNS (a, b) (PARTITION p0 VALUES IN ((1, 2), (3, 4)), PARTITION p1 VALUES IN ((5, 6)))",
+			expected: []string{"ALTER TABLE `t1` PARTITION BY LIST COLUMNS (`a`, `b`) (PARTITION `p0` VALUES IN ((1, 2), (3, 4)), PARTITION `p1` VALUES IN ((5, 6)))"},
+		},
+		{
+			// The same values grouped into different tuples are different
+			// partitioning. Moving a tuple between partitions keeps the set
+			// of tuples, so it is a REORGANIZE.
+			name:     "MoveMultiColumnListTuple",
+			source:   "CREATE TABLE t1 (a INT NOT NULL, b VARCHAR(10) NOT NULL, PRIMARY KEY (a, b)) PARTITION BY LIST COLUMNS (a, b) (PARTITION p0 VALUES IN ((1, 'x'), (3, 'y')), PARTITION p1 VALUES IN ((5, 'z')))",
+			target:   "CREATE TABLE t1 (a INT NOT NULL, b VARCHAR(10) NOT NULL, PRIMARY KEY (a, b)) PARTITION BY LIST COLUMNS (a, b) (PARTITION p0 VALUES IN ((1, 'x')), PARTITION p1 VALUES IN ((3, 'y'), (5, 'z')))",
+			expected: []string{"ALTER TABLE `t1` REORGANIZE PARTITION `p0`, `p1` INTO (PARTITION `p0` VALUES IN ((1, 'x')), PARTITION `p1` VALUES IN ((3, 'y'), (5, 'z')))"},
+		},
+		{
+			// Regrouping the same scalar values into different tuples changes
+			// the set of tuples: a repartition, never a REORGANIZE.
+			name:     "RegroupMultiColumnListTuples",
+			source:   "CREATE TABLE t1 (a INT NOT NULL, b INT NOT NULL, PRIMARY KEY (a, b)) PARTITION BY LIST COLUMNS (a, b) (PARTITION p0 VALUES IN ((1, 2), (3, 4)))",
+			target:   "CREATE TABLE t1 (a INT NOT NULL, b INT NOT NULL, PRIMARY KEY (a, b)) PARTITION BY LIST COLUMNS (a, b) (PARTITION p0 VALUES IN ((1, 3), (2, 4)))",
+			expected: []string{"ALTER TABLE `t1` PARTITION BY LIST COLUMNS (`a`, `b`) (PARTITION `p0` VALUES IN ((1, 3), (2, 4)))"},
+		},
+		{
+			// NULL is a value, not the string 'NULL': emitted quoted, the
+			// REORGANIZE would move the NULL rows into no partition and MySQL
+			// would delete them.
+			name:     "ListNullValueCommentChange",
+			source:   "CREATE TABLE t1 (id INT NOT NULL, s VARCHAR(10)) PARTITION BY LIST COLUMNS (s) (PARTITION p0 VALUES IN (NULL, 'a'), PARTITION p1 VALUES IN ('b'))",
+			target:   "CREATE TABLE t1 (id INT NOT NULL, s VARCHAR(10)) PARTITION BY LIST COLUMNS (s) (PARTITION p0 VALUES IN (NULL, 'a') COMMENT 'x', PARTITION p1 VALUES IN ('b'))",
+			expected: []string{"ALTER TABLE `t1` REORGANIZE PARTITION `p0` INTO (PARTITION `p0` VALUES IN (NULL, 'a') COMMENT = 'x')"},
+		},
+		{
+			// NULL and the string 'NULL' are different values, so swapping one
+			// for the other changes the value set: a repartition.
+			name:     "ListNullValueToStringNull",
+			source:   "CREATE TABLE t1 (id INT NOT NULL, s VARCHAR(10)) PARTITION BY LIST COLUMNS (s) (PARTITION p0 VALUES IN (NULL, 'a'))",
+			target:   "CREATE TABLE t1 (id INT NOT NULL, s VARCHAR(10)) PARTITION BY LIST COLUMNS (s) (PARTITION p0 VALUES IN ('NULL', 'a'))",
+			expected: []string{"ALTER TABLE `t1` PARTITION BY LIST COLUMNS (`s`) (PARTITION `p0` VALUES IN ('NULL', 'a'))"},
+		},
+		{
+			// Appending a partition while the subpartitioning changes is a
+			// repartition: ADD PARTITION would leave the subpartitioning as
+			// it was.
+			name:     "AppendWithSubpartitionChange",
+			source:   "CREATE TABLE t1 (id INT NOT NULL, PRIMARY KEY (id)) PARTITION BY RANGE (id) SUBPARTITION BY HASH (id) SUBPARTITIONS 2 (PARTITION p0 VALUES LESS THAN (10))",
+			target:   "CREATE TABLE t1 (id INT NOT NULL, PRIMARY KEY (id)) PARTITION BY RANGE (id) SUBPARTITION BY HASH (id) SUBPARTITIONS 4 (PARTITION p0 VALUES LESS THAN (10), PARTITION p1 VALUES LESS THAN (20))",
+			expected: []string{"ALTER TABLE `t1` PARTITION BY RANGE (`id`) SUBPARTITION BY HASH (`id`) SUBPARTITIONS 4 (PARTITION `p0` VALUES LESS THAN (10), PARTITION `p1` VALUES LESS THAN (20))"},
+		},
+		{
+			// REORGANIZE can't share an ALTER and copies the table in spirit
+			// anyway, so alongside a column change it is a repartition.
+			name:     "SplitRangePartitionWithColumn",
+			source:   rangeBase,
+			target:   "CREATE TABLE t1 (id INT NOT NULL, b INT, c INT, PRIMARY KEY (id)) PARTITION BY RANGE (id) (PARTITION p0 VALUES LESS THAN (10), PARTITION p1a VALUES LESS THAN (15), PARTITION p1 VALUES LESS THAN (20))",
+			expected: []string{"ALTER TABLE `t1` ADD COLUMN `c` int NULL PARTITION BY RANGE (`id`) (PARTITION `p0` VALUES LESS THAN (10), PARTITION `p1a` VALUES LESS THAN (15), PARTITION `p1` VALUES LESS THAN (20))"},
+		},
+		{
+			name:     "AppendWithChangedExpression",
+			source:   rangeBase,
+			target:   "CREATE TABLE t1 (id INT NOT NULL, b INT NOT NULL, PRIMARY KEY (id, b)) PARTITION BY RANGE (b) (PARTITION p0 VALUES LESS THAN (10), PARTITION p1 VALUES LESS THAN (20), PARTITION p2 VALUES LESS THAN (30))",
+			expected: []string{"ALTER TABLE `t1` MODIFY COLUMN `b` int NOT NULL, DROP PRIMARY KEY, ADD PRIMARY KEY (`id`, `b`) PARTITION BY RANGE (`b`) (PARTITION `p0` VALUES LESS THAN (10), PARTITION `p1` VALUES LESS THAN (20), PARTITION `p2` VALUES LESS THAN (30))"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			source, err := ParseCreateTable(tt.source)
+			require.NoError(t, err)
+			target, err := ParseCreateTable(tt.target)
+			require.NoError(t, err)
+			stmts, err := source.Diff(target, nil)
+			require.NoError(t, err)
+			got := make([]string, 0, len(stmts))
+			for _, s := range stmts {
+				got = append(got, s.Statement)
+			}
+			require.Equal(t, tt.expected, got)
+		})
+	}
 }
 
 func TestNewDiffOptions(t *testing.T) {
@@ -2314,4 +2657,35 @@ func TestNewDiffOptions(t *testing.T) {
 	require.False(t, opts.IgnoreCharsetCollation, "IgnoreCharsetCollation should default to false")
 	require.False(t, opts.IgnorePartitioning, "IgnorePartitioning should default to false")
 	require.True(t, opts.IgnoreRowFormat, "IgnoreRowFormat should default to true")
+}
+
+// TestDiffPartitionStorageOptionChange checks that a change to any one
+// storage option of a partition, or of a named subpartition, is a diff.
+func TestDiffPartitionStorageOptionChange(t *testing.T) {
+	options := []struct{ from, to, emitted string }{
+		{"DATA DIRECTORY = '/a'", "DATA DIRECTORY = '/b'", "DATA DIRECTORY = '/b'"},
+		{"INDEX DIRECTORY = '/a'", "INDEX DIRECTORY = '/b'", "INDEX DIRECTORY = '/b'"},
+		{"MAX_ROWS = 1", "MAX_ROWS = 2", "MAX_ROWS = 2"},
+		{"MIN_ROWS = 1", "MIN_ROWS = 2", "MIN_ROWS = 2"},
+		{"TABLESPACE = ts1", "TABLESPACE = ts2", "TABLESPACE = `ts2`"},
+		{"NODEGROUP = 1", "NODEGROUP = 2", "NODEGROUP = 2"},
+	}
+	for _, opt := range options {
+		t.Run(opt.to, func(t *testing.T) {
+			for _, layout := range []string{
+				"PARTITION BY RANGE (id) (PARTITION p0 VALUES LESS THAN (10) %s)",
+				"PARTITION BY RANGE (id) SUBPARTITION BY HASH (id) (PARTITION p0 VALUES LESS THAN (10) (SUBPARTITION s0 %s, SUBPARTITION s1))",
+			} {
+				source, err := ParseCreateTable("CREATE TABLE t1 (id INT NOT NULL PRIMARY KEY) " + strings.Replace(layout, "%s", opt.from, 1))
+				require.NoError(t, err)
+				target, err := ParseCreateTable("CREATE TABLE t1 (id INT NOT NULL PRIMARY KEY) " + strings.Replace(layout, "%s", opt.to, 1))
+				require.NoError(t, err)
+				stmts, err := source.Diff(target, nil)
+				require.NoError(t, err)
+				require.Len(t, stmts, 1, layout)
+				require.Contains(t, stmts[0].Statement, "REORGANIZE PARTITION `p0` INTO")
+				require.Contains(t, stmts[0].Statement, opt.emitted)
+			}
+		})
+	}
 }
