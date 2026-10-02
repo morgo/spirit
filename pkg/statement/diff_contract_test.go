@@ -130,12 +130,14 @@ func TestDiffMySQLContracts(t *testing.T) {
 			source: "(id INT PRIMARY KEY)",
 			target: "(id INT PRIMARY KEY, c VARCHAR(10) DEFAULT (_latin1'a' COLLATE latin1_bin))",
 		},
-		// An introducer that decides the charset of a result, not just the
-		// value of a literal: anywhere under COLLATE, and inside CHARSET(),
-		// COLLATION() and WEIGHT_STRING(). The diff used to fold these, which
-		// emitted error 1253 for the first and a different value for the rest.
+		// Every introducer but _utf8mb4 is kept, wherever the literal sits:
+		// an introducer can decide the value even of an ASCII literal
+		// (UPPER(_latin5'i'), STRCMP under a PAD SPACE collation), and the
+		// diff cannot tell. It used to fold an ASCII latin1 or utf8mb3
+		// literal away outside COLLATE, which emitted error 1253 under
+		// COLLATE and a different value elsewhere.
 		// TestDiffIntegrationExpressionDefaultIntroducerValues checks the
-		// values. See foldLiteralCharsets.
+		// values. See restoreExprText.
 		{
 			name:   "expression default keeps the introducer under COLLATE over a function",
 			source: "(id INT PRIMARY KEY)",
@@ -162,26 +164,29 @@ func TestDiffMySQLContracts(t *testing.T) {
 			target: "(id INT PRIMARY KEY, c VARCHAR(64), CONSTRAINT ck CHECK (c <> CHARSET(IF(id, _latin1'a', _latin1'b'))))",
 		},
 		{
-			// MySQL keeps the _latin1 in the stored expression; the value is
-			// the same, so the two are one expression and nothing is emitted.
-			name:     "an ASCII latin1 literal under UPPER() is the bare literal",
-			source:   "(id INT PRIMARY KEY, g VARCHAR(10) AS (UPPER(_latin1'a')) STORED)",
-			target:   "(id INT PRIMARY KEY, g VARCHAR(10) AS (UPPER('a')) STORED)",
-			wantNoop: true,
+			// MySQL keeps the _latin1 in the stored expression. The value
+			// happens to be the same, but the diff cannot tell (UPPER(_latin5'i')
+			// is not UPPER('i')), so the bare spelling diffs once; the MODIFY
+			// stores UPPER('a') from a utf8mb4 session, reported as
+			// upper(_utf8mb4'a'), which renders bare, and the two agree.
+			name:   "an ASCII latin1 literal under UPPER() is replaced by the bare one",
+			source: "(id INT PRIMARY KEY, g VARCHAR(10) AS (UPPER(_latin1'a')) STORED)",
+			target: "(id INT PRIMARY KEY, g VARCHAR(10) AS (UPPER('a')) STORED)",
 		},
 		{
-			name:                 "literal stored from a utf8mb3 session is the bare literal",
+			// The same expression stored from a utf8mb3 or a latin1 session
+			// reports _utf8mb3 or _latin1 on its literal; the schema's bare
+			// literal diffs once and the re-stored expression agrees.
+			name:                 "literal stored from a utf8mb3 session is re-stored once",
 			source:               "(id INT PRIMARY KEY, c VARCHAR(10), CONSTRAINT ck CHECK (c <> 'A'))",
 			target:               "(id INT PRIMARY KEY, c VARCHAR(10), CONSTRAINT ck CHECK (c <> 'A'))",
 			sourceSessionCharset: "utf8",
-			wantNoop:             true,
 		},
 		{
-			name:                 "ASCII literal stored from a latin1 session is the bare literal",
+			name:                 "ASCII literal stored from a latin1 session is re-stored once",
 			source:               "(id INT PRIMARY KEY, g INT AS (LENGTH('abc')) STORED)",
 			target:               "(id INT PRIMARY KEY, g INT AS (LENGTH('abc')) STORED)",
 			sourceSessionCharset: "latin1",
-			wantNoop:             true,
 		},
 		{
 			// From a latin1 session the UTF-8 bytes of 'é' are read as two

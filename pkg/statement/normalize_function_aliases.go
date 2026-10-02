@@ -62,10 +62,11 @@ var mysqlFunctionAliases = map[string]string{
 //
 // The rule renames only; it does not touch the shape of the expression. The
 // other half of the rewriting MySQL does to a stored expression — charset
-// introducers, so that 'x' reads back as _utf8mb4'x' (or _latin1'x' from a
-// latin1 client) — needs no rule either, because every restore to text folds
-// the introducers that are equivalent to none and keeps the rest (see
-// restoreExprText and foldLiteralCharsets) on both sides of the diff.
+// introducers, so that 'x' reads back as _utf8mb4'x' — needs no rule either,
+// because every restore to text omits the _utf8mb4 introducer and keeps every
+// other (see restoreExprText) on both sides of the diff. A literal stored
+// from a client of another charset reads back with that charset's introducer
+// (_latin1'x'), which is kept, so such a schema diffs once and then agrees.
 type functionAliasNormalizer struct{}
 
 func (functionAliasNormalizer) Name() string { return "function-aliases" }

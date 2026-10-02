@@ -3680,11 +3680,15 @@ func TestDiffIntegrationTemporalDefaultTruncateFractional(t *testing.T) {
 
 // TestDiffIntegrationExpressionDefaultIntroducerValues verifies that an
 // expression default whose charset introducer decides its value stores, when
-// added through a diff, the value a direct CREATE of the target stores. The
-// diff used to fold an ASCII latin1 (or utf8mb3) literal to the bare literal
-// everywhere but directly beneath COLLATE, which changed CHARSET(_latin1'a')
-// from 'latin1' to 'utf8mb4', COLLATION(_utf8mb3'a') to the utf8mb4
-// collation, and made CONCAT(_latin1'a') COLLATE latin1_bin error 1253.
+// added through a diff, the value a direct CREATE of the target stores, and
+// that the introducer is kept whatever reads the literal. The diff used to
+// fold an ASCII latin1 (or utf8mb3) literal to the bare literal everywhere
+// but beneath COLLATE, CHARSET(), COLLATION() and WEIGHT_STRING(), which
+// changed CHARSET(_latin1'a') from 'latin1' to 'utf8mb4', made
+// CONCAT(_latin1'a') COLLATE latin1_bin error 1253, and would have changed
+// UPPER(_latin5'i') from 'İ' to 'I' and STRCMP(_latin1'a', _latin1'a ') from
+// 0 to -1 (a PAD SPACE collation against a NO PAD one): an ASCII literal's
+// introducer can decide the value under any function.
 func TestDiffIntegrationExpressionDefaultIntroducerValues(t *testing.T) {
 	for _, expr := range []string{
 		"CHARSET(_latin1'a')",
@@ -3692,6 +3696,11 @@ func TestDiffIntegrationExpressionDefaultIntroducerValues(t *testing.T) {
 		"CONCAT(_latin1'a') COLLATE latin1_bin",
 		"HEX(WEIGHT_STRING(_latin1'a'))",
 		"CHARSET(IF(id, _latin1'a', _latin1'b'))",
+		"UPPER(_latin5'i')",
+		"UPPER(_latin1'a')",
+		"STRCMP(_latin1'a', _latin1'a ')",
+		"STRCMP(_utf8mb3'a', _utf8mb3'a ')",
+		"LENGTH(_utf8mb3'a')",
 	} {
 		t.Run(expr, func(t *testing.T) {
 			_, db := testutils.CreateUniqueTestDatabase(t)

@@ -1001,20 +1001,22 @@ func TestDiff(t *testing.T) {
 			expected: "ALTER TABLE `t1` DROP CHECK `chk_age`, ADD CONSTRAINT `chk_age` CHECK (`age`>=18)",
 		},
 		{
-			// CHECK constraints with charset introducers like _utf8mb3 are normalized
-			// during parsing. MySQL generates different auto-names based on the original
-			// expression text, so the same logical constraint can have different names.
-			// The diff should recognize these as equivalent and produce no diff.
-			name:     "CheckConstraintCharsetIntroducerNoDiff",
+			// The _utf8mb3 MySQL reports on a literal stored from an older
+			// client is kept: the diff cannot tell an inert introducer from
+			// one that decides the value. The schema's bare spelling (and
+			// here its other name) diffs once; the re-added constraint,
+			// stored from a utf8mb4 session, then agrees.
+			name:     "CheckConstraintUTF8MB3IntroducerDiffers",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, type enum('A','B'), tok varchar(15), CONSTRAINT chk_tok_abc123 CHECK (type = _utf8mb3'A' AND tok IS NOT NULL OR type = _utf8mb3'B' AND tok IS NULL))",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, type enum('A','B'), tok varchar(15), CONSTRAINT chk_tok_def456 CHECK (type = 'A' AND tok IS NOT NULL OR type = 'B' AND tok IS NULL))",
-			expected: "",
+			expected: "ALTER TABLE `t1` DROP CHECK `chk_tok_abc123`, ADD CONSTRAINT `chk_tok_def456` CHECK (`type`='A' AND `tok` IS NOT NULL OR `type`='B' AND `tok` IS NULL)",
 		},
-		// Charset introducers. A literal's introducer is kept when it changes
-		// the expression (_binary, a non-ASCII literal under another charset,
-		// the UTF-16/32 family, or the operand of COLLATE) and folded away
-		// when it spells the bare literal (utf8mb3, N'x', an ASCII literal
-		// under latin1). See restoreExprText.
+		// Charset introducers. Every introducer a literal carries is kept
+		// except _utf8mb4, the one a bare literal parses to and the one MySQL
+		// writes on a bare literal stored from a utf8mb4 session: an
+		// introducer can change the value even of an ASCII literal
+		// (UPPER(_latin5'i') is 'İ', STRCMP(_latin1'a', _latin1'a ') is 0),
+		// and Spirit does not evaluate expressions. See restoreExprText.
 		{
 			name:     "GeneratedColumnBinaryIntroducerDiffers",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, g INT AS (CHAR_LENGTH('€')) STORED)",
@@ -1059,12 +1061,19 @@ func TestDiff(t *testing.T) {
 			expected: "ALTER TABLE `t1` MODIFY COLUMN `g` varchar(32) GENERATED ALWAYS AS (HEX(WEIGHT_STRING(IF(`id`, _LATIN1'a', _LATIN1'b')))) STORED NULL",
 		},
 		{
-			// Every other function reads the literal's value, so an ASCII
-			// literal under latin1 is the bare literal there.
-			name:     "GeneratedColumnLatin1ASCIIIntroducerInsideUpperNoDiff",
+			// An ASCII literal's introducer can still decide the value
+			// (UPPER(_latin5'i') is 'İ'), so it is kept and the expressions
+			// differ.
+			name:     "GeneratedColumnLatin1ASCIIIntroducerInsideUpperDiffers",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, g VARCHAR(10) AS (UPPER(_latin1'a')) STORED)",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, g VARCHAR(10) AS (UPPER('a')) STORED)",
-			expected: "",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `g` varchar(10) GENERATED ALWAYS AS (UPPER('a')) STORED NULL",
+		},
+		{
+			name:     "GeneratedColumnLatin5IntroducerInsideUpperDiffers",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, g VARCHAR(10) AS (UPPER('i')) STORED)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, g VARCHAR(10) AS (UPPER(_latin5'i')) STORED)",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `g` varchar(10) GENERATED ALWAYS AS (UPPER(_LATIN5'i')) STORED NULL",
 		},
 		{
 			name:     "FunctionalIndexBinaryIntroducerDiffers",
@@ -1073,10 +1082,10 @@ func TestDiff(t *testing.T) {
 			expected: "ALTER TABLE `t1` DROP INDEX `fk`, ADD INDEX `fk` ((CONCAT(`z`, _BINARY'x')))",
 		},
 		{
-			name:     "CheckLatin1ASCIIIntroducerNoDiff",
+			name:     "CheckLatin1ASCIIIntroducerDiffers",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c VARCHAR(10), CHECK (c <> _latin1'abc'))",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c VARCHAR(10), CHECK (c <> 'abc'))",
-			expected: "",
+			expected: "ALTER TABLE `t1` DROP CHECK `t1_chk_1`, ADD CONSTRAINT `t1_chk_1` CHECK (`c`!='abc')",
 		},
 		{
 			name:     "CheckLatin1NonASCIIIntroducerDiffers",
@@ -1091,10 +1100,11 @@ func TestDiff(t *testing.T) {
 			expected: "ALTER TABLE `t1` DROP CHECK `t1_chk_1`, ADD CONSTRAINT `t1_chk_1` CHECK (`c`!='x')",
 		},
 		{
-			name:     "CheckNationalLiteralNoDiff",
+			// N'x' is _utf8mb3'x', kept like any other introducer.
+			name:     "CheckNationalLiteralDiffers",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c VARCHAR(10), CHECK (c <> N'x'))",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c VARCHAR(10), CHECK (c <> 'x'))",
-			expected: "",
+			expected: "ALTER TABLE `t1` DROP CHECK `t1_chk_1`, ADD CONSTRAINT `t1_chk_1` CHECK (`c`!='x')",
 		},
 		{
 			// A literal-style default is a value: MySQL converts it to the

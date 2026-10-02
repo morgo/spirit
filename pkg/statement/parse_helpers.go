@@ -3,13 +3,10 @@ package statement
 import (
 	"fmt"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/block/spirit/pkg/parser"
 	"github.com/block/spirit/pkg/parser/ast"
-	"github.com/block/spirit/pkg/parser/charset"
 	"github.com/block/spirit/pkg/parser/format"
-	"github.com/block/spirit/pkg/parser/mysql"
 )
 
 // This file holds low-level, stateless parsing helpers used by the CreateTable
@@ -137,7 +134,7 @@ func restoreValueExprTextWith(expr ast.ExprNode, bareTimestampKeyword bool, extr
 		// default (or partition value) is a value, not an expression: MySQL
 		// converts it to the column's charset and reports it with no
 		// introducer, so every introducer is dropped from it. Inside an
-		// expression default the introducer stays meaningful and is handled
+		// expression default the introducer stays meaningful and is kept
 		// by restoreExprText.
 		flags := format.DefaultRestoreFlags | extra
 		if bareTimestampKeyword {
@@ -301,163 +298,44 @@ func restoreExpressionText(expr ast.ExprNode) (string, bool) {
 // SHOW CREATE TABLE render a literal the same way.
 //
 // MySQL keeps a string literal's charset introducer in the expressions it
-// stores, and the introducer can change what the expression means:
-// CHAR_LENGTH(_binary'€') is 3 where CHAR_LENGTH('€') is 1, and
-// _latin1'a' COLLATE latin1_bin is error 1253 once the introducer is gone,
-// because latin1_bin is not a collation of the default charset. Dropping every
-// introducer (the former format.RestoreStringWithoutCharset) therefore emitted
-// a different expression from the one the user wrote. Introducers are kept
-// instead, except those that spell the same value as the bare literal, which
-// foldLiteralCharsets rewrites to the default charset for the duration of the
-// restore — MySQL adds the session's introducer to every bare literal it
-// stores, so a user-written 'x' has to compare equal to the _utf8mb4'x' that
-// SHOW CREATE TABLE reports for it. format.RestoreStringWithoutDefaultCharset
-// then omits the default introducer, which is the form a bare literal parses
-// to. The AST itself is left as parsed: the fold is undone once the text is
-// rendered, so Column.Raw and the other retained nodes still carry what was
-// written.
+// stores, and the introducer can change what the expression means, even on
+// an ASCII literal: UPPER(_latin5'i') is 'İ' where UPPER('i') is 'I';
+// STRCMP(_latin1'a', _latin1'a ') is 0 where the bare pair is -1 (a PAD SPACE
+// collation against a NO PAD one); CHAR_LENGTH(_binary'€') is 3 where
+// CHAR_LENGTH('€') is 1; CHARSET(_latin1'a') is 'latin1'; and _latin1'a'
+// COLLATE latin1_bin is error 1253 once the introducer is gone. Spirit does
+// not evaluate expressions, so it cannot tell an inert introducer from one
+// that decides the value, and an introducer it dropped or folded would have
+// the diff call two expressions one. Every introducer is therefore kept as
+// written, with one exception: _utf8mb4, the parser's default charset, which
+// a bare literal parses to and which MySQL writes on every bare literal it
+// stores from a utf8mb4 session, so that a user's 'x' compares equal to the
+// _utf8mb4'x' SHOW CREATE TABLE reports for it
+// (format.RestoreStringWithoutDefaultCharset). Dropping every introducer
+// (format.RestoreStringWithoutCharset) is reserved for literal-style
+// defaults, which MySQL converts to the column's charset and reports bare.
+//
+// Two consequences follow, both in the safe direction (a statement emitted
+// again, never a change missed). An expression stored from a session of
+// another charset reports that charset's introducer on its bare literals
+// (_latin1 from the mysql command-line client's default, _utf8mb3 from an
+// older client), so a schema that spells them bare diffs once: the emitted
+// statement stores the expression from Spirit's utf8mb4 session, after which
+// the two agree. And an expression whose literals MySQL rewrites on storage
+// never converges: CONCAT(_latin1'x', 'y') is stored as
+// concat(_utf8mb4'x',_utf8mb4'y') (charset aggregation), a different text
+// from the one written, so such a schema has to spell what MySQL stores. The
+// parser spells utf8mb3 as _utf8, an alias MySQL accepts.
 func restoreExprText(expr ast.ExprNode, flags format.RestoreFlags) (string, bool) {
 	if expr == nil {
 		return "", false
 	}
-	defer foldLiteralCharsets(expr)()
 	var sb strings.Builder
 	rCtx := format.NewRestoreCtx(flags|format.RestoreStringWithoutDefaultCharset, &sb)
 	if err := expr.Restore(rCtx); err != nil {
 		return "", false
 	}
 	return sb.String(), true
-}
-
-// foldLiteralCharsets rewrites, in place, the charset of every string literal
-// in expr whose introducer is equivalent to none, so that the literal renders
-// bare, and returns the function that puts every rewritten literal back. An
-// introducer is equivalent to none when it names:
-//
-//   - utf8mb4, the parser's default: a bare 'x' and _utf8mb4'x' are the same
-//     parse, and MySQL reports the latter for a bare literal stored from a
-//     utf8mb4 session;
-//   - utf8mb3 (also spelled utf8, and the N'x' national form): every valid
-//     utf8mb3 string is the same bytes in utf8mb4, so the value, its length
-//     and its comparisons against a column do not change. MySQL reports
-//     _utf8mb3 for bare literals stored from an older client;
-//   - any other ASCII-compatible charset (latin1, ascii, …) when the literal
-//     is pure ASCII, whose bytes and characters are the same in utf8mb4. MySQL
-//     reports _latin1 for bare literals stored from a latin1 client, which the
-//     mysql command-line client is by default.
-//
-// Kept are _binary (a binary literal measures and compares by bytes, so it is
-// never the bare literal's expression), the UTF-16/32 family (not
-// ASCII-compatible), and a non-ASCII literal under any other charset (its
-// bytes are not those of the utf8mb4 spelling).
-//
-// The equivalence holds for the literal's value, not for its charset, so
-// nothing is folded inside the expressions that observe the charset itself,
-// however deep the literal sits:
-//
-//   - the operand of COLLATE, whose collation must belong to the charset of
-//     the operand's result, which an introducer anywhere in it can decide:
-//     CONCAT(_latin1'a') COLLATE latin1_bin is latin1; folded, error 1253;
-//   - the arguments of CHARSET(), COLLATION() and WEIGHT_STRING(), whose
-//     result is the charset, the collation or the collation weights of the
-//     argument: CHARSET(_latin1'a') is 'latin1' where CHARSET('a') is
-//     'utf8mb4', and CHARSET(IF(1, _latin1'a', _latin1'b')) is 'latin1' too.
-//
-// Every other function and operator reads a literal's value and converts it
-// to whatever charset it works in, so an ASCII literal under latin1 is the
-// same argument as the bare one (LENGTH, UPPER, HEX, CONCAT with a column, a
-// comparison with a column). Spirit does not track the charset an expression
-// evaluates in, so the protected set is these four constructs, where the
-// charset is the result; a new charset-observing construct belongs in
-// charsetObservingFunctions.
-//
-// The fold is not a complete equivalence: two literals that carry the same
-// non-default introducer and are compared with each other use that charset's
-// default collation, and folding both moves the comparison to utf8mb4's. That
-// is accepted so that a table created from a non-utf8mb4 session converges
-// rather than re-emitting the same expression on every diff.
-func foldLiteralCharsets(expr ast.ExprNode) (undo func()) {
-	if expr == nil {
-		return func() {}
-	}
-	f := &literalCharsetFolder{}
-	expr.Accept(f)
-	return f.undo
-}
-
-// charsetObservingFunctions are the functions whose result is the charset or
-// collation of their argument rather than a conversion of its value, so a
-// literal's introducer anywhere beneath them is load-bearing. See
-// foldLiteralCharsets.
-var charsetObservingFunctions = map[string]bool{
-	ast.Charset:      true,
-	ast.Collation:    true,
-	ast.WeightString: true,
-}
-
-// literalCharsetFolder is the ast.Visitor behind foldLiteralCharsets. It
-// records each literal it rewrites so that undo can restore the parse.
-type literalCharsetFolder struct {
-	folded []foldedLiteral
-}
-
-// foldedLiteral is a string literal whose charset the folder rewrote, with the
-// charset and collation it had.
-type foldedLiteral struct {
-	expr             *ast.ValueExpr
-	charset, collate string
-}
-
-func (f *literalCharsetFolder) Enter(n ast.Node) (ast.Node, bool) {
-	switch e := n.(type) {
-	case *ast.SetCollationExpr:
-		// The whole operand is skipped, not just a literal directly beneath:
-		// the collation must belong to the charset of the operand's result.
-		return n, true
-	case *ast.FuncCallExpr:
-		if charsetObservingFunctions[e.FnName.L] {
-			return n, true
-		}
-	case *ast.ValueExpr:
-		if e.Kind() == ast.KindString && literalCharsetFoldsToDefault(e.GetType().GetCharset(), e.GetString()) {
-			f.folded = append(f.folded, foldedLiteral{expr: e, charset: e.GetType().GetCharset(), collate: e.GetType().GetCollate()})
-			e.GetType().SetCharset(mysql.DefaultCharset)
-			e.GetType().SetCollate(mysql.DefaultCollationName)
-		}
-	}
-	return n, false
-}
-
-func (f *literalCharsetFolder) Leave(n ast.Node) (ast.Node, bool) { return n, true }
-
-// undo restores the charset and collation of every literal the folder
-// rewrote, in reverse order, leaving the AST as it was parsed.
-func (f *literalCharsetFolder) undo() {
-	for i := len(f.folded) - 1; i >= 0; i-- {
-		l := f.folded[i]
-		l.expr.GetType().SetCharset(l.charset)
-		l.expr.GetType().SetCollate(l.collate)
-	}
-}
-
-// literalCharsetFoldsToDefault reports whether a string literal under charset
-// cs with the given value is the same literal under the default charset. See
-// foldLiteralCharsets for the rule.
-func literalCharsetFoldsToDefault(cs, value string) bool {
-	switch cs {
-	case "", mysql.DefaultCharset:
-		return false // already bare
-	case charset.CharsetUTF8, charset.CharsetUTF8MB3:
-		return true
-	case charset.CharsetBin, charset.CharsetUCS2, charset.CharsetUTF16, charset.CharsetUTF16LE, charset.CharsetUTF32:
-		return false
-	}
-	for i := range len(value) {
-		if value[i] >= utf8.RuneSelf {
-			return false
-		}
-	}
-	return true
 }
 
 // extractLengthFromTypeString extracts length from type string like
