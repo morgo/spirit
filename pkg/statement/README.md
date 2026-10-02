@@ -293,8 +293,11 @@ type Index struct {
 
 `TableOptions` holds every table option `SHOW CREATE TABLE` reports. An
 option MySQL treats as unset (`STATS_PERSISTENT=DEFAULT`, `KEY_BLOCK_SIZE=0`,
-`SECONDARY_ENGINE_ATTRIBUTE=''`, ...) parses as nil/false, and `Diff` emits
-that same value to clear an option the target no longer declares.
+`SECONDARY_ENGINE_ATTRIBUTE=''`, `ROW_FORMAT=DEFAULT`, ...) parses as nil/false,
+and `Diff` emits that same value to clear an option the target no longer
+declares. `ROW_FORMAT` (and with it `KEY_BLOCK_SIZE`) is only compared under
+`IgnoreRowFormat: false`; the clearing `ROW_FORMAT=DEFAULT` rebuilds the table,
+as every row format change does, and fires once.
 
 ```go
 type TableOptions struct {

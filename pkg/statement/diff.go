@@ -74,6 +74,12 @@ type DiffOptions struct {
 	// Default: true (via NewDiffOptions).
 	// ROW_FORMAT=DYNAMIC is the InnoDB default in MySQL 8.0+, so differences
 	// between an unspecified ROW_FORMAT and an explicit DYNAMIC are cosmetic.
+	//
+	// When false, a target that names no row format (or names
+	// ROW_FORMAT=DEFAULT, which MySQL stores as none) clears a row format the
+	// source has with ROW_FORMAT=DEFAULT, so the table returns to the engine
+	// default. That is a table rebuild, as every row format change is, and
+	// it fires once: the rebuilt table reports no row format either.
 	IgnoreRowFormat bool
 }
 

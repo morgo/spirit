@@ -1327,21 +1327,24 @@ func (ct *CreateTable) parseTableOptions(options []*ast.TableOption) *TableOptio
 				hasOptions = true
 			}
 		case ast.TableOptionRowFormat:
-			if option.UintValue > 0 {
+			// ROW_FORMAT=DEFAULT is the absence of a row format: MySQL stores
+			// nothing for it, SHOW CREATE TABLE omits it, and the table takes
+			// the engine default (innodb_default_row_format), so it is parsed
+			// as no row format, the same as a definition that leaves the
+			// option out.
+			if option.UintValue > 0 && option.UintValue != ast.RowFormatDefault {
 				var rowFormat string
 
 				switch option.UintValue {
-				case 1: // RowFormatDefault
-					rowFormat = "DEFAULT"
-				case 2: // RowFormatDynamic
+				case ast.RowFormatDynamic:
 					rowFormat = "DYNAMIC"
-				case 3: // RowFormatFixed
+				case ast.RowFormatFixed:
 					rowFormat = "FIXED"
-				case 4: // RowFormatCompressed
+				case ast.RowFormatCompressed:
 					rowFormat = "COMPRESSED"
-				case 5: // RowFormatRedundant
+				case ast.RowFormatRedundant:
 					rowFormat = "REDUNDANT"
-				case 6: // RowFormatCompact
+				case ast.RowFormatCompact:
 					rowFormat = "COMPACT"
 				default:
 					rowFormat = fmt.Sprintf("UNKNOWN_%d", option.UintValue)
@@ -2617,6 +2620,13 @@ func (ct *CreateTable) diffTableOptions(target *CreateTable, opts *DiffOptions) 
 		if !ptrEqual(ct.TableOptions.getRowFormat(), target.TableOptions.getRowFormat()) {
 			if rowFormat := target.TableOptions.getRowFormat(); rowFormat != nil {
 				clauses = append(clauses, fmt.Sprintf("ROW_FORMAT=%s", *rowFormat))
+			} else {
+				// The target names no row format, so the table it describes
+				// has the engine default, which is what ROW_FORMAT=DEFAULT
+				// sets: it clears the stored option, and SHOW CREATE TABLE
+				// then omits it like the target does. Without it a table
+				// stuck on ROW_FORMAT=COMPACT could never be brought back.
+				clauses = append(clauses, "ROW_FORMAT=DEFAULT")
 			}
 		}
 		optionClause("KEY_BLOCK_SIZE", uintText(source.KeyBlockSize), uintText(dest.KeyBlockSize), "0")

@@ -2875,6 +2875,44 @@ func TestDiff_DiffOptions(t *testing.T) {
 			opts:     nil,
 			expected: "",
 		},
+		// A target without a row format clears the source's with
+		// ROW_FORMAT=DEFAULT, the option MySQL stores as none; a target that
+		// writes ROW_FORMAT=DEFAULT out is the same target.
+		{
+			name:     "RowFormatClearedWhenTargetOmitsIt",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY) ROW_FORMAT=COMPACT",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY)",
+			opts:     &DiffOptions{IgnoreAutoIncrement: true, IgnoreEngine: true, IgnoreRowFormat: false},
+			expected: "ALTER TABLE `t1` ROW_FORMAT=DEFAULT",
+		},
+		{
+			name:     "RowFormatDefaultParsesAsNone",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY) ROW_FORMAT=COMPACT",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY) ROW_FORMAT=DEFAULT",
+			opts:     &DiffOptions{IgnoreAutoIncrement: true, IgnoreEngine: true, IgnoreRowFormat: false},
+			expected: "ALTER TABLE `t1` ROW_FORMAT=DEFAULT",
+		},
+		{
+			name:     "RowFormatDefaultAgainstNoneIsNoop",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY) ROW_FORMAT=DEFAULT",
+			opts:     &DiffOptions{IgnoreAutoIncrement: true, IgnoreEngine: true, IgnoreRowFormat: false},
+			expected: "",
+		},
+		{
+			name:     "RowFormatAndKeyBlockSizeClearedTogether",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY) ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=8",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY)",
+			opts:     &DiffOptions{IgnoreAutoIncrement: true, IgnoreEngine: true, IgnoreRowFormat: false},
+			expected: "ALTER TABLE `t1` ROW_FORMAT=DEFAULT, KEY_BLOCK_SIZE=0",
+		},
+		{
+			name:     "RowFormatClearIgnoredByDefault",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY) ROW_FORMAT=COMPACT",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY)",
+			opts:     nil,
+			expected: "",
+		},
 
 		// Combined: ignore everything possible, still detect column + index changes
 		{

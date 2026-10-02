@@ -296,6 +296,52 @@ func TestDiffMySQLContracts(t *testing.T) {
 			target: "(id INT PRIMARY KEY) ROW_FORMAT=DYNAMIC",
 			opts:   &DiffOptions{IgnoreAutoIncrement: true, IgnoreEngine: true, IgnoreRowFormat: false},
 		},
+		// A row format the target leaves out. The diff emitted nothing for
+		// COMPACT -> omitted, and ROW_FORMAT=DEFAULT on the target re-emitted
+		// itself forever: MySQL stores it as no row format.
+		{
+			name:   "row format is cleared when the target omits it",
+			source: "(id INT PRIMARY KEY) ROW_FORMAT=COMPACT",
+			target: "(id INT PRIMARY KEY)",
+			opts:   &DiffOptions{IgnoreAutoIncrement: true, IgnoreEngine: true, IgnoreRowFormat: false},
+		},
+		{
+			name:   "row format is cleared by a target ROW_FORMAT=DEFAULT",
+			source: "(id INT PRIMARY KEY) ROW_FORMAT=COMPACT",
+			target: "(id INT PRIMARY KEY) ROW_FORMAT=DEFAULT",
+			opts:   &DiffOptions{IgnoreAutoIncrement: true, IgnoreEngine: true, IgnoreRowFormat: false},
+		},
+		{
+			name:   "explicit DYNAMIC row format is cleared when the target omits it",
+			source: "(id INT PRIMARY KEY) ROW_FORMAT=DYNAMIC",
+			target: "(id INT PRIMARY KEY)",
+			opts:   &DiffOptions{IgnoreAutoIncrement: true, IgnoreEngine: true, IgnoreRowFormat: false},
+		},
+		{
+			name:   "compressed row format is cleared when the target omits it",
+			source: "(id INT PRIMARY KEY) ROW_FORMAT=COMPRESSED",
+			target: "(id INT PRIMARY KEY)",
+			opts:   &DiffOptions{IgnoreAutoIncrement: true, IgnoreEngine: true, IgnoreRowFormat: false},
+		},
+		{
+			name:   "compressed row format and KEY_BLOCK_SIZE are cleared when the target omits them",
+			source: "(id INT PRIMARY KEY) ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=8",
+			target: "(id INT PRIMARY KEY)",
+			opts:   &DiffOptions{IgnoreAutoIncrement: true, IgnoreEngine: true, IgnoreRowFormat: false},
+		},
+		{
+			name:     "target ROW_FORMAT=DEFAULT against no row format is a no-op",
+			source:   "(id INT PRIMARY KEY)",
+			target:   "(id INT PRIMARY KEY) ROW_FORMAT=DEFAULT",
+			opts:     &DiffOptions{IgnoreAutoIncrement: true, IgnoreEngine: true, IgnoreRowFormat: false},
+			wantNoop: true,
+		},
+		{
+			name:     "row format is left alone by default",
+			source:   "(id INT PRIMARY KEY) ROW_FORMAT=COMPACT",
+			target:   "(id INT PRIMARY KEY)",
+			wantNoop: true,
+		},
 		// An index's SECONDARY_ENGINE_ATTRIBUTE.
 		{
 			name:   "index SECONDARY_ENGINE_ATTRIBUTE is applied",
