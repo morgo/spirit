@@ -109,10 +109,15 @@ func formatColumnDefinition(col *Column) string {
 		parts = append(parts, genClause)
 	}
 
-	// Nullable
-	if !col.Nullable {
+	// Nullable. A nullable AUTO_INCREMENT column writes its NULL after the
+	// AUTO_INCREMENT attribute: MySQL applies the attributes in order and
+	// AUTO_INCREMENT implies NOT NULL, so `int NULL AUTO_INCREMENT` is stored
+	// NOT NULL (see autoIncrementNotNullNormalizer).
+	nullAfterAutoInc := col.Nullable && col.AutoInc
+	switch {
+	case !col.Nullable:
 		parts = append(parts, "NOT NULL")
-	} else {
+	case !nullAfterAutoInc:
 		parts = append(parts, "NULL")
 	}
 
@@ -184,6 +189,9 @@ func formatColumnDefinition(col *Column) string {
 	// Auto increment
 	if col.AutoInc {
 		parts = append(parts, "AUTO_INCREMENT")
+		if nullAfterAutoInc {
+			parts = append(parts, "NULL")
+		}
 	}
 
 	// Invisible column (MySQL 8.0.23+), reported after AUTO_INCREMENT and

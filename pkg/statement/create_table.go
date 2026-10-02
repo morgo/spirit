@@ -298,6 +298,28 @@ func (c *Column) declaresNull() bool {
 	return false
 }
 
+// declaresNullAfterAutoIncrement reports whether a NULL attribute follows the
+// AUTO_INCREMENT attribute in the column definition. MySQL applies the
+// attributes in order — AUTO_INCREMENT implies NOT NULL and a later NULL
+// clears it — so this is the one spelling of a nullable AUTO_INCREMENT column
+// (see autoIncrementNotNullNormalizer). A column built without a Raw
+// definition declares nothing.
+func (c *Column) declaresNullAfterAutoIncrement() bool {
+	if c.Raw == nil {
+		return false
+	}
+	seenAutoInc, nullAfter := false, false
+	for _, opt := range c.Raw.Options {
+		switch opt.Tp { //nolint:exhaustive
+		case ast.ColumnOptionAutoIncrement:
+			seenAutoInc, nullAfter = true, false
+		case ast.ColumnOptionNull:
+			nullAfter = seenAutoInc
+		}
+	}
+	return nullAfter
+}
+
 // ForeignKeyReference represents a foreign key reference
 type ForeignKeyReference struct {
 	Table    string   `json:"table"`

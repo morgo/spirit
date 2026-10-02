@@ -230,6 +230,35 @@ func TestDiff(t *testing.T) {
 			expected: "",
 		},
 		{
+			// AUTO_INCREMENT implies NOT NULL: MySQL stores every one of these
+			// as `int NOT NULL AUTO_INCREMENT`, so none of them is a change.
+			name:     "AutoIncrementImpliesNotNull",
+			source:   "CREATE TABLE t1 (id INT NOT NULL AUTO_INCREMENT, x INT PRIMARY KEY, UNIQUE KEY k (id))",
+			target:   "CREATE TABLE t1 (id INT AUTO_INCREMENT, x INT PRIMARY KEY, UNIQUE KEY k (id))",
+			expected: "",
+		},
+		{
+			name:     "AutoIncrementNullBeforeIsNotNull",
+			source:   "CREATE TABLE t1 (id INT NOT NULL AUTO_INCREMENT, x INT PRIMARY KEY, UNIQUE KEY k (id))",
+			target:   "CREATE TABLE t1 (id INT NULL AUTO_INCREMENT, x INT PRIMARY KEY, UNIQUE KEY k (id))",
+			expected: "",
+		},
+		{
+			name:     "AutoIncrementDefaultNullDropped",
+			source:   "CREATE TABLE t1 (id INT NOT NULL AUTO_INCREMENT, x INT PRIMARY KEY, UNIQUE KEY k (id))",
+			target:   "CREATE TABLE t1 (id INT AUTO_INCREMENT DEFAULT NULL, x INT PRIMARY KEY, UNIQUE KEY k (id))",
+			expected: "",
+		},
+		{
+			// A NULL after the AUTO_INCREMENT is the one spelling of a nullable
+			// AUTO_INCREMENT column, and the MODIFY has to keep that order or
+			// MySQL stores it NOT NULL.
+			name:     "AutoIncrementNullAfterIsNullable",
+			source:   "CREATE TABLE t1 (id INT NOT NULL AUTO_INCREMENT, x INT PRIMARY KEY, UNIQUE KEY k (id))",
+			target:   "CREATE TABLE t1 (id INT AUTO_INCREMENT NULL, x INT PRIMARY KEY, UNIQUE KEY k (id))",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `id` int AUTO_INCREMENT NULL",
+		},
+		{
 			// Reverse direction: the user's BOOLEAN schema as source, canonical
 			// tinyint(1) as target. Still equal — canonicalization is symmetric.
 			name:     "BooleanVsCanonicalTinyint",

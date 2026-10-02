@@ -348,14 +348,39 @@ func TestDiffMySQLContracts(t *testing.T) {
 		},
 		{
 			name:     "index KEY_BLOCK_SIZE is a no-op on an uncompressed table",
-			source:   "(id INT NOT NULL AUTO_INCREMENT, x INT PRIMARY KEY, UNIQUE KEY k (id))",
-			target:   "(id INT NOT NULL AUTO_INCREMENT, x INT PRIMARY KEY, UNIQUE KEY k (id) KEY_BLOCK_SIZE=8)",
+			source:   "(id INT AUTO_INCREMENT, x INT PRIMARY KEY, UNIQUE KEY k (id))",
+			target:   "(id INT AUTO_INCREMENT, x INT PRIMARY KEY, UNIQUE KEY k (id) KEY_BLOCK_SIZE=8)",
 			wantNoop: true,
 		},
 		{
 			name:   "index KEY_BLOCK_SIZE is applied on a compressed table",
 			source: "(id INT PRIMARY KEY, c INT, KEY k (c)) ROW_FORMAT=COMPRESSED",
 			target: "(id INT PRIMARY KEY, c INT, KEY k (c) KEY_BLOCK_SIZE=8) ROW_FORMAT=COMPRESSED",
+		},
+
+		// AUTO_INCREMENT implies NOT NULL (autoIncrementNotNullNormalizer).
+		{
+			name:     "AUTO_INCREMENT without NOT NULL is NOT NULL",
+			source:   "(id INT NOT NULL AUTO_INCREMENT, x INT PRIMARY KEY, UNIQUE KEY k (id))",
+			target:   "(id INT AUTO_INCREMENT, x INT PRIMARY KEY, UNIQUE KEY k (id))",
+			wantNoop: true,
+		},
+		{
+			name:     "NULL before AUTO_INCREMENT is NOT NULL",
+			source:   "(id INT NOT NULL AUTO_INCREMENT, x INT PRIMARY KEY, UNIQUE KEY k (id))",
+			target:   "(id INT NULL AUTO_INCREMENT, x INT PRIMARY KEY, UNIQUE KEY k (id))",
+			wantNoop: true,
+		},
+		{
+			name:     "AUTO_INCREMENT DEFAULT NULL is NOT NULL with no default",
+			source:   "(id INT NOT NULL AUTO_INCREMENT, x INT PRIMARY KEY, UNIQUE KEY k (id))",
+			target:   "(id INT AUTO_INCREMENT DEFAULT NULL, x INT PRIMARY KEY, UNIQUE KEY k (id))",
+			wantNoop: true,
+		},
+		{
+			name:   "adding an AUTO_INCREMENT column without NOT NULL",
+			source: "(x INT PRIMARY KEY)",
+			target: "(x INT PRIMARY KEY, id INT AUTO_INCREMENT, UNIQUE KEY k (id))",
 		},
 	}
 	for _, c := range contracts {
@@ -396,4 +421,32 @@ func TestDiffContractInlineUniqueKeepsLiveName(t *testing.T) {
 	stmts, err = again.Diff(dst, nil)
 	require.NoError(t, err)
 	require.Empty(t, stmts)
+}
+
+// TestDiffContractNullableAutoIncrement: a NULL written after the
+// AUTO_INCREMENT is the one spelling of a nullable AUTO_INCREMENT column, and
+// the emitted MODIFY has to keep that order, because MySQL applies the
+// attributes in order and `int NULL AUTO_INCREMENT` is stored NOT NULL. This
+// is not a diffContract because the result cannot converge: MySQL reports the
+// nullable column as `int AUTO_INCREMENT`, which as CREATE TABLE input means
+// NOT NULL, so a second diff reads the live column back as NOT NULL.
+func TestDiffContractNullableAutoIncrement(t *testing.T) {
+	_, db := testutils.CreateUniqueTestDatabase(t)
+	ctx := t.Context()
+	_, err := db.ExecContext(ctx, "CREATE TABLE t (id INT NOT NULL AUTO_INCREMENT, x INT PRIMARY KEY, UNIQUE KEY k (id))")
+	require.NoError(t, err)
+	src, err := ParseCreateTable(showCreateTable(t, db, "t"))
+	require.NoError(t, err)
+	dst, err := ParseCreateTable("CREATE TABLE t (id INT AUTO_INCREMENT NULL, x INT PRIMARY KEY, UNIQUE KEY k (id))")
+	require.NoError(t, err)
+	stmts, err := src.Diff(dst, nil)
+	require.NoError(t, err)
+	require.Len(t, stmts, 1)
+	assert.Equal(t, "ALTER TABLE `t` MODIFY COLUMN `id` int AUTO_INCREMENT NULL", stmts[0].Statement)
+	_, err = db.ExecContext(ctx, stmts[0].Statement)
+	require.NoError(t, err)
+	var isNullable string
+	require.NoError(t, db.QueryRowContext(ctx, "SELECT IS_NULLABLE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 't' AND COLUMN_NAME = 'id'").Scan(&isNullable))
+	assert.Equal(t, "YES", isNullable)
+	assert.Contains(t, showCreateTable(t, db, "t"), "`id` int AUTO_INCREMENT,\n")
 }
