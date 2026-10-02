@@ -712,6 +712,9 @@ func TestDiffMySQLContracts(t *testing.T) {
 		// Generated columns changing to or from VIRTUAL. The diff used to emit
 		// a MODIFY COLUMN, which MySQL rejects (error 3106); the column is
 		// dropped and added back, with whatever reads it. See rebuiltColumns.
+		// A VIRTUAL column becoming a regular column is staged through STORED
+		// so that it keeps its values (see virtualToRegularIntermediate and
+		// TestDiffIntegrationVirtualToRegularKeepsValues, which checks them).
 		{
 			name:   "generated column VIRTUAL to STORED is rebuilt",
 			source: "(id INT PRIMARY KEY, c INT, g INT AS (c + 1) VIRTUAL)",
@@ -723,9 +726,34 @@ func TestDiffMySQLContracts(t *testing.T) {
 			target: "(id INT PRIMARY KEY, c INT, g INT AS (c + 1) VIRTUAL)",
 		},
 		{
-			name:   "generated column VIRTUAL to regular is rebuilt",
+			name:   "generated column VIRTUAL to regular is staged through STORED",
 			source: "(id INT PRIMARY KEY, c INT, g INT AS (c + 1) VIRTUAL)",
 			target: "(id INT PRIMARY KEY, c INT, g INT)",
+		},
+		{
+			name:   "generated column VIRTUAL to regular with a type change and other changes",
+			source: "(id INT PRIMARY KEY, c INT, g INT AS (c + 1) VIRTUAL)",
+			target: "(id INT PRIMARY KEY, c INT, g BIGINT NOT NULL DEFAULT 0, d INT)",
+		},
+		{
+			name:   "generated column VIRTUAL to regular while its read column is dropped",
+			source: "(id INT PRIMARY KEY, c INT, g INT AS (c + 1) VIRTUAL)",
+			target: "(id INT PRIMARY KEY, g INT)",
+		},
+		{
+			name:   "generated column VIRTUAL to regular under a functional index and a CHECK",
+			source: "(id INT PRIMARY KEY, c INT, g INT AS (c + 1) VIRTUAL, KEY kf ((g + 1)), CONSTRAINT ck CHECK (g > 0))",
+			target: "(id INT PRIMARY KEY, c INT, g INT, KEY kf ((g + 1)), CONSTRAINT ck CHECK (g > 0))",
+		},
+		{
+			name:   "generated column VIRTUAL to regular with a dependent generated column",
+			source: "(id INT PRIMARY KEY, c INT, g INT AS (c + 1) VIRTUAL, s INT AS (g + 1) STORED)",
+			target: "(id INT PRIMARY KEY, c INT, g INT, s INT AS (g + 1) STORED)",
+		},
+		{
+			name:   "dependent STORED column becoming regular is modified, not rebuilt",
+			source: "(id INT PRIMARY KEY, c INT, g INT AS (c + 1) VIRTUAL, s INT AS (g + 1) STORED)",
+			target: "(id INT PRIMARY KEY, c INT, g INT AS (c + 1) STORED, s INT)",
 		},
 		{
 			name:   "regular column to generated VIRTUAL is rebuilt",

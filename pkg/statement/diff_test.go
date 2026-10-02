@@ -397,10 +397,48 @@ func TestDiff(t *testing.T) {
 			expected: "ALTER TABLE `t1` DROP COLUMN `g`, ADD COLUMN `g` int GENERATED ALWAYS AS (`c`+1) VIRTUAL NULL",
 		},
 		{
-			name:     "GeneratedVirtualToRegularIsRebuilt",
-			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, g INT AS (c + 1) VIRTUAL)",
-			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, g INT)",
-			expected: "ALTER TABLE `t1` DROP COLUMN `g`, ADD COLUMN `g` int NULL",
+			// A VIRTUAL column holds no data, so a DROP+ADD of the regular
+			// column would leave it NULL. It is rebuilt STORED first, which
+			// MySQL fills from the expression, then MODIFYed into a regular
+			// column, which keeps the values. See virtualToRegularIntermediate.
+			name:   "GeneratedVirtualToRegularIsStagedThroughStored",
+			source: "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, g INT AS (c + 1) VIRTUAL)",
+			target: "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, g INT)",
+			expectedStatements: []string{
+				"ALTER TABLE `t1` DROP COLUMN `g`, ADD COLUMN `g` int GENERATED ALWAYS AS (`c`+1) STORED NULL",
+				"ALTER TABLE `t1` MODIFY COLUMN `g` int NULL",
+			},
+		},
+		{
+			// The second statement carries the type and attribute changes,
+			// and everything else the diff emits.
+			name:   "GeneratedVirtualToRegularStagesOtherChangesSecond",
+			source: "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, g INT AS (c + 1) VIRTUAL)",
+			target: "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, g BIGINT NOT NULL DEFAULT 0, d INT)",
+			expectedStatements: []string{
+				"ALTER TABLE `t1` DROP COLUMN `g`, ADD COLUMN `g` int GENERATED ALWAYS AS (`c`+1) STORED NULL",
+				"ALTER TABLE `t1` MODIFY COLUMN `g` bigint NOT NULL DEFAULT 0, ADD COLUMN `d` int NULL",
+			},
+		},
+		{
+			// Dropping the column the expression read is fine in the second
+			// statement: the regular column no longer reads it.
+			name:   "GeneratedVirtualToRegularDropsReadColumnSecond",
+			source: "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, g INT AS (c + 1) VIRTUAL)",
+			target: "CREATE TABLE t1 (id INT PRIMARY KEY, g INT)",
+			expectedStatements: []string{
+				"ALTER TABLE `t1` DROP COLUMN `g`, ADD COLUMN `g` int GENERATED ALWAYS AS (`c`+1) STORED NULL",
+				"ALTER TABLE `t1` DROP COLUMN `c`, MODIFY COLUMN `g` int NULL",
+			},
+		},
+		{
+			// A STORED column reading a rebuilt column is not rebuilt with it
+			// when the target makes it regular: the MODIFY keeps its values,
+			// and MySQL accepts it in the same ALTER as the DROP.
+			name:     "GeneratedDependentToRegularIsModifiedNotRebuilt",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, g INT AS (c + 1) VIRTUAL, s INT AS (g + 1) STORED)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, g INT AS (c + 1) STORED, s INT)",
+			expected: "ALTER TABLE `t1` DROP COLUMN `g`, ADD COLUMN `g` int GENERATED ALWAYS AS (`c`+1) STORED NULL AFTER `c`, MODIFY COLUMN `s` int NULL",
 		},
 		{
 			name:     "RegularToGeneratedVirtualIsRebuilt",

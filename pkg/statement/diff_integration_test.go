@@ -3368,3 +3368,98 @@ func TestDiffIntegrationEnumSetMemberSpacesNoTableDefault(t *testing.T) {
 		})
 	}
 }
+
+// TestDiffIntegrationVirtualToRegularKeepsValues verifies, on a populated
+// table, that a VIRTUAL generated column the target makes a regular column
+// keeps the values its expression produced. MySQL refuses the direct MODIFY
+// (error 3106), and a DROP+ADD of the regular column leaves it NULL because a
+// VIRTUAL column holds no data. The diff stages the change through a STORED
+// column, which MySQL fills from the expression and whose values a MODIFY
+// into a regular column keeps (see virtualToRegularIntermediate). Each case
+// also checks that the live table ends up as a direct CREATE of the target
+// and that a second diff is empty.
+func TestDiffIntegrationVirtualToRegularKeepsValues(t *testing.T) {
+	cases := []struct {
+		name   string
+		source string
+		target string
+		query  string // one row; every column must read as want
+		want   []int64
+	}{
+		{
+			name:   "regular column keeps the generated value",
+			source: "(id INT PRIMARY KEY, c INT, g INT AS (c + 1) VIRTUAL)",
+			target: "(id INT PRIMARY KEY, c INT, g INT)",
+			query:  "SELECT g FROM t",
+			want:   []int64{41},
+		},
+		{
+			name:   "type and attribute changes ride the second statement",
+			source: "(id INT PRIMARY KEY, c INT, g INT AS (c + 1) VIRTUAL)",
+			target: "(id INT PRIMARY KEY, c INT, g BIGINT NOT NULL DEFAULT 0, d INT)",
+			query:  "SELECT g FROM t",
+			want:   []int64{41},
+		},
+		{
+			name:   "the read column can go in the second statement",
+			source: "(id INT PRIMARY KEY, c INT, g INT AS (c + 1) VIRTUAL)",
+			target: "(id INT PRIMARY KEY, g INT)",
+			query:  "SELECT g FROM t",
+			want:   []int64{41},
+		},
+		{
+			name:   "a functional index and a CHECK reading the column are re-added",
+			source: "(id INT PRIMARY KEY, c INT, g INT AS (c + 1) VIRTUAL, KEY kf ((g + 1)), CONSTRAINT ck CHECK (g > 0))",
+			target: "(id INT PRIMARY KEY, c INT, g INT, KEY kf ((g + 1)), CONSTRAINT ck CHECK (g > 0))",
+			query:  "SELECT g FROM t",
+			want:   []int64{41},
+		},
+		{
+			name:   "a dependent generated column is recomputed from the kept value",
+			source: "(id INT PRIMARY KEY, c INT, g INT AS (c + 1) VIRTUAL, s INT AS (g + 1) STORED)",
+			target: "(id INT PRIMARY KEY, c INT, g INT, s INT AS (g + 1) STORED)",
+			query:  "SELECT g, s FROM t",
+			want:   []int64{41, 42},
+		},
+		{
+			// The STORED column s reads g, which is rebuilt. Rebuilding s with
+			// it would have dropped its values; the MODIFY keeps them.
+			name:   "a dependent STORED column becoming regular keeps its values",
+			source: "(id INT PRIMARY KEY, c INT, g INT AS (c + 1) VIRTUAL, s INT AS (g + 1) STORED)",
+			target: "(id INT PRIMARY KEY, c INT, g INT AS (c + 1) STORED, s INT)",
+			query:  "SELECT g, s FROM t",
+			want:   []int64{41, 42},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, db := testutils.CreateUniqueTestDatabase(t)
+			exec := func(stmt string) {
+				t.Helper()
+				_, err := db.ExecContext(t.Context(), stmt)
+				require.NoError(t, err, "executing: %s", stmt)
+			}
+			exec("CREATE TABLE t " + c.target)
+			expected := showCreateTable(t, db, "t")
+			exec("DROP TABLE t")
+
+			exec("CREATE TABLE t " + c.source)
+			exec("INSERT INTO t (id, c) VALUES (1, 40)")
+			stmts := diffLiveTable(t, db, "t", "CREATE TABLE t "+c.target)
+			require.NotEmpty(t, stmts)
+			execStatements(t, db, stmts)
+
+			got := make([]sql.NullInt64, len(c.want))
+			dest := make([]any, len(got))
+			for i := range got {
+				dest[i] = &got[i]
+			}
+			require.NoError(t, db.QueryRowContext(t.Context(), c.query).Scan(dest...))
+			for i, want := range c.want {
+				assert.Equal(t, sql.NullInt64{Int64: want, Valid: true}, got[i], "column %d of %q", i, c.query)
+			}
+			assert.Equal(t, expected, showCreateTable(t, db, "t"))
+			requireConverged(t, db, "t", "CREATE TABLE t "+c.target)
+		})
+	}
+}

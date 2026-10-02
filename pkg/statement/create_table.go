@@ -1734,6 +1734,23 @@ func (ct *CreateTable) Diff(target *CreateTable, opts *DiffOptions) ([]*Abstract
 		return nil, fmt.Errorf("invalid target table %q: %w", target.TableName, err)
 	}
 
+	// A VIRTUAL generated column that the target makes a regular column is
+	// converted in two statements so that it keeps its values: the first
+	// rebuilds it as a STORED generated column, which MySQL fills from the
+	// expression; the second is this diff from that intermediate table, in
+	// which the column is a MODIFY (see virtualToRegularIntermediate).
+	if intermediate := ct.virtualToRegularIntermediate(target); intermediate != nil {
+		first, err := ct.Diff(intermediate, opts)
+		if err != nil {
+			return nil, err
+		}
+		rest, err := intermediate.Diff(target, opts)
+		if err != nil {
+			return nil, err
+		}
+		return append(first, rest...), nil
+	}
+
 	var alterClauses []string
 
 	// The columns MySQL cannot MODIFY into their target definition are
@@ -1879,19 +1896,26 @@ func (ct *CreateTable) buildAlterStatement(clauses []string, partitionClause str
 // refuses to change a column to or from a VIRTUAL generated column in place
 // (error 3106, "Changing the STORED status"), in every direction: VIRTUAL to
 // STORED, STORED to VIRTUAL, VIRTUAL to a regular column and a regular column
-// to VIRTUAL. Only the regular/STORED pair is a MODIFY. The drop loses nothing
-// a MODIFY would have kept: a generated column holds no data of its own, and
-// MySQL fills the regular column such a change leaves behind with its default
-// either way. MySQL recomputes the values from the new expression when it adds
-// the column.
+// to VIRTUAL. Only the regular/STORED pair is a MODIFY. A generated column
+// holds no data of its own, so dropping one loses nothing: MySQL recomputes
+// it from the new expression when it adds the column. A VIRTUAL column that
+// becomes a regular column is the exception, because the regular column has
+// to keep the values the expression produced; Diff never asks this function
+// about that transition directly but stages it through a STORED intermediate
+// first (see virtualToRegularIntermediate), from which the regular column is
+// a MODIFY that keeps the values.
 //
 // A generated column that reads a rebuilt column blocks its DROP (error 3108)
-// and is rebuilt with it, transitively. The index and constraint diffs then
-// drop and re-add the functional indexes and CHECK constraints that read a
-// rebuilt column (errors 3837 and 3959); an index that names the column as a
-// plain key part survives the rebuild on its own. A foreign key on a rebuilt
-// column is not handled: MySQL rejects the DROP (error 1828), and the diff
-// lets that error surface rather than drop a referential constraint.
+// and is rebuilt with it, transitively — unless the target makes it a regular
+// column. Then it is left to the MODIFY, which MySQL accepts in the same
+// ALTER as the DROP of the column it read, because the modified column no
+// longer reads anything; the rebuild would have dropped a STORED column's
+// values for nothing. The index and constraint diffs drop and re-add the
+// functional indexes and CHECK constraints that read a rebuilt column (errors
+// 3837 and 3959); an index that names the column as a plain key part survives
+// the rebuild on its own. A foreign key on a rebuilt column is not handled:
+// MySQL rejects the DROP (error 1828), and the diff lets that error surface
+// rather than drop a referential constraint.
 func (ct *CreateTable) rebuiltColumns(target *CreateTable) map[string]bool {
 	targetColumns := make(map[string]*Column, len(target.Columns))
 	for i := range target.Columns {
@@ -1917,8 +1941,8 @@ func (ct *CreateTable) rebuiltColumns(target *CreateTable) map[string]bool {
 			if rebuilt[name] || sourceCol.GeneratedExpr == nil {
 				continue
 			}
-			if _, kept := targetColumns[name]; !kept {
-				continue // dropped anyway
+			if targetCol, kept := targetColumns[name]; !kept || targetCol.GeneratedExpr == nil {
+				continue // dropped anyway, or modified into a regular column
 			}
 			if expressionReadsAny(p, *sourceCol.GeneratedExpr, rebuilt) {
 				rebuilt[name] = true
@@ -1927,6 +1951,46 @@ func (ct *CreateTable) rebuiltColumns(target *CreateTable) map[string]bool {
 		}
 	}
 	return rebuilt
+}
+
+// virtualToRegularIntermediate returns the table ct becomes once every VIRTUAL
+// generated column that target declares as a regular column has been rebuilt
+// as a STORED generated column with its source expression, or nil when there
+// is no such column. Diff converts those columns through it in two statements.
+//
+// MySQL refuses the direct MODIFY (error 3106) and a DROP+ADD of the regular
+// column leaves it NULL: a VIRTUAL column holds no data, so there is nothing
+// for the added column to inherit, and the values the expression produced are
+// lost (a row with c=40 under `g INT AS (c+1) VIRTUAL` reads g=41 before and
+// NULL after). A STORED column is filled from the expression when it is added,
+// and MySQL does keep the values of a STORED column that a MODIFY turns into a
+// regular one. So the first statement rebuilds the column STORED, at its place
+// and with whatever reads it (the ordinary rebuild, see rebuiltColumns), and
+// the second MODIFYs it into the target definition, type and attribute changes
+// included, alongside everything else the diff emits. The intermediate differs
+// from ct only in the STORED keyword of those columns, so the first statement
+// changes nothing else, and the expression still reads the source columns,
+// which the second statement is free to drop or change.
+func (ct *CreateTable) virtualToRegularIntermediate(target *CreateTable) *CreateTable {
+	targetColumns := make(map[string]*Column, len(target.Columns))
+	for i := range target.Columns {
+		targetColumns[strings.ToLower(target.Columns[i].Name)] = &target.Columns[i]
+	}
+	var intermediate *CreateTable
+	for i := range ct.Columns {
+		sourceCol := &ct.Columns[i]
+		targetCol, ok := targetColumns[strings.ToLower(sourceCol.Name)]
+		if !ok || !isVirtualGenerated(sourceCol) || targetCol.GeneratedExpr != nil {
+			continue
+		}
+		if intermediate == nil {
+			copied := *ct
+			copied.Columns = slices.Clone(ct.Columns)
+			intermediate = &copied
+		}
+		intermediate.Columns[i].GeneratedStored = true
+	}
+	return intermediate
 }
 
 // isVirtualGenerated reports whether col is a VIRTUAL generated column.
