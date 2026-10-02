@@ -3738,11 +3738,11 @@ func TestDiffPartitionStorageOptionChange(t *testing.T) {
 }
 
 // A table-level KEY_BLOCK_SIZE change (compared under IgnoreRowFormat: false)
-// leaves every index that stored the old size reporting it, so the diff
-// re-creates them: the primary key in the same ALTER, every other index by a
-// swap after it. See indexesKeepOldBlockSize. Each plan is verified against
-// MySQL in TestDiffMySQLContracts.
-func TestDiffTableKeyBlockSizeChangeResizesIndexes(t *testing.T) {
+// emits only the new size. On a table that stays compressed MySQL keeps the old
+// size on the existing indexes, so that change does not converge; compressed
+// tables are out of scope, and the diff does not re-create the indexes (the
+// primary key would need a DROP PRIMARY KEY, which Spirit refuses).
+func TestDiffTableKeyBlockSizeChange(t *testing.T) {
 	compared := NewDiffOptions()
 	compared.IgnoreRowFormat = false
 	tests := []struct {
@@ -3753,46 +3753,22 @@ func TestDiffTableKeyBlockSizeChangeResizesIndexes(t *testing.T) {
 		expected []string
 	}{
 		{
-			name:   "Resized",
-			source: "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k (c), UNIQUE KEY u (c, id)) ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=8",
-			target: "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k (c), UNIQUE KEY u (c, id)) ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=4",
-			opts:   compared,
-			expected: []string{
-				"ALTER TABLE `t1` DROP PRIMARY KEY, ADD PRIMARY KEY (`id`), KEY_BLOCK_SIZE=4",
-				"ALTER TABLE `t1` ADD INDEX `_k_new` (`c`), DROP INDEX `k`, ADD UNIQUE INDEX `_u_new` (`c`, `id`), DROP INDEX `u`",
-				"ALTER TABLE `t1` RENAME INDEX `_k_new` TO `k`, RENAME INDEX `_u_new` TO `u`",
-			},
+			name:     "Resized",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k (c), UNIQUE KEY u (c, id)) ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=8",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k (c), UNIQUE KEY u (c, id)) ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=4",
+			opts:     compared,
+			expected: []string{"ALTER TABLE `t1` KEY_BLOCK_SIZE=4"},
 		},
 		{
-			// The implicit size (ROW_FORMAT=COMPRESSED alone) is a change too:
-			// the indexes would report the old explicit size.
-			name:   "ToTheImplicitSize",
-			source: "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k (c)) ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=4",
-			target: "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k (c)) ROW_FORMAT=COMPRESSED",
-			opts:   compared,
-			expected: []string{
-				"ALTER TABLE `t1` DROP PRIMARY KEY, ADD PRIMARY KEY (`id`), KEY_BLOCK_SIZE=0",
-				"ALTER TABLE `t1` ADD INDEX `_k_new` (`c`), DROP INDEX `k`",
-				"ALTER TABLE `t1` RENAME INDEX `_k_new` TO `k`",
-			},
-		},
-		{
-			// An index the target gives the old size explicitly is an option
-			// change on the live index, which reports none: it is swapped
-			// with its own size, which MySQL then reports.
-			name:   "IndexKeepingItsOwnSize",
-			source: "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k (c)) ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=8",
-			target: "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k (c) KEY_BLOCK_SIZE=8) ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=4",
-			opts:   compared,
-			expected: []string{
-				"ALTER TABLE `t1` DROP PRIMARY KEY, ADD PRIMARY KEY (`id`), KEY_BLOCK_SIZE=4",
-				"ALTER TABLE `t1` ADD INDEX `_k_new` (`c`) KEY_BLOCK_SIZE=8, DROP INDEX `k`",
-				"ALTER TABLE `t1` RENAME INDEX `_k_new` TO `k`",
-			},
+			name:     "ToTheImplicitSize",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k (c)) ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=4",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k (c)) ROW_FORMAT=COMPRESSED",
+			opts:     compared,
+			expected: []string{"ALTER TABLE `t1` KEY_BLOCK_SIZE=0"},
 		},
 		{
 			// A table without an explicit size stores none on its indexes, so
-			// they take the new one on their own.
+			// they take the new one on their own: this one converges.
 			name:     "FromTheImplicitSize",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k (c)) ROW_FORMAT=COMPRESSED",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k (c)) ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=4",
