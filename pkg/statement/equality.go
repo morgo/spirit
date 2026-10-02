@@ -158,21 +158,6 @@ func indexNeedsSeparateRebuild(source, target *Index) bool {
 	return !engineAttributeEqual(source.SecondaryEngineAttribute, target.SecondaryEngineAttribute)
 }
 
-// onlyIgnoredOptionsDiffer reports whether the options indexNeedsSeparateRebuild
-// names (WITH PARSER, KEY_BLOCK_SIZE, SECONDARY_ENGINE_ATTRIBUTE) are the only
-// difference between two indexes with the same column list: a same-name DROP
-// and ADD of the index in one ALTER would then change nothing.
-func onlyIgnoredOptionsDiffer(source, target *Index) bool {
-	if !indexNeedsSeparateRebuild(source, target) {
-		return false
-	}
-	withSourceOptions := *target
-	withSourceOptions.ParserName = source.ParserName
-	withSourceOptions.KeyBlockSize = source.KeyBlockSize
-	withSourceOptions.SecondaryEngineAttribute = source.SecondaryEngineAttribute
-	return indexesEqualIgnoreVisibility(source, &withSourceOptions)
-}
-
 // indexColumnListsEqual checks if two index column lists are equal
 func indexColumnListsEqual(a, b []IndexColumn) bool {
 	if len(a) != len(b) {

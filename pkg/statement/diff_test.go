@@ -22,6 +22,12 @@ func TestDiff(t *testing.T) {
 		expectedStatements []string
 	}{
 		{
+			name:     "PrimaryKeyCommentChange",
+			source:   "CREATE TABLE t1 (id INT, PRIMARY KEY (id) COMMENT 'before')",
+			target:   "CREATE TABLE t1 (id INT, PRIMARY KEY (id) COMMENT 'after')",
+			expected: "ALTER TABLE `t1` DROP PRIMARY KEY, ADD PRIMARY KEY (`id`) COMMENT 'after'",
+		},
+		{
 			name:     "NoChanges",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY)",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY)",
@@ -3792,38 +3798,6 @@ func TestDiffTableKeyBlockSizeChange(t *testing.T) {
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k (c), UNIQUE KEY u (c, id)) ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=4",
 			opts:     compared,
 			expected: []string{"ALTER TABLE `t1` KEY_BLOCK_SIZE=4"},
-		},
-		{
-			// The table after "Resized": MySQL keeps the old size on every
-			// index. The secondary indexes are swapped and take the new size.
-			// The primary key is left alone: a same-column DROP and ADD of it
-			// changes nothing, and Spirit refuses a DROP PRIMARY KEY.
-			name:   "ResizedThenSwapsTheSecondaryIndexes",
-			source: "CREATE TABLE t1 (id INT, c INT, PRIMARY KEY (id) KEY_BLOCK_SIZE=8, KEY k (c) KEY_BLOCK_SIZE=8, UNIQUE KEY u (c, id) KEY_BLOCK_SIZE=8) ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=4",
-			target: "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k (c), UNIQUE KEY u (c, id)) ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=4",
-			opts:   compared,
-			expected: []string{
-				"ALTER TABLE `t1` ADD INDEX `_k_new` (`c`), DROP INDEX `k`, ADD UNIQUE INDEX `_u_new` (`c`, `id`), DROP INDEX `u`",
-				"ALTER TABLE `t1` RENAME INDEX `_k_new` TO `k`, RENAME INDEX `_u_new` TO `u`",
-			},
-		},
-		{
-			// The table after the swaps: only the primary key keeps the old
-			// size, and the diff stays empty.
-			name:     "ResizedThenLeavesThePrimaryKey",
-			source:   "CREATE TABLE t1 (id INT, c INT, PRIMARY KEY (id) KEY_BLOCK_SIZE=8, KEY k (c), UNIQUE KEY u (c, id)) ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=4",
-			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k (c), UNIQUE KEY u (c, id)) ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=4",
-			opts:     compared,
-			expected: nil,
-		},
-		{
-			// A primary key change beyond its KEY_BLOCK_SIZE still drops and
-			// re-adds it, for Spirit's primarykey check to refuse.
-			name:     "PrimaryKeyCommentChangeIsStillPlanned",
-			source:   "CREATE TABLE t1 (id INT, c INT, PRIMARY KEY (id) KEY_BLOCK_SIZE=8) ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=4",
-			target:   "CREATE TABLE t1 (id INT, c INT, PRIMARY KEY (id) COMMENT 'pk') ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=4",
-			opts:     compared,
-			expected: []string{"ALTER TABLE `t1` DROP PRIMARY KEY, ADD PRIMARY KEY (`id`) COMMENT 'pk'"},
 		},
 		{
 			name:     "ToTheImplicitSize",
