@@ -2094,6 +2094,40 @@ func TestDiff(t *testing.T) {
 			expected: "ALTER TABLE `t1` DROP FOREIGN KEY `fk_user`, ADD CONSTRAINT `_fk_user_new2` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE",
 		},
 		{
+			// An index the target adds under the name is avoided: MySQL
+			// renames the index it created for the foreign key after the new
+			// constraint, so the ALTER would fail with error 1061.
+			name:     "ReplacementNameAvoidsATargetOnlyIndex",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, c INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, c INT, KEY _fk_user_new (c), CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)",
+			expected: "ALTER TABLE `t1` ADD INDEX `_fk_user_new` (`c`), DROP FOREIGN KEY `fk_user`, ADD CONSTRAINT `_fk_user_new2` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE",
+		},
+		{
+			// A foreign key the target adds under the name is avoided for
+			// the same reason (error 1061).
+			name:     "ReplacementNameAvoidsATargetOnlyForeignKey",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, c INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, c INT, CONSTRAINT _fk_user_new FOREIGN KEY (c) REFERENCES users(id), CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)",
+			expected: "ALTER TABLE `t1` DROP FOREIGN KEY `fk_user`, ADD CONSTRAINT `_fk_user_new2` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE, ADD CONSTRAINT `_fk_user_new` FOREIGN KEY (`c`) REFERENCES `users` (`id`)",
+		},
+		{
+			// A foreign key the same ALTER drops is avoided: MySQL keeps the
+			// index it created for that foreign key, under the same name, so
+			// the ALTER would fail with error 1061.
+			name:     "ReplacementNameAvoidsASourceOnlyForeignKey",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, c INT, CONSTRAINT _fk_user_new FOREIGN KEY (c) REFERENCES users(id), CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, c INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)",
+			expected: "ALTER TABLE `t1` DROP FOREIGN KEY `_fk_user_new`, DROP FOREIGN KEY `fk_user`, ADD CONSTRAINT `_fk_user_new2` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE",
+		},
+		{
+			// An index the same ALTER drops is avoided too. MySQL would
+			// accept its name, but the rule is every name on either side.
+			name:     "ReplacementNameAvoidsASourceOnlyIndex",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, c INT, KEY _fk_user_new (c), CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, c INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)",
+			expected: "ALTER TABLE `t1` DROP INDEX `_fk_user_new`, DROP FOREIGN KEY `fk_user`, ADD CONSTRAINT `_fk_user_new2` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE",
+		},
+		{
 			// The foreign key keeps the replacement name, and is paired with
 			// the target's by definition, as any renamed foreign key is.
 			name:     "ForeignKeyUnderReplacementNameNoDiff",
