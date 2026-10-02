@@ -586,6 +586,20 @@ func TestDiffMySQLContracts(t *testing.T) {
 			target:   `(id INT PRIMARY KEY, c INT SECONDARY_ENGINE_ATTRIBUTE='{"w": 1.2345678901234568e22, "y": 1.0, "z": 100.0}')`,
 			wantNoop: true,
 		},
+		// An integer against a double compares exactly: MySQL stores
+		// 9007199254740993 as an integer and 9007199254740992.0 as a double
+		// (reported as 9.007199254740992e15), and the comparison used to
+		// round the integer to a float64 first and see no change.
+		{
+			name:   "index attribute changing a large integer to a nearby double converges",
+			source: `(id INT PRIMARY KEY, c INT, KEY k (c) SECONDARY_ENGINE_ATTRIBUTE='{"x":9007199254740993}')`,
+			target: `(id INT PRIMARY KEY, c INT, KEY k (c) SECONDARY_ENGINE_ATTRIBUTE='{"x":9007199254740992.0}')`,
+		},
+		{
+			name:   "column attribute changing a double to the integer it rounds converges",
+			source: `(id INT PRIMARY KEY, c INT SECONDARY_ENGINE_ATTRIBUTE='{"x":9007199254740993.0}')`,
+			target: `(id INT PRIMARY KEY, c INT SECONDARY_ENGINE_ATTRIBUTE='{"x":9007199254740993}')`,
+		},
 		// An index whose options alone change is replaced by a swap: the
 		// replacement is added under a temporary name and the old index
 		// dropped in one statement, then renamed back. The standalone DROP

@@ -31,7 +31,14 @@ func TestJSONEqual(t *testing.T) {
 		{"integer against the same double", `{"y":1}`, `{"y": 1.0}`, true, true},
 		{"integer past uint64 is a double", `{"w":12345678901234567890123}`, `{"w": 1.2345678901234568e22}`, true, true},
 		{"doubles that differ", `1.5`, `1.25`, false, true},
-		{"a double close to an exact integer", `9007199254740993`, `9007199254740992.0`, true, true},
+		// An integer and a double compare exactly, not through a float64:
+		// MySQL stores 9007199254740993 as an integer and 9007199254740992.0
+		// as a double, and compares them unequal.
+		{"integer against a nearby double", `9007199254740993`, `9007199254740992.0`, false, true},
+		{"integer against the double it rounds to", `9007199254740993`, `9007199254740993.0`, false, true},
+		{"integer against its exact double", `9007199254740992`, `9007199254740992.0`, true, true},
+		{"integer against an exponent", `100`, `1e2`, true, true},
+		{"negative zero against zero", `-0.0`, `0`, true, true},
 		// Validity.
 		{"invalid left", `{`, `{}`, false, false},
 		{"invalid right", `{}`, `{"x":}`, false, false},
