@@ -858,9 +858,8 @@ func TestDiff(t *testing.T) {
 			expected: "ALTER TABLE `t1` ADD INDEX `idx_name` (`name`) COMMENT 'name index'",
 		},
 
-		// Fulltext indexes
-		// Note: Spatial indexes can not be supported, because the TiDB parser does not support them.
-		// i.e. GEOMETRY, POINT, LINESTRING, and other spatial column types.
+		// Fulltext indexes. (Spatial indexes are covered next to the SRID
+		// cases in diff_column_options_test.go.)
 		{
 			name:     "AddFulltextIndex",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, content TEXT)",

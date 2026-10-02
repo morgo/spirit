@@ -1689,8 +1689,11 @@ func (ct *CreateTable) parseExpression(expr ast.ExprNode) any {
 
 // Diff compares this CreateTable (source) with another CreateTable (target)
 // and returns ALTER TABLE statements needed to transform source into target.
-// Most changes produce a single statement, but some (e.g. changing partition type)
-// require multiple sequential statements.
+// Most changes produce a single statement, but some require multiple
+// sequential statements: a spatial index dropped before the primary ALTER
+// changes its column's SRID, an option-only index rebuild or a partition
+// clause that cannot share an ALTER after it. See pkg/statement/README.md,
+// "Statement Planning".
 // Returns nil if the tables are identical.
 // Returns an error if target has a primary key column that declares NULL, a
 // table MySQL refuses to create.
@@ -1720,8 +1723,22 @@ func (ct *CreateTable) Diff(target *CreateTable, opts *DiffOptions) ([]*Abstract
 	// 2. Diff indexes (DROP, ADD). Option-only index changes (same column
 	// list, different WITH PARSER / KEY_BLOCK_SIZE / etc.) are returned as
 	// separate statements because MySQL no-ops a combined DROP+ADD of the same
-	// index in a single ALTER.
-	indexClauses, separateIndexStatements := ct.diffIndexes(target, rebuilt)
+	// index in a single ALTER. A spatial index on a column whose SRID changes
+	// is dropped in a statement of its own before the primary ALTER, because
+	// MySQL rejects the SRID change while the index exists, even when the
+	// same ALTER drops it (error 3644); the target's index is added back in
+	// the primary ALTER.
+	var preStatements [][]string
+	spatialDrops := ct.spatialIndexesBlockingSRIDChange(target)
+	if len(spatialDrops) > 0 {
+		drops := make([]string, 0, len(spatialDrops))
+		for name := range spatialDrops {
+			drops = append(drops, fmt.Sprintf("DROP INDEX %s", sqlescape.EscapeIdentifier(name)))
+		}
+		slices.Sort(drops)
+		preStatements = append(preStatements, drops)
+	}
+	indexClauses, separateIndexStatements := ct.diffIndexes(target, rebuilt, spatialDrops)
 	alterClauses = append(alterClauses, indexClauses...)
 
 	// 3. Diff constraints (DROP, ADD)
@@ -1762,6 +1779,15 @@ func (ct *CreateTable) Diff(target *CreateTable, opts *DiffOptions) ([]*Abstract
 
 	// Build the result
 	var results []*AbstractStatement
+
+	// Statements the primary ALTER depends on (a spatial index drop)
+	for _, clauses := range preStatements {
+		stmt, err := ct.buildAlterStatement(clauses, "")
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, stmt)
+	}
 
 	// Primary statement (columns, indexes, constraints, table options, and
 	// any partition clause that can share an ALTER with them)
@@ -2145,6 +2171,46 @@ func pairInlineUniqueNames(sourceIdxList, targetIdxList []Index) {
 	}
 }
 
+// spatialIndexesBlockingSRIDChange returns the names of the source's spatial
+// indexes on a column whose SRID attribute the target changes: added, removed
+// or different. MySQL refuses to change a column's SRID while a spatial index
+// is on it (error 3644), even when the same ALTER drops the index, so Diff
+// drops them in a statement of its own before the primary ALTER and passes
+// them to diffIndexes as already gone, which adds the target's index on the
+// column, if any, back in the primary ALTER. Any other change to such a
+// column, and an SRID change on a column with no spatial index, is a plain
+// MODIFY.
+func (ct *CreateTable) spatialIndexesBlockingSRIDChange(target *CreateTable) map[string]bool {
+	targetColumns := make(map[string]*Column, len(target.Columns))
+	for i := range target.Columns {
+		targetColumns[strings.ToLower(target.Columns[i].Name)] = &target.Columns[i]
+	}
+	sridChanged := make(map[string]bool)
+	for i := range ct.Columns {
+		sourceCol := &ct.Columns[i]
+		name := strings.ToLower(sourceCol.Name)
+		if targetCol, ok := targetColumns[name]; ok && !ptrEqual(sourceCol.SRID, targetCol.SRID) {
+			sridChanged[name] = true
+		}
+	}
+	if len(sridChanged) == 0 {
+		return nil
+	}
+	blocking := make(map[string]bool)
+	for i := range ct.Indexes {
+		idx := &ct.Indexes[i]
+		if idx.Type != "SPATIAL" {
+			continue
+		}
+		for _, part := range idx.ColumnList {
+			if sridChanged[strings.ToLower(part.Name)] {
+				blocking[idx.Name] = true
+			}
+		}
+	}
+	return blocking
+}
+
 // diffIndexes compares indexes and returns ALTER clauses for differences.
 //
 // Most index changes are emitted into the combined ALTER (the returned
@@ -2161,13 +2227,19 @@ func pairInlineUniqueNames(sourceIdxList, targetIdxList []Index) {
 // (error 3837) unless the same ALTER drops it, so it is dropped and added back
 // from the target's definition in the combined ALTER. An index that names the
 // column as a plain key part survives the rebuild on its own.
-func (ct *CreateTable) diffIndexes(target *CreateTable, rebuilt map[string]bool) (clauses []string, separateStatements [][]string) {
+//
+// droppedBefore names the source indexes a statement before this ALTER has
+// already dropped (see spatialIndexesBlockingSRIDChange). They are diffed as
+// absent from the source: a same-named target index is a plain ADD.
+func (ct *CreateTable) diffIndexes(target *CreateTable, rebuilt, droppedBefore map[string]bool) (clauses []string, separateStatements [][]string) {
 	// Inline column-level UNIQUE / PRIMARY KEY have already been materialized
 	// into ct.Indexes by normalization (see indexNormalizer, primaryKeyNormalizer),
 	// so both index sets can be walked directly. The lists are copied because
 	// pairInlineUniqueNames renames entries, and the caller's tables must not
 	// change under a diff.
-	sourceIdxList := slices.Clone(ct.Indexes)
+	sourceIdxList := slices.DeleteFunc(slices.Clone(ct.Indexes), func(idx Index) bool {
+		return droppedBefore[idx.Name]
+	})
 	targetIdxList := slices.Clone(target.Indexes)
 	pairInlineUniqueNames(sourceIdxList, targetIdxList)
 

@@ -726,6 +726,44 @@ func TestDiffMySQLContracts(t *testing.T) {
 			source: "(id INT PRIMARY KEY, g INT AS (id + 1) VIRTUAL, h INT AS (g + 1) VIRTUAL, c INT)",
 			target: "(id INT PRIMARY KEY, g INT AS (id + 1) STORED, h INT AS (g + 1) VIRTUAL, c INT)",
 		},
+		// SRID changes under a spatial index. The diff used to emit one
+		// MODIFY, which MySQL rejects while the index exists (error 3644),
+		// even with a DROP INDEX in the same ALTER. See
+		// spatialIndexesBlockingSRIDChange.
+		{
+			name:   "SRID change under a spatial index",
+			source: "(id INT PRIMARY KEY, p POINT NOT NULL SRID 0, SPATIAL KEY k (p))",
+			target: "(id INT PRIMARY KEY, p POINT NOT NULL SRID 4326, SPATIAL KEY k (p))",
+		},
+		{
+			name:   "SRID added under a spatial index",
+			source: "(id INT PRIMARY KEY, p POINT NOT NULL, SPATIAL KEY k (p))",
+			target: "(id INT PRIMARY KEY, p POINT NOT NULL SRID 4326, SPATIAL KEY k (p))",
+		},
+		{
+			name:   "SRID removed under a spatial index",
+			source: "(id INT PRIMARY KEY, p POINT NOT NULL SRID 4326, SPATIAL KEY k (p))",
+			target: "(id INT PRIMARY KEY, p POINT NOT NULL, SPATIAL KEY k (p))",
+		},
+		{
+			// The SHOW CREATE TABLE comparison is textual, and a re-added
+			// index lists after the ones that stayed, in the order the diff
+			// adds them (sorted by clause text): kq is declared first, and
+			// ka sorts before kb.
+			name:   "SRID change under two spatial indexes keeps one on another column",
+			source: "(id INT PRIMARY KEY, p POINT NOT NULL SRID 0, q POINT NOT NULL SRID 0, SPATIAL KEY kq (q), SPATIAL KEY ka (p), SPATIAL KEY kb (p))",
+			target: "(id INT PRIMARY KEY, p POINT NOT NULL SRID 4326, q POINT NOT NULL SRID 0, SPATIAL KEY kq (q), SPATIAL KEY ka (p), SPATIAL KEY kb (p))",
+		},
+		{
+			name:   "SRID change with the spatial index removed",
+			source: "(id INT PRIMARY KEY, p POINT NOT NULL SRID 0, SPATIAL KEY k (p))",
+			target: "(id INT PRIMARY KEY, p POINT NOT NULL SRID 4326)",
+		},
+		{
+			name:   "comment change under a spatial index is a plain MODIFY",
+			source: "(id INT PRIMARY KEY, p POINT NOT NULL SRID 0, SPATIAL KEY k (p))",
+			target: "(id INT PRIMARY KEY, p POINT NOT NULL SRID 0 COMMENT 'x', SPATIAL KEY k (p))",
+		},
 	}
 	for _, c := range contracts {
 		t.Run(c.name, func(t *testing.T) {
