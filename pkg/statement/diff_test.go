@@ -1910,6 +1910,127 @@ func TestDiff(t *testing.T) {
 			target:   "CREATE TABLE t1 (d INT, a INT, b INT, c INT)",
 			expected: "ALTER TABLE `t1` MODIFY COLUMN `d` int NULL FIRST",
 		},
+		// Table options SHOW CREATE TABLE reports that Diff used to discard.
+		// Each is cleared by the value MySQL reads back as unset.
+		{
+			name:     "TableStatsOptionsAdded",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY) STATS_PERSISTENT=0 STATS_AUTO_RECALC=1 STATS_SAMPLE_PAGES=42",
+			expected: "ALTER TABLE `t1` STATS_PERSISTENT=0, STATS_AUTO_RECALC=1, STATS_SAMPLE_PAGES=42",
+		},
+		{
+			name:     "TableStatsOptionsReset",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY) STATS_PERSISTENT=0 STATS_AUTO_RECALC=1 STATS_SAMPLE_PAGES=42",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY)",
+			expected: "ALTER TABLE `t1` STATS_PERSISTENT=DEFAULT, STATS_AUTO_RECALC=DEFAULT, STATS_SAMPLE_PAGES=DEFAULT",
+		},
+		{
+			name:     "TableStatsOptionsDefaultNoDiff",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY) STATS_PERSISTENT=DEFAULT STATS_AUTO_RECALC=DEFAULT STATS_SAMPLE_PAGES=DEFAULT",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY)",
+			expected: "",
+		},
+		{
+			name:     "TableStatsPersistentToggled",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY) STATS_PERSISTENT=1",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY) STATS_PERSISTENT=0",
+			expected: "ALTER TABLE `t1` STATS_PERSISTENT=0",
+		},
+		{
+			name:     "AutoextendSizeSuffixNoDiff",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY) /*!80023 AUTOEXTEND_SIZE=4194304 */ ENGINE=InnoDB",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY) AUTOEXTEND_SIZE=4M",
+			expected: "",
+		},
+		{
+			name:     "AutoextendSizeAdded",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY) AUTOEXTEND_SIZE=4M",
+			expected: "ALTER TABLE `t1` AUTOEXTEND_SIZE=4194304",
+		},
+		{
+			name:     "AutoextendSizeReset",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY) AUTOEXTEND_SIZE=4M",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY)",
+			expected: "ALTER TABLE `t1` AUTOEXTEND_SIZE=0",
+		},
+		{
+			name:     "TableSecondaryEngineAttributeAdded",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY) SECONDARY_ENGINE_ATTRIBUTE='{\"t\":1}'",
+			expected: "ALTER TABLE `t1` SECONDARY_ENGINE_ATTRIBUTE='{\\\"t\\\":1}'",
+		},
+		{
+			name:     "TableSecondaryEngineAttributeReset",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY) SECONDARY_ENGINE_ATTRIBUTE='{\"t\":1}'",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY)",
+			expected: "ALTER TABLE `t1` SECONDARY_ENGINE_ATTRIBUTE=''",
+		},
+		{
+			name:     "TableSecondaryEngineAttributeReserializedNoDiff",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY) /*!80021 SECONDARY_ENGINE_ATTRIBUTE='{\"t\": 1}' */",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY) SECONDARY_ENGINE_ATTRIBUTE='{\"t\":1}'",
+			expected: "",
+		},
+		{
+			name:     "TableStorageHintsAdded",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY) MIN_ROWS=10 MAX_ROWS=1000 AVG_ROW_LENGTH=100 PACK_KEYS=1 CHECKSUM=1 DELAY_KEY_WRITE=1",
+			expected: "ALTER TABLE `t1` MIN_ROWS=10, MAX_ROWS=1000, AVG_ROW_LENGTH=100, PACK_KEYS=1, CHECKSUM=1, DELAY_KEY_WRITE=1",
+		},
+		{
+			name:     "TableStorageHintsReset",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY) MIN_ROWS=10 MAX_ROWS=1000 AVG_ROW_LENGTH=100 PACK_KEYS=1 CHECKSUM=1 DELAY_KEY_WRITE=1",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY)",
+			expected: "ALTER TABLE `t1` MIN_ROWS=0, MAX_ROWS=0, AVG_ROW_LENGTH=0, PACK_KEYS=DEFAULT, CHECKSUM=0, DELAY_KEY_WRITE=0",
+		},
+		{
+			// The table-level KEY_BLOCK_SIZE goes with ROW_FORMAT, which the
+			// default options ignore (see TestDiffWithOptions for the rest).
+			name:     "TableKeyBlockSizeIgnoredByDefault",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY) ROW_FORMAT=COMPRESSED",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY) ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=4",
+			expected: "",
+		},
+		// An index's SECONDARY_ENGINE_ATTRIBUTE. Adding or removing it alone
+		// is an option-only change: a combined DROP+ADD is a MySQL no-op that
+		// leaves the attribute as it was, so the two go in separate statements.
+		{
+			name:   "IndexSecondaryEngineAttributeAdded",
+			source: "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k (c))",
+			target: "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k (c) SECONDARY_ENGINE_ATTRIBUTE='{\"k\":1}')",
+			expectedStatements: []string{
+				"ALTER TABLE `t1` DROP INDEX `k`",
+				"ALTER TABLE `t1` ADD INDEX `k` (`c`) SECONDARY_ENGINE_ATTRIBUTE='{\\\"k\\\":1}'",
+			},
+		},
+		{
+			name:   "IndexSecondaryEngineAttributeRemoved",
+			source: "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k (c) SECONDARY_ENGINE_ATTRIBUTE='{\"k\":1}')",
+			target: "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k (c))",
+			expectedStatements: []string{
+				"ALTER TABLE `t1` DROP INDEX `k`",
+				"ALTER TABLE `t1` ADD INDEX `k` (`c`)",
+			},
+		},
+		{
+			name:     "IndexSecondaryEngineAttributeReserializedNoDiff",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k (c) /*!80021 SECONDARY_ENGINE_ATTRIBUTE '{\"k\": 1}' */)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k (c) SECONDARY_ENGINE_ATTRIBUTE='{\"k\":1}')",
+			expected: "",
+		},
+		{
+			name:     "IndexRebuildPreservesSecondaryEngineAttribute",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k (c) COMMENT 'a' SECONDARY_ENGINE_ATTRIBUTE='{\"k\":1}')",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k (c) COMMENT 'b' SECONDARY_ENGINE_ATTRIBUTE='{\"k\":1}')",
+			expected: "ALTER TABLE `t1` DROP INDEX `k`, ADD INDEX `k` (`c`) COMMENT 'b' SECONDARY_ENGINE_ATTRIBUTE='{\\\"k\\\":1}'",
+		},
+		{
+			name:     "IndexVisibilityChangeKeepsSecondaryEngineAttribute",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k (c) SECONDARY_ENGINE_ATTRIBUTE='{\"k\":1}')",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k (c) SECONDARY_ENGINE_ATTRIBUTE='{\"k\":1}' INVISIBLE)",
+			expected: "ALTER TABLE `t1` ALTER INDEX `k` INVISIBLE",
+		},
 		// Partitioning. The sources below are shaped like SHOW CREATE TABLE
 		// output, which always prints a per-partition `ENGINE = InnoDB` that
 		// human-authored SQL omits; that clause must not register as a change
@@ -2339,6 +2460,30 @@ func TestDiff_DiffOptions(t *testing.T) {
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY) ROW_FORMAT=COMPRESSED",
 			opts:     &DiffOptions{IgnoreAutoIncrement: true, IgnoreEngine: true, IgnoreRowFormat: false},
 			expected: "ALTER TABLE `t1` ROW_FORMAT=COMPRESSED",
+		},
+		// The table-level KEY_BLOCK_SIZE is the compressed page size and goes
+		// with ROW_FORMAT: ignored with it, and cleared in the same statement
+		// as a row format change, which InnoDB otherwise rejects.
+		{
+			name:     "KeyBlockSizeDetectedWithRowFormat",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY) ROW_FORMAT=COMPRESSED",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY) ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=4",
+			opts:     &DiffOptions{IgnoreAutoIncrement: true, IgnoreEngine: true, IgnoreRowFormat: false},
+			expected: "ALTER TABLE `t1` KEY_BLOCK_SIZE=4",
+		},
+		{
+			name:     "KeyBlockSizeClearedWithRowFormatChange",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY) ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=4",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY) ROW_FORMAT=DYNAMIC",
+			opts:     &DiffOptions{IgnoreAutoIncrement: true, IgnoreEngine: true, IgnoreRowFormat: false},
+			expected: "ALTER TABLE `t1` ROW_FORMAT=DYNAMIC, KEY_BLOCK_SIZE=0",
+		},
+		{
+			name:     "KeyBlockSizeIgnoredWithRowFormat",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY) ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=4",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY) ROW_FORMAT=DYNAMIC",
+			opts:     nil,
+			expected: "",
 		},
 
 		// Combined: ignore everything possible, still detect column + index changes

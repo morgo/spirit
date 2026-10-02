@@ -229,6 +229,94 @@ func TestDiffMySQLContracts(t *testing.T) {
 			source: "(a INT, b INT, c INT, d INT)",
 			target: "(d INT, c INT, b INT, a INT)",
 		},
+		// Table options SHOW CREATE TABLE reports and Diff used to discard.
+		{
+			name:   "table statistics options are applied",
+			source: "(id INT PRIMARY KEY)",
+			target: "(id INT PRIMARY KEY) STATS_PERSISTENT=0 STATS_AUTO_RECALC=1 STATS_SAMPLE_PAGES=42",
+		},
+		{
+			name:   "table statistics options are reset",
+			source: "(id INT PRIMARY KEY) STATS_PERSISTENT=0 STATS_AUTO_RECALC=1 STATS_SAMPLE_PAGES=42",
+			target: "(id INT PRIMARY KEY)",
+		},
+		{
+			name:     "AUTOEXTEND_SIZE suffix matches the live byte count",
+			source:   "(id INT PRIMARY KEY) AUTOEXTEND_SIZE=4194304",
+			target:   "(id INT PRIMARY KEY) AUTOEXTEND_SIZE=4M",
+			wantNoop: true,
+		},
+		{
+			name:   "AUTOEXTEND_SIZE is applied",
+			source: "(id INT PRIMARY KEY)",
+			target: "(id INT PRIMARY KEY) AUTOEXTEND_SIZE=4M",
+		},
+		{
+			name:   "AUTOEXTEND_SIZE is reset",
+			source: "(id INT PRIMARY KEY) AUTOEXTEND_SIZE=4M",
+			target: "(id INT PRIMARY KEY)",
+		},
+		{
+			name:   "table SECONDARY_ENGINE_ATTRIBUTE is applied",
+			source: "(id INT PRIMARY KEY)",
+			target: `(id INT PRIMARY KEY) SECONDARY_ENGINE_ATTRIBUTE='{"t":1}'`,
+		},
+		{
+			name:   "table SECONDARY_ENGINE_ATTRIBUTE is reset",
+			source: `(id INT PRIMARY KEY) SECONDARY_ENGINE_ATTRIBUTE='{"t":1}'`,
+			target: "(id INT PRIMARY KEY)",
+		},
+		{
+			name:     "table SECONDARY_ENGINE_ATTRIBUTE compares as JSON",
+			source:   `(id INT PRIMARY KEY) SECONDARY_ENGINE_ATTRIBUTE='{"b":1,"a":[1,2]}'`,
+			target:   `(id INT PRIMARY KEY) SECONDARY_ENGINE_ATTRIBUTE='{"a": [1, 2], "b": 1}'`,
+			wantNoop: true,
+		},
+		{
+			name:   "table storage hints are applied",
+			source: "(id INT PRIMARY KEY)",
+			target: "(id INT PRIMARY KEY) MIN_ROWS=10 MAX_ROWS=1000 AVG_ROW_LENGTH=100 PACK_KEYS=1 CHECKSUM=1 DELAY_KEY_WRITE=1",
+		},
+		{
+			name:   "table storage hints are reset",
+			source: "(id INT PRIMARY KEY) MIN_ROWS=10 MAX_ROWS=1000 AVG_ROW_LENGTH=100 PACK_KEYS=1 CHECKSUM=1 DELAY_KEY_WRITE=1",
+			target: "(id INT PRIMARY KEY)",
+		},
+		{
+			name:   "table KEY_BLOCK_SIZE is applied with the row format",
+			source: "(id INT PRIMARY KEY) ROW_FORMAT=COMPRESSED",
+			target: "(id INT PRIMARY KEY) ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=4",
+			opts:   &DiffOptions{IgnoreAutoIncrement: true, IgnoreEngine: true, IgnoreRowFormat: false},
+		},
+		{
+			// InnoDB rejects ROW_FORMAT=DYNAMIC while a KEY_BLOCK_SIZE is set,
+			// so the clearing KEY_BLOCK_SIZE=0 must travel in the same ALTER.
+			name:   "table KEY_BLOCK_SIZE is cleared with the row format",
+			source: "(id INT PRIMARY KEY) ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=4",
+			target: "(id INT PRIMARY KEY) ROW_FORMAT=DYNAMIC",
+			opts:   &DiffOptions{IgnoreAutoIncrement: true, IgnoreEngine: true, IgnoreRowFormat: false},
+		},
+		// An index's SECONDARY_ENGINE_ATTRIBUTE.
+		{
+			name:   "index SECONDARY_ENGINE_ATTRIBUTE is applied",
+			source: "(id INT PRIMARY KEY, c INT, KEY k (c))",
+			target: `(id INT PRIMARY KEY, c INT, KEY k (c) SECONDARY_ENGINE_ATTRIBUTE='{"k":1}')`,
+		},
+		{
+			name:   "index SECONDARY_ENGINE_ATTRIBUTE is removed",
+			source: `(id INT PRIMARY KEY, c INT, KEY k (c) SECONDARY_ENGINE_ATTRIBUTE='{"k":1}')`,
+			target: "(id INT PRIMARY KEY, c INT, KEY k (c))",
+		},
+		{
+			name:   "index SECONDARY_ENGINE_ATTRIBUTE survives a comment change",
+			source: `(id INT PRIMARY KEY, c INT, KEY k (c) COMMENT 'a' SECONDARY_ENGINE_ATTRIBUTE='{"k":1}')`,
+			target: `(id INT PRIMARY KEY, c INT, KEY k (c) COMMENT 'b' SECONDARY_ENGINE_ATTRIBUTE='{"k":1}')`,
+		},
+		{
+			name:   "index SECONDARY_ENGINE_ATTRIBUTE survives a visibility change",
+			source: `(id INT PRIMARY KEY, c INT, KEY k (c) SECONDARY_ENGINE_ATTRIBUTE='{"k":1}')`,
+			target: `(id INT PRIMARY KEY, c INT, KEY k (c) SECONDARY_ENGINE_ATTRIBUTE='{"k":1}' INVISIBLE)`,
+		},
 	}
 	for _, c := range contracts {
 		t.Run(c.name, func(t *testing.T) {

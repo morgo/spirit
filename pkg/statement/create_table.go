@@ -18,6 +18,7 @@ import (
 	"github.com/block/spirit/pkg/parser/mysql"
 	"github.com/block/spirit/pkg/parser/types"
 	"github.com/block/spirit/pkg/table"
+	"github.com/block/spirit/pkg/utils"
 )
 
 // CreateTable represents a parsed CREATE TABLE statement with structured data
@@ -104,6 +105,10 @@ type Index struct {
 	KeyBlockSize *uint64           `json:"key_block_size,omitempty"`
 	ParserName   *string           `json:"parser_name,omitempty"`
 	Options      map[string]string `json:"options,omitempty"`
+	// SecondaryEngineAttribute is the index's SECONDARY_ENGINE_ATTRIBUTE JSON
+	// text as written; compared as JSON (engineAttributeEqual) because MySQL
+	// reports it re-serialized, and emitted as written.
+	SecondaryEngineAttribute *string `json:"secondary_engine_attribute,omitempty"`
 
 	// InlineDerived marks a UNIQUE index that indexNormalizer synthesized
 	// from an inline column-level UNIQUE (`c INT UNIQUE`). Its name is only a
@@ -307,6 +312,29 @@ type TableOptions struct {
 	Comment       *string `json:"comment,omitempty"`
 	AutoIncrement *uint64 `json:"auto_increment,omitempty"`
 	RowFormat     *string `json:"row_format,omitempty"`
+	// KeyBlockSize is the table-level KEY_BLOCK_SIZE, the compressed page
+	// size in KiB. It belongs with ROW_FORMAT (it implies COMPRESSED and
+	// InnoDB rejects it with any other row format), so Diff treats the two
+	// together under DiffOptions.IgnoreRowFormat. 0 means unset.
+	KeyBlockSize *uint64 `json:"key_block_size,omitempty"`
+	// AutoextendSize is AUTOEXTEND_SIZE in bytes. MySQL accepts it with a
+	// K/M/G suffix (4M) and reports it in bytes (4194304). 0 means unset.
+	AutoextendSize *uint64 `json:"autoextend_size,omitempty"`
+	// The following are reported by SHOW CREATE TABLE only when set; each
+	// has a value MySQL treats as "unset" that Diff emits to clear it.
+	StatsPersistent  *bool   `json:"stats_persistent,omitempty"`   // STATS_PERSISTENT=0|1; DEFAULT is not recorded
+	StatsAutoRecalc  *bool   `json:"stats_auto_recalc,omitempty"`  // STATS_AUTO_RECALC=0|1; DEFAULT is not recorded
+	StatsSamplePages *uint64 `json:"stats_sample_pages,omitempty"` // STATS_SAMPLE_PAGES=n; 0 and DEFAULT are not recorded
+	PackKeys         *bool   `json:"pack_keys,omitempty"`          // PACK_KEYS=0|1; DEFAULT is not recorded
+	Checksum         bool    `json:"checksum,omitempty"`           // CHECKSUM=1
+	DelayKeyWrite    bool    `json:"delay_key_write,omitempty"`    // DELAY_KEY_WRITE=1
+	AvgRowLength     *uint64 `json:"avg_row_length,omitempty"`     // 0 is not recorded
+	MinRows          *uint64 `json:"min_rows,omitempty"`           // 0 is not recorded
+	MaxRows          *uint64 `json:"max_rows,omitempty"`           // 0 is not recorded
+	// SecondaryEngineAttribute is the table's SECONDARY_ENGINE_ATTRIBUTE JSON
+	// text as written; compared as JSON (engineAttributeEqual) because MySQL
+	// reports it re-serialized, and emitted as written. '' is not recorded.
+	SecondaryEngineAttribute *string `json:"secondary_engine_attribute,omitempty"`
 }
 
 // PartitionOptions represents table partitioning configuration
@@ -1019,6 +1047,11 @@ func (ct *CreateTable) parseIndex(constraint *ast.Constraint) Index {
 			parserName := opt.ParserName.String()
 			index.ParserName = &parserName
 		}
+
+		if opt.SecondaryEngineAttr != "" {
+			attr := opt.SecondaryEngineAttr
+			index.SecondaryEngineAttribute = &attr
+		}
 	}
 
 	// Clean up options map if empty
@@ -1198,6 +1231,77 @@ func (ct *CreateTable) parseTableOptions(options []*ast.TableOption) *TableOptio
 				tableOpts.AutoIncrement = &option.UintValue
 				hasOptions = true
 			}
+		case ast.TableOptionKeyBlockSize:
+			if option.UintValue > 0 {
+				tableOpts.KeyBlockSize = &option.UintValue
+				hasOptions = true
+			}
+		case ast.TableOptionAutoextendSize:
+			// The grammar yields the bare byte count in UintValue and a
+			// suffixed size (4M) in StrValue. A suffixed value MySQL would
+			// not accept is left unset: the CREATE TABLE itself is invalid.
+			size := option.UintValue
+			if option.StrValue != "" {
+				parsed, err := utils.ParseSizeNumber(option.StrValue)
+				if err != nil {
+					break
+				}
+				size = parsed
+			}
+			if size > 0 {
+				tableOpts.AutoextendSize = &size
+				hasOptions = true
+			}
+		case ast.TableOptionStatsPersistent:
+			if !option.Default {
+				tableOpts.StatsPersistent = new(option.UintValue != 0)
+				hasOptions = true
+			}
+		case ast.TableOptionStatsAutoRecalc:
+			if !option.Default {
+				tableOpts.StatsAutoRecalc = new(option.UintValue != 0)
+				hasOptions = true
+			}
+		case ast.TableOptionStatsSamplePages:
+			if !option.Default && option.UintValue > 0 {
+				tableOpts.StatsSamplePages = &option.UintValue
+				hasOptions = true
+			}
+		case ast.TableOptionPackKeys:
+			if !option.Default {
+				tableOpts.PackKeys = new(option.UintValue != 0)
+				hasOptions = true
+			}
+		case ast.TableOptionCheckSum:
+			if option.UintValue != 0 {
+				tableOpts.Checksum = true
+				hasOptions = true
+			}
+		case ast.TableOptionDelayKeyWrite:
+			if option.UintValue != 0 {
+				tableOpts.DelayKeyWrite = true
+				hasOptions = true
+			}
+		case ast.TableOptionAvgRowLength:
+			if option.UintValue > 0 {
+				tableOpts.AvgRowLength = &option.UintValue
+				hasOptions = true
+			}
+		case ast.TableOptionMinRows:
+			if option.UintValue > 0 {
+				tableOpts.MinRows = &option.UintValue
+				hasOptions = true
+			}
+		case ast.TableOptionMaxRows:
+			if option.UintValue > 0 {
+				tableOpts.MaxRows = &option.UintValue
+				hasOptions = true
+			}
+		case ast.TableOptionSecondaryEngineAttribute:
+			if option.StrValue != "" {
+				tableOpts.SecondaryEngineAttribute = &option.StrValue
+				hasOptions = true
+			}
 		case ast.TableOptionRowFormat:
 			if option.UintValue > 0 {
 				var rowFormat string
@@ -1266,6 +1370,16 @@ func (to *TableOptions) getRowFormat() *string {
 		return nil
 	}
 	return to.RowFormat
+}
+
+// deref returns the options by value, or the zero value for a nil receiver
+// (a table with no options at all), so callers can read the fields without
+// a nil check per option.
+func (to *TableOptions) deref() TableOptions {
+	if to == nil {
+		return TableOptions{}
+	}
+	return *to
 }
 
 func (to *TableOptions) getAutoIncrement() *string {
@@ -2203,13 +2317,35 @@ func (ct *CreateTable) diffTableOptions(target *CreateTable, opts *DiffOptions) 
 		}
 	}
 
-	// Compare ROW_FORMAT
+	source, dest := ct.TableOptions.deref(), target.TableOptions.deref()
+
+	// optionClause appends name=<target value> when the target sets the
+	// option, or name=<reset> when only the source does. ALTER TABLE has no
+	// way to leave a table option out, so each one is cleared by the value
+	// MySQL reads back as unset.
+	optionClause := func(name string, sourceValue, targetValue *string, reset string) {
+		if ptrEqual(sourceValue, targetValue) {
+			return
+		}
+		if targetValue != nil {
+			clauses = append(clauses, name+"="+*targetValue)
+		} else {
+			clauses = append(clauses, name+"="+reset)
+		}
+	}
+
+	// Compare ROW_FORMAT and, with it, the table-level KEY_BLOCK_SIZE: the
+	// compressed page size that implies ROW_FORMAT=COMPRESSED. The two have
+	// to move together — InnoDB rejects an ALTER to another row format while
+	// a KEY_BLOCK_SIZE is set, so the clearing KEY_BLOCK_SIZE=0 goes in the
+	// same statement as the ROW_FORMAT.
 	if !opts.IgnoreRowFormat {
 		if !ptrEqual(ct.TableOptions.getRowFormat(), target.TableOptions.getRowFormat()) {
 			if rowFormat := target.TableOptions.getRowFormat(); rowFormat != nil {
 				clauses = append(clauses, fmt.Sprintf("ROW_FORMAT=%s", *rowFormat))
 			}
 		}
+		optionClause("KEY_BLOCK_SIZE", uintText(source.KeyBlockSize), uintText(dest.KeyBlockSize), "0")
 	}
 
 	// Compare AUTO_INCREMENT
@@ -2222,7 +2358,57 @@ func (ct *CreateTable) diffTableOptions(target *CreateTable, opts *DiffOptions) 
 		}
 	}
 
+	// The remaining options are always compared. They are declared schema
+	// (SHOW CREATE TABLE reports each one that is set), and before they were
+	// modelled a declared STATS_PERSISTENT=0 or SECONDARY_ENGINE_ATTRIBUTE
+	// was silently never applied. Emitted in the order SHOW CREATE TABLE
+	// reports them.
+	optionClause("MIN_ROWS", uintText(source.MinRows), uintText(dest.MinRows), "0")
+	optionClause("MAX_ROWS", uintText(source.MaxRows), uintText(dest.MaxRows), "0")
+	optionClause("AVG_ROW_LENGTH", uintText(source.AvgRowLength), uintText(dest.AvgRowLength), "0")
+	optionClause("PACK_KEYS", boolText(source.PackKeys), boolText(dest.PackKeys), "DEFAULT")
+	optionClause("STATS_PERSISTENT", boolText(source.StatsPersistent), boolText(dest.StatsPersistent), "DEFAULT")
+	optionClause("STATS_AUTO_RECALC", boolText(source.StatsAutoRecalc), boolText(dest.StatsAutoRecalc), "DEFAULT")
+	optionClause("STATS_SAMPLE_PAGES", uintText(source.StatsSamplePages), uintText(dest.StatsSamplePages), "DEFAULT")
+	optionClause("CHECKSUM", flagText(source.Checksum), flagText(dest.Checksum), "0")
+	optionClause("DELAY_KEY_WRITE", flagText(source.DelayKeyWrite), flagText(dest.DelayKeyWrite), "0")
+	optionClause("AUTOEXTEND_SIZE", uintText(source.AutoextendSize), uintText(dest.AutoextendSize), "0")
+	if !engineAttributeEqual(source.SecondaryEngineAttribute, dest.SecondaryEngineAttribute) {
+		attr := ""
+		if dest.SecondaryEngineAttribute != nil {
+			attr = sqlescape.EscapeString(*dest.SecondaryEngineAttribute)
+		}
+		clauses = append(clauses, "SECONDARY_ENGINE_ATTRIBUTE='"+attr+"'")
+	}
+
 	return clauses
+}
+
+// uintText, boolText and flagText render an optional table option value as
+// the text its ALTER clause carries, or nil when the option is unset, so that
+// every option diffs through the same optionClause path in diffTableOptions.
+func uintText(v *uint64) *string {
+	if v == nil {
+		return nil
+	}
+	return new(strconv.FormatUint(*v, 10))
+}
+
+func boolText(v *bool) *string {
+	if v == nil {
+		return nil
+	}
+	if *v {
+		return new("1")
+	}
+	return new("0")
+}
+
+func flagText(v bool) *string {
+	if !v {
+		return nil
+	}
+	return new("1")
 }
 
 // columnsEqualWithContext checks if two columns are equal, considering table

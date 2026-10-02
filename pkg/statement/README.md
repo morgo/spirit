@@ -285,6 +285,31 @@ type Index struct {
     KeyBlockSize *uint64
     ParserName   *string           // For FULLTEXT indexes
     Options      map[string]string // Additional index options
+    SecondaryEngineAttribute *string // JSON text as written; compared as JSON
+}
+```
+
+### Table Options
+
+`TableOptions` holds every table option `SHOW CREATE TABLE` reports. An
+option MySQL treats as unset (`STATS_PERSISTENT=DEFAULT`, `KEY_BLOCK_SIZE=0`,
+`SECONDARY_ENGINE_ATTRIBUTE=''`, ...) parses as nil/false, and `Diff` emits
+that same value to clear an option the target no longer declares.
+
+```go
+type TableOptions struct {
+    Engine, Charset, Collation, Comment, RowFormat *string
+    AutoIncrement    *uint64
+    KeyBlockSize     *uint64 // compressed page size; diffed with ROW_FORMAT (IgnoreRowFormat)
+    AutoextendSize   *uint64 // bytes: AUTOEXTEND_SIZE=4M parses as 4194304
+    StatsPersistent  *bool
+    StatsAutoRecalc  *bool
+    StatsSamplePages *uint64
+    PackKeys         *bool
+    Checksum         bool
+    DelayKeyWrite    bool
+    AvgRowLength, MinRows, MaxRows *uint64
+    SecondaryEngineAttribute *string // JSON text as written; compared as JSON
 }
 ```
 

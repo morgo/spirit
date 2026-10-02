@@ -68,7 +68,9 @@ type DiffOptions struct {
 	// Default: false (via NewDiffOptions).
 	IgnorePartitioning bool
 
-	// IgnoreRowFormat skips diffing the ROW_FORMAT table option.
+	// IgnoreRowFormat skips diffing the ROW_FORMAT table option, and with it
+	// the table-level KEY_BLOCK_SIZE (the compressed page size, which implies
+	// ROW_FORMAT=COMPRESSED and is only valid with it).
 	// Default: true (via NewDiffOptions).
 	// ROW_FORMAT=DYNAMIC is the InnoDB default in MySQL 8.0+, so differences
 	// between an unspecified ROW_FORMAT and an explicit DYNAMIC are cosmetic.

@@ -292,6 +292,11 @@ func formatAddIndex(idx *Index) string {
 		parts = append(parts, "INVISIBLE")
 	}
 
+	// SECONDARY_ENGINE_ATTRIBUTE, last as SHOW CREATE TABLE reports it.
+	if idx.SecondaryEngineAttribute != nil {
+		parts = append(parts, fmt.Sprintf("SECONDARY_ENGINE_ATTRIBUTE='%s'", sqlescape.EscapeString(*idx.SecondaryEngineAttribute)))
+	}
+
 	return strings.Join(parts, " ")
 }
 

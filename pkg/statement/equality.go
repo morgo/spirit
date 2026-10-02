@@ -68,6 +68,13 @@ func engineAttributeEqual(a, b *string) bool {
 
 // indexesEqual checks if two indexes are equal
 func indexesEqual(a, b *Index) bool {
+	return indexesEqualIgnoreVisibility(a, b) && ptrEqual(a.Invisible, b.Invisible)
+}
+
+// indexesEqualIgnoreVisibility checks if two indexes are equal, ignoring the
+// Invisible attribute: visibility alone is changed in place with ALTER INDEX,
+// every other difference rebuilds the index.
+func indexesEqualIgnoreVisibility(a, b *Index) bool {
 	if a.Name != b.Name {
 		return false
 	}
@@ -84,9 +91,6 @@ func indexesEqual(a, b *Index) bool {
 	} else if !slices.EqualFunc(a.Columns, b.Columns, strings.EqualFold) {
 		return false
 	}
-	if !ptrEqual(a.Invisible, b.Invisible) {
-		return false
-	}
 	if !ptrEqual(a.Using, b.Using) {
 		return false
 	}
@@ -99,40 +103,7 @@ func indexesEqual(a, b *Index) bool {
 	if !ptrEqual(a.ParserName, b.ParserName) {
 		return false
 	}
-	return true
-}
-
-// indexesEqualIgnoreVisibility checks if two indexes are equal, ignoring the Invisible attribute
-func indexesEqualIgnoreVisibility(a, b *Index) bool {
-	if a.Name != b.Name {
-		return false
-	}
-	if a.Type != b.Type {
-		return false
-	}
-	// Compare using ColumnList if available, otherwise fall back to Columns.
-	// Referenced column names are matched case-insensitively.
-	if len(a.ColumnList) > 0 && len(b.ColumnList) > 0 {
-		if !indexColumnListsEqual(a.ColumnList, b.ColumnList) {
-			return false
-		}
-	} else if !slices.EqualFunc(a.Columns, b.Columns, strings.EqualFold) {
-		return false
-	}
-	// Skip Invisible comparison
-	if !ptrEqual(a.Using, b.Using) {
-		return false
-	}
-	if !ptrEqual(a.Comment, b.Comment) {
-		return false
-	}
-	if !ptrEqual(a.KeyBlockSize, b.KeyBlockSize) {
-		return false
-	}
-	if !ptrEqual(a.ParserName, b.ParserName) {
-		return false
-	}
-	return true
+	return engineAttributeEqual(a.SecondaryEngineAttribute, b.SecondaryEngineAttribute)
 }
 
 // indexColumnListIdentical reports whether two indexes have the same name,
@@ -181,7 +152,9 @@ func indexNeedsSeparateRebuild(source, target *Index) bool {
 	if !ptrEqual(source.KeyBlockSize, target.KeyBlockSize) {
 		return true
 	}
-	return false
+	// Same no-op: a combined DROP+ADD that only adds the attribute leaves the
+	// index without it.
+	return !engineAttributeEqual(source.SecondaryEngineAttribute, target.SecondaryEngineAttribute)
 }
 
 // indexColumnListsEqual checks if two index column lists are equal

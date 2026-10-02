@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	_ "github.com/block/mysql"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -1999,4 +2000,44 @@ func TestPartitionKeyColumnsChanged(t *testing.T) {
 			require.Equal(t, tc.expected, source.partitionKeyColumnsChanged(target, NewDiffOptions()))
 		})
 	}
+}
+
+// TestParseTableOptionsReportedByShowCreate parses every table and index
+// option SHOW CREATE TABLE reports, in the form it reports them, and checks
+// that each lands in its field, that MySQL's "unset" spellings stay unset,
+// and that a suffixed AUTOEXTEND_SIZE is read in bytes.
+func TestParseTableOptionsReportedByShowCreate(t *testing.T) {
+	ct, err := ParseCreateTable("CREATE TABLE t (id INT PRIMARY KEY, KEY k (id) /*!80021 SECONDARY_ENGINE_ATTRIBUTE '{\"k\": 1}' */) " +
+		"/*!80023 AUTOEXTEND_SIZE=4194304 */ ENGINE=InnoDB MIN_ROWS=10 MAX_ROWS=1000 AVG_ROW_LENGTH=100 PACK_KEYS=1 " +
+		"STATS_PERSISTENT=0 STATS_AUTO_RECALC=1 STATS_SAMPLE_PAGES=42 CHECKSUM=1 DELAY_KEY_WRITE=1 KEY_BLOCK_SIZE=8 " +
+		"/*!80021 SECONDARY_ENGINE_ATTRIBUTE='{\"t\": 1}' */")
+	require.NoError(t, err)
+	o := ct.TableOptions
+	require.NotNil(t, o)
+	assert.Equal(t, uint64(4194304), *o.AutoextendSize)
+	assert.Equal(t, uint64(10), *o.MinRows)
+	assert.Equal(t, uint64(1000), *o.MaxRows)
+	assert.Equal(t, uint64(100), *o.AvgRowLength)
+	assert.True(t, *o.PackKeys)
+	assert.False(t, *o.StatsPersistent)
+	assert.True(t, *o.StatsAutoRecalc)
+	assert.Equal(t, uint64(42), *o.StatsSamplePages)
+	assert.True(t, o.Checksum)
+	assert.True(t, o.DelayKeyWrite)
+	assert.Equal(t, uint64(8), *o.KeyBlockSize)
+	assert.Equal(t, `{"t": 1}`, *o.SecondaryEngineAttribute)
+	assert.Equal(t, `{"k": 1}`, *ct.Indexes.ByName("k").SecondaryEngineAttribute)
+
+	ct, err = ParseCreateTable("CREATE TABLE t (id INT PRIMARY KEY, KEY k (id) SECONDARY_ENGINE_ATTRIBUTE='') " +
+		"STATS_PERSISTENT=DEFAULT STATS_AUTO_RECALC=DEFAULT STATS_SAMPLE_PAGES=DEFAULT PACK_KEYS=DEFAULT " +
+		"AUTOEXTEND_SIZE=0 KEY_BLOCK_SIZE=0 CHECKSUM=0 DELAY_KEY_WRITE=0 MIN_ROWS=0 MAX_ROWS=0 AVG_ROW_LENGTH=0 SECONDARY_ENGINE_ATTRIBUTE=''")
+	require.NoError(t, err)
+	assert.Nil(t, ct.TableOptions)
+	assert.Nil(t, ct.Indexes.ByName("k").SecondaryEngineAttribute)
+
+	ct, err = ParseCreateTable("CREATE TABLE t (id INT PRIMARY KEY) AUTOEXTEND_SIZE=4M STATS_PERSISTENT=1 PACK_KEYS=0")
+	require.NoError(t, err)
+	assert.Equal(t, uint64(4194304), *ct.TableOptions.AutoextendSize)
+	assert.True(t, *ct.TableOptions.StatsPersistent)
+	assert.False(t, *ct.TableOptions.PackKeys)
 }
