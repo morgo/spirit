@@ -66,7 +66,7 @@ func TestDiff(t *testing.T) {
 			name:     "ReorderColumn",
 			source:   "CREATE TABLE t1 (a INT, b INT, c INT)",
 			target:   "CREATE TABLE t1 (c INT, a INT, b INT)",
-			expected: "ALTER TABLE `t1` MODIFY COLUMN `c` int NULL FIRST, MODIFY COLUMN `a` int NULL AFTER `c`, MODIFY COLUMN `b` int NULL AFTER `a`",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `c` int NULL FIRST",
 		},
 		{
 			name:     "AddIndex",
@@ -1361,7 +1361,7 @@ func TestDiff(t *testing.T) {
 			name:     "ChangeColumnOrder",
 			source:   "CREATE TABLE t1 (a INT, b INT, c INT)",
 			target:   "CREATE TABLE t1 (b INT, c INT, a INT)",
-			expected: "ALTER TABLE `t1` MODIFY COLUMN `b` int NULL FIRST, MODIFY COLUMN `c` int NULL AFTER `b`, MODIFY COLUMN `a` int NULL AFTER `c`",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `b` int NULL FIRST, MODIFY COLUMN `c` int NULL AFTER `b`",
 		},
 		// Binary/Blob Types
 		{
@@ -1880,7 +1880,35 @@ func TestDiff(t *testing.T) {
 			name:     "ReorderUppercaseColumns",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, A INT NOT NULL, B INT NOT NULL)",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, B INT NOT NULL, A INT NOT NULL)",
-			expected: "ALTER TABLE `t1` MODIFY COLUMN `B` int NOT NULL AFTER `id`, MODIFY COLUMN `A` int NOT NULL AFTER `B`",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `B` int NOT NULL AFTER `id`",
+		},
+		// Positioning follows the clauses through the way MySQL applies them
+		// (see calculateColumnPositioning). Dropping a column used to count
+		// as an implicit move for its successor, so the reorder below was
+		// never emitted and the live table ended up as (id, b, d).
+		{
+			name:     "ReorderAfterDrop",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, c INT, d INT)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, d INT, b INT)",
+			expected: "ALTER TABLE `t1` DROP COLUMN `a`, DROP COLUMN `c`, MODIFY COLUMN `d` int NULL AFTER `id`",
+		},
+		{
+			name:     "DropWithoutReorderNoPosition",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, c INT)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, b INT, c INT)",
+			expected: "ALTER TABLE `t1` DROP COLUMN `a`",
+		},
+		{
+			name:     "AddInMiddleThenReorder",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, x INT, b INT, a INT)",
+			expected: "ALTER TABLE `t1` ADD COLUMN `x` int NULL AFTER `id`, MODIFY COLUMN `b` int NULL AFTER `x`",
+		},
+		{
+			name:     "MoveLastColumnFirst",
+			source:   "CREATE TABLE t1 (a INT, b INT, c INT, d INT)",
+			target:   "CREATE TABLE t1 (d INT, a INT, b INT, c INT)",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `d` int NULL FIRST",
 		},
 		// Partitioning. The sources below are shaped like SHOW CREATE TABLE
 		// output, which always prints a per-partition `ENGINE = InnoDB` that

@@ -126,21 +126,6 @@ func TestHelperFunctions(t *testing.T) {
 		require.True(t, needsQuotes("O'Brien"))
 	})
 
-	t.Run("getPreviousColumn", func(t *testing.T) {
-		columns := []Column{
-			{Name: "id"},
-			{Name: "name"},
-			{Name: "email"},
-			{Name: "created_at"},
-		}
-
-		require.Empty(t, getPreviousColumn(columns, "id"))
-		require.Equal(t, "id", getPreviousColumn(columns, "name"))
-		require.Equal(t, "name", getPreviousColumn(columns, "email"))
-		require.Equal(t, "email", getPreviousColumn(columns, "created_at"))
-		require.Empty(t, getPreviousColumn(columns, "nonexistent"))
-	})
-
 	t.Run("getPrimaryKeyIndex", func(t *testing.T) {
 		// Table with no primary key
 		ct1, err := ParseCreateTable("CREATE TABLE t1 (id INT, name VARCHAR(100))")

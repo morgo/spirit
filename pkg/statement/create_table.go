@@ -1702,10 +1702,9 @@ func (ct *CreateTable) diffColumns(target *CreateTable, opts *DiffOptions) []str
 	slices.Sort(dropClauses)
 	clauses = append(clauses, dropClauses...)
 
-	// Determine which columns need explicit positioning
-	// A column needs explicit positioning if:
-	// 1. It's a new column (ADD) - always needs position
-	// 2. Its previous column changed (explicit reorder)
+	// Determine which columns need explicit positioning: every new column,
+	// and every existing column that is not where the target wants it once
+	// the clauses before it have been applied (see calculateColumnPositioning).
 	needsExplicitPosition := ct.calculateColumnPositioning(target, sourceColumns, targetColumns)
 
 	// Whether this ALTER sets the table default to the server's utf8mb4
@@ -1817,58 +1816,58 @@ func withChangedCollationNamed(source, col *Column, sourceTable, targetTable *Cr
 	return &named
 }
 
-// calculateColumnPositioning determines which columns need explicit positioning (FIRST/AFTER).
-// Returns a map of column names (lowercased) that need explicit positioning.
-// Map keys are lowercased to match the source/target column maps built by
-// the caller, since column identifiers in MySQL are case-insensitive.
+// calculateColumnPositioning decides which target columns need an explicit
+// FIRST/AFTER clause. It returns the set of their names, lowercased to match
+// the source/target column maps built by the caller (MySQL column identifiers
+// are case-insensitive).
+//
+// It simulates what MySQL does with the clauses diffColumns emits. MySQL first
+// removes the dropped columns and replaces the definitions of the modified
+// ones in place, then processes the positioned clauses (ADD/MODIFY with FIRST
+// or AFTER) one at a time in statement order, each one taking the column out
+// of wherever it currently is and re-inserting it at the named place. Walking
+// the target in order against that evolving list, a column already at its
+// target position needs no clause; one that is not is moved there, which the
+// caller renders as FIRST or AFTER the preceding target column. The invariant
+// is that after step i the first i+1 columns of the simulated list are the
+// first i+1 target columns, so every later AFTER names a column that is
+// already where it belongs.
+//
+// Comparing each column's predecessor between source and target, the previous
+// approach, did not follow the clauses through: dropping a column counted as
+// an "implicit" move for its successor, so `(id, a, b, c, d)` to `(id, d, b)`
+// emitted no position for d and left the live table as `(id, b, d)`.
 func (ct *CreateTable) calculateColumnPositioning(target *CreateTable, sourceColumns, targetColumns map[string]*Column) map[string]bool {
 	needsExplicitPosition := make(map[string]bool)
 
-	var prevColumn string
-	for _, targetCol := range target.Columns {
-		_, existsInSource := sourceColumns[strings.ToLower(targetCol.Name)]
-
-		if !existsInSource {
-			// New columns always need explicit positioning
-			needsExplicitPosition[strings.ToLower(targetCol.Name)] = true
-		} else {
-			// Existing column - check if its position changed
-			sourcePrevCol := getPreviousColumn(ct.Columns, targetCol.Name)
-
-			// Check if this is an implicit or explicit position change
-			_, prevColExistedInSource := sourceColumns[strings.ToLower(prevColumn)]
-			_, sourcePrevColStillExists := targetColumns[strings.ToLower(sourcePrevCol)]
-
-			implicitChange := false
-			switch {
-			case prevColumn == "" && sourcePrevCol == "":
-				// Both first, no real change
-				implicitChange = true
-			case prevColumn != "" && !prevColExistedInSource:
-				// Previous column is new, position change is implicit
-				implicitChange = true
-			case sourcePrevCol != "" && !sourcePrevColStillExists:
-				// Previous column was dropped, position change is implicit
-				implicitChange = true
-			case strings.EqualFold(prevColumn, sourcePrevCol):
-				// Same previous column, check if we need cascading
-				// Cascading happens if the previous column was repositioned
-				if prevColumn != "" && needsExplicitPosition[strings.ToLower(prevColumn)] && prevColExistedInSource {
-					// Previous column was repositioned, so this column needs repositioning too
-					needsExplicitPosition[strings.ToLower(targetCol.Name)] = true
-				}
-				implicitChange = true
-			default:
-				// Explicit reorder - previous column changed and both exist
-				implicitChange = false
-			}
-
-			if !implicitChange {
-				needsExplicitPosition[strings.ToLower(targetCol.Name)] = true
-			}
+	// The surviving source columns in source order: the list as it stands
+	// once the DROP COLUMN clauses have taken effect.
+	current := make([]string, 0, len(target.Columns))
+	for _, col := range ct.Columns {
+		if _, kept := targetColumns[strings.ToLower(col.Name)]; kept {
+			current = append(current, strings.ToLower(col.Name))
 		}
+	}
 
-		prevColumn = targetCol.Name
+	for pos, targetCol := range target.Columns {
+		name := strings.ToLower(targetCol.Name)
+		if _, existsInSource := sourceColumns[name]; !existsInSource {
+			// ADD COLUMN takes its place in the list; at the end the caller
+			// omits the AFTER clause, which appends, and the simulation here
+			// is the same either way.
+			current = slices.Insert(current, pos, name)
+			needsExplicitPosition[name] = true
+			continue
+		}
+		if pos < len(current) && current[pos] == name {
+			continue
+		}
+		// Out of place: MySQL takes it out and re-inserts it after the
+		// preceding target column, which by the invariant is at pos-1.
+		idx := slices.Index(current, name)
+		current = slices.Delete(current, idx, idx+1)
+		current = slices.Insert(current, pos, name)
+		needsExplicitPosition[name] = true
 	}
 
 	return needsExplicitPosition

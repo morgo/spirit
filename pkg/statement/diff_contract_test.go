@@ -206,6 +206,29 @@ func TestDiffMySQLContracts(t *testing.T) {
 			source: "(id INT PRIMARY KEY)",
 			target: "(id INT PRIMARY KEY, g INT GENERATED ALWAYS AS (id + 1) STORED NOT NULL INVISIBLE COMMENT 'g')",
 		},
+		// Column order. Positions are decided by replaying the clauses the
+		// way MySQL applies them; a DROP used to suppress the reorder of the
+		// column after it.
+		{
+			name:   "columns are reordered after a drop",
+			source: "(id INT PRIMARY KEY, a INT, b INT, c INT, d INT)",
+			target: "(id INT PRIMARY KEY, d INT, b INT)",
+		},
+		{
+			name:   "columns are reordered around an added column",
+			source: "(id INT PRIMARY KEY, a INT, b INT)",
+			target: "(id INT PRIMARY KEY, x INT, b INT, a INT)",
+		},
+		{
+			name:   "columns are rotated",
+			source: "(a INT, b INT, c INT, d INT)",
+			target: "(c INT, d INT, a INT, b INT)",
+		},
+		{
+			name:   "columns are reversed",
+			source: "(a INT, b INT, c INT, d INT)",
+			target: "(d INT, c INT, b INT, a INT)",
+		},
 	}
 	for _, c := range contracts {
 		t.Run(c.name, func(t *testing.T) {
