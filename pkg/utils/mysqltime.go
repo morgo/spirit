@@ -12,8 +12,9 @@ import (
 // microseconds to round them with. Build one with [ParseDateTimeString],
 // [ParseDateTimeNumber], [ParseTimeString] or [ParseTimeNumber]; round it to
 // the column's fractional-seconds precision with [Temporal.RoundDateTime] or
-// [Temporal.RoundTime]; render it with [Temporal.DateTimeString],
-// [Temporal.DateString] or [Temporal.TimeString].
+// [Temporal.RoundTime], or truncate it with [Temporal.Truncate]; render it
+// with [Temporal.DateTimeString], [Temporal.DateString] or
+// [Temporal.TimeString].
 //
 // The parsers accept the spellings MySQL 8.0 accepts and reads unambiguously,
 // and reject (return false for) everything else, including the spellings MySQL
@@ -358,13 +359,20 @@ func (t Temporal) validTime() bool {
 }
 
 // RoundDateTime rounds the value to fsp fractional digits the way MySQL
-// stores it: the digit past the microseconds rounds them first, then the
-// microseconds round half up to fsp, each carrying into the seconds and on
-// through the date. It returns false when the carry runs past 9999-12-31.
+// stores it under its default sql_mode: the digit past the microseconds
+// rounds them first, then the microseconds round half up to fsp, each
+// carrying into the seconds and on through the date. It returns false when
+// the carry runs past 9999-12-31, and when it happens in year 0000, where
+// MySQL does not carry the date but stores the zero date ('0000-12-09
+// 23:59:59.5' is '0000-00-00 00:00:00', '0000-06-15 10:00:00.5' is
+// '0000-00-00 10:00:01'), a value this reader does not produce.
 func (t Temporal) RoundDateTime(fsp int) (Temporal, bool) {
 	micro, carry := roundMicro(t.Micro, t.nanos, fsp)
 	t.Micro, t.nanos = micro, 0
 	if carry {
+		if t.Year == 0 {
+			return Temporal{}, false
+		}
 		tm := time.Date(t.Year, time.Month(t.Month), t.Day, t.Hour, t.Minute, t.Second+1, 0, time.UTC)
 		if tm.Year() > 9999 {
 			return Temporal{}, false
@@ -388,6 +396,21 @@ func (t Temporal) RoundTime(fsp int) (Temporal, bool) {
 		}
 	}
 	return t, true
+}
+
+// Truncate drops the fraction past fsp digits the way MySQL stores the value
+// with TIME_TRUNCATE_FRACTIONAL in its sql_mode, for a DATETIME, DATE or TIME
+// alike: nothing rounds and nothing carries (a negative TIME truncates toward
+// zero), so the result is always valid.
+func (t Temporal) Truncate(fsp int) Temporal {
+	if fsp < 0 {
+		fsp = 0
+	}
+	if fsp < 6 {
+		t.Micro -= t.Micro % pow10(6-fsp)
+	}
+	t.nanos = 0
+	return t
 }
 
 // roundMicro applies MySQL's two rounding steps and reports a carry into the

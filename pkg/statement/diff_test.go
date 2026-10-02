@@ -336,9 +336,18 @@ func TestDiff(t *testing.T) {
 		},
 		{
 			name:     "TemporalDefaultTimeWithDays",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c TIME DEFAULT '26:03:04')",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c TIME DEFAULT '1 2:3:4.4')",
+			expected: "",
+		},
+		{
+			// MySQL rounds the fraction under its default sql_mode and
+			// truncates it under TIME_TRUNCATE_FRACTIONAL; the rule reads
+			// neither, so the literal diffs against both stored values.
+			name:     "TemporalDefaultFractionModeDependentDiffs",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c TIME DEFAULT '26:03:05')",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c TIME DEFAULT '1 2:3:4.5')",
-			expected: "",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `c` time NULL DEFAULT '1 2:3:4.5'",
 		},
 		{
 			name:     "TemporalDefaultAdded",

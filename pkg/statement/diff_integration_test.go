@@ -3589,63 +3589,92 @@ func TestDiffIntegrationFloatDefaultChangeUnderOneReport(t *testing.T) {
 	assert.Contains(t, showCreateTable(t, db, "t"), "DEFAULT '1234570'")
 }
 
-// TestDiffIntegrationTemporalDefaultTruncateFractional verifies that a
-// temporal DEFAULT a diff emits stores the value MySQL reads for the written
-// literal under the session's own sql_mode. temporalDefaultNormalizer models
-// MySQL's default rounding of a fraction past the column's precision; with
-// TIME_TRUNCATE_FRACTIONAL set, MySQL truncates instead, and emitting the
-// rounded reading stored a value one unit too high. The emitted literal is
-// the written one, so the result matches a direct CREATE of the target. The
-// price, pinned here, is that such a literal keeps diffing under that mode:
-// the rule cannot see the session, so it compares the rounded value against
-// the truncated one the table reports.
+// TestDiffIntegrationTemporalDefaultTruncateFractional verifies, under the
+// default sql_mode and under TIME_TRUNCATE_FRACTIONAL, that a temporal
+// DEFAULT a diff emits stores the value MySQL reads for the written literal
+// under the session's own mode, and that temporalDefaultNormalizer reads a
+// fraction past the column's precision only where the two modes agree. MySQL
+// rounds such a fraction by default and truncates it under that mode; the
+// rule cannot see the session of the CREATE, and reading the literal under
+// an assumed mode made a schema compare equal to a value the table did not
+// hold (and emitting the rounded reading stored a value one unit too high
+// under the other mode). A literal whose extra digits round down converges
+// under both modes. One the modes disagree on, including a carry into year
+// 0000 that MySQL stores as the zero date, is left as written: it keeps
+// diffing under both modes, with the MODIFY carrying the literal as written,
+// and applying it again changes nothing.
 func TestDiffIntegrationTemporalDefaultTruncateFractional(t *testing.T) {
 	cases := []struct {
-		name   string
-		target string
+		name      string
+		target    string
+		converges bool
 	}{
-		{"time", "(id INT PRIMARY KEY, c TIME DEFAULT '12:34:56.9')"},
-		{"time with precision", "(id INT PRIMARY KEY, c TIME(1) DEFAULT '12:34:56.99')"},
-		{"datetime", "(id INT PRIMARY KEY, c DATETIME DEFAULT '2024-01-01 23:59:59.9')"},
-		{"timestamp", "(id INT PRIMARY KEY, c TIMESTAMP NULL DEFAULT '2024-01-01 23:59:59.9')"},
-		{"date", "(id INT PRIMARY KEY, c DATE DEFAULT '2024-01-01 23:59:59.9')"},
-		{"time from a number", "(id INT PRIMARY KEY, c TIME DEFAULT 1.55)"},
+		{"time", "(id INT PRIMARY KEY, c TIME DEFAULT '12:34:56.9')", false},
+		{"time with precision", "(id INT PRIMARY KEY, c TIME(1) DEFAULT '12:34:56.99')", false},
+		{"datetime", "(id INT PRIMARY KEY, c DATETIME DEFAULT '2024-01-01 23:59:59.9')", false},
+		{"timestamp", "(id INT PRIMARY KEY, c TIMESTAMP NULL DEFAULT '2024-01-01 23:59:59.9')", false},
+		{"date", "(id INT PRIMARY KEY, c DATE DEFAULT '2024-01-01 23:59:59.9')", false},
+		{"time from a number", "(id INT PRIMARY KEY, c TIME DEFAULT 1.55)", false},
+		{"datetime carry into year zero", "(id INT PRIMARY KEY, c DATETIME DEFAULT '0000-12-09 23:59:59.5')", false},
+		{"time below the half", "(id INT PRIMARY KEY, c TIME DEFAULT '12:34:56.4')", true},
+		{"time with precision below the half", "(id INT PRIMARY KEY, c TIME(1) DEFAULT '12:34:56.94')", true},
+		{"datetime below the half", "(id INT PRIMARY KEY, c DATETIME DEFAULT '2024-01-01 23:59:59.4')", true},
+		{"datetime with precision at the seventh digit", "(id INT PRIMARY KEY, c DATETIME(6) DEFAULT '2024-01-01 10:00:00.1234564999')", true},
+		{"date below the half", "(id INT PRIMARY KEY, c DATE DEFAULT '2024-01-01 23:59:59.4')", true},
+		{"time from a number below the half", "(id INT PRIMARY KEY, c TIME(1) DEFAULT 1.54)", true},
+		{"datetime in year zero below the half", "(id INT PRIMARY KEY, c DATETIME DEFAULT '0000-12-09 23:59:59.4')", true},
 	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			dbName, _ := testutils.CreateUniqueTestDatabase(t)
-			// One connection, so the SET SESSION applies to every statement.
-			db, err := sql.Open("block-mysql", testutils.DSNForDatabase(dbName))
-			require.NoError(t, err)
-			t.Cleanup(func() { require.NoError(t, db.Close()) })
-			db.SetMaxOpenConns(1)
-			exec := func(stmt string) {
-				t.Helper()
-				_, err := db.ExecContext(t.Context(), stmt)
-				require.NoError(t, err, "executing: %s", stmt)
-			}
-			exec("SET SESSION sql_mode = CONCAT(@@sql_mode, ',TIME_TRUNCATE_FRACTIONAL')")
+	modes := []struct {
+		name    string
+		sqlMode string
+	}{
+		{"default", ""},
+		{"TIME_TRUNCATE_FRACTIONAL", "SET SESSION sql_mode = CONCAT(@@sql_mode, ',TIME_TRUNCATE_FRACTIONAL')"},
+	}
+	for _, mode := range modes {
+		for _, c := range cases {
+			t.Run(mode.name+"/"+c.name, func(t *testing.T) {
+				dbName, _ := testutils.CreateUniqueTestDatabase(t)
+				// One connection, so the SET SESSION applies to every statement.
+				db, err := sql.Open("block-mysql", testutils.DSNForDatabase(dbName))
+				require.NoError(t, err)
+				t.Cleanup(func() { require.NoError(t, db.Close()) })
+				db.SetMaxOpenConns(1)
+				exec := func(stmt string) {
+					t.Helper()
+					_, err := db.ExecContext(t.Context(), stmt)
+					require.NoError(t, err, "executing: %s", stmt)
+				}
+				if mode.sqlMode != "" {
+					exec(mode.sqlMode)
+				}
 
-			exec("CREATE TABLE t " + c.target)
-			expected := showCreateTable(t, db, "t")
-			exec("DROP TABLE t")
+				exec("CREATE TABLE t " + c.target)
+				expected := showCreateTable(t, db, "t")
+				exec("DROP TABLE t")
 
-			exec("CREATE TABLE t (id INT PRIMARY KEY)")
-			stmts := diffLiveTable(t, db, "t", "CREATE TABLE t "+c.target)
-			require.Len(t, stmts, 1)
-			execStatements(t, db, stmts)
-			assert.Equal(t, expected, showCreateTable(t, db, "t"), "the default must be what MySQL reads for the written literal under this session's mode")
+				exec("CREATE TABLE t (id INT PRIMARY KEY)")
+				stmts := diffLiveTable(t, db, "t", "CREATE TABLE t "+c.target)
+				require.Len(t, stmts, 1)
+				execStatements(t, db, stmts)
+				assert.Equal(t, expected, showCreateTable(t, db, "t"), "the default must be what MySQL reads for the written literal under this session's mode")
 
-			// The documented residual: the rounded reading compares unequal to
-			// the truncated value, so the same MODIFY is emitted again, and
-			// applying it changes nothing.
-			again := diffLiveTable(t, db, "t", "CREATE TABLE t "+c.target)
-			require.Len(t, again, 1, "under TIME_TRUNCATE_FRACTIONAL an over-precise literal keeps diffing; if this converges now, update temporalDefaultNormalizer's doc")
-			assert.Contains(t, again[0].Statement, "MODIFY COLUMN `c` ")
-			assert.Contains(t, again[0].Statement, "DEFAULT "+c.target[strings.LastIndex(c.target, "DEFAULT ")+len("DEFAULT "):len(c.target)-1], "the literal as written")
-			execStatements(t, db, again)
-			assert.Equal(t, expected, showCreateTable(t, db, "t"))
-		})
+				again := diffLiveTable(t, db, "t", "CREATE TABLE t "+c.target)
+				if c.converges {
+					require.Nil(t, again, "a fraction the two modes agree on converges")
+					return
+				}
+				// The documented residual: a literal the two modes store
+				// differently is left as written, so it compares unequal to
+				// the live value under either mode, the same MODIFY is emitted
+				// again, and applying it changes nothing.
+				require.Len(t, again, 1, "a literal MySQL rounds under one sql_mode and truncates under the other keeps diffing; if this converges now, update temporalDefaultNormalizer's doc")
+				assert.Contains(t, again[0].Statement, "MODIFY COLUMN `c` ")
+				assert.Contains(t, again[0].Statement, "DEFAULT "+c.target[strings.LastIndex(c.target, "DEFAULT ")+len("DEFAULT "):len(c.target)-1], "the literal as written")
+				execStatements(t, db, again)
+				assert.Equal(t, expected, showCreateTable(t, db, "t"))
+			})
+		}
 	}
 }
 

@@ -27,39 +27,46 @@ func init() { registerNormalizer(temporalDefaultNormalizer{}) }
 //	datetime DEFAULT 20200101                  -> '2020-01-01 00:00:00'
 //	datetime DEFAULT 101                       -> '2000-01-01 00:00:00'
 //	datetime(3) DEFAULT '2020-01-01 10:00:00'  -> '2020-01-01 10:00:00.000'
-//	datetime(3) DEFAULT '... 10:00:00.1235'    -> '2020-01-01 10:00:00.124'
-//	datetime DEFAULT '2020-01-01 23:59:59.9'   -> '2020-01-02 00:00:00'
-//	date DEFAULT '2020-01-01 23:59:59.9'       -> '2020-01-02'
+//	datetime(3) DEFAULT '... 10:00:00.1234'    -> '2020-01-01 10:00:00.123'
+//	datetime DEFAULT '2020-01-01 10:00:00.4'   -> '2020-01-01 10:00:00'
+//	date DEFAULT '2020-01-01 23:59:59.4'       -> '2020-01-01'
 //	date DEFAULT 20200101                      -> '2020-01-01'
 //	time DEFAULT '1:2'                         -> '01:02:00'
-//	time DEFAULT '1 2:3:4.5'                   -> '26:03:05'
+//	time DEFAULT '1 2:3:4.4'                   -> '26:03:04'
 //	time DEFAULT 100                           -> '00:01:00'
-//	time(1) DEFAULT 1.55                       -> '00:00:01.6'
+//	time(1) DEFAULT 1.54                       -> '00:00:01.5'
 //	time DEFAULT '-0:00:00.4'                  -> '00:00:00'
 //
-// A fraction rounds half up to the column's precision, in two steps the way
-// MySQL does it: the digit past the microseconds rounds them first. A DATETIME
-// string rounds from the seventh digit and a TIME string from the last digit
-// written, so '10:00:00.1234564999' is '.123456' on a datetime(6) and
-// '.123457' on a time(6). The carry runs through the seconds, minutes, hours
-// and date.
+// A fraction past the column's precision is read only where MySQL's two ways
+// of shortening it agree. Under the default sql_mode MySQL rounds it half up,
+// in two steps: the digit past the microseconds rounds them first (a DATETIME
+// string from the seventh digit, a TIME string from the last digit written),
+// then the microseconds round to the precision, and the carry runs through
+// the seconds, minutes, hours and date. With TIME_TRUNCATE_FRACTIONAL in the
+// session's sql_mode MySQL truncates instead: '12:34:56.9' on a time is
+// '12:34:57' under one mode and '12:34:56' under the other. The rule cannot
+// see the session of the CREATE, so a literal the two readings disagree on
+// is left as written; reading it under an assumed mode would make a schema
+// compare equal to a live value it may not have. The literal then keeps
+// diffing against the live table, and the MODIFY the diff emits carries it as
+// written (Column.DefaultAsWritten), so MySQL stores under the session's own
+// mode what the CREATE did. A literal the two readings agree on, one whose
+// extra digits round down ('10:00:00.4', '.1234' on a datetime(3),
+// '10:00:00.1234564999' on a datetime(6), where the seventh digit decides),
+// is read.
 //
 // The result is recorded as a [DefaultKindString], the form SHOW CREATE TABLE
 // reports, so a declared number compares equal to the live string. It is the
-// value Diff compares, not the one it emits: a MODIFY writes the literal as
-// the schema spelled it (Column.DefaultAsWritten), so MySQL reads it under the
-// session's own rules. That matters for the rounding above, which is the
-// default behaviour but not the only one: with TIME_TRUNCATE_FRACTIONAL in
-// the session's sql_mode, MySQL truncates a fraction past the column's
-// precision instead ('12:34:56.9' is '12:34:56', not '12:34:57'). The rule
-// cannot see the session, so it models the default. Under that mode a literal
-// with more fractional digits than the column keeps stores the truncated
-// value, as a CREATE TABLE would, but compares unequal to it, so the diff
-// emits the same MODIFY on every run until the schema spells the value the
-// column keeps. Everything else about the rule holds in both modes.
+// value Diff compares, not the one it emits.
 //
 // Left alone, so that the diff keeps emitting the literal as written:
 //
+//   - a fraction past the column's precision that MySQL rounds under the
+//     default sql_mode and truncates under TIME_TRUNCATE_FRACTIONAL (above):
+//     '12:34:56.9' on a time, '1.55' on a time(1), '23:59:59.5' on a
+//     datetime or a date. Every carry into year 0000 is one of these, and
+//     MySQL does not even carry it under the default mode: it stores the zero
+//     date ('0000-12-09 23:59:59.5' is '0000-00-00 00:00:00').
 //   - a value MySQL rejects (an invalid date, a zero month or day, a field
 //     out of range, a carry past 9999-12-31 or 838:59:59), so the MODIFY
 //     fails the way it would have anyway.
@@ -71,8 +78,8 @@ func init() { registerNormalizer(temporalDefaultNormalizer{}) }
 //     digit string of a width other than 6, 8, 12 or 14 ('10101' is
 //     2010-10-01), a thirteen-digit number (a year 100-999 datetime), a TIME
 //     string that starts with a colon or that MySQL reads as a DATETIME first
-//     (twelve or more digits, or a date), and a number MySQL reads as a
-//     DATETIME on a TIME column.
+//     (twelve or more digits, or a date: '1999-12-29 12:00' stores
+//     '12:00:00'), and a number MySQL reads as a DATETIME on a TIME column.
 //   - a hex or bit literal, TRUE/FALSE, an expression default and NULL.
 //
 // TIMESTAMP has one more wrinkle this rule cannot remove: MySQL converts a
@@ -103,7 +110,9 @@ func (temporalDefaultNormalizer) Normalize(ct *CreateTable) *CreateTable {
 
 // temporalDefaultText returns the text SHOW CREATE TABLE reports for a
 // temporal column's literal default, or false where the default is not one
-// this rule converts. See [temporalDefaultNormalizer].
+// this rule converts: an unreadable literal, or one whose fraction MySQL
+// rounds under one sql_mode and truncates under another. See
+// [temporalDefaultNormalizer].
 func temporalDefaultText(c *Column, typ string) (string, bool) {
 	text := *c.Default
 	number := c.DefaultKind == DefaultKindNumber
@@ -127,16 +136,19 @@ func temporalDefaultText(c *Column, typ string) (string, bool) {
 			return "", false
 		}
 		if typ == "date" {
-			// A DATE keeps the date after the time part has rounded away.
-			if value, ok = value.RoundDateTime(0); !ok {
+			// A DATE keeps the date the time part rounds to, or the date
+			// as written under truncation; read only where that is one date.
+			rounded, ok := value.RoundDateTime(0)
+			if !ok || rounded.DateString() != value.Truncate(0).DateString() {
 				return "", false
 			}
-			return value.DateString(), true
+			return rounded.DateString(), true
 		}
-		if value, ok = value.RoundDateTime(fsp); !ok {
+		rounded, ok := value.RoundDateTime(fsp)
+		if !ok || rounded.DateTimeString(fsp) != value.Truncate(fsp).DateTimeString(fsp) {
 			return "", false
 		}
-		return value.DateTimeString(fsp), true
+		return rounded.DateTimeString(fsp), true
 	case "time":
 		var value utils.Temporal
 		var ok bool
@@ -148,10 +160,11 @@ func temporalDefaultText(c *Column, typ string) (string, bool) {
 		if !ok {
 			return "", false
 		}
-		if value, ok = value.RoundTime(fsp); !ok {
+		rounded, ok := value.RoundTime(fsp)
+		if !ok || rounded.TimeString(fsp) != value.Truncate(fsp).TimeString(fsp) {
 			return "", false
 		}
-		return value.TimeString(fsp), true
+		return rounded.TimeString(fsp), true
 	}
 	return "", false
 }

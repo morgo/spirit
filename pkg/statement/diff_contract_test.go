@@ -761,7 +761,11 @@ func TestDiffMySQLContracts(t *testing.T) {
 			target: "(id INT PRIMARY KEY, c BINARY(5) DEFAULT 1.5)",
 		},
 		// Temporal literal defaults (temporalDefaultNormalizer): MySQL stores
-		// the literal as a date or time and reports the stored value.
+		// the literal as a date or time and reports the stored value. A
+		// fraction past the precision is read only where MySQL's rounding
+		// and its TIME_TRUNCATE_FRACTIONAL truncation agree; the literals
+		// they disagree on keep diffing, which
+		// TestDiffIntegrationTemporalDefaultTruncateFractional pins.
 		{
 			name:   "datetime default from a date converges",
 			source: "(id INT PRIMARY KEY, c DATETIME)",
@@ -784,9 +788,9 @@ func TestDiffMySQLContracts(t *testing.T) {
 			target: "(id INT PRIMARY KEY, c DATETIME(3) DEFAULT '2020-01-01 10:00:00')",
 		},
 		{
-			name:   "datetime default rounds and carries",
+			name:   "datetime default with a fraction below the half converges",
 			source: "(id INT PRIMARY KEY, c DATETIME)",
-			target: "(id INT PRIMARY KEY, c DATETIME DEFAULT '2020-01-01 23:59:59.9')",
+			target: "(id INT PRIMARY KEY, c DATETIME DEFAULT '2020-01-01 23:59:59.4')",
 		},
 		{
 			name:   "datetime default from a number converges",
@@ -796,7 +800,7 @@ func TestDiffMySQLContracts(t *testing.T) {
 		{
 			name:   "datetime default from a compact string converges",
 			source: "(id INT PRIMARY KEY, c DATETIME(6))",
-			target: "(id INT PRIMARY KEY, c DATETIME(6) DEFAULT '20200101T100000.12345678')",
+			target: "(id INT PRIMARY KEY, c DATETIME(6) DEFAULT '20200101T100000.1234564')",
 		},
 		{
 			name:   "timestamp default converges",
@@ -811,7 +815,7 @@ func TestDiffMySQLContracts(t *testing.T) {
 		{
 			name:   "date default from a datetime string converges",
 			source: "(id INT PRIMARY KEY, c DATE)",
-			target: "(id INT PRIMARY KEY, c DATE DEFAULT '2020-01-01 23:59:59.9')",
+			target: "(id INT PRIMARY KEY, c DATE DEFAULT '2020-01-01 23:59:59.4')",
 		},
 		{
 			name:   "time default converges",
@@ -821,17 +825,17 @@ func TestDiffMySQLContracts(t *testing.T) {
 		{
 			name:   "time default with days converges",
 			source: "(id INT PRIMARY KEY, c TIME)",
-			target: "(id INT PRIMARY KEY, c TIME DEFAULT '1 2:3:4.5')",
+			target: "(id INT PRIMARY KEY, c TIME DEFAULT '1 2:3:4.4')",
 		},
 		{
 			name:   "time default from a number converges",
 			source: "(id INT PRIMARY KEY, c TIME(1))",
-			target: "(id INT PRIMARY KEY, c TIME(1) DEFAULT 1.55)",
+			target: "(id INT PRIMARY KEY, c TIME(1) DEFAULT 1.54)",
 		},
 		{
-			name:   "time default fraction rounds from the last digit",
+			name:   "time default fraction cut at the precision converges",
 			source: "(id INT PRIMARY KEY, c TIME(6))",
-			target: "(id INT PRIMARY KEY, c TIME(6) DEFAULT '10:00:00.1234564999')",
+			target: "(id INT PRIMARY KEY, c TIME(6) DEFAULT '10:00:00.1234564')",
 		},
 		{
 			name:     "time default negative zero is a no-op",

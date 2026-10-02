@@ -115,6 +115,14 @@ func TestParseDateTimeString(t *testing.T) {
 		{"2020-01-01 10:00:60", 0, ""},
 		{"9999-12-31 23:59:59.9", 0, ""},
 		{"9999-12-31 23:59:59.99", 1, ""},
+		// A carry in year 0000 is not carried by MySQL: it stores the zero
+		// date, which this reader does not produce.
+		{"0000-12-09 23:59:59.5", 0, ""},
+		{"0000-12-09 23:59:59.95", 1, ""},
+		{"0000-06-15 10:00:00.5", 0, ""},
+		{"0000-01-01 23:59:59.5", 0, ""},
+		{"0000-12-09 23:59:59.4", 0, "0000-12-09 23:59:59"},
+		{"0001-12-31 23:59:59.5", 0, "0002-01-01 00:00:00"},
 		{"20200101T", 0, ""},
 		{"2020010110", 0, ""},
 		{"202001011000", 0, ""},
@@ -203,9 +211,56 @@ func TestParseDateTimeNumber(t *testing.T) {
 func TestDateString(t *testing.T) {
 	parsed, ok := ParseDateTimeString("2020-01-01 23:59:59.9")
 	require.True(t, ok)
+	assert.Equal(t, "2020-01-01", parsed.Truncate(0).DateString())
 	parsed, ok = parsed.RoundDateTime(0)
 	require.True(t, ok)
 	assert.Equal(t, "2020-01-02", parsed.DateString())
+}
+
+// Truncate drops the digits past the precision without rounding or carrying,
+// the way MySQL stores a fraction under TIME_TRUNCATE_FRACTIONAL.
+func TestTruncate(t *testing.T) {
+	dateTimes := []struct {
+		text string
+		fsp  int
+		want string
+	}{
+		{"2020-01-01 23:59:59.9", 0, "2020-01-01 23:59:59"},
+		{"2020-01-01 10:00:00.1235", 3, "2020-01-01 10:00:00.123"},
+		{"2020-01-01 10:00:00.12345678", 6, "2020-01-01 10:00:00.123456"},
+		{"2020-01-01 10:00:00.0049999", 2, "2020-01-01 10:00:00.00"},
+		{"2020-01-01 10:00:00", 2, "2020-01-01 10:00:00.00"},
+		{"0000-12-09 23:59:59.5", 0, "0000-12-09 23:59:59"},
+		{"9999-12-31 23:59:59.9", 0, "9999-12-31 23:59:59"},
+		{"20200101235959.9", 0, "2020-01-01 23:59:59"},
+	}
+	for _, tc := range dateTimes {
+		t.Run(tc.text, func(t *testing.T) {
+			parsed, ok := ParseDateTimeString(tc.text)
+			require.True(t, ok)
+			assert.Equal(t, tc.want, parsed.Truncate(tc.fsp).DateTimeString(tc.fsp))
+		})
+	}
+	times := []struct {
+		text string
+		fsp  int
+		want string
+	}{
+		{"12:34:56.9", 0, "12:34:56"},
+		{"12:34:56.99", 1, "12:34:56.9"},
+		{"1 2:3:4.5", 0, "26:03:04"},
+		{"-0:00:00.5", 0, "00:00:00"},
+		{"-1:2:3.9", 0, "-01:02:03"},
+		{"10:00:00.1234564999", 6, "10:00:00.123456"},
+		{"1:2:3.4999999", 0, "01:02:03"},
+	}
+	for _, tc := range times {
+		t.Run(tc.text, func(t *testing.T) {
+			parsed, ok := ParseTimeString(tc.text)
+			require.True(t, ok)
+			assert.Equal(t, tc.want, parsed.Truncate(tc.fsp).TimeString(tc.fsp))
+		})
+	}
 }
 
 func TestParseTimeString(t *testing.T) {
