@@ -843,6 +843,16 @@ func TestDiffMySQLContracts(t *testing.T) {
 			target:   "(id INT PRIMARY KEY, a INT, b INT, CONSTRAINT ck CHECK ((a > 0 AND b > 0) AND id > 0))",
 			wantNoop: true,
 		},
+		// A comparison between quoted literals. The quote stripping that turns
+		// DEFAULT ('a') into the value a keyed off the rendered text, so once
+		// the canonical form had dropped the parentheses of ('a') = ('a') the
+		// default became the unparsable a'='a and the diff's own ALTER failed
+		// to parse.
+		{
+			name:   "expression default comparing quoted literals",
+			source: "(id INT PRIMARY KEY)",
+			target: "(id INT PRIMARY KEY, c INT DEFAULT (('a') = ('a')), d INT DEFAULT ('a' LIKE 'a%'), e VARCHAR(5) DEFAULT (('a')))",
+		},
 		// Expression defaults and unary plus (expressionParenNormalizer): MySQL
 		// stores an expression in its own parenthesization and drops every
 		// unary plus when it parses it.

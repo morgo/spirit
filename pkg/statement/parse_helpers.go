@@ -147,8 +147,12 @@ func restoreValueExprTextWith(expr ast.ExprNode, bareTimestampKeyword bool, extr
 		if !ok {
 			return "<error>"
 		}
-		// if the string is quoted, remove quotes
-		if strings.HasPrefix(str, "'") && strings.HasSuffix(str, "'") {
+		// A string literal is stored without its quotes. Only a literal: an
+		// expression can render with a quote at each end too — ('a') = ('a')
+		// is 'a'='a' once the canonical form has dropped its parentheses —
+		// and stripping those left the unparsable a'='a.
+		if _, isString := stringLiteralValue(unwrapParenExpr(expr)); isString &&
+			strings.HasPrefix(str, "'") && strings.HasSuffix(str, "'") {
 			str = str[1 : len(str)-1]
 		}
 		return str

@@ -250,3 +250,40 @@ func TestCanonicalExprParensExpressionDefaultsStillDiffRealChanges(t *testing.T)
 		"a int DEFAULT ((-(1) + 2))",
 		"MODIFY COLUMN `a` int NULL DEFAULT (-(1+2))")
 }
+
+// TestCanonicalExprDefaultUnquotesOnlyStringLiterals pins that a default is
+// stored without its quotes only when the whole default is one string literal.
+// The stripping used to key off the rendered text, so once the canonical form
+// had dropped the parentheses of DEFAULT (('a') = ('a')) the comparison
+// rendered as 'a'='a', which starts and ends with a quote, and the default
+// became the unparsable a'='a.
+func TestCanonicalExprDefaultUnquotesOnlyStringLiterals(t *testing.T) {
+	cases := []struct {
+		column string
+		want   string
+		kind   DefaultKind
+	}{
+		{"a INT DEFAULT (('a') = ('a'))", "`a` int NULL DEFAULT ('a'='a')", DefaultKindUnknown},
+		{"a INT DEFAULT ('a' = 'b')", "`a` int NULL DEFAULT ('a'='b')", DefaultKindUnknown},
+		{"a INT DEFAULT ('a' LIKE 'a%')", "`a` int NULL DEFAULT ('a' LIKE 'a%')", DefaultKindUnknown},
+		{"a INT DEFAULT ('a' IN ('a','b'))", "`a` int NULL DEFAULT ('a' IN ('a','b'))", DefaultKindUnknown},
+		{"a VARCHAR(5) DEFAULT (('a'))", "`a` varchar(5) NULL DEFAULT ('a')", DefaultKindString},
+		{"a VARCHAR(5) DEFAULT ('a')", "`a` varchar(5) NULL DEFAULT ('a')", DefaultKindString},
+		{"a VARCHAR(5) DEFAULT ('it''s')", "`a` varchar(5) NULL DEFAULT ('it\\'s')", DefaultKindString},
+		{"a VARCHAR(5) DEFAULT 'a'", "`a` varchar(5) NULL DEFAULT 'a'", DefaultKindString},
+	}
+	for _, c := range cases {
+		t.Run(c.column, func(t *testing.T) {
+			ct, err := ParseCreateTable("CREATE TABLE t (" + c.column + ")")
+			require.NoError(t, err)
+			require.Len(t, ct.Columns, 1)
+			assert.Equal(t, c.kind, ct.Columns[0].DefaultKind)
+			definition := formatColumnDefinition(&ct.Columns[0])
+			assert.Equal(t, c.want, definition)
+			// What is emitted parses, and parses back to the same definition.
+			again, err := ParseCreateTable("CREATE TABLE t (" + definition + ")")
+			require.NoError(t, err, definition)
+			assert.Equal(t, definition, formatColumnDefinition(&again.Columns[0]))
+		})
+	}
+}
