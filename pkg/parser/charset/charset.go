@@ -53,9 +53,35 @@ type Collation struct {
 	IsDefault    bool
 	Sortlen      int
 	PadAttribute string
+	// CaseSensitive reports whether strings that differ only in letter case
+	// compare unequal ('abc' != 'ABC').
+	CaseSensitive bool
+	// AccentSensitive reports whether strings that differ only in accents
+	// compare unequal ('cafe' and 'café'). Insensitive still keeps apart a
+	// letter the collation's language counts as its own, such as Icelandic
+	// 'á'.
+	AccentSensitive Sensitivity
+	// KanaSensitive reports whether hiragana and katakana forms of the same
+	// kana compare unequal.
+	KanaSensitive Sensitivity
+	// Binary reports whether the collation compares bytes or code points
+	// rather than weights, so two values it calls equal are identical apart
+	// from the trailing spaces a PAD SPACE collation ignores. Moving a column
+	// onto a binary collation of the same charset cannot make values that
+	// compared unequal start comparing equal, unless it starts ignoring
+	// trailing spaces.
+	Binary bool
+	// UCAVersion is the Unicode Collation Algorithm version of the weights.
+	UCAVersion UCAVersion
+	// DeprecatedByCollationID is the ID of the collation that replaces this
+	// one, or 0 when none does. Following it from an obsolete collation
+	// reaches a current one.
+	DeprecatedByCollationID int
 }
 
 var collationsNameMap = make(map[string]*Collation)
+
+var collationsIDMap = make(map[int]*Collation)
 
 // CharacterSetInfos contains all the supported charsets.
 var CharacterSetInfos = map[string]*Charset{
@@ -154,12 +180,22 @@ func utf8Alias(csname string) string {
 	return csname
 }
 
-// GetCollationByName returns the collation by name.
-func GetCollationByName(name string) (*Collation, error) {
+// FindCollationByName returns the collation by name.
+func FindCollationByName(name string) (*Collation, error) {
 	csname := utf8Alias(strings.ToLower(name))
 	collation, ok := collationsNameMap[csname]
 	if !ok {
 		return nil, ErrUnknownCollation.GenByArgs(name)
+	}
+	return collation, nil
+}
+
+// FindCollationByID returns the collation with the given ID, such as the one a
+// Collation's DeprecatedByCollationID names.
+func FindCollationByID(id int) (*Collation, error) {
+	collation, ok := collationsIDMap[id]
+	if !ok {
+		return nil, fmt.Errorf("unknown collation ID %d", id)
 	}
 	return collation, nil
 }
@@ -283,7 +319,10 @@ var charsets = map[string]*Charset{
 	CharsetUTF8MB4:  {Name: CharsetUTF8MB4, Maxlen: 4, DefaultCollation: "utf8mb4_0900_ai_ci", Desc: "UTF-8 Unicode", Collations: make(map[string]*Collation)},
 }
 
-var collations = []*Collation{
+// collations is built from collationTable by init.
+var collations []*Collation
+
+var collationTable = []collationRow{
 	{1, "big5", "big5_chinese_ci", true, 1, PadSpace},
 	{2, "latin2", "latin2_czech_cs", false, 1, PadSpace},
 	{3, "dec8", "dec8_swedish_ci", true, 1, PadSpace},
@@ -358,7 +397,7 @@ var collations = []*Collation{
 	{73, "keybcs2", "keybcs2_bin", false, 1, PadSpace},
 	{74, "koi8r", "koi8r_bin", false, 1, PadSpace},
 	{75, "koi8u", "koi8u_bin", false, 1, PadSpace},
-	{76, "utf8", "utf8_tolower_ci", false, 1, PadNone},
+	{76, "utf8", "utf8_tolower_ci", false, 1, PadSpace},
 	{77, "latin2", "latin2_bin", false, 1, PadSpace},
 	{78, "latin5", "latin5_bin", false, 1, PadSpace},
 	{79, "latin7", "latin7_bin", false, 1, PadSpace},
@@ -456,30 +495,30 @@ var collations = []*Collation{
 	{182, "utf32", "utf32_unicode_520_ci", false, 1, PadSpace},
 	{183, "utf32", "utf32_vietnamese_ci", false, 1, PadSpace},
 	{192, "utf8", "utf8_unicode_ci", false, 8, PadSpace},
-	{193, "utf8", "utf8_icelandic_ci", false, 1, PadNone},
-	{194, "utf8", "utf8_latvian_ci", false, 1, PadNone},
-	{195, "utf8", "utf8_romanian_ci", false, 1, PadNone},
-	{196, "utf8", "utf8_slovenian_ci", false, 1, PadNone},
-	{197, "utf8", "utf8_polish_ci", false, 1, PadNone},
-	{198, "utf8", "utf8_estonian_ci", false, 1, PadNone},
-	{199, "utf8", "utf8_spanish_ci", false, 1, PadNone},
-	{200, "utf8", "utf8_swedish_ci", false, 1, PadNone},
-	{201, "utf8", "utf8_turkish_ci", false, 1, PadNone},
-	{202, "utf8", "utf8_czech_ci", false, 1, PadNone},
-	{203, "utf8", "utf8_danish_ci", false, 1, PadNone},
-	{204, "utf8", "utf8_lithuanian_ci", false, 1, PadNone},
-	{205, "utf8", "utf8_slovak_ci", false, 1, PadNone},
-	{206, "utf8", "utf8_spanish2_ci", false, 1, PadNone},
-	{207, "utf8", "utf8_roman_ci", false, 1, PadNone},
-	{208, "utf8", "utf8_persian_ci", false, 1, PadNone},
-	{209, "utf8", "utf8_esperanto_ci", false, 1, PadNone},
-	{210, "utf8", "utf8_hungarian_ci", false, 1, PadNone},
-	{211, "utf8", "utf8_sinhala_ci", false, 1, PadNone},
-	{212, "utf8", "utf8_german2_ci", false, 1, PadNone},
-	{213, "utf8", "utf8_croatian_ci", false, 1, PadNone},
-	{214, "utf8", "utf8_unicode_520_ci", false, 1, PadNone},
-	{215, "utf8", "utf8_vietnamese_ci", false, 1, PadNone},
-	{223, "utf8", "utf8_general_mysql500_ci", false, 1, PadNone},
+	{193, "utf8", "utf8_icelandic_ci", false, 1, PadSpace},
+	{194, "utf8", "utf8_latvian_ci", false, 1, PadSpace},
+	{195, "utf8", "utf8_romanian_ci", false, 1, PadSpace},
+	{196, "utf8", "utf8_slovenian_ci", false, 1, PadSpace},
+	{197, "utf8", "utf8_polish_ci", false, 1, PadSpace},
+	{198, "utf8", "utf8_estonian_ci", false, 1, PadSpace},
+	{199, "utf8", "utf8_spanish_ci", false, 1, PadSpace},
+	{200, "utf8", "utf8_swedish_ci", false, 1, PadSpace},
+	{201, "utf8", "utf8_turkish_ci", false, 1, PadSpace},
+	{202, "utf8", "utf8_czech_ci", false, 1, PadSpace},
+	{203, "utf8", "utf8_danish_ci", false, 1, PadSpace},
+	{204, "utf8", "utf8_lithuanian_ci", false, 1, PadSpace},
+	{205, "utf8", "utf8_slovak_ci", false, 1, PadSpace},
+	{206, "utf8", "utf8_spanish2_ci", false, 1, PadSpace},
+	{207, "utf8", "utf8_roman_ci", false, 1, PadSpace},
+	{208, "utf8", "utf8_persian_ci", false, 1, PadSpace},
+	{209, "utf8", "utf8_esperanto_ci", false, 1, PadSpace},
+	{210, "utf8", "utf8_hungarian_ci", false, 1, PadSpace},
+	{211, "utf8", "utf8_sinhala_ci", false, 1, PadSpace},
+	{212, "utf8", "utf8_german2_ci", false, 1, PadSpace},
+	{213, "utf8", "utf8_croatian_ci", false, 1, PadSpace},
+	{214, "utf8", "utf8_unicode_520_ci", false, 1, PadSpace},
+	{215, "utf8", "utf8_vietnamese_ci", false, 1, PadSpace},
+	{223, "utf8", "utf8_general_mysql500_ci", false, 1, PadSpace},
 	{224, "utf8mb4", "utf8mb4_unicode_ci", false, 8, PadSpace},
 	{225, "utf8mb4", "utf8mb4_icelandic_ci", false, 1, PadSpace},
 	{226, "utf8mb4", "utf8mb4_latvian_ci", false, 1, PadSpace},
@@ -574,8 +613,14 @@ var collations = []*Collation{
 
 // init method always puts to the end of file.
 func init() {
+	built, err := buildCollations(collationTable)
+	if err != nil {
+		panic(fmt.Sprintf("build collation table: %v", err))
+	}
+	collations = built
 	for _, c := range collations {
 		collationsNameMap[c.Name] = c
+		collationsIDMap[c.ID] = c
 
 		if charset, ok := CharacterSetInfos[c.CharsetName]; ok {
 			charset.Collations[c.Name] = c
