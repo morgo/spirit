@@ -16,6 +16,11 @@ func init() { registerNormalizer(indexDefaultsNormalizer{}) }
 //   - USING HASH, on InnoDB. InnoDB has no hash indexes: it builds a B-tree
 //     and reports no USING at all, so the option-only rebuild the diff emitted
 //     changed nothing. An explicit USING BTREE is reported and is kept.
+//   - KEY_BLOCK_SIZE equal to the table's own KEY_BLOCK_SIZE, on any engine.
+//     MySQL stores it on the index but reports an index's size only when it
+//     differs from the table's, so KEY k (c) KEY_BLOCK_SIZE=4 on a
+//     KEY_BLOCK_SIZE=4 table reads back as KEY k (c), and the diff replaced
+//     the index on every run.
 //   - KEY_BLOCK_SIZE, on InnoDB, unless the table is compressed: a
 //     ROW_FORMAT=COMPRESSED or a table-level KEY_BLOCK_SIZE. The option only
 //     applies to compressed tables and is dropped on creation otherwise, so
@@ -34,12 +39,15 @@ func (indexDefaultsNormalizer) Normalize(ct *CreateTable) *CreateTable {
 	engine := ct.TableOptions.getEngine()
 	innodb := engine == nil || strings.EqualFold(*engine, "InnoDB")
 	rowFormat := ct.TableOptions.getRowFormat()
-	compressed := (rowFormat != nil && strings.EqualFold(*rowFormat, "COMPRESSED")) ||
-		ct.TableOptions.deref().KeyBlockSize != nil
+	tableSize := ct.TableOptions.deref().KeyBlockSize
+	compressed := (rowFormat != nil && strings.EqualFold(*rowFormat, "COMPRESSED")) || tableSize != nil
 	for i := range ct.Indexes {
 		idx := &ct.Indexes[i]
 		if idx.Invisible != nil && !*idx.Invisible {
 			idx.Invisible = nil
+		}
+		if idx.KeyBlockSize != nil && tableSize != nil && *idx.KeyBlockSize == *tableSize {
+			idx.KeyBlockSize = nil
 		}
 		if !innodb {
 			continue

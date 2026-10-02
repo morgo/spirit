@@ -108,14 +108,18 @@ type IndexColumn struct {
 
 // Index represents an index definition
 type Index struct {
-	Raw          *ast.Constraint   `json:"-"`
-	Name         string            `json:"name"`
-	Type         string            `json:"type"`                  // PRIMARY KEY, UNIQUE, INDEX, FULLTEXT, SPATIAL
-	Columns      []string          `json:"columns"`               // Deprecated: use ColumnList for full details
-	ColumnList   []IndexColumn     `json:"column_list,omitempty"` // Full column specifications including prefix/expression
-	Invisible    *bool             `json:"invisible,omitempty"`
-	Using        *string           `json:"using,omitempty"` // BTREE, HASH, RTREE
-	Comment      *string           `json:"comment,omitempty"`
+	Raw        *ast.Constraint `json:"-"`
+	Name       string          `json:"name"`
+	Type       string          `json:"type"`                  // PRIMARY KEY, UNIQUE, INDEX, FULLTEXT, SPATIAL
+	Columns    []string        `json:"columns"`               // Deprecated: use ColumnList for full details
+	ColumnList []IndexColumn   `json:"column_list,omitempty"` // Full column specifications including prefix/expression
+	Invisible  *bool           `json:"invisible,omitempty"`
+	Using      *string         `json:"using,omitempty"` // BTREE, HASH, RTREE
+	Comment    *string         `json:"comment,omitempty"`
+	// KeyBlockSize is the index's own KEY_BLOCK_SIZE; nil when none is set or
+	// it equals the table's, which SHOW CREATE TABLE omits
+	// (indexDefaultsNormalizer). See indexesKeepOldBlockSize for what the
+	// table's size change does to the indexes.
 	KeyBlockSize *uint64           `json:"key_block_size,omitempty"`
 	ParserName   *string           `json:"parser_name,omitempty"`
 	Options      map[string]string `json:"options,omitempty"`
@@ -1782,10 +1786,11 @@ func (ct *CreateTable) Diff(target *CreateTable, opts *DiffOptions) ([]*Abstract
 	alterClauses = append(alterClauses, columnClauses...)
 
 	// 2. Diff indexes (DROP, ADD). An index whose options alone change (same
-	// column list, different WITH PARSER / KEY_BLOCK_SIZE / etc.) is replaced
-	// in statements of its own after the primary ALTER, because MySQL no-ops
-	// a combined DROP+ADD of the same index in a single ALTER (see
-	// diffIndexes). A spatial index on a column whose SRID changes
+	// column list, different WITH PARSER / KEY_BLOCK_SIZE / etc.), or whose
+	// stored KEY_BLOCK_SIZE the table's change would leave behind, is
+	// replaced in statements of its own after the primary ALTER, because
+	// MySQL no-ops a combined DROP+ADD of the same index in a single ALTER
+	// (see diffIndexes). A spatial index on a column whose SRID changes
 	// is dropped in a statement of its own before the primary ALTER, because
 	// MySQL rejects the SRID change while the index exists, even when the
 	// same ALTER drops it (error 3644); the target's index is added back in
@@ -1800,7 +1805,7 @@ func (ct *CreateTable) Diff(target *CreateTable, opts *DiffOptions) ([]*Abstract
 		slices.Sort(drops)
 		preStatements = append(preStatements, drops)
 	}
-	indexClauses, separateIndexStatements := ct.diffIndexes(target, rebuilt, spatialDrops)
+	indexClauses, separateIndexStatements := ct.diffIndexes(target, rebuilt, spatialDrops, ct.indexesKeepOldBlockSize(target, opts))
 	alterClauses = append(alterClauses, indexClauses...)
 
 	// 3. Diff constraints (DROP, ADD). A foreign key added back under a name
@@ -1838,9 +1843,10 @@ func (ct *CreateTable) Diff(target *CreateTable, opts *DiffOptions) ([]*Abstract
 	}
 
 	// Index replacements run as their own ALTER statements, after the
-	// primary ALTER so they observe any column change the replacement
-	// depends on. Foreign keys added back under a dropped name follow them,
-	// so the index a re-added foreign key may need exists by then.
+	// primary ALTER so they observe any column or table option change the
+	// replacement depends on. Foreign keys added back under a dropped name
+	// follow them, so the index a re-added foreign key may need exists by
+	// then.
 	additionalStatements = append(additionalStatements, separateIndexStatements...)
 	additionalStatements = append(additionalStatements, separateConstraintStatements...)
 
@@ -2337,6 +2343,11 @@ func (ct *CreateTable) spatialIndexesBlockingSRIDChange(target *CreateTable) map
 // standalone clause-lists (each becomes its own ALTER statement) that run
 // after the combined ALTER.
 //
+// tableBlockSizeChanges says the combined ALTER changes the table's
+// KEY_BLOCK_SIZE in a way that leaves the indexes at the old size (see
+// indexesKeepOldBlockSize); every index that declares no size of its own is
+// then re-created too.
+//
 // rebuilt names the columns dropped and added back by diffColumns (see
 // rebuiltColumns). A functional index that reads one blocks the DROP COLUMN
 // (error 3837) unless the same ALTER drops it, so it is dropped and added back
@@ -2346,7 +2357,7 @@ func (ct *CreateTable) spatialIndexesBlockingSRIDChange(target *CreateTable) map
 // droppedBefore names the source indexes a statement before this ALTER has
 // already dropped (see spatialIndexesBlockingSRIDChange). They are diffed as
 // absent from the source: a same-named target index is a plain ADD.
-func (ct *CreateTable) diffIndexes(target *CreateTable, rebuilt, droppedBefore map[string]bool) (clauses []string, separateStatements [][]string) {
+func (ct *CreateTable) diffIndexes(target *CreateTable, rebuilt, droppedBefore map[string]bool, tableBlockSizeChanges bool) (clauses []string, separateStatements [][]string) {
 	// Inline column-level UNIQUE / PRIMARY KEY have already been materialized
 	// into ct.Indexes by normalization (see indexNormalizer, primaryKeyNormalizer),
 	// so both index sets can be walked directly. The lists are copied because
@@ -2373,8 +2384,10 @@ func (ct *CreateTable) diffIndexes(target *CreateTable, rebuilt, droppedBefore m
 		}
 		return false
 	}
-	// rebuiltIndexes are the source indexes dropped for a column rebuild;
-	// each is added back below from the target's definition, whatever it is.
+	// rebuiltIndexes are the source indexes dropped in the primary ALTER to
+	// be added back below from the target's definition, whatever it is:
+	// those reading a rebuilt column, and a primary key re-created so it
+	// takes the table's new KEY_BLOCK_SIZE.
 	rebuiltIndexes := make(map[string]bool)
 
 	// Build maps for easier lookup
@@ -2397,12 +2410,13 @@ func (ct *CreateTable) diffIndexes(target *CreateTable, rebuilt, droppedBefore m
 	// guards against emitting "DROP PRIMARY KEY" twice from the source loop.
 	pkDropAdded := false
 
-	// replaced tracks the indexes re-created outside the primary ALTER:
-	// those whose column list is unchanged but whose options differ (WITH
-	// PARSER, KEY_BLOCK_SIZE, SECONDARY_ENGINE_ATTRIBUTE). MySQL pairs a
-	// same-name, same-columns DROP+ADD in one ALTER and keeps the old index,
-	// so each is re-created by swap instead; they are routed out of
-	// dropClauses, the additions and the visibility clauses below.
+	// replaced tracks the indexes re-created outside the primary ALTER: one
+	// whose column list is unchanged but whose options differ (WITH PARSER,
+	// KEY_BLOCK_SIZE, SECONDARY_ENGINE_ATTRIBUTE), and one the table's
+	// KEY_BLOCK_SIZE change would otherwise leave at the old size. MySQL
+	// pairs a same-name, same-columns DROP+ADD in one ALTER and keeps the
+	// old index, so each is re-created by swap instead; they are routed out
+	// of dropClauses, the additions and the visibility clauses below.
 	replaced := make(map[string]bool)
 
 	// swap re-creates an index as the target defines it, in a statement of
@@ -2472,6 +2486,22 @@ func (ct *CreateTable) diffIndexes(target *CreateTable, rebuilt, droppedBefore m
 				swap(sourceIdx, targetIdx)
 			default:
 				dropClauses = append(dropClauses, fmt.Sprintf("DROP INDEX %s", sqlescape.EscapeIdentifier(sourceIdx.Name)))
+			}
+		case tableBlockSizeChanges && sourceIdx.KeyBlockSize == nil && targetIdx.KeyBlockSize == nil:
+			// Unchanged, but stored at the source table's KEY_BLOCK_SIZE,
+			// which MySQL would report on it once the table's differs (see
+			// indexesKeepOldBlockSize). The primary key is dropped and added
+			// back in the primary ALTER, where it takes the new size along
+			// with the table; any other index is swapped after it, like an
+			// option change, and the replacement takes the new size.
+			if sourceIdx.Type == "PRIMARY KEY" {
+				if !pkDropAdded {
+					dropClauses = append(dropClauses, "DROP PRIMARY KEY")
+					pkDropAdded = true
+				}
+				rebuiltIndexes[sourceIdx.Name] = true
+			} else {
+				swap(sourceIdx, targetIdx)
 			}
 		}
 	}
@@ -2552,6 +2582,33 @@ func (ct *CreateTable) diffIndexes(target *CreateTable, rebuilt, droppedBefore m
 	clauses = append(clauses, alterClauses...)
 
 	return clauses, separateStatements
+}
+
+// indexesKeepOldBlockSize reports whether the table-level KEY_BLOCK_SIZE
+// change this diff emits would leave the existing indexes reporting the old
+// size, so that diffIndexes re-creates them after it.
+//
+// MySQL stores the table's KEY_BLOCK_SIZE on every index created while one is
+// set (an index created without one takes it at the next rebuild), carries
+// the stored size through every later ALTER, and reports it on the index once
+// it differs from the table's. After ALTER TABLE t KEY_BLOCK_SIZE=4 on a
+// KEY_BLOCK_SIZE=8 table, SHOW CREATE TABLE therefore shows PRIMARY KEY (id)
+// KEY_BLOCK_SIZE=8 and KEY k (c) KEY_BLOCK_SIZE=8, the declared schema never
+// converges, and the next diff sees an option change on every index. Only an
+// index re-created after the table change, or in the same statement, takes
+// the new size. Nothing is left behind when the table had no explicit size
+// (its indexes store none) or stops being compressed (InnoDB drops every
+// index KEY_BLOCK_SIZE then). Verified on MySQL 8.0.
+func (ct *CreateTable) indexesKeepOldBlockSize(target *CreateTable, opts *DiffOptions) bool {
+	if opts.IgnoreRowFormat {
+		return false
+	}
+	source, dest := ct.TableOptions.deref(), target.TableOptions.deref()
+	if source.KeyBlockSize == nil || ptrEqual(source.KeyBlockSize, dest.KeyBlockSize) {
+		return false
+	}
+	rowFormat := target.TableOptions.getRowFormat()
+	return dest.KeyBlockSize != nil || (rowFormat != nil && strings.EqualFold(*rowFormat, "COMPRESSED"))
 }
 
 // temporaryIndexName names the replacement index of a swap (see diffIndexes):

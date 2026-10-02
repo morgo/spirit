@@ -80,6 +80,12 @@ type DiffOptions struct {
 	// source has with ROW_FORMAT=DEFAULT, so the table returns to the engine
 	// default. That is a table rebuild, as every row format change is, and
 	// it fires once: the rebuilt table reports no row format either.
+	//
+	// A KEY_BLOCK_SIZE change on a table that stays compressed also
+	// re-creates every index that stored the old size, which MySQL would
+	// otherwise report on each of them: the primary key in the same ALTER
+	// (DROP PRIMARY KEY, ADD PRIMARY KEY), the others by a swap after it.
+	// See CreateTable.indexesKeepOldBlockSize.
 	IgnoreRowFormat bool
 }
 

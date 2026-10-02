@@ -654,6 +654,14 @@ func TestDiff(t *testing.T) {
 			},
 		},
 		{
+			// An index declaring the table's own KEY_BLOCK_SIZE is reported
+			// without it (indexDefaultsNormalizer), so it is no change.
+			name:     "IndexKeyBlockSizeEqualToTheTableNoChange",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, b VARCHAR(100), KEY idx_b (b)) ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=4",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, b VARCHAR(100), KEY idx_b (b) KEY_BLOCK_SIZE=4) ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=4",
+			expected: "",
+		},
+		{
 			name:     "IndexKeyBlockSizeNoChange",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, b VARCHAR(100), KEY idx_b (b) KEY_BLOCK_SIZE=8) ROW_FORMAT=COMPRESSED",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, b VARCHAR(100), KEY idx_b (b) KEY_BLOCK_SIZE=8) ROW_FORMAT=COMPRESSED",
@@ -3672,6 +3680,103 @@ func TestDiffPartitionStorageOptionChange(t *testing.T) {
 				require.Contains(t, stmts[0].Statement, "REORGANIZE PARTITION `p0` INTO")
 				require.Contains(t, stmts[0].Statement, opt.emitted)
 			}
+		})
+	}
+}
+
+// A table-level KEY_BLOCK_SIZE change (compared under IgnoreRowFormat: false)
+// leaves every index that stored the old size reporting it, so the diff
+// re-creates them: the primary key in the same ALTER, every other index by a
+// swap after it. See indexesKeepOldBlockSize. Each plan is verified against
+// MySQL in TestDiffMySQLContracts.
+func TestDiffTableKeyBlockSizeChangeResizesIndexes(t *testing.T) {
+	compared := NewDiffOptions()
+	compared.IgnoreRowFormat = false
+	tests := []struct {
+		name     string
+		source   string
+		target   string
+		opts     *DiffOptions
+		expected []string
+	}{
+		{
+			name:   "Resized",
+			source: "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k (c), UNIQUE KEY u (c, id)) ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=8",
+			target: "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k (c), UNIQUE KEY u (c, id)) ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=4",
+			opts:   compared,
+			expected: []string{
+				"ALTER TABLE `t1` DROP PRIMARY KEY, ADD PRIMARY KEY (`id`), KEY_BLOCK_SIZE=4",
+				"ALTER TABLE `t1` ADD INDEX `_k_new` (`c`), DROP INDEX `k`",
+				"ALTER TABLE `t1` ADD UNIQUE INDEX `_u_new` (`c`, `id`), DROP INDEX `u`",
+				"ALTER TABLE `t1` RENAME INDEX `_k_new` TO `k`, RENAME INDEX `_u_new` TO `u`",
+			},
+		},
+		{
+			// The implicit size (ROW_FORMAT=COMPRESSED alone) is a change too:
+			// the indexes would report the old explicit size.
+			name:   "ToTheImplicitSize",
+			source: "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k (c)) ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=4",
+			target: "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k (c)) ROW_FORMAT=COMPRESSED",
+			opts:   compared,
+			expected: []string{
+				"ALTER TABLE `t1` DROP PRIMARY KEY, ADD PRIMARY KEY (`id`), KEY_BLOCK_SIZE=0",
+				"ALTER TABLE `t1` ADD INDEX `_k_new` (`c`), DROP INDEX `k`",
+				"ALTER TABLE `t1` RENAME INDEX `_k_new` TO `k`",
+			},
+		},
+		{
+			// An index the target gives the old size explicitly is an option
+			// change on the live index, which reports none: it is swapped
+			// with its own size, which MySQL then reports.
+			name:   "IndexKeepingItsOwnSize",
+			source: "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k (c)) ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=8",
+			target: "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k (c) KEY_BLOCK_SIZE=8) ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=4",
+			opts:   compared,
+			expected: []string{
+				"ALTER TABLE `t1` DROP PRIMARY KEY, ADD PRIMARY KEY (`id`), KEY_BLOCK_SIZE=4",
+				"ALTER TABLE `t1` ADD INDEX `_k_new` (`c`) KEY_BLOCK_SIZE=8, DROP INDEX `k`",
+				"ALTER TABLE `t1` RENAME INDEX `_k_new` TO `k`",
+			},
+		},
+		{
+			// A table without an explicit size stores none on its indexes, so
+			// they take the new one on their own.
+			name:     "FromTheImplicitSize",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k (c)) ROW_FORMAT=COMPRESSED",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k (c)) ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=4",
+			opts:     compared,
+			expected: []string{"ALTER TABLE `t1` KEY_BLOCK_SIZE=4"},
+		},
+		{
+			// InnoDB drops every index KEY_BLOCK_SIZE when the table stops
+			// being compressed.
+			name:     "ToUncompressed",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k (c)) ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=8",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k (c)) ROW_FORMAT=DYNAMIC",
+			opts:     compared,
+			expected: []string{"ALTER TABLE `t1` ROW_FORMAT=DYNAMIC, KEY_BLOCK_SIZE=0"},
+		},
+		{
+			name:     "IgnoredByDefault",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k (c)) ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=8",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k (c)) ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=4",
+			opts:     nil,
+			expected: nil,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			source, err := ParseCreateTable(tt.source)
+			require.NoError(t, err)
+			target, err := ParseCreateTable(tt.target)
+			require.NoError(t, err)
+			stmts, err := source.Diff(target, tt.opts)
+			require.NoError(t, err)
+			var got []string
+			for _, s := range stmts {
+				got = append(got, s.Statement)
+			}
+			assert.Equal(t, tt.expected, got)
 		})
 	}
 }

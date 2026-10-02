@@ -36,6 +36,14 @@ type diffContract struct {
 	opts     *DiffOptions // nil selects the defaults
 }
 
+// compressedDiffOptions compares ROW_FORMAT and the table-level
+// KEY_BLOCK_SIZE, which the defaults ignore.
+func compressedDiffOptions() *DiffOptions {
+	opts := NewDiffOptions()
+	opts.IgnoreRowFormat = false
+	return opts
+}
+
 func runDiffContract(t *testing.T, c diffContract) {
 	t.Helper()
 	dbName, db := testutils.CreateUniqueTestDatabase(t)
@@ -600,6 +608,54 @@ func TestDiffMySQLContracts(t *testing.T) {
 			name:   "option change next to an index under the temporary name",
 			source: "(id INT PRIMARY KEY, c INT, KEY _K_new (id), KEY k (c)) ROW_FORMAT=COMPRESSED",
 			target: "(id INT PRIMARY KEY, c INT, KEY _K_new (id), KEY k (c) KEY_BLOCK_SIZE=4) ROW_FORMAT=COMPRESSED",
+		},
+		// A table-level KEY_BLOCK_SIZE change leaves every index that stored
+		// the old size reporting it (see indexesKeepOldBlockSize), so the
+		// primary key is re-created in the same ALTER and every other index
+		// swapped after it. Compared under IgnoreRowFormat: false; the
+		// default ignores the option.
+		{
+			name:   "table KEY_BLOCK_SIZE change re-sizes the indexes",
+			source: "(id INT PRIMARY KEY, c INT, KEY k (c), UNIQUE KEY u (c, id)) ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=8",
+			target: "(id INT PRIMARY KEY, c INT, KEY k (c), UNIQUE KEY u (c, id)) ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=4",
+			opts:   compressedDiffOptions(),
+		},
+		{
+			name:   "table KEY_BLOCK_SIZE change with an AUTO_INCREMENT primary key",
+			source: "(id INT AUTO_INCREMENT PRIMARY KEY, c INT, KEY k (c)) ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=8",
+			target: "(id INT AUTO_INCREMENT PRIMARY KEY, c INT, KEY k (c)) ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=4",
+			opts:   compressedDiffOptions(),
+		},
+		{
+			name:   "table KEY_BLOCK_SIZE change to the implicit size",
+			source: "(id INT PRIMARY KEY, c INT, KEY k (c)) ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=4",
+			target: "(id INT PRIMARY KEY, c INT, KEY k (c)) ROW_FORMAT=COMPRESSED",
+			opts:   compressedDiffOptions(),
+		},
+		{
+			name:   "table KEY_BLOCK_SIZE change with an index keeping its own size",
+			source: "(id INT PRIMARY KEY, c INT, KEY k (c)) ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=8",
+			target: "(id INT PRIMARY KEY, c INT, KEY k (c) KEY_BLOCK_SIZE=8) ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=4",
+			opts:   compressedDiffOptions(),
+		},
+		{
+			name:   "table KEY_BLOCK_SIZE change from the implicit size",
+			source: "(id INT PRIMARY KEY, c INT, KEY k (c)) ROW_FORMAT=COMPRESSED",
+			target: "(id INT PRIMARY KEY, c INT, KEY k (c)) ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=4",
+			opts:   compressedDiffOptions(),
+		},
+		{
+			name:   "compressed table becoming uncompressed",
+			source: "(id INT PRIMARY KEY, c INT, KEY k (c)) ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=8",
+			target: "(id INT PRIMARY KEY, c INT, KEY k (c)) ROW_FORMAT=DYNAMIC",
+			opts:   compressedDiffOptions(),
+		},
+		{
+			name:     "index declaring the table's KEY_BLOCK_SIZE is no change",
+			source:   "(id INT PRIMARY KEY, c INT, KEY k (c)) ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=4",
+			target:   "(id INT PRIMARY KEY, c INT, KEY k (c) KEY_BLOCK_SIZE=4) ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=4",
+			opts:     compressedDiffOptions(),
+			wantNoop: true,
 		},
 		{
 			// MySQL rounds a scaled real default as floor(x) + rint(frac·10^D)/10^D
