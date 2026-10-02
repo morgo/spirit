@@ -586,6 +586,126 @@ func TestDiff(t *testing.T) {
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c VARCHAR(10) DEFAULT 'x')",
 			expected: "",
 		},
+		// Column-level CHECKs. A column can carry several, each with its own
+		// name and enforcement; all of them are hoisted (columnCheckNormalizer).
+		// Keeping only the last one made a diff drop the others from the live
+		// table; dropping NOT ENFORCED made it start enforcing the constraint.
+		{
+			name:     "ColumnMultipleChecksAdded",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT CHECK (c > 0) CHECK (c < 10))",
+			expected: "ALTER TABLE `t1` ADD CONSTRAINT `t1_chk_1` CHECK (`c`>0), ADD CONSTRAINT `t1_chk_2` CHECK (`c`<10)",
+		},
+		{
+			name:     "ColumnMultipleChecksNoDiff",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, CONSTRAINT t1_chk_1 CHECK ((c > 0)), CONSTRAINT t1_chk_2 CHECK ((c < 10)))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT CHECK (c > 0) CHECK (c < 10))",
+			expected: "",
+		},
+		{
+			name:     "ColumnCheckNotEnforcedAdded",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT CONSTRAINT ck CHECK (c > 0) NOT ENFORCED)",
+			expected: "ALTER TABLE `t1` ADD CONSTRAINT `ck` CHECK (`c`>0) NOT ENFORCED",
+		},
+		{
+			name:     "ColumnCheckEnforcementToggled",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, CONSTRAINT ck CHECK ((c > 0)))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT CONSTRAINT ck CHECK (c > 0) NOT ENFORCED)",
+			expected: "ALTER TABLE `t1` ALTER CHECK `ck` NOT ENFORCED",
+		},
+		{
+			name:     "ColumnCheckNotEnforcedNoDiff",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, CONSTRAINT ck CHECK ((c > 0)) /*!80016 NOT ENFORCED */)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT CONSTRAINT ck CHECK (c > 0) NOT ENFORCED)",
+			expected: "",
+		},
+		// Invisible columns and the other per-column attributes MySQL
+		// reports: NOT SECONDARY, COLUMN_FORMAT, STORAGE and
+		// SECONDARY_ENGINE_ATTRIBUTE. They used to land in the unmodeled
+		// Options map, which Diff ignores: no diff when only they changed,
+		// and, because MODIFY COLUMN replaces the whole definition, silently
+		// cleared by any other change to the column.
+		{
+			name:     "InvisibleColumnAdded",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT INVISIBLE)",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `c` int NULL INVISIBLE",
+		},
+		{
+			name:     "InvisibleColumnRemoved",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT INVISIBLE)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT)",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `c` int NULL",
+		},
+		{
+			name:     "InvisibleColumnNoDiff",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, `c` int DEFAULT NULL /*!80023 INVISIBLE */)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT INVISIBLE)",
+			expected: "",
+		},
+		{
+			name:     "ExplicitVisibleColumnNoDiff",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT VISIBLE)",
+			expected: "",
+		},
+		{
+			name:     "CommentChangePreservesInvisible",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT INVISIBLE)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT INVISIBLE COMMENT 'x')",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `c` int NULL INVISIBLE COMMENT 'x'",
+		},
+		{
+			name:     "NotSecondaryAdded",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT NOT SECONDARY)",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `c` int NULL NOT SECONDARY",
+		},
+		{
+			name:     "NotSecondaryNoDiff",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, `c` int NOT SECONDARY DEFAULT NULL)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT NOT SECONDARY)",
+			expected: "",
+		},
+		{
+			name:     "SecondaryEngineAttributeAdded",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT)",
+			target:   `CREATE TABLE t1 (id INT PRIMARY KEY, c INT SECONDARY_ENGINE_ATTRIBUTE='{"x":1}')`,
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `c` int NULL SECONDARY_ENGINE_ATTRIBUTE='{\\\"x\\\":1}'",
+		},
+		{
+			// MySQL re-serializes the JSON (here with a space after the
+			// colon); the attribute is compared as a JSON document.
+			name:     "SecondaryEngineAttributeReserializedNoDiff",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, `c` int DEFAULT NULL /*!80021 SECONDARY_ENGINE_ATTRIBUTE '{\"x\": 1}' */)",
+			target:   `CREATE TABLE t1 (id INT PRIMARY KEY, c INT SECONDARY_ENGINE_ATTRIBUTE='{"x":1}')`,
+			expected: "",
+		},
+		{
+			name:     "CommentChangePreservesSecondaryEngineAttribute",
+			source:   `CREATE TABLE t1 (id INT PRIMARY KEY, c INT SECONDARY_ENGINE_ATTRIBUTE='{"x":1}')`,
+			target:   `CREATE TABLE t1 (id INT PRIMARY KEY, c INT SECONDARY_ENGINE_ATTRIBUTE='{"x":1}' COMMENT 'x')`,
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `c` int NULL COMMENT 'x' SECONDARY_ENGINE_ATTRIBUTE='{\\\"x\\\":1}'",
+		},
+		{
+			name:     "ColumnFormatAndStorageAdded",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT COLUMN_FORMAT FIXED STORAGE DISK)",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `c` int NULL STORAGE DISK COLUMN_FORMAT FIXED",
+		},
+		{
+			name:     "ColumnFormatAndStorageNoDiff",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, `c` int /*!50606 STORAGE DISK */ /*!50606 COLUMN_FORMAT FIXED */ DEFAULT NULL)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT COLUMN_FORMAT fixed STORAGE disk)",
+			expected: "",
+		},
+		{
+			name:     "ColumnFormatDefaultNoDiff",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT COLUMN_FORMAT DEFAULT STORAGE DEFAULT SECONDARY_ENGINE_ATTRIBUTE='')",
+			expected: "",
+		},
 		{
 			// When constraint names differ AND expressions actually differ, it should still produce a diff.
 			name:     "CheckConstraintDifferentNameDifferentExpression",

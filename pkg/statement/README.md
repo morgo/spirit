@@ -241,8 +241,13 @@ type Column struct {
     OnUpdate   *string           // ON UPDATE CURRENT_TIMESTAMP[(n)] for TIMESTAMP/DATETIME
     GeneratedExpr   *string      // Expression for GENERATED ALWAYS AS (...) columns
     GeneratedStored bool         // true = STORED, false = VIRTUAL
-    Check      *string           // Column-level CHECK (...) expression
+    Checks     []ColumnCheck     // Column-level CHECKs (name, expression, NOT ENFORCED); hoisted into Constraints
     SRID       *uint32           // SRID attribute for spatial columns
+    Invisible  bool              // INVISIBLE column (8.0.23+); explicit VISIBLE is not recorded
+    NotSecondary bool            // NOT SECONDARY
+    ColumnFormat *string         // COLUMN_FORMAT FIXED|DYNAMIC; DEFAULT is not recorded
+    Storage    *string           // STORAGE DISK|MEMORY; DEFAULT is not recorded
+    SecondaryEngineAttribute *string // SECONDARY_ENGINE_ATTRIBUTE JSON as written; compared as JSON
     AutoInc    bool
     PrimaryKey bool              // Column-level PRIMARY KEY
     Unique     bool              // Column-level UNIQUE
@@ -360,7 +365,7 @@ Two layers of canonicalization apply:
    | `primaryKeyNormalizer` | inline `id INT PRIMARY KEY` → table-level `PRIMARY KEY` index |
    | `primaryKeyNotNullNormalizer` | marks every primary key column `NOT NULL`, as MySQL stores it: `a INT, PRIMARY KEY (a)` → `a int NOT NULL`. The promotion is implicit only: a key column that explicitly declares `NULL` or `DEFAULT NULL`, which MySQL refuses to create (error 1171), stays nullable, and `Diff` and `DeclarativeToImperative` reject a target schema in that state |
    | `indexNormalizer` | inline `c INT UNIQUE` → table-level `UNIQUE KEY`; assigns MySQL's default names to unnamed indexes |
-   | `columnCheckNormalizer` | hoists a column-level `CHECK` into a table-level constraint |
+   | `columnCheckNormalizer` | hoists every column-level `CHECK` into a table-level constraint, keeping its name and `NOT ENFORCED`: `c INT CHECK (c > 0) CHECK (c < 10)` is two constraints |
    | `expressionParenNormalizer` | rewrites `CHECK`, generated-column, partition and subpartition expressions into a canonical parenthesization, keeping only the parentheses the expression's own precedence does not already imply: MySQL stores them fully parenthesized and the parser preserves input parens verbatim, so `CHECK ((a=1) OR ((b=2) AND (c=3)))` and `CHECK (a=1 OR b=2 AND c=3)` both canonicalize to the latter |
    | `functionAliasNormalizer` | rewrites a function name to the one MySQL stores, in expression `DEFAULT`s, generated columns, `CHECK`s, functional indexes and partition expressions: `STRING_TO_VECTOR` → `to_vector`, `LCASE` → `lower`, `SUBSTRING`/`MID` → `substr`, `DAY` → `dayofmonth`, and the timestamp family inside an expression default → `now()` |
    | `timestampFspZeroNormalizer` | drops an explicit fractional-seconds precision of 0 from the timestamp functions (`CURRENT_TIMESTAMP`, `NOW`, `LOCALTIME`, `LOCALTIMESTAMP`, `CURTIME`, `CURRENT_TIME`, `UTC_TIMESTAMP`, `UTC_TIME`, `SYSDATE`), in a literal `DEFAULT`, `ON UPDATE` and expression `DEFAULT`s, as MySQL stores them: `DEFAULT CURRENT_TIMESTAMP(0)` → `DEFAULT CURRENT_TIMESTAMP`, `DEFAULT (NOW(0) + INTERVAL 1 DAY)` → `DEFAULT ((now() + interval 1 day))`. A non-zero fsp is kept |

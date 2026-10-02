@@ -35,32 +35,52 @@ type CreateTable struct {
 
 // Column represents a table column definition
 type Column struct {
-	Raw             *ast.ColumnDef    `json:"-"`
-	Name            string            `json:"name"`
-	Type            string            `json:"type"`
-	Length          *int              `json:"length,omitempty"` // nil = no width; 0 is a real width (varchar(0))
-	Precision       *int              `json:"precision,omitempty"`
-	Scale           *int              `json:"scale,omitempty"`
-	Unsigned        *bool             `json:"unsigned,omitempty"`
-	Zerofill        *bool             `json:"zerofill,omitempty"`    // ZEROFILL display attribute (implies unsigned)
-	EnumValues      []string          `json:"enum_values,omitempty"` // Permitted values for ENUM type
-	SetValues       []string          `json:"set_values,omitempty"`  // Permitted values for SET type
-	Nullable        bool              `json:"nullable"`
-	Default         *string           `json:"default,omitempty"`
-	DefaultIsExpr   bool              `json:"default_is_expr,omitempty"`  // true when default is an expression (needs parens), e.g. DEFAULT (json_object())
-	DefaultKind     DefaultKind       `json:"default_kind,omitempty"`     // the literal form the default was written as, read off the AST — see DefaultKind
-	OnUpdate        *string           `json:"on_update,omitempty"`        // ON UPDATE expression for TIMESTAMP/DATETIME, e.g. "current_timestamp"
-	GeneratedExpr   *string           `json:"generated_expr,omitempty"`   // Expression for GENERATED ALWAYS AS (...) columns
-	GeneratedStored bool              `json:"generated_stored,omitempty"` // true = STORED, false = VIRTUAL (only meaningful when GeneratedExpr is set)
-	Check           *string           `json:"check,omitempty"`            // Column-level CHECK (...) constraint expression
-	SRID            *uint32           `json:"srid,omitempty"`             // SRID attribute for spatial columns
-	AutoInc         bool              `json:"auto_increment"`
-	PrimaryKey      bool              `json:"primary_key"`
-	Unique          bool              `json:"unique"`
-	Comment         *string           `json:"comment,omitempty"`
-	Charset         *string           `json:"charset,omitempty"`
-	Collation       *string           `json:"collation,omitempty"`
-	Options         map[string]string `json:"options,omitempty"`
+	Raw             *ast.ColumnDef `json:"-"`
+	Name            string         `json:"name"`
+	Type            string         `json:"type"`
+	Length          *int           `json:"length,omitempty"` // nil = no width; 0 is a real width (varchar(0))
+	Precision       *int           `json:"precision,omitempty"`
+	Scale           *int           `json:"scale,omitempty"`
+	Unsigned        *bool          `json:"unsigned,omitempty"`
+	Zerofill        *bool          `json:"zerofill,omitempty"`    // ZEROFILL display attribute (implies unsigned)
+	EnumValues      []string       `json:"enum_values,omitempty"` // Permitted values for ENUM type
+	SetValues       []string       `json:"set_values,omitempty"`  // Permitted values for SET type
+	Nullable        bool           `json:"nullable"`
+	Default         *string        `json:"default,omitempty"`
+	DefaultIsExpr   bool           `json:"default_is_expr,omitempty"`  // true when default is an expression (needs parens), e.g. DEFAULT (json_object())
+	DefaultKind     DefaultKind    `json:"default_kind,omitempty"`     // the literal form the default was written as, read off the AST — see DefaultKind
+	OnUpdate        *string        `json:"on_update,omitempty"`        // ON UPDATE expression for TIMESTAMP/DATETIME, e.g. "current_timestamp"
+	GeneratedExpr   *string        `json:"generated_expr,omitempty"`   // Expression for GENERATED ALWAYS AS (...) columns
+	GeneratedStored bool           `json:"generated_stored,omitempty"` // true = STORED, false = VIRTUAL (only meaningful when GeneratedExpr is set)
+	Checks          []ColumnCheck  `json:"checks,omitempty"`           // Column-level CHECK constraints, in declaration order; hoisted into Constraints by columnCheckNormalizer
+	SRID            *uint32        `json:"srid,omitempty"`             // SRID attribute for spatial columns
+	Invisible       bool           `json:"invisible,omitempty"`        // INVISIBLE (MySQL 8.0.23+); VISIBLE is the default and is not recorded
+	NotSecondary    bool           `json:"not_secondary,omitempty"`    // NOT SECONDARY: excluded from the secondary engine
+	ColumnFormat    *string        `json:"column_format,omitempty"`    // COLUMN_FORMAT FIXED|DYNAMIC; DEFAULT is not recorded
+	Storage         *string        `json:"storage,omitempty"`          // STORAGE DISK|MEMORY; DEFAULT is not recorded
+	// SecondaryEngineAttribute is the SECONDARY_ENGINE_ATTRIBUTE JSON text as
+	// written. MySQL reports it re-serialized, so it is compared as JSON
+	// (engineAttributeEqual) and emitted as written.
+	SecondaryEngineAttribute *string           `json:"secondary_engine_attribute,omitempty"`
+	AutoInc                  bool              `json:"auto_increment"`
+	PrimaryKey               bool              `json:"primary_key"`
+	Unique                   bool              `json:"unique"`
+	Comment                  *string           `json:"comment,omitempty"`
+	Charset                  *string           `json:"charset,omitempty"`
+	Collation                *string           `json:"collation,omitempty"`
+	Options                  map[string]string `json:"options,omitempty"`
+}
+
+// ColumnCheck is a column-level CHECK constraint as written in a column
+// definition: `c INT [CONSTRAINT name] CHECK (expr) [NOT ENFORCED]`. A column
+// can carry any number of them. MySQL stores each as a table-level constraint,
+// which is how SHOW CREATE TABLE reports them, so columnCheckNormalizer moves
+// them to CreateTable.Constraints at parse time and the slice is empty on a
+// parsed CreateTable.
+type ColumnCheck struct {
+	Name        string `json:"name,omitempty"` // the CONSTRAINT name, or "" for MySQL to number it
+	Expression  string `json:"expression"`
+	NotEnforced bool   `json:"not_enforced,omitempty"`
 }
 
 // IndexColumn represents a column or expression in an index
@@ -869,12 +889,18 @@ func (ct *CreateTable) parseColumn(col *ast.ColumnDef) Column {
 				}
 			}
 		case ast.ColumnOptionCheck:
-			// Column-level CHECK (expr). Note that MySQL normalizes these to
-			// table-level constraints in SHOW CREATE TABLE output, so this is
-			// only seen when parsing user-written (non-canonical) statements.
+			// Column-level CHECK (expr). MySQL reports these as table-level
+			// constraints in SHOW CREATE TABLE, so this is only seen when
+			// parsing user-written statements. A column may carry several,
+			// each with its own name and enforcement; every one is kept, in
+			// order, for columnCheckNormalizer to hoist.
 			if opt.Expr != nil {
 				if exprStr, ok := restoreExpressionText(opt.Expr); ok {
-					column.Check = &exprStr
+					column.Checks = append(column.Checks, ColumnCheck{
+						Name:        opt.ConstraintName,
+						Expression:  exprStr,
+						NotEnforced: !opt.Enforced,
+					})
 				}
 			}
 		case ast.ColumnOptionSrid:
@@ -883,6 +909,26 @@ func (ct *CreateTable) parseColumn(col *ast.ColumnDef) Column {
 			// parser unwraps as a regular column option.
 			srid := opt.Srid
 			column.SRID = &srid
+		case ast.ColumnOptionVisibility:
+			// VISIBLE is the default and MySQL reports nothing for it, so
+			// only INVISIBLE is recorded and an explicit VISIBLE compares
+			// equal to its absence. SHOW CREATE TABLE emits INVISIBLE as
+			// /*!80023 INVISIBLE */. The last one written wins.
+			column.Invisible = strings.EqualFold(opt.StrValue, "INVISIBLE")
+		case ast.ColumnOptionNotSecondary:
+			column.NotSecondary = true
+		case ast.ColumnOptionColumnFormat:
+			column.ColumnFormat = nonDefaultKeyword(opt.StrValue)
+		case ast.ColumnOptionStorage:
+			column.Storage = nonDefaultKeyword(opt.StrValue)
+		case ast.ColumnOptionSecondaryEngineAttribute:
+			// SECONDARY_ENGINE_ATTRIBUTE='' clears the attribute; MySQL then
+			// reports nothing, so the empty string is recorded as absent.
+			column.SecondaryEngineAttribute = nil
+			if opt.StrValue != "" {
+				attr := opt.StrValue
+				column.SecondaryEngineAttribute = &attr
+			}
 		default:
 			// Store unknown options for flexibility
 			column.Options[fmt.Sprintf("option_%d", opt.Tp)] = opt.StrValue
@@ -895,6 +941,17 @@ func (ct *CreateTable) parseColumn(col *ast.ColumnDef) Column {
 	}
 
 	return column
+}
+
+// nonDefaultKeyword returns the uppercased keyword of a COLUMN_FORMAT or
+// STORAGE option, or nil for DEFAULT: that keyword means the option is unset,
+// and MySQL reports nothing for it.
+func nonDefaultKeyword(keyword string) *string {
+	upper := strings.ToUpper(keyword)
+	if upper == "DEFAULT" {
+		return nil
+	}
+	return &upper
 }
 
 // parseIndex converts a constraint to an Index struct

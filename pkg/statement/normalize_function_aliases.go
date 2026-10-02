@@ -80,7 +80,9 @@ func (functionAliasNormalizer) Normalize(ct *CreateTable) *CreateTable {
 			canonicalizeFuncAliases(p, col.Default, restoreExprDefaultText)
 		}
 		canonicalizeFuncAliases(p, col.GeneratedExpr, restoreExpressionText)
-		canonicalizeFuncAliases(p, col.Check, restoreExpressionText)
+		for j := range col.Checks {
+			canonicalizeFuncAliases(p, &col.Checks[j].Expression, restoreExpressionText)
+		}
 	}
 	for i := range ct.Constraints {
 		c := &ct.Constraints[i]

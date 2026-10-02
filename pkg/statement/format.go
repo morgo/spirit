@@ -122,6 +122,20 @@ func formatColumnDefinition(col *Column) string {
 		parts = append(parts, fmt.Sprintf("SRID %d", *col.SRID))
 	}
 
+	// The attributes MySQL reports between the type and the DEFAULT. Each of
+	// these, like INVISIBLE and SECONDARY_ENGINE_ATTRIBUTE below, has to be
+	// re-emitted on every MODIFY: MySQL replaces the whole column definition,
+	// so an attribute left out of the MODIFY is silently cleared.
+	if col.NotSecondary {
+		parts = append(parts, "NOT SECONDARY")
+	}
+	if col.Storage != nil {
+		parts = append(parts, "STORAGE "+*col.Storage)
+	}
+	if col.ColumnFormat != nil {
+		parts = append(parts, "COLUMN_FORMAT "+*col.ColumnFormat)
+	}
+
 	// Default value (not permitted on generated columns)
 	if col.Default != nil && col.GeneratedExpr == nil {
 		defaultVal := *col.Default
@@ -172,9 +186,20 @@ func formatColumnDefinition(col *Column) string {
 		parts = append(parts, "AUTO_INCREMENT")
 	}
 
+	// Invisible column (MySQL 8.0.23+), reported after AUTO_INCREMENT and
+	// before COMMENT.
+	if col.Invisible {
+		parts = append(parts, "INVISIBLE")
+	}
+
 	// Comment
 	if col.Comment != nil {
 		parts = append(parts, fmt.Sprintf("COMMENT '%s'", sqlescape.EscapeString(*col.Comment)))
+	}
+
+	// SECONDARY_ENGINE_ATTRIBUTE is the last attribute MySQL reports.
+	if col.SecondaryEngineAttribute != nil {
+		parts = append(parts, fmt.Sprintf("SECONDARY_ENGINE_ATTRIBUTE='%s'", sqlescape.EscapeString(*col.SecondaryEngineAttribute)))
 	}
 
 	// NOTE: column-level CHECK constraints are deliberately not emitted here.

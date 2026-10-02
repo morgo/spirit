@@ -64,7 +64,9 @@ func (expressionParenNormalizer) Normalize(ct *CreateTable) *CreateTable {
 	for i := range ct.Columns {
 		col := &ct.Columns[i]
 		canonicalizeExprParens(p, col.GeneratedExpr)
-		canonicalizeExprParens(p, col.Check)
+		for j := range col.Checks {
+			canonicalizeExprParens(p, &col.Checks[j].Expression)
+		}
 	}
 	for i := range ct.Constraints {
 		c := &ct.Constraints[i]

@@ -18,28 +18,33 @@ import (
 // (columnsEqualWithContext + the shared columnExtendedAttributesEqual helper)
 // compares.
 var columnFieldsCompared = map[string]struct{}{
-	"Name":            {},
-	"Type":            {},
-	"Length":          {},
-	"Precision":       {},
-	"Scale":           {},
-	"Unsigned":        {},
-	"Zerofill":        {},
-	"EnumValues":      {},
-	"SetValues":       {},
-	"Nullable":        {},
-	"Default":         {},
-	"DefaultIsExpr":   {},
-	"DefaultKind":     {},
-	"OnUpdate":        {},
-	"GeneratedExpr":   {},
-	"GeneratedStored": {},
-	"SRID":            {},
-	"AutoInc":         {},
-	"PrimaryKey":      {},
-	"Comment":         {},
-	"Charset":         {},
-	"Collation":       {},
+	"Name":                     {},
+	"Type":                     {},
+	"Length":                   {},
+	"Precision":                {},
+	"Scale":                    {},
+	"Unsigned":                 {},
+	"Zerofill":                 {},
+	"EnumValues":               {},
+	"SetValues":                {},
+	"Nullable":                 {},
+	"Default":                  {},
+	"DefaultIsExpr":            {},
+	"DefaultKind":              {},
+	"OnUpdate":                 {},
+	"GeneratedExpr":            {},
+	"GeneratedStored":          {},
+	"SRID":                     {},
+	"Invisible":                {},
+	"NotSecondary":             {},
+	"ColumnFormat":             {},
+	"Storage":                  {},
+	"SecondaryEngineAttribute": {},
+	"AutoInc":                  {},
+	"PrimaryKey":               {},
+	"Comment":                  {},
+	"Charset":                  {},
+	"Collation":                {},
 }
 
 // columnFieldsNotCompared lists exported Column fields that are deliberately
@@ -52,7 +57,7 @@ var columnFieldsNotCompared = map[string]string{
 	// the parser (columnCheckNormalizer) and diffed by diffConstraints instead —
 	// see the comment on columnExtendedAttributesEqual. So it is intentionally not
 	// part of per-column equality.
-	"Check": "hoisted to table-level Constraints; diffed by diffConstraints, not here",
+	"Checks": "hoisted to table-level Constraints; diffed by diffConstraints, not here",
 	// Options is a catch-all map for column options the parser did not model
 	// explicitly. It is currently NOT compared by either columnsEqual function.
 	// If you start populating Options with semantically meaningful data, it must
@@ -75,7 +80,7 @@ var columnFieldsNotCompared = map[string]string{
 // update columnsEqualWithContext in create_table.go (plus columnExtendedAttributesEqual
 // for extended attributes) to compare the new field, then add it to
 // columnFieldsCompared. If the new field is intentionally NOT part of column
-// equality (like Raw / Check / Options), add it to columnFieldsNotCompared with
+// equality (like Raw / Checks / Options), add it to columnFieldsNotCompared with
 // a justifying comment instead.
 func TestColumnsEqualAllFieldsAccounted(t *testing.T) {
 	typ := reflect.TypeFor[Column]()
@@ -122,29 +127,34 @@ func TestColumnsEqualAllFieldsAccounted(t *testing.T) {
 // so that DefaultKind participates in the comparison.
 func baseColumn() Column {
 	return Column{
-		Name:            "c",
-		Type:            "varchar",
-		Length:          new(255),
-		Precision:       new(10),
-		Scale:           new(2),
-		Unsigned:        new(true),
-		Zerofill:        new(true),
-		EnumValues:      []string{"a", "b"},
-		SetValues:       []string{"x", "y"},
-		Nullable:        false,
-		Default:         new("foo"),
-		DefaultIsExpr:   true,
-		DefaultKind:     DefaultKindString,
-		OnUpdate:        new("current_timestamp"),
-		GeneratedExpr:   new("(1 + 1)"),
-		GeneratedStored: true,
-		SRID:            new(uint32(4326)),
-		AutoInc:         true,
-		PrimaryKey:      true,
-		Unique:          true,
-		Comment:         new("hi"),
-		Charset:         new("utf8mb4"),
-		Collation:       new("utf8mb4_bin"),
+		Name:                     "c",
+		Type:                     "varchar",
+		Length:                   new(255),
+		Precision:                new(10),
+		Scale:                    new(2),
+		Unsigned:                 new(true),
+		Zerofill:                 new(true),
+		EnumValues:               []string{"a", "b"},
+		SetValues:                []string{"x", "y"},
+		Nullable:                 false,
+		Default:                  new("foo"),
+		DefaultIsExpr:            true,
+		DefaultKind:              DefaultKindString,
+		OnUpdate:                 new("current_timestamp"),
+		GeneratedExpr:            new("(1 + 1)"),
+		GeneratedStored:          true,
+		SRID:                     new(uint32(4326)),
+		Invisible:                true,
+		NotSecondary:             true,
+		ColumnFormat:             new("FIXED"),
+		Storage:                  new("DISK"),
+		SecondaryEngineAttribute: new(`{"a": 1}`),
+		AutoInc:                  true,
+		PrimaryKey:               true,
+		Unique:                   true,
+		Comment:                  new("hi"),
+		Charset:                  new("utf8mb4"),
+		Collation:                new("utf8mb4_bin"),
 	}
 }
 
@@ -176,6 +186,11 @@ func everyComparedFieldMutation() []struct {
 		{"GeneratedExpr", func(c *Column) { c.GeneratedExpr = new("(2 + 2)") }},
 		{"GeneratedStored", func(c *Column) { c.GeneratedStored = false }},
 		{"SRID", func(c *Column) { c.SRID = new(uint32(3857)) }},
+		{"Invisible", func(c *Column) { c.Invisible = false }},
+		{"NotSecondary", func(c *Column) { c.NotSecondary = false }},
+		{"ColumnFormat", func(c *Column) { c.ColumnFormat = new("DYNAMIC") }},
+		{"Storage", func(c *Column) { c.Storage = new("MEMORY") }},
+		{"SecondaryEngineAttribute", func(c *Column) { c.SecondaryEngineAttribute = new(`{"a": 2}`) }},
 		{"AutoInc", func(c *Column) { c.AutoInc = false }},
 		{"PrimaryKey", func(c *Column) { c.PrimaryKey = false }},
 		{"Comment", func(c *Column) { c.Comment = new("bye") }},

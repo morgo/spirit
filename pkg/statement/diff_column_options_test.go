@@ -249,9 +249,9 @@ func TestParseColumnAttributeOptions(t *testing.T) {
 	c := ct.Columns.ByName("c")
 	require.NotNil(t, c)
 	// Column-level CHECK is hoisted into a table-level constraint (mirroring
-	// MySQL), so Column.Check is cleared and the constraint appears in
+	// MySQL), so Column.Checks is cleared and the constraint appears in
 	// ct.Constraints with MySQL's auto-generated name.
-	require.Nil(t, c.Check)
+	require.Empty(t, c.Checks)
 	require.Empty(t, c.Options)
 
 	var chk *Constraint
@@ -554,4 +554,60 @@ func TestColumnAttributeOptionsMySQL(t *testing.T) {
 		requireNoSelfDiff(t, db, "multi_chk_t")
 		requireConverged(t, db, "multi_chk_t", target)
 	})
+}
+
+// TestParseColumnVisibilityAndEngineOptions parses the per-column attributes
+// in the version-comment form SHOW CREATE TABLE reports them in, and in the
+// user-written form, into their own fields rather than the unmodeled Options.
+func TestParseColumnVisibilityAndEngineOptions(t *testing.T) {
+	ct, err := ParseCreateTable("CREATE TABLE `t` (\n" +
+		"  `id` int NOT NULL,\n" +
+		"  `a` int DEFAULT NULL /*!80023 INVISIBLE */,\n" +
+		"  `c` int NOT SECONDARY DEFAULT NULL /*!80023 INVISIBLE */,\n" +
+		"  `e` int GENERATED ALWAYS AS ((`id` + 1)) STORED NOT NULL /*!80023 INVISIBLE */ COMMENT 'e',\n" +
+		"  `h` int /*!50606 STORAGE MEMORY */ /*!50606 COLUMN_FORMAT DYNAMIC */ DEFAULT NULL /*!80023 INVISIBLE */ COMMENT 'h' /*!80021 SECONDARY_ENGINE_ATTRIBUTE '{\"k\": 1}' */,\n" +
+		"  `v` int VISIBLE,\n" +
+		"  `w` int COLUMN_FORMAT DEFAULT STORAGE DEFAULT SECONDARY_ENGINE_ATTRIBUTE='',\n" +
+		"  PRIMARY KEY (`id`)\n" +
+		")")
+	require.NoError(t, err)
+
+	a := ct.Columns.ByName("a")
+	require.NotNil(t, a)
+	require.True(t, a.Invisible)
+	require.Empty(t, a.Options)
+
+	c := ct.Columns.ByName("c")
+	require.NotNil(t, c)
+	require.True(t, c.Invisible)
+	require.True(t, c.NotSecondary)
+	require.Empty(t, c.Options)
+
+	e := ct.Columns.ByName("e")
+	require.NotNil(t, e)
+	require.True(t, e.Invisible)
+	require.NotNil(t, e.GeneratedExpr)
+	require.NotNil(t, e.Comment)
+
+	h := ct.Columns.ByName("h")
+	require.NotNil(t, h)
+	require.True(t, h.Invisible)
+	require.NotNil(t, h.Storage)
+	require.Equal(t, "MEMORY", *h.Storage)
+	require.NotNil(t, h.ColumnFormat)
+	require.Equal(t, "DYNAMIC", *h.ColumnFormat)
+	require.NotNil(t, h.SecondaryEngineAttribute)
+	require.Equal(t, `{"k": 1}`, *h.SecondaryEngineAttribute)
+	require.Empty(t, h.Options)
+
+	// VISIBLE and the DEFAULT keywords mean "unset": MySQL reports nothing.
+	for _, name := range []string{"v", "w"} {
+		col := ct.Columns.ByName(name)
+		require.NotNil(t, col)
+		require.False(t, col.Invisible, name)
+		require.Nil(t, col.ColumnFormat, name)
+		require.Nil(t, col.Storage, name)
+		require.Nil(t, col.SecondaryEngineAttribute, name)
+		require.Empty(t, col.Options, name)
+	}
 }

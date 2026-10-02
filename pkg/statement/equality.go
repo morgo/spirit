@@ -1,6 +1,7 @@
 package statement
 
 import (
+	"encoding/json"
 	"reflect"
 	"slices"
 	"strings"
@@ -14,8 +15,9 @@ import (
 // columnExtendedAttributesEqual compares the column attributes beyond the
 // basic type/nullability/default set: ON UPDATE (TIMESTAMP/DATETIME
 // auto-update), GENERATED ALWAYS AS expressions (including STORED vs
-// VIRTUAL), and SRID. These are semantically critical — omitting them from a
-// MODIFY COLUMN silently removes the behavior from the live table.
+// VIRTUAL), SRID, INVISIBLE, NOT SECONDARY, COLUMN_FORMAT, STORAGE and
+// SECONDARY_ENGINE_ATTRIBUTE. These are semantically critical — omitting them
+// from a MODIFY COLUMN silently removes the behavior from the live table.
 //
 // Column-level CHECK constraints are intentionally NOT compared here: the
 // parser hoists them into table-level CreateTable.Constraints (see
@@ -35,7 +37,33 @@ func columnExtendedAttributesEqual(a, b *Column) bool {
 	if !ptrEqual(a.SRID, b.SRID) {
 		return false
 	}
-	return true
+	if a.Invisible != b.Invisible || a.NotSecondary != b.NotSecondary {
+		return false
+	}
+	if !ptrEqual(a.ColumnFormat, b.ColumnFormat) || !ptrEqual(a.Storage, b.Storage) {
+		return false
+	}
+	return engineAttributeEqual(a.SecondaryEngineAttribute, b.SecondaryEngineAttribute)
+}
+
+// engineAttributeEqual compares two SECONDARY_ENGINE_ATTRIBUTE values. MySQL
+// stores the attribute as a JSON document and reports it re-serialized — keys
+// reordered, a space after every colon and comma — so the text a user wrote
+// rarely matches SHOW CREATE TABLE byte for byte. Two values are equal when
+// they are the same JSON document. A value that is not valid JSON (MySQL
+// rejects it, but the parser does not) is compared as text.
+func engineAttributeEqual(a, b *string) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	if *a == *b {
+		return true
+	}
+	var docA, docB any
+	if json.Unmarshal([]byte(*a), &docA) != nil || json.Unmarshal([]byte(*b), &docB) != nil {
+		return false
+	}
+	return reflect.DeepEqual(docA, docB)
 }
 
 // indexesEqual checks if two indexes are equal

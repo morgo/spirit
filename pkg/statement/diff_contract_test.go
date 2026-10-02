@@ -144,6 +144,68 @@ func TestDiffMySQLContracts(t *testing.T) {
 			target:               "(id INT PRIMARY KEY, g INT AS (CHAR_LENGTH('é')) STORED)",
 			sourceSessionCharset: "latin1",
 		},
+		// Column-level CHECKs: every one a column carries is kept, with its
+		// enforcement. Only the last used to survive, and NOT ENFORCED was lost.
+		{
+			name:   "both column checks are added",
+			source: "(id INT PRIMARY KEY, c INT)",
+			target: "(id INT PRIMARY KEY, c INT CHECK (c > 0) CHECK (c < 10))",
+		},
+		{
+			name:     "both column checks are kept",
+			source:   "(id INT PRIMARY KEY, c INT CHECK (c > 0) CHECK (c < 10))",
+			target:   "(id INT PRIMARY KEY, c INT CHECK (c > 0) CHECK (c < 10))",
+			wantNoop: true,
+		},
+		{
+			name:   "column check stays not enforced",
+			source: "(id INT PRIMARY KEY, c INT)",
+			target: "(id INT PRIMARY KEY, c INT CONSTRAINT ck CHECK (c > 0) NOT ENFORCED)",
+		},
+		{
+			name:   "column check enforcement is toggled",
+			source: "(id INT PRIMARY KEY, c INT CONSTRAINT ck CHECK (c > 0))",
+			target: "(id INT PRIMARY KEY, c INT CONSTRAINT ck CHECK (c > 0) NOT ENFORCED)",
+		},
+		// Invisible columns and the other per-column attributes. They were
+		// not modeled, so a change to one was never emitted, and a MODIFY
+		// for any other reason silently cleared them.
+		{
+			name:   "column becomes invisible",
+			source: "(id INT PRIMARY KEY, c INT)",
+			target: "(id INT PRIMARY KEY, c INT INVISIBLE)",
+		},
+		{
+			name:   "column becomes visible",
+			source: "(id INT PRIMARY KEY, c INT INVISIBLE)",
+			target: "(id INT PRIMARY KEY, c INT)",
+		},
+		{
+			name:   "invisible column survives a comment change",
+			source: "(id INT PRIMARY KEY, c INT INVISIBLE)",
+			target: "(id INT PRIMARY KEY, c INT INVISIBLE COMMENT 'x')",
+		},
+		{
+			name:   "secondary engine attribute survives a comment change",
+			source: `(id INT PRIMARY KEY, c INT SECONDARY_ENGINE_ATTRIBUTE='{"x":1}')`,
+			target: `(id INT PRIMARY KEY, c INT SECONDARY_ENGINE_ATTRIBUTE='{"x":1}' COMMENT 'x')`,
+		},
+		{
+			name:     "secondary engine attribute as MySQL re-serializes it is a no-op",
+			source:   `(id INT PRIMARY KEY, c INT SECONDARY_ENGINE_ATTRIBUTE='{"b":1,"a":[1,2]}')`,
+			target:   `(id INT PRIMARY KEY, c INT SECONDARY_ENGINE_ATTRIBUTE='{"b":1,"a":[1,2]}')`,
+			wantNoop: true,
+		},
+		{
+			name:   "not secondary, column format and storage survive a comment change",
+			source: "(id INT PRIMARY KEY, c INT NOT SECONDARY COLUMN_FORMAT FIXED STORAGE DISK)",
+			target: "(id INT PRIMARY KEY, c INT NOT SECONDARY COLUMN_FORMAT FIXED STORAGE DISK COMMENT 'x')",
+		},
+		{
+			name:   "generated invisible column is added with its attributes",
+			source: "(id INT PRIMARY KEY)",
+			target: "(id INT PRIMARY KEY, g INT GENERATED ALWAYS AS (id + 1) STORED NOT NULL INVISIBLE COMMENT 'g')",
+		},
 	}
 	for _, c := range contracts {
 		t.Run(c.name, func(t *testing.T) {
