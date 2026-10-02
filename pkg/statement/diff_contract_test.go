@@ -663,6 +663,69 @@ func TestDiffMySQLContracts(t *testing.T) {
 			source: "(id INT PRIMARY KEY, c INT)",
 			target: "(id INT PRIMARY KEY, c INT, g INT GENERATED ALWAYS AS (+c + +1) VIRTUAL)",
 		},
+		// Generated columns changing to or from VIRTUAL. The diff used to emit
+		// a MODIFY COLUMN, which MySQL rejects (error 3106); the column is
+		// dropped and added back, with whatever reads it. See rebuiltColumns.
+		{
+			name:   "generated column VIRTUAL to STORED is rebuilt",
+			source: "(id INT PRIMARY KEY, c INT, g INT AS (c + 1) VIRTUAL)",
+			target: "(id INT PRIMARY KEY, c INT, g INT AS (c + 1) STORED)",
+		},
+		{
+			name:   "generated column STORED to VIRTUAL is rebuilt",
+			source: "(id INT PRIMARY KEY, c INT, g INT AS (c + 1) STORED)",
+			target: "(id INT PRIMARY KEY, c INT, g INT AS (c + 1) VIRTUAL)",
+		},
+		{
+			name:   "generated column VIRTUAL to regular is rebuilt",
+			source: "(id INT PRIMARY KEY, c INT, g INT AS (c + 1) VIRTUAL)",
+			target: "(id INT PRIMARY KEY, c INT, g INT)",
+		},
+		{
+			name:   "regular column to generated VIRTUAL is rebuilt",
+			source: "(id INT PRIMARY KEY, c INT, g INT)",
+			target: "(id INT PRIMARY KEY, c INT, g INT AS (c + 1) VIRTUAL)",
+		},
+		{
+			name:   "regular column to generated STORED is modified",
+			source: "(id INT PRIMARY KEY, c INT, g INT)",
+			target: "(id INT PRIMARY KEY, c INT, g INT AS (c + 1) STORED)",
+		},
+		{
+			name:   "generated rebuild keeps the column position",
+			source: "(id INT PRIMARY KEY, g INT AS (id + 1) VIRTUAL, c INT)",
+			target: "(id INT PRIMARY KEY, g INT AS (id + 1) STORED, c INT)",
+		},
+		{
+			name:   "generated rebuild keeps plain indexes on the column",
+			source: "(id INT PRIMARY KEY, c INT, g INT AS (c + 1) VIRTUAL, KEY kg (g), UNIQUE KEY ug (g), KEY kcg (c, g))",
+			target: "(id INT PRIMARY KEY, c INT, g INT AS (c + 1) STORED, KEY kg (g), UNIQUE KEY ug (g), KEY kcg (c, g))",
+		},
+		{
+			name:   "generated rebuild re-adds a functional index on the column",
+			source: "(id INT PRIMARY KEY, c INT, g INT AS (c + 1) VIRTUAL, KEY kf ((g + 1)))",
+			target: "(id INT PRIMARY KEY, c INT, g INT AS (c + 1) STORED, KEY kf ((g + 1)))",
+		},
+		{
+			name:   "generated rebuild re-adds a single-column CHECK",
+			source: "(id INT PRIMARY KEY, c INT, g INT AS (c + 1) VIRTUAL, CONSTRAINT ck CHECK (g > 0))",
+			target: "(id INT PRIMARY KEY, c INT, g INT AS (c + 1) STORED, CONSTRAINT ck CHECK (g > 0))",
+		},
+		{
+			name:   "generated rebuild re-adds a multi-column CHECK",
+			source: "(id INT PRIMARY KEY, c INT, g INT AS (c + 1) VIRTUAL, CONSTRAINT ck CHECK (g > c))",
+			target: "(id INT PRIMARY KEY, c INT, g INT AS (c + 1) STORED, CONSTRAINT ck CHECK (g > c))",
+		},
+		{
+			name:   "generated rebuild re-adds a column-level CHECK under its server name",
+			source: "(id INT PRIMARY KEY, c INT, g INT AS (c + 1) VIRTUAL CHECK (g > 0))",
+			target: "(id INT PRIMARY KEY, c INT, g INT AS (c + 1) STORED CHECK (g > 0))",
+		},
+		{
+			name:   "generated rebuild cascades to a dependent generated column",
+			source: "(id INT PRIMARY KEY, g INT AS (id + 1) VIRTUAL, h INT AS (g + 1) VIRTUAL, c INT)",
+			target: "(id INT PRIMARY KEY, g INT AS (id + 1) STORED, h INT AS (g + 1) VIRTUAL, c INT)",
+		},
 	}
 	for _, c := range contracts {
 		t.Run(c.name, func(t *testing.T) {

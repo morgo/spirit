@@ -376,6 +376,17 @@ Partitioning is compared as a whole, and a difference is emitted as one clause:
 
 A `PARTITION BY` carries the `SUBPARTITION BY` clause, partition and subpartition comments and storage options (`DATA DIRECTORY`, `INDEX DIRECTORY`, `MAX_ROWS`, `MIN_ROWS`, `TABLESPACE`, `NODEGROUP`), and any explicitly named subpartitions; `ADD PARTITION` and `REORGANIZE PARTITION` carry the same per-partition options. InnoDB rejects `INDEX DIRECTORY` (error 1031) and any tablespace other than `innodb_file_per_table` (error 1478); they are compared and emitted anyway, so a desired schema that sets one fails rather than being silently dropped. The per-partition `ENGINE` clause is the one thing deliberately **not** compared: MySQL requires every partition to use the table's engine, so it carries no information, yet `SHOW CREATE TABLE` always prints it while authored SQL does not.
 
+### Statement Planning
+
+`Diff` folds every change into one `ALTER TABLE` where MySQL lets it, with the clauses in the order columns (`DROP`, then `ADD`/`MODIFY` in target order), indexes, constraints, table options, partitioning. The exceptions are the changes MySQL rejects or silently ignores in that shape. Each is planned so that the emitted statements apply in order and a second diff against the result is empty:
+
+| Change | Plan | Why |
+|---|---|---|
+| A column changing to or from a `VIRTUAL` generated column (`VIRTUAL` ↔ `STORED`, `VIRTUAL` ↔ regular) | `DROP COLUMN` and `ADD COLUMN` in the same `ALTER`, at the column's target position | MySQL refuses the `MODIFY` (error 3106, "Changing the STORED status"). Nothing is lost: a generated column holds no data of its own and MySQL recomputes it, and the regular column such a change leaves behind gets its default under a `MODIFY` too. Regular ↔ `STORED` stays a `MODIFY` |
+| A functional index or `CHECK` constraint that reads a rebuilt column | `DROP INDEX`/`DROP CHECK` and the matching `ADD` in the same `ALTER`, even when the definition is unchanged | Either blocks the `DROP COLUMN` (errors 3837 and 3959) unless the same statement drops it. An index that names the column as a plain key part survives the rebuild on its own. A generated column that reads a rebuilt column is rebuilt with it (error 3108). A foreign key on a rebuilt column is left alone, so MySQL's error 1828 surfaces rather than a referential constraint being dropped |
+| An index whose column list is unchanged but whose `WITH PARSER`, `KEY_BLOCK_SIZE` or `SECONDARY_ENGINE_ATTRIBUTE` differs | `DROP INDEX` and `ADD INDEX` as two statements after the primary `ALTER` | MySQL pairs a same-name, same-columns `DROP`+`ADD` in one `ALTER` and keeps the old index, ignoring the option change |
+| `ADD PARTITION`, `COALESCE PARTITION`, `REORGANIZE PARTITION` alongside other changes | see the previous section | MySQL does not accept them next to other clauses |
+
 ## Normalization
 
 MySQL rewrites many constructs when it stores a table definition, so the form a human writes rarely matches what `SHOW CREATE TABLE` reports. Left unhandled, this produces **spurious diffs** — a schema file that says `active BOOLEAN` would appear to differ from the live `active tinyint(1)`, and a diff would emit a pointless `MODIFY COLUMN`. To prevent this, `ParseCreateTable` runs a pipeline of **normalization rules** over the parsed `CreateTable` before returning it, canonicalizing both sides so `Diff` compares like with like.

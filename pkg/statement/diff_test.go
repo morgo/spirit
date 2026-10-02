@@ -380,6 +380,97 @@ func TestDiff(t *testing.T) {
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, g INT GENERATED ALWAYS AS (+c + +1) VIRTUAL)",
 			expected: "",
 		},
+		// MySQL refuses to MODIFY a column to or from a VIRTUAL generated
+		// column (error 3106, "Changing the STORED status"); such a column is
+		// dropped and added back, at its position. Regular <-> STORED stays a
+		// MODIFY. See rebuiltColumns.
+		{
+			name:     "GeneratedVirtualToStoredIsRebuilt",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, g INT AS (c + 1) VIRTUAL)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, g INT AS (c + 1) STORED)",
+			expected: "ALTER TABLE `t1` DROP COLUMN `g`, ADD COLUMN `g` int GENERATED ALWAYS AS (`c`+1) STORED NULL",
+		},
+		{
+			name:     "GeneratedStoredToVirtualIsRebuilt",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, g INT AS (c + 1) STORED)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, g INT AS (c + 1) VIRTUAL)",
+			expected: "ALTER TABLE `t1` DROP COLUMN `g`, ADD COLUMN `g` int GENERATED ALWAYS AS (`c`+1) VIRTUAL NULL",
+		},
+		{
+			name:     "GeneratedVirtualToRegularIsRebuilt",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, g INT AS (c + 1) VIRTUAL)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, g INT)",
+			expected: "ALTER TABLE `t1` DROP COLUMN `g`, ADD COLUMN `g` int NULL",
+		},
+		{
+			name:     "RegularToGeneratedVirtualIsRebuilt",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, g INT)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, g INT AS (c + 1) VIRTUAL)",
+			expected: "ALTER TABLE `t1` DROP COLUMN `g`, ADD COLUMN `g` int GENERATED ALWAYS AS (`c`+1) VIRTUAL NULL",
+		},
+		{
+			name:     "RegularToGeneratedStoredIsModified",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, g INT)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, g INT AS (c + 1) STORED)",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `g` int GENERATED ALWAYS AS (`c`+1) STORED NULL",
+		},
+		{
+			name:     "GeneratedStoredToRegularIsModified",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, g INT AS (c + 1) STORED)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, g INT)",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `g` int NULL",
+		},
+		{
+			name:     "GeneratedExpressionChangeIsModified",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, g INT AS (c + 1) VIRTUAL)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, g INT AS (c + 2) VIRTUAL)",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `g` int GENERATED ALWAYS AS (`c`+2) VIRTUAL NULL",
+		},
+		{
+			name:     "GeneratedRebuildKeepsPosition",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, g INT AS (id + 1) VIRTUAL, c INT)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, g INT AS (id + 1) STORED, c INT)",
+			expected: "ALTER TABLE `t1` DROP COLUMN `g`, ADD COLUMN `g` int GENERATED ALWAYS AS (`id`+1) STORED NULL AFTER `id`",
+		},
+		{
+			// A plain key part on the column survives a DROP+ADD in one ALTER.
+			name:     "GeneratedRebuildKeepsPlainIndex",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, g INT AS (c + 1) VIRTUAL, KEY kg (g), KEY kcg (c, g))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, g INT AS (c + 1) STORED, KEY kg (g), KEY kcg (c, g))",
+			expected: "ALTER TABLE `t1` DROP COLUMN `g`, ADD COLUMN `g` int GENERATED ALWAYS AS (`c`+1) STORED NULL",
+		},
+		{
+			// A functional index reading the column blocks its DROP (error
+			// 3837) unless the same ALTER drops it; it is added back.
+			name:     "GeneratedRebuildReaddsFunctionalIndex",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, g INT AS (c + 1) VIRTUAL, KEY kf ((g + 1)))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, g INT AS (c + 1) STORED, KEY kf ((g + 1)))",
+			expected: "ALTER TABLE `t1` DROP COLUMN `g`, ADD COLUMN `g` int GENERATED ALWAYS AS (`c`+1) STORED NULL, DROP INDEX `kf`, ADD INDEX `kf` ((`g`+1))",
+		},
+		{
+			// A CHECK reading the column blocks its DROP (error 3959) unless
+			// the same ALTER drops it; the target's is added back.
+			name:     "GeneratedRebuildReaddsCheck",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, g INT AS (c + 1) VIRTUAL, CONSTRAINT ck CHECK (g > c))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, g INT AS (c + 1) STORED, CONSTRAINT ck CHECK (g > c))",
+			expected: "ALTER TABLE `t1` DROP COLUMN `g`, ADD COLUMN `g` int GENERATED ALWAYS AS (`c`+1) STORED NULL, DROP CHECK `ck`, ADD CONSTRAINT `ck` CHECK (`g`>`c`)",
+		},
+		{
+			// The re-add takes the target's text, even when the source's was
+			// an enforcement-only difference away from it.
+			name:     "GeneratedRebuildReaddsChangedCheck",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, g INT AS (c + 1) VIRTUAL, CONSTRAINT ck CHECK (g > c))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, g INT AS (c + 1) STORED, CONSTRAINT ck CHECK (g > c) NOT ENFORCED)",
+			expected: "ALTER TABLE `t1` DROP COLUMN `g`, ADD COLUMN `g` int GENERATED ALWAYS AS (`c`+1) STORED NULL, DROP CHECK `ck`, ADD CONSTRAINT `ck` CHECK (`g`>`c`) NOT ENFORCED",
+		},
+		{
+			// A generated column reading a rebuilt column blocks its DROP
+			// (error 3108) and is rebuilt with it.
+			name:     "GeneratedRebuildCascadesToDependents",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, g INT AS (id + 1) VIRTUAL, h INT AS (g + 1) VIRTUAL, c INT)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, g INT AS (id + 1) STORED, h INT AS (g + 1) VIRTUAL, c INT)",
+			expected: "ALTER TABLE `t1` DROP COLUMN `g`, DROP COLUMN `h`, ADD COLUMN `g` int GENERATED ALWAYS AS (`id`+1) STORED NULL AFTER `id`, ADD COLUMN `h` int GENERATED ALWAYS AS (`g`+1) VIRTUAL NULL AFTER `g`",
+		},
 		{
 			// MySQL reports a functional index key part wrapped in its own
 			// parentheses, KEY k (((`c` + 1))); the authored KEY k ((c+1)) is

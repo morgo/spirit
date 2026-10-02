@@ -246,6 +246,24 @@ func expressionColumnNames(p *parser.Parser, text string) ([]string, bool) {
 	return c.names, true
 }
 
+// expressionReadsAny reports whether an expression text reads any of the
+// columns in names (lowercased). A text that does not parse reads none.
+func expressionReadsAny(p *parser.Parser, text string, names map[string]bool) bool {
+	if len(names) == 0 {
+		return false
+	}
+	columns, ok := expressionColumnNames(p, text)
+	if !ok {
+		return false
+	}
+	for _, column := range columns {
+		if names[strings.ToLower(column)] {
+			return true
+		}
+	}
+	return false
+}
+
 // columnNameCollector is the ast.Visitor behind expressionColumnNames.
 type columnNameCollector struct {
 	names []string

@@ -89,10 +89,12 @@ func TestDiffColumnAttributeOptions(t *testing.T) {
 			expected: "",
 		},
 		{
+			// MySQL refuses to MODIFY between STORED and VIRTUAL (error 3106),
+			// so the column is dropped and added back; see rebuiltColumns.
 			name:     "GeneratedStoredVsVirtual",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT GENERATED ALWAYS AS (a + 1) STORED)",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT GENERATED ALWAYS AS (a + 1) VIRTUAL)",
-			expected: "ALTER TABLE `t1` MODIFY COLUMN `b` int GENERATED ALWAYS AS (`a`+1) VIRTUAL NULL",
+			expected: "ALTER TABLE `t1` DROP COLUMN `b`, ADD COLUMN `b` int GENERATED ALWAYS AS (`a`+1) VIRTUAL NULL",
 		},
 		{
 			name:     "GeneratedExpressionChanged",

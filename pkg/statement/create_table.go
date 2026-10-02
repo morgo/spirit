@@ -1708,19 +1708,24 @@ func (ct *CreateTable) Diff(target *CreateTable, opts *DiffOptions) ([]*Abstract
 
 	var alterClauses []string
 
+	// The columns MySQL cannot MODIFY into their target definition are
+	// dropped and added back instead, and the index and constraint diffs
+	// re-add what reads them (see rebuiltColumns).
+	rebuilt := ct.rebuiltColumns(target)
+
 	// 1. Diff columns (DROP, ADD, MODIFY)
-	columnClauses := ct.diffColumns(target, opts)
+	columnClauses := ct.diffColumns(target, opts, rebuilt)
 	alterClauses = append(alterClauses, columnClauses...)
 
 	// 2. Diff indexes (DROP, ADD). Option-only index changes (same column
 	// list, different WITH PARSER / KEY_BLOCK_SIZE / etc.) are returned as
 	// separate statements because MySQL no-ops a combined DROP+ADD of the same
 	// index in a single ALTER.
-	indexClauses, separateIndexStatements := ct.diffIndexes(target)
+	indexClauses, separateIndexStatements := ct.diffIndexes(target, rebuilt)
 	alterClauses = append(alterClauses, indexClauses...)
 
 	// 3. Diff constraints (DROP, ADD)
-	constraintClauses := ct.diffConstraints(target)
+	constraintClauses := ct.diffConstraints(target, rebuilt)
 	alterClauses = append(alterClauses, constraintClauses...)
 
 	// 4. Diff table options
@@ -1813,8 +1818,70 @@ func (ct *CreateTable) buildAlterStatement(clauses []string, partitionClause str
 	}, nil
 }
 
-// diffColumns compares columns and returns ALTER clauses for differences
-func (ct *CreateTable) diffColumns(target *CreateTable, opts *DiffOptions) []string {
+// rebuiltColumns returns the lowercased names of the columns, present in both
+// tables, that the ALTER has to drop and add back rather than MODIFY. MySQL
+// refuses to change a column to or from a VIRTUAL generated column in place
+// (error 3106, "Changing the STORED status"), in every direction: VIRTUAL to
+// STORED, STORED to VIRTUAL, VIRTUAL to a regular column and a regular column
+// to VIRTUAL. Only the regular/STORED pair is a MODIFY. The drop loses nothing
+// a MODIFY would have kept: a generated column holds no data of its own, and
+// MySQL fills the regular column such a change leaves behind with its default
+// either way. MySQL recomputes the values from the new expression when it adds
+// the column.
+//
+// A generated column that reads a rebuilt column blocks its DROP (error 3108)
+// and is rebuilt with it, transitively. The index and constraint diffs then
+// drop and re-add the functional indexes and CHECK constraints that read a
+// rebuilt column (errors 3837 and 3959); an index that names the column as a
+// plain key part survives the rebuild on its own. A foreign key on a rebuilt
+// column is not handled: MySQL rejects the DROP (error 1828), and the diff
+// lets that error surface rather than drop a referential constraint.
+func (ct *CreateTable) rebuiltColumns(target *CreateTable) map[string]bool {
+	targetColumns := make(map[string]*Column, len(target.Columns))
+	for i := range target.Columns {
+		targetColumns[strings.ToLower(target.Columns[i].Name)] = &target.Columns[i]
+	}
+	rebuilt := make(map[string]bool)
+	for i := range ct.Columns {
+		sourceCol := &ct.Columns[i]
+		name := strings.ToLower(sourceCol.Name)
+		if targetCol, ok := targetColumns[name]; ok && isVirtualGenerated(sourceCol) != isVirtualGenerated(targetCol) {
+			rebuilt[name] = true
+		}
+	}
+	if len(rebuilt) == 0 {
+		return rebuilt
+	}
+	p := parser.New()
+	for changed := true; changed; {
+		changed = false
+		for i := range ct.Columns {
+			sourceCol := &ct.Columns[i]
+			name := strings.ToLower(sourceCol.Name)
+			if rebuilt[name] || sourceCol.GeneratedExpr == nil {
+				continue
+			}
+			if _, kept := targetColumns[name]; !kept {
+				continue // dropped anyway
+			}
+			if expressionReadsAny(p, *sourceCol.GeneratedExpr, rebuilt) {
+				rebuilt[name] = true
+				changed = true
+			}
+		}
+	}
+	return rebuilt
+}
+
+// isVirtualGenerated reports whether col is a VIRTUAL generated column.
+func isVirtualGenerated(col *Column) bool {
+	return col.GeneratedExpr != nil && !col.GeneratedStored
+}
+
+// diffColumns compares columns and returns ALTER clauses for differences.
+// rebuilt names the columns that are dropped and added back instead of
+// modified (see rebuiltColumns).
+func (ct *CreateTable) diffColumns(target *CreateTable, opts *DiffOptions, rebuilt map[string]bool) []string {
 	var clauses []string
 
 	// Build maps for easier lookup. Keys are lowercased so identifier
@@ -1830,11 +1897,17 @@ func (ct *CreateTable) diffColumns(target *CreateTable, opts *DiffOptions) []str
 		targetColumns[strings.ToLower(target.Columns[i].Name)] = &target.Columns[i]
 	}
 
-	// Collect DROP operations and sort by name for deterministic output
+	// Collect DROP operations and sort by name for deterministic output. A
+	// rebuilt column is dropped here and leaves the source map, so the target
+	// walk below adds it back as it would a new column, position included.
 	var dropClauses []string
 	for _, sourceCol := range ct.Columns {
-		if _, exists := targetColumns[strings.ToLower(sourceCol.Name)]; !exists {
+		name := strings.ToLower(sourceCol.Name)
+		if _, exists := targetColumns[name]; !exists || rebuilt[name] {
 			dropClauses = append(dropClauses, fmt.Sprintf("DROP COLUMN %s", sqlescape.EscapeIdentifier(sourceCol.Name)))
+		}
+		if rebuilt[name] {
+			delete(sourceColumns, name)
 		}
 	}
 	slices.Sort(dropClauses)
@@ -1957,7 +2030,9 @@ func withChangedCollationNamed(source, col *Column, sourceTable, targetTable *Cr
 // calculateColumnPositioning decides which target columns need an explicit
 // FIRST/AFTER clause. It returns the set of their names, lowercased to match
 // the source/target column maps built by the caller (MySQL column identifiers
-// are case-insensitive).
+// are case-insensitive). sourceColumns holds the source columns the ALTER
+// keeps: a rebuilt column (see rebuiltColumns) is absent from it, and is
+// simulated as the DROP followed by the ADD the caller emits for it.
 //
 // It simulates what MySQL does with the clauses diffColumns emits. MySQL first
 // removes the dropped columns and replaces the definitions of the modified
@@ -1982,9 +2057,14 @@ func (ct *CreateTable) calculateColumnPositioning(target *CreateTable, sourceCol
 	// once the DROP COLUMN clauses have taken effect.
 	current := make([]string, 0, len(target.Columns))
 	for _, col := range ct.Columns {
-		if _, kept := targetColumns[strings.ToLower(col.Name)]; kept {
-			current = append(current, strings.ToLower(col.Name))
+		name := strings.ToLower(col.Name)
+		if _, kept := targetColumns[name]; !kept {
+			continue
 		}
+		if _, kept := sourceColumns[name]; !kept {
+			continue // rebuilt: dropped, then added by the target walk
+		}
+		current = append(current, name)
 	}
 
 	for pos, targetCol := range target.Columns {
@@ -2011,16 +2091,6 @@ func (ct *CreateTable) calculateColumnPositioning(target *CreateTable, sourceCol
 	return needsExplicitPosition
 }
 
-// diffIndexes compares indexes and returns ALTER clauses for differences.
-//
-// Most index changes are emitted into the combined ALTER (the returned
-// []string). However, an index whose column list is identical but whose
-// options differ (e.g. WITH PARSER or KEY_BLOCK_SIZE) cannot be changed by a
-// combined `DROP INDEX x, ADD INDEX x (<same cols>)` in a single ALTER: MySQL
-// pairs the two clauses up and keeps the existing index, silently ignoring the
-// option change. To make such a change actually take effect, the DROP and ADD
-// must run as two separate ALTER statements. Those are returned via the second
-// value as standalone clause-lists (each becomes its own ALTER statement).
 // pairInlineUniqueNames reconciles the names of unique indexes that one side
 // declared inline (`c INT UNIQUE`). indexNormalizer names such an index after
 // its column, which is only a guess at the name the server assigned: the live
@@ -2075,7 +2145,23 @@ func pairInlineUniqueNames(sourceIdxList, targetIdxList []Index) {
 	}
 }
 
-func (ct *CreateTable) diffIndexes(target *CreateTable) (clauses []string, separateStatements [][]string) {
+// diffIndexes compares indexes and returns ALTER clauses for differences.
+//
+// Most index changes are emitted into the combined ALTER (the returned
+// []string). However, an index whose column list is identical but whose
+// options differ (e.g. WITH PARSER or KEY_BLOCK_SIZE) cannot be changed by a
+// combined `DROP INDEX x, ADD INDEX x (<same cols>)` in a single ALTER: MySQL
+// pairs the two clauses up and keeps the existing index, silently ignoring the
+// option change. To make such a change actually take effect, the DROP and ADD
+// must run as two separate ALTER statements. Those are returned via the second
+// value as standalone clause-lists (each becomes its own ALTER statement).
+//
+// rebuilt names the columns dropped and added back by diffColumns (see
+// rebuiltColumns). A functional index that reads one blocks the DROP COLUMN
+// (error 3837) unless the same ALTER drops it, so it is dropped and added back
+// from the target's definition in the combined ALTER. An index that names the
+// column as a plain key part survives the rebuild on its own.
+func (ct *CreateTable) diffIndexes(target *CreateTable, rebuilt map[string]bool) (clauses []string, separateStatements [][]string) {
 	// Inline column-level UNIQUE / PRIMARY KEY have already been materialized
 	// into ct.Indexes by normalization (see indexNormalizer, primaryKeyNormalizer),
 	// so both index sets can be walked directly. The lists are copied because
@@ -2084,6 +2170,25 @@ func (ct *CreateTable) diffIndexes(target *CreateTable) (clauses []string, separ
 	sourceIdxList := slices.Clone(ct.Indexes)
 	targetIdxList := slices.Clone(target.Indexes)
 	pairInlineUniqueNames(sourceIdxList, targetIdxList)
+
+	var p *parser.Parser
+	readsRebuilt := func(idx *Index) bool {
+		if len(rebuilt) == 0 {
+			return false
+		}
+		if p == nil {
+			p = parser.New()
+		}
+		for _, part := range idx.ColumnList {
+			if part.Expression != nil && expressionReadsAny(p, *part.Expression, rebuilt) {
+				return true
+			}
+		}
+		return false
+	}
+	// rebuiltIndexes are the source indexes dropped for a column rebuild;
+	// each is added back below from the target's definition, whatever it is.
+	rebuiltIndexes := make(map[string]bool)
 
 	// Build maps for easier lookup
 	sourceIndexes := make(map[string]*Index)
@@ -2116,7 +2221,8 @@ func (ct *CreateTable) diffIndexes(target *CreateTable) (clauses []string, separ
 		sourceIdx := &sourceIdxList[i]
 		targetIdx, existsInTarget := targetIndexes[sourceIdx.Name]
 
-		if !existsInTarget {
+		switch {
+		case !existsInTarget:
 			// Index removed completely
 			if sourceIdx.Type == "PRIMARY KEY" {
 				if !pkDropAdded {
@@ -2126,7 +2232,10 @@ func (ct *CreateTable) diffIndexes(target *CreateTable) (clauses []string, separ
 			} else {
 				dropClauses = append(dropClauses, fmt.Sprintf("DROP INDEX %s", sqlescape.EscapeIdentifier(sourceIdx.Name)))
 			}
-		} else if !indexesEqual(sourceIdx, targetIdx) && !indexesEqualIgnoreVisibility(sourceIdx, targetIdx) {
+		case readsRebuilt(sourceIdx):
+			rebuiltIndexes[sourceIdx.Name] = true
+			dropClauses = append(dropClauses, fmt.Sprintf("DROP INDEX %s", sqlescape.EscapeIdentifier(sourceIdx.Name)))
+		case !indexesEqual(sourceIdx, targetIdx) && !indexesEqualIgnoreVisibility(sourceIdx, targetIdx):
 			// Index exists but changed (and not just visibility) - need to drop and re-add
 			switch {
 			case sourceIdx.Type == "PRIMARY KEY":
@@ -2158,10 +2267,15 @@ func (ct *CreateTable) diffIndexes(target *CreateTable) (clauses []string, separ
 	for _, targetIdx := range targetIdxList {
 		sourceIdx, existsInSource := sourceIndexes[targetIdx.Name]
 
-		if !existsInSource {
+		switch {
+		case !existsInSource:
 			// New index - add it
 			addClauses = append(addClauses, formatAddIndex(&targetIdx))
-		} else if !indexesEqual(sourceIdx, &targetIdx) {
+		case rebuiltIndexes[targetIdx.Name]:
+			// Dropped above for a column rebuild; add it back as the target
+			// defines it.
+			addClauses = append(addClauses, formatAddIndex(&targetIdx))
+		case !indexesEqual(sourceIdx, &targetIdx):
 			// Index exists but changed - check if only visibility changed
 			if indexesEqualIgnoreVisibility(sourceIdx, &targetIdx) {
 				// Only visibility changed - skip for now, handle in ALTER INDEX section
@@ -2183,7 +2297,8 @@ func (ct *CreateTable) diffIndexes(target *CreateTable) (clauses []string, separ
 	for _, targetIdx := range targetIdxList {
 		sourceIdx, existsInSource := sourceIndexes[targetIdx.Name]
 
-		if existsInSource && !indexesEqual(sourceIdx, &targetIdx) && indexesEqualIgnoreVisibility(sourceIdx, &targetIdx) {
+		if existsInSource && !rebuiltIndexes[targetIdx.Name] &&
+			!indexesEqual(sourceIdx, &targetIdx) && indexesEqualIgnoreVisibility(sourceIdx, &targetIdx) {
 			// Only visibility changed
 			targetVisible := targetIdx.Invisible == nil || !*targetIdx.Invisible
 			if targetVisible {
@@ -2199,9 +2314,31 @@ func (ct *CreateTable) diffIndexes(target *CreateTable) (clauses []string, separ
 	return clauses, separateStatements
 }
 
-// diffConstraints compares constraints and returns ALTER clauses for differences
-func (ct *CreateTable) diffConstraints(target *CreateTable) []string {
+// diffConstraints compares constraints and returns ALTER clauses for differences.
+//
+// rebuilt names the columns dropped and added back by diffColumns (see
+// rebuiltColumns). A CHECK constraint that reads one blocks the DROP COLUMN
+// (error 3959) unless the same ALTER drops it, so the source's is dropped and
+// the target's added back in the combined ALTER, each decided on its own text
+// and outside the pairing below, which would otherwise find the pair equal and
+// emit nothing. MySQL accepts the DROP CHECK and the ADD CONSTRAINT under the
+// same name in one statement.
+func (ct *CreateTable) diffConstraints(target *CreateTable, rebuilt map[string]bool) []string {
 	var clauses []string
+
+	var p *parser.Parser
+	readsRebuilt := func(c *Constraint) bool {
+		if len(rebuilt) == 0 || c.Type != "CHECK" || c.Expression == nil {
+			return false
+		}
+		if p == nil {
+			p = parser.New()
+		}
+		return expressionReadsAny(p, *c.Expression, rebuilt)
+	}
+	// droppedForRebuild are the source CHECKs dropped for a column rebuild;
+	// a same-named target constraint is added back whatever its text.
+	droppedForRebuild := make(map[string]bool)
 
 	// Build maps for easier lookup
 	sourceConstraints := make(map[string]*Constraint)
@@ -2227,14 +2364,17 @@ func (ct *CreateTable) diffConstraints(target *CreateTable) []string {
 		if _, exactMatch := targetConstraints[sourceConstr.Name]; exactMatch {
 			continue // will be handled by the normal name-based path
 		}
+		if readsRebuilt(sourceConstr) {
+			continue // dropped and re-added for the column rebuild
+		}
 		// No exact name match — look for an expression-equivalent target constraint
 		for j := range target.Constraints {
 			targetConstr := &target.Constraints[j]
 			if _, exactMatch := sourceConstraints[targetConstr.Name]; exactMatch {
 				continue // this target constraint already has a name match in source
 			}
-			if matchedTargetByExpression[targetConstr.Name] {
-				continue // already paired with another source constraint
+			if matchedTargetByExpression[targetConstr.Name] || readsRebuilt(targetConstr) {
+				continue // already paired with another source constraint, or re-added for a rebuild
 			}
 			if constraintsEqualIgnoreName(sourceConstr, targetConstr) {
 				matchedSourceByExpression[sourceConstr.Name] = true
@@ -2255,10 +2395,14 @@ func (ct *CreateTable) diffConstraints(target *CreateTable) []string {
 			continue // equivalent constraint exists in target under a different name
 		}
 		targetConstr, exists := targetConstraints[sourceConstr.Name]
+		rebuild := readsRebuilt(sourceConstr)
+		if rebuild {
+			droppedForRebuild[sourceConstr.Name] = true
+		}
 
 		// Drop if constraint doesn't exist in target OR if it changed
-		if !exists || !constraintsEqual(sourceConstr, targetConstr) {
-			if exists && constraintsEqualExceptEnforcement(sourceConstr, targetConstr) {
+		if rebuild || !exists || !constraintsEqual(sourceConstr, targetConstr) {
+			if !rebuild && exists && constraintsEqualExceptEnforcement(sourceConstr, targetConstr) {
 				// Only the [NOT] ENFORCED state changed: use MySQL's targeted
 				// ALTER CHECK clause instead of DROP+ADD. Flipping to NOT
 				// ENFORCED is then metadata-only (INSTANT-capable); flipping
@@ -2291,9 +2435,10 @@ func (ct *CreateTable) diffConstraints(target *CreateTable) []string {
 			continue // equivalent constraint exists in source under a different name
 		}
 		sourceConstr, existsInSource := sourceConstraints[targetConstr.Name]
+		rebuild := droppedForRebuild[targetConstr.Name] || readsRebuilt(&targetConstr)
 
-		if !existsInSource || !constraintsEqual(sourceConstr, &targetConstr) {
-			if existsInSource && constraintsEqualExceptEnforcement(sourceConstr, &targetConstr) {
+		if rebuild || !existsInSource || !constraintsEqual(sourceConstr, &targetConstr) {
+			if !rebuild && existsInSource && constraintsEqualExceptEnforcement(sourceConstr, &targetConstr) {
 				continue // enforcement-only change; handled by ALTER CHECK above
 			}
 			addClauses = append(addClauses, formatAddConstraint(&targetConstr))
