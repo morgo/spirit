@@ -2415,17 +2415,19 @@ func (ct *CreateTable) diffIndexes(target *CreateTable, rebuilt, droppedBefore m
 	// of dropClauses, the additions and the visibility clauses below.
 	replaced := make(map[string]bool)
 
-	// swap re-creates an index as the target defines it, in a statement of
-	// its own after the primary ALTER: the replacement is added under a
-	// temporary name and the old index dropped in the same statement, and a
-	// final statement renames every replacement back. Adding before dropping
-	// is what gets the swap through where a standalone DROP INDEX is refused:
-	// the only index on an AUTO_INCREMENT column (error 1075) or the index a
-	// foreign key depends on (error 1553). The temporary name avoids every
-	// index name on either side, compared case-insensitively as MySQL does.
-	// A run that stops between the two statements leaves the index under
-	// the temporary name; the next diff drops that one and adds the
-	// target's.
+	// swap re-creates an index as the target defines it, after the primary
+	// ALTER: the replacement is added under a temporary name and the old
+	// index dropped in the same statement, and a final statement renames
+	// every replacement back. Every swapped index shares one statement, so
+	// the table is rebuilt once for all of them, except a FULLTEXT index,
+	// which takes a statement of its own (InnoDB builds one FULLTEXT index
+	// per ALTER, error 1795). Adding before dropping is what gets the swap
+	// through where a standalone DROP INDEX is refused: the only index on an
+	// AUTO_INCREMENT column (error 1075) or the index a foreign key depends
+	// on (error 1553). The temporary name avoids every index name on either
+	// side, compared case-insensitively as MySQL does. A run that stops
+	// between the statements leaves the index under the temporary name; the
+	// next diff drops that one and adds the target's.
 	takenIndexNames := make(map[string]bool, len(sourceIdxList)+len(targetIdxList))
 	for _, idx := range sourceIdxList {
 		takenIndexNames[strings.ToLower(idx.Name)] = true
@@ -2433,16 +2435,23 @@ func (ct *CreateTable) diffIndexes(target *CreateTable, rebuilt, droppedBefore m
 	for _, idx := range targetIdxList {
 		takenIndexNames[strings.ToLower(idx.Name)] = true
 	}
+	var swapClauses []string     // every swap but a FULLTEXT one: one statement
+	var fulltextSwaps [][]string // one statement per FULLTEXT swap
 	var renames []string
 	swap := func(sourceIdx, targetIdx *Index) {
 		replaced[sourceIdx.Name] = true
 		tmp := replacementName(sourceIdx.Name, takenIndexNames)
 		replacement := *targetIdx
 		replacement.Name = tmp
-		separateStatements = append(separateStatements, []string{
+		pair := []string{
 			formatAddIndex(&replacement),
 			fmt.Sprintf("DROP INDEX %s", sqlescape.EscapeIdentifier(sourceIdx.Name)),
-		})
+		}
+		if targetIdx.Type == "FULLTEXT" {
+			fulltextSwaps = append(fulltextSwaps, pair)
+		} else {
+			swapClauses = append(swapClauses, pair...)
+		}
 		renames = append(renames, fmt.Sprintf("RENAME INDEX %s TO %s",
 			sqlescape.EscapeIdentifier(tmp), sqlescape.EscapeIdentifier(sourceIdx.Name)))
 	}
@@ -2503,6 +2512,10 @@ func (ct *CreateTable) diffIndexes(target *CreateTable, rebuilt, droppedBefore m
 	}
 	slices.Sort(dropClauses)
 	clauses = append(clauses, dropClauses...)
+	if len(swapClauses) > 0 {
+		separateStatements = append(separateStatements, swapClauses)
+	}
+	separateStatements = append(separateStatements, fulltextSwaps...)
 	if len(renames) > 0 {
 		separateStatements = append(separateStatements, renames)
 	}
@@ -2684,19 +2697,6 @@ func (ct *CreateTable) diffConstraints(target *CreateTable, rebuilt map[string]b
 	// diff drops; a target foreign key under one of them is added under a
 	// replacement name (see above).
 	droppedForeignKeys := make(map[string]bool)
-
-	// Build maps for easier lookup
-	sourceConstraints := make(map[string]*Constraint)
-	for i := range ct.Constraints {
-		sourceConstraints[ct.Constraints[i].Name] = &ct.Constraints[i]
-	}
-
-	targetConstraints := make(map[string]*Constraint)
-	for i := range target.Constraints {
-		targetConstraints[target.Constraints[i].Name] = &target.Constraints[i]
-	}
-
-	// Build a set of source constraint names that have an equivalent match in the
 	// takenNames are the lowercased constraint and index names on either
 	// side, which a replacement foreign key name must avoid.
 	var takenNames map[string]bool
@@ -2718,6 +2718,19 @@ func (ct *CreateTable) diffConstraints(target *CreateTable, rebuilt map[string]b
 		}
 		return replacementName(name, takenNames)
 	}
+
+	// Build maps for easier lookup
+	sourceConstraints := make(map[string]*Constraint)
+	for i := range ct.Constraints {
+		sourceConstraints[ct.Constraints[i].Name] = &ct.Constraints[i]
+	}
+
+	targetConstraints := make(map[string]*Constraint)
+	for i := range target.Constraints {
+		targetConstraints[target.Constraints[i].Name] = &target.Constraints[i]
+	}
+
+	// Build a set of source constraint names that have an equivalent match in the
 	// target under a different name. This handles the case where MySQL generates
 	// different auto-names for CHECK constraints whose original expression text
 	// differs only cosmetically (e.g. charset introducers like _utf8mb3 that are

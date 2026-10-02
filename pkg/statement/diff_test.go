@@ -661,14 +661,28 @@ func TestDiff(t *testing.T) {
 			},
 		},
 		{
-			// Every replacement is renamed back in one final statement.
-			name:   "TwoOptionOnlyChangesShareTheRename",
+			// Every swap shares one statement, and every replacement is
+			// renamed back in one final statement.
+			name:   "TwoOptionOnlyChangesShareTheSwapAndTheRename",
 			source: "CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, KEY ka (a), KEY kb (b)) ROW_FORMAT=COMPRESSED",
 			target: "CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, KEY ka (a) KEY_BLOCK_SIZE=4, KEY kb (b) KEY_BLOCK_SIZE=4) ROW_FORMAT=COMPRESSED",
 			expectedStatements: []string{
-				"ALTER TABLE `t1` ADD INDEX `_ka_new` (`a`) KEY_BLOCK_SIZE=4, DROP INDEX `ka`",
-				"ALTER TABLE `t1` ADD INDEX `_kb_new` (`b`) KEY_BLOCK_SIZE=4, DROP INDEX `kb`",
+				"ALTER TABLE `t1` ADD INDEX `_ka_new` (`a`) KEY_BLOCK_SIZE=4, DROP INDEX `ka`, ADD INDEX `_kb_new` (`b`) KEY_BLOCK_SIZE=4, DROP INDEX `kb`",
 				"ALTER TABLE `t1` RENAME INDEX `_ka_new` TO `ka`, RENAME INDEX `_kb_new` TO `kb`",
+			},
+		},
+		{
+			// InnoDB builds one FULLTEXT index per ALTER (error 1795), so a
+			// FULLTEXT swap takes a statement of its own, after the shared
+			// one; the renames still share a statement.
+			name:   "FulltextSwapTakesItsOwnStatement",
+			source: "CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b TEXT, c TEXT, KEY ka (a), FULLTEXT KEY fb (b), FULLTEXT KEY fc (c)) ROW_FORMAT=COMPRESSED",
+			target: "CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b TEXT, c TEXT, KEY ka (a) KEY_BLOCK_SIZE=4, FULLTEXT KEY fb (b) WITH PARSER ngram, FULLTEXT KEY fc (c) WITH PARSER ngram) ROW_FORMAT=COMPRESSED",
+			expectedStatements: []string{
+				"ALTER TABLE `t1` ADD INDEX `_ka_new` (`a`) KEY_BLOCK_SIZE=4, DROP INDEX `ka`",
+				"ALTER TABLE `t1` ADD FULLTEXT INDEX `_fb_new` (`b`) WITH PARSER ngram, DROP INDEX `fb`",
+				"ALTER TABLE `t1` ADD FULLTEXT INDEX `_fc_new` (`c`) WITH PARSER ngram, DROP INDEX `fc`",
+				"ALTER TABLE `t1` RENAME INDEX `_ka_new` TO `ka`, RENAME INDEX `_fb_new` TO `fb`, RENAME INDEX `_fc_new` TO `fc`",
 			},
 		},
 		{
@@ -3745,8 +3759,7 @@ func TestDiffTableKeyBlockSizeChangeResizesIndexes(t *testing.T) {
 			opts:   compared,
 			expected: []string{
 				"ALTER TABLE `t1` DROP PRIMARY KEY, ADD PRIMARY KEY (`id`), KEY_BLOCK_SIZE=4",
-				"ALTER TABLE `t1` ADD INDEX `_k_new` (`c`), DROP INDEX `k`",
-				"ALTER TABLE `t1` ADD UNIQUE INDEX `_u_new` (`c`, `id`), DROP INDEX `u`",
+				"ALTER TABLE `t1` ADD INDEX `_k_new` (`c`), DROP INDEX `k`, ADD UNIQUE INDEX `_u_new` (`c`, `id`), DROP INDEX `u`",
 				"ALTER TABLE `t1` RENAME INDEX `_k_new` TO `k`, RENAME INDEX `_u_new` TO `u`",
 			},
 		},
