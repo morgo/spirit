@@ -304,6 +304,45 @@ func TestDiff(t *testing.T) {
 			expected: "ALTER TABLE `t1` MODIFY COLUMN `c` decimal(6,2) NULL DEFAULT 1.21",
 		},
 		{
+			// MySQL stores a temporal literal in any of its accepted spellings
+			// and reports the stored value, so the declared spelling has to be
+			// read the same way or every run re-emits the same MODIFY.
+			name:     "TemporalDefaultDateWithoutTime",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c DATETIME DEFAULT '2020-01-01 00:00:00')",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c DATETIME DEFAULT '2020-1-1')",
+			expected: "",
+		},
+		{
+			name:     "TemporalDefaultFractionPadded",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c DATETIME(3) DEFAULT '2020-01-01 10:00:00.000')",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c DATETIME(3) DEFAULT '2020-01-01 10:00:00')",
+			expected: "",
+		},
+		{
+			name:     "TemporalDefaultDateFromNumber",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c DATE DEFAULT '2020-01-01')",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c DATE DEFAULT 20200101)",
+			expected: "",
+		},
+		{
+			name:     "TemporalDefaultTimeWithDays",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c TIME DEFAULT '26:03:05')",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c TIME DEFAULT '1 2:3:4.5')",
+			expected: "",
+		},
+		{
+			name:     "TemporalDefaultAdded",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c DATETIME)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c DATETIME DEFAULT '2020-1-1')",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `c` datetime NULL DEFAULT '2020-01-01 00:00:00'",
+		},
+		{
+			name:     "TemporalDefaultChanged",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c TIME DEFAULT '01:02:00')",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c TIME DEFAULT '1:3')",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `c` time NULL DEFAULT '01:03:00'",
+		},
+		{
 			// MySQL reports a functional index key part wrapped in its own
 			// parentheses, KEY k (((`c` + 1))); the authored KEY k ((c+1)) is
 			// the same index.

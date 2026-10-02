@@ -263,8 +263,9 @@ func TestNumericDefaultLeavesRejectedValuesAlone(t *testing.T) {
 		{"a int(4) zerofill DEFAULT 2.5", "0003", DefaultKindString},
 		{"a decimal(6,2) zerofill DEFAULT 1.5", "1.5", DefaultKindNumber},
 		{"a double zerofill DEFAULT 1.5", "1.5", DefaultKindNumber},
-		{"a date DEFAULT '2020-1-1'", "2020-1-1", DefaultKindString},
-		{"a datetime DEFAULT 20200101", "20200101", DefaultKindNumber},
+		// (temporalDefaultNormalizer reads these two as dates.)
+		{"a date DEFAULT '2020-1-1'", "2020-01-01", DefaultKindString},
+		{"a datetime DEFAULT 20200101", "2020-01-01 00:00:00", DefaultKindString},
 		{"a enum('1','2') DEFAULT '1'", "1", DefaultKindString},
 		{"a text", "", DefaultKindUnknown},
 	}

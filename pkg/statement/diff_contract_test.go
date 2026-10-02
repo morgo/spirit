@@ -525,6 +525,85 @@ func TestDiffMySQLContracts(t *testing.T) {
 			source: "(id INT PRIMARY KEY, c BINARY(5))",
 			target: "(id INT PRIMARY KEY, c BINARY(5) DEFAULT 1.5)",
 		},
+		// Temporal literal defaults (temporalDefaultNormalizer): MySQL stores
+		// the literal as a date or time and reports the stored value.
+		{
+			name:   "datetime default from a date converges",
+			source: "(id INT PRIMARY KEY, c DATETIME)",
+			target: "(id INT PRIMARY KEY, c DATETIME DEFAULT '2020-1-1')",
+		},
+		{
+			name:   "datetime default changed",
+			source: "(id INT PRIMARY KEY, c DATETIME DEFAULT '2020-01-01')",
+			target: "(id INT PRIMARY KEY, c DATETIME DEFAULT '2020-01-02 10:00:00')",
+		},
+		{
+			name:     "datetime default already canonical is a no-op",
+			source:   "(id INT PRIMARY KEY, c DATETIME DEFAULT '2020-01-01 00:00:00')",
+			target:   "(id INT PRIMARY KEY, c DATETIME DEFAULT '2020-01-01')",
+			wantNoop: true,
+		},
+		{
+			name:   "datetime default with precision pads the fraction",
+			source: "(id INT PRIMARY KEY, c DATETIME(3))",
+			target: "(id INT PRIMARY KEY, c DATETIME(3) DEFAULT '2020-01-01 10:00:00')",
+		},
+		{
+			name:   "datetime default rounds and carries",
+			source: "(id INT PRIMARY KEY, c DATETIME)",
+			target: "(id INT PRIMARY KEY, c DATETIME DEFAULT '2020-01-01 23:59:59.9')",
+		},
+		{
+			name:   "datetime default from a number converges",
+			source: "(id INT PRIMARY KEY, c DATETIME)",
+			target: "(id INT PRIMARY KEY, c DATETIME DEFAULT 20200101100000)",
+		},
+		{
+			name:   "datetime default from a compact string converges",
+			source: "(id INT PRIMARY KEY, c DATETIME(6))",
+			target: "(id INT PRIMARY KEY, c DATETIME(6) DEFAULT '20200101T100000.12345678')",
+		},
+		{
+			name:   "timestamp default converges",
+			source: "(id INT PRIMARY KEY, c TIMESTAMP NULL)",
+			target: "(id INT PRIMARY KEY, c TIMESTAMP NULL DEFAULT '2020-01-01')",
+		},
+		{
+			name:   "date default from a number converges",
+			source: "(id INT PRIMARY KEY, c DATE)",
+			target: "(id INT PRIMARY KEY, c DATE DEFAULT 20200101)",
+		},
+		{
+			name:   "date default from a datetime string converges",
+			source: "(id INT PRIMARY KEY, c DATE)",
+			target: "(id INT PRIMARY KEY, c DATE DEFAULT '2020-01-01 23:59:59.9')",
+		},
+		{
+			name:   "time default converges",
+			source: "(id INT PRIMARY KEY, c TIME)",
+			target: "(id INT PRIMARY KEY, c TIME DEFAULT '1:2')",
+		},
+		{
+			name:   "time default with days converges",
+			source: "(id INT PRIMARY KEY, c TIME)",
+			target: "(id INT PRIMARY KEY, c TIME DEFAULT '1 2:3:4.5')",
+		},
+		{
+			name:   "time default from a number converges",
+			source: "(id INT PRIMARY KEY, c TIME(1))",
+			target: "(id INT PRIMARY KEY, c TIME(1) DEFAULT 1.55)",
+		},
+		{
+			name:   "time default fraction rounds from the last digit",
+			source: "(id INT PRIMARY KEY, c TIME(6))",
+			target: "(id INT PRIMARY KEY, c TIME(6) DEFAULT '10:00:00.1234564999')",
+		},
+		{
+			name:     "time default negative zero is a no-op",
+			source:   "(id INT PRIMARY KEY, c TIME DEFAULT '00:00:00')",
+			target:   "(id INT PRIMARY KEY, c TIME DEFAULT '-0:00:00.4')",
+			wantNoop: true,
+		},
 	}
 	for _, c := range contracts {
 		t.Run(c.name, func(t *testing.T) {
