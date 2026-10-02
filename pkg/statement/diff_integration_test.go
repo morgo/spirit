@@ -3571,3 +3571,50 @@ func TestDiffIntegrationTemporalDefaultTruncateFractional(t *testing.T) {
 		})
 	}
 }
+
+// TestDiffIntegrationExpressionDefaultIntroducerValues verifies that an
+// expression default whose charset introducer decides its value stores, when
+// added through a diff, the value a direct CREATE of the target stores. The
+// diff used to fold an ASCII latin1 (or utf8mb3) literal to the bare literal
+// everywhere but directly beneath COLLATE, which changed CHARSET(_latin1'a')
+// from 'latin1' to 'utf8mb4', COLLATION(_utf8mb3'a') to the utf8mb4
+// collation, and made CONCAT(_latin1'a') COLLATE latin1_bin error 1253.
+func TestDiffIntegrationExpressionDefaultIntroducerValues(t *testing.T) {
+	for _, expr := range []string{
+		"CHARSET(_latin1'a')",
+		"COLLATION(_utf8mb3'a')",
+		"CONCAT(_latin1'a') COLLATE latin1_bin",
+		"HEX(WEIGHT_STRING(_latin1'a'))",
+		"CHARSET(IF(id, _latin1'a', _latin1'b'))",
+	} {
+		t.Run(expr, func(t *testing.T) {
+			_, db := testutils.CreateUniqueTestDatabase(t)
+			exec := func(stmt string) {
+				t.Helper()
+				_, err := db.ExecContext(t.Context(), stmt)
+				require.NoError(t, err, "executing: %s", stmt)
+			}
+			storedDefault := func() string {
+				t.Helper()
+				exec("TRUNCATE TABLE t")
+				exec("INSERT INTO t (id) VALUES (1)")
+				var v string
+				require.NoError(t, db.QueryRowContext(t.Context(), "SELECT c FROM t").Scan(&v))
+				return v
+			}
+			target := "(id INT PRIMARY KEY, c VARCHAR(64) DEFAULT (" + expr + "))"
+			exec("CREATE TABLE t " + target)
+			expectedCreate := showCreateTable(t, db, "t")
+			expectedValue := storedDefault()
+			exec("DROP TABLE t")
+
+			exec("CREATE TABLE t (id INT PRIMARY KEY)")
+			stmts := diffLiveTable(t, db, "t", "CREATE TABLE t "+target)
+			require.Len(t, stmts, 1)
+			execStatements(t, db, stmts)
+			assert.Equal(t, expectedValue, storedDefault(), "the expression default must keep its introducer: %s", stmts[0].Statement)
+			assert.Equal(t, expectedCreate, showCreateTable(t, db, "t"))
+			requireConverged(t, db, "t", "CREATE TABLE t "+target)
+		})
+	}
+}

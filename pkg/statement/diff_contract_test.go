@@ -122,6 +122,45 @@ func TestDiffMySQLContracts(t *testing.T) {
 			source: "(id INT PRIMARY KEY)",
 			target: "(id INT PRIMARY KEY, c VARCHAR(10) DEFAULT (_latin1'a' COLLATE latin1_bin))",
 		},
+		// An introducer that decides the charset of a result, not just the
+		// value of a literal: anywhere under COLLATE, and inside CHARSET(),
+		// COLLATION() and WEIGHT_STRING(). The diff used to fold these, which
+		// emitted error 1253 for the first and a different value for the rest.
+		// TestDiffIntegrationExpressionDefaultIntroducerValues checks the
+		// values. See foldLiteralCharsets.
+		{
+			name:   "expression default keeps the introducer under COLLATE over a function",
+			source: "(id INT PRIMARY KEY)",
+			target: "(id INT PRIMARY KEY, c VARCHAR(10) DEFAULT (CONCAT(_latin1'a') COLLATE latin1_bin))",
+		},
+		{
+			name:   "expression default keeps the introducer inside CHARSET()",
+			source: "(id INT PRIMARY KEY)",
+			target: "(id INT PRIMARY KEY, c VARCHAR(64) DEFAULT (CHARSET(_latin1'a')))",
+		},
+		{
+			name:   "expression default keeps the introducer inside COLLATION()",
+			source: "(id INT PRIMARY KEY)",
+			target: "(id INT PRIMARY KEY, c VARCHAR(64) DEFAULT (COLLATION(_utf8mb3'a')))",
+		},
+		{
+			name:   "generated column keeps the introducer inside WEIGHT_STRING()",
+			source: "(id INT PRIMARY KEY)",
+			target: "(id INT PRIMARY KEY, g VARCHAR(64) AS (HEX(WEIGHT_STRING(_latin1'a'))) STORED)",
+		},
+		{
+			name:   "CHECK keeps the introducer deep inside CHARSET()",
+			source: "(id INT PRIMARY KEY, c VARCHAR(64))",
+			target: "(id INT PRIMARY KEY, c VARCHAR(64), CONSTRAINT ck CHECK (c <> CHARSET(IF(id, _latin1'a', _latin1'b'))))",
+		},
+		{
+			// MySQL keeps the _latin1 in the stored expression; the value is
+			// the same, so the two are one expression and nothing is emitted.
+			name:     "an ASCII latin1 literal under UPPER() is the bare literal",
+			source:   "(id INT PRIMARY KEY, g VARCHAR(10) AS (UPPER(_latin1'a')) STORED)",
+			target:   "(id INT PRIMARY KEY, g VARCHAR(10) AS (UPPER('a')) STORED)",
+			wantNoop: true,
+		},
 		{
 			name:                 "literal stored from a utf8mb3 session is the bare literal",
 			source:               "(id INT PRIMARY KEY, c VARCHAR(10), CONSTRAINT ck CHECK (c <> 'A'))",

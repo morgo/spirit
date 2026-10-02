@@ -304,16 +304,19 @@ func restoreExpressionText(expr ast.ExprNode) (string, bool) {
 // introducer (the former format.RestoreStringWithoutCharset) therefore emitted
 // a different expression from the one the user wrote. Introducers are kept
 // instead, except those that spell the same value as the bare literal, which
-// foldLiteralCharsets rewrites to the default charset first — MySQL adds the
-// session's introducer to every bare literal it stores, so a user-written 'x'
-// has to compare equal to the _utf8mb4'x' that SHOW CREATE TABLE reports for
-// it. format.RestoreStringWithoutDefaultCharset then omits the default
-// introducer, which is the form a bare literal parses to.
+// foldLiteralCharsets rewrites to the default charset for the duration of the
+// restore — MySQL adds the session's introducer to every bare literal it
+// stores, so a user-written 'x' has to compare equal to the _utf8mb4'x' that
+// SHOW CREATE TABLE reports for it. format.RestoreStringWithoutDefaultCharset
+// then omits the default introducer, which is the form a bare literal parses
+// to. The AST itself is left as parsed: the fold is undone once the text is
+// rendered, so Column.Raw and the other retained nodes still carry what was
+// written.
 func restoreExprText(expr ast.ExprNode, flags format.RestoreFlags) (string, bool) {
 	if expr == nil {
 		return "", false
 	}
-	foldLiteralCharsets(expr)
+	defer foldLiteralCharsets(expr)()
 	var sb strings.Builder
 	rCtx := format.NewRestoreCtx(flags|format.RestoreStringWithoutDefaultCharset, &sb)
 	if err := expr.Restore(rCtx); err != nil {
@@ -324,7 +327,8 @@ func restoreExprText(expr ast.ExprNode, flags format.RestoreFlags) (string, bool
 
 // foldLiteralCharsets rewrites, in place, the charset of every string literal
 // in expr whose introducer is equivalent to none, so that the literal renders
-// bare. An introducer is equivalent to none when it names:
+// bare, and returns the function that puts every rewritten literal back. An
+// introducer is equivalent to none when it names:
 //
 //   - utf8mb4, the parser's default: a bare 'x' and _utf8mb4'x' are the same
 //     parse, and MySQL reports the latter for a bare literal stored from a
@@ -340,36 +344,79 @@ func restoreExprText(expr ast.ExprNode, flags format.RestoreFlags) (string, bool
 //
 // Kept are _binary (a binary literal measures and compares by bytes, so it is
 // never the bare literal's expression), the UTF-16/32 family (not
-// ASCII-compatible), a non-ASCII literal under any other charset (its bytes
-// are not those of the utf8mb4 spelling), and any literal that is the direct
-// operand of COLLATE, where the introducer is the charset the collation must
-// belong to.
+// ASCII-compatible), and a non-ASCII literal under any other charset (its
+// bytes are not those of the utf8mb4 spelling).
+//
+// The equivalence holds for the literal's value, not for its charset, so
+// nothing is folded inside the expressions that observe the charset itself,
+// however deep the literal sits:
+//
+//   - the operand of COLLATE, whose collation must belong to the charset of
+//     the operand's result, which an introducer anywhere in it can decide:
+//     CONCAT(_latin1'a') COLLATE latin1_bin is latin1; folded, error 1253;
+//   - the arguments of CHARSET(), COLLATION() and WEIGHT_STRING(), whose
+//     result is the charset, the collation or the collation weights of the
+//     argument: CHARSET(_latin1'a') is 'latin1' where CHARSET('a') is
+//     'utf8mb4', and CHARSET(IF(1, _latin1'a', _latin1'b')) is 'latin1' too.
+//
+// Every other function and operator reads a literal's value and converts it
+// to whatever charset it works in, so an ASCII literal under latin1 is the
+// same argument as the bare one (LENGTH, UPPER, HEX, CONCAT with a column, a
+// comparison with a column). Spirit does not track the charset an expression
+// evaluates in, so the protected set is these four constructs, where the
+// charset is the result; a new charset-observing construct belongs in
+// charsetObservingFunctions.
 //
 // The fold is not a complete equivalence: two literals that carry the same
 // non-default introducer and are compared with each other use that charset's
 // default collation, and folding both moves the comparison to utf8mb4's. That
 // is accepted so that a table created from a non-utf8mb4 session converges
 // rather than re-emitting the same expression on every diff.
-func foldLiteralCharsets(expr ast.ExprNode) {
+func foldLiteralCharsets(expr ast.ExprNode) (undo func()) {
 	if expr == nil {
-		return
+		return func() {}
 	}
-	expr.Accept(literalCharsetFolder{})
+	f := &literalCharsetFolder{}
+	expr.Accept(f)
+	return f.undo
 }
 
-// literalCharsetFolder is the ast.Visitor behind foldLiteralCharsets.
-type literalCharsetFolder struct{}
+// charsetObservingFunctions are the functions whose result is the charset or
+// collation of their argument rather than a conversion of its value, so a
+// literal's introducer anywhere beneath them is load-bearing. See
+// foldLiteralCharsets.
+var charsetObservingFunctions = map[string]bool{
+	ast.Charset:      true,
+	ast.Collation:    true,
+	ast.WeightString: true,
+}
 
-func (literalCharsetFolder) Enter(n ast.Node) (ast.Node, bool) {
+// literalCharsetFolder is the ast.Visitor behind foldLiteralCharsets. It
+// records each literal it rewrites so that undo can restore the parse.
+type literalCharsetFolder struct {
+	folded []foldedLiteral
+}
+
+// foldedLiteral is a string literal whose charset the folder rewrote, with the
+// charset and collation it had.
+type foldedLiteral struct {
+	expr             *ast.ValueExpr
+	charset, collate string
+}
+
+func (f *literalCharsetFolder) Enter(n ast.Node) (ast.Node, bool) {
 	switch e := n.(type) {
 	case *ast.SetCollationExpr:
-		// The operand's introducer is load-bearing under COLLATE; skip it.
-		// Anything deeper (COLLATE over a function call) is still visited.
-		if _, ok := unwrapParenExpr(e.Expr).(*ast.ValueExpr); ok {
+		// The whole operand is skipped, not just a literal directly beneath:
+		// the collation must belong to the charset of the operand's result.
+		return n, true
+	case *ast.FuncCallExpr:
+		if charsetObservingFunctions[e.FnName.L] {
 			return n, true
 		}
 	case *ast.ValueExpr:
 		if e.Kind() == ast.KindString && literalCharsetFoldsToDefault(e.GetType().GetCharset(), e.GetString()) {
+			f.folded = append(f.folded, foldedLiteral{expr: e, charset: e.GetType().GetCharset(), collate: e.GetType().GetCollate()})
 			e.GetType().SetCharset(mysql.DefaultCharset)
 			e.GetType().SetCollate(mysql.DefaultCollationName)
 		}
@@ -377,7 +424,17 @@ func (literalCharsetFolder) Enter(n ast.Node) (ast.Node, bool) {
 	return n, false
 }
 
-func (literalCharsetFolder) Leave(n ast.Node) (ast.Node, bool) { return n, true }
+func (f *literalCharsetFolder) Leave(n ast.Node) (ast.Node, bool) { return n, true }
+
+// undo restores the charset and collation of every literal the folder
+// rewrote, in reverse order, leaving the AST as it was parsed.
+func (f *literalCharsetFolder) undo() {
+	for i := len(f.folded) - 1; i >= 0; i-- {
+		l := f.folded[i]
+		l.expr.GetType().SetCharset(l.charset)
+		l.expr.GetType().SetCollate(l.collate)
+	}
+}
 
 // literalCharsetFoldsToDefault reports whether a string literal under charset
 // cs with the given value is the same literal under the default charset. See

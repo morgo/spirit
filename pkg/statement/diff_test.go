@@ -977,6 +977,45 @@ func TestDiff(t *testing.T) {
 			expected: "ALTER TABLE `t1` MODIFY COLUMN `c` varchar(10) NULL DEFAULT (_LATIN1'a' COLLATE latin1_bin)",
 		},
 		{
+			// An introducer anywhere under COLLATE decides the charset the
+			// collation must belong to; folding it is error 1253.
+			name:     "ExpressionDefaultKeepsIntroducerUnderCollateFunction",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c VARCHAR(10) DEFAULT (CONCAT('a') COLLATE utf8mb4_bin))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c VARCHAR(10) DEFAULT (CONCAT(_latin1'a') COLLATE latin1_bin))",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `c` varchar(10) NULL DEFAULT (CONCAT(_LATIN1'a') COLLATE latin1_bin)",
+		},
+		{
+			// CHARSET() returns the charset the introducer names: 'latin1'
+			// against 'utf8mb4'. A different value, kept as written.
+			name:     "ExpressionDefaultKeepsIntroducerInsideCharset",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c VARCHAR(10) DEFAULT (CHARSET('a')))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c VARCHAR(10) DEFAULT (CHARSET(_latin1'a')))",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `c` varchar(10) NULL DEFAULT (charset(_latin1'a'))",
+		},
+		{
+			// The parser spells utf8mb3 as utf8, an alias MySQL accepts.
+			name:     "ExpressionDefaultKeepsIntroducerInsideCollation",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c VARCHAR(32) DEFAULT (COLLATION('a')))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c VARCHAR(32) DEFAULT (COLLATION(_utf8mb3'a')))",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `c` varchar(32) NULL DEFAULT (collation(_utf8'a'))",
+		},
+		{
+			// WEIGHT_STRING returns the collation weights, which differ per
+			// charset even for ASCII; the introducer is kept however deep.
+			name:     "GeneratedColumnKeepsIntroducerInsideWeightString",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, g VARCHAR(32) AS (HEX(WEIGHT_STRING('a'))) STORED)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, g VARCHAR(32) AS (HEX(WEIGHT_STRING(IF(id, _latin1'a', _latin1'b')))) STORED)",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `g` varchar(32) GENERATED ALWAYS AS (HEX(WEIGHT_STRING(IF(`id`, _LATIN1'a', _LATIN1'b')))) STORED NULL",
+		},
+		{
+			// Every other function reads the literal's value, so an ASCII
+			// literal under latin1 is the bare literal there.
+			name:     "GeneratedColumnLatin1ASCIIIntroducerInsideUpperNoDiff",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, g VARCHAR(10) AS (UPPER(_latin1'a')) STORED)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, g VARCHAR(10) AS (UPPER('a')) STORED)",
+			expected: "",
+		},
+		{
 			name:     "FunctionalIndexBinaryIntroducerDiffers",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, z VARCHAR(10), KEY fk ((CONCAT(z, 'x'))))",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, z VARCHAR(10), KEY fk ((CONCAT(z, _binary'x'))))",
