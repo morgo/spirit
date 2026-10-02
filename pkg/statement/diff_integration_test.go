@@ -255,6 +255,50 @@ func TestDiffIntegrationKeyBlockSize(t *testing.T) {
 	require.Nil(t, stmts)
 }
 
+// TestDiffIntegrationTableKeyBlockSizeChangeLeavesThePrimaryKey follows a
+// table KEY_BLOCK_SIZE change on a table that stays compressed through every
+// diff it takes. The first emits only the new size, and MySQL keeps the old
+// size on the existing indexes. The second swaps the secondary index, whose
+// replacement takes the new size, and plans nothing for the primary key:
+// Spirit refuses a DROP PRIMARY KEY, and MySQL keeps the old size on a
+// same-column DROP and ADD of it. The third is empty, with the old size still
+// reported on the primary key.
+func TestDiffIntegrationTableKeyBlockSizeChangeLeavesThePrimaryKey(t *testing.T) {
+	tt := testutils.NewTestTable(t, "diff_tkbs",
+		"CREATE TABLE diff_tkbs (id int PRIMARY KEY, a int, KEY ka (a)) ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=8")
+	target, err := ParseCreateTable("CREATE TABLE diff_tkbs (id int PRIMARY KEY, a int, KEY ka (a)) ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=4")
+	require.NoError(t, err)
+	opts := NewDiffOptions()
+	opts.IgnoreRowFormat = false
+
+	rounds := [][]string{
+		{"ALTER TABLE `diff_tkbs` KEY_BLOCK_SIZE=4"},
+		{
+			"ALTER TABLE `diff_tkbs` ADD INDEX `_ka_new` (`a`), DROP INDEX `ka`",
+			"ALTER TABLE `diff_tkbs` RENAME INDEX `_ka_new` TO `ka`",
+		},
+		nil,
+	}
+	for round, want := range rounds {
+		source, err := ParseCreateTable(showCreateTable(t, tt.DB, tt.Name))
+		require.NoError(t, err)
+		stmts, err := source.Diff(target, opts)
+		require.NoError(t, err)
+		var got []string
+		for _, s := range stmts {
+			got = append(got, s.Statement)
+		}
+		require.Equal(t, want, got, "diff %d", round+1)
+		for _, s := range got {
+			_, err := tt.DB.ExecContext(t.Context(), s)
+			require.NoError(t, err)
+		}
+	}
+	live := showCreateTable(t, tt.DB, tt.Name)
+	assert.Contains(t, live, "PRIMARY KEY (`id`) KEY_BLOCK_SIZE=8")
+	assert.NotContains(t, live, "(`a`) KEY_BLOCK_SIZE=8")
+}
+
 // A table created from `year(4)` is stored as a plain `year`, so it must diff
 // clean against the declaration it was created from. Without
 // yearDisplayWidthNormalizer the diff emits `MODIFY COLUMN ... year(4)` on

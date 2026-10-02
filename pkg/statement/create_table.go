@@ -2412,6 +2412,12 @@ func (ct *CreateTable) diffIndexes(target *CreateTable, rebuilt, droppedBefore, 
 	// index diff below — no inline-PK special cases are needed. pkDropAdded just
 	// guards against emitting "DROP PRIMARY KEY" twice from the source loop.
 	pkDropAdded := false
+	// leftAlone names a primary key whose only change is an option MySQL
+	// ignores on a same-column DROP and ADD (see onlyIgnoredOptionsDiffer).
+	// Nothing is emitted for it: that pair changes nothing, a primary key
+	// cannot be swapped under a temporary name as other indexes are, and
+	// Spirit refuses a DROP PRIMARY KEY anyway. The difference stays.
+	leftAlone := make(map[string]bool)
 
 	// replaced tracks the indexes re-created outside the primary ALTER:
 	// those whose column list is unchanged but whose options differ (WITH
@@ -2476,6 +2482,8 @@ func (ct *CreateTable) diffIndexes(target *CreateTable, rebuilt, droppedBefore, 
 		case !indexesEqual(sourceIdx, targetIdx) && !indexesEqualIgnoreVisibility(sourceIdx, targetIdx):
 			// Index exists but changed (and not just visibility) - need to drop and re-add
 			switch {
+			case sourceIdx.Type == "PRIMARY KEY" && onlyIgnoredOptionsDiffer(sourceIdx, targetIdx):
+				leftAlone[sourceIdx.Name] = true
 			case sourceIdx.Type == "PRIMARY KEY":
 				// Only add if not already added above
 				if !pkDropAdded {
@@ -2531,7 +2539,7 @@ func (ct *CreateTable) diffIndexes(target *CreateTable, rebuilt, droppedBefore, 
 				continue
 			}
 			// A replaced index is re-created by its swap statements above.
-			if replaced[targetIdx.Name] {
+			if replaced[targetIdx.Name] || leftAlone[targetIdx.Name] {
 				continue
 			}
 			// Other changes - need to drop and re-add (drop already handled above)

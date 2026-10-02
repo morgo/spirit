@@ -82,11 +82,15 @@ type DiffOptions struct {
 	// it fires once: the rebuilt table reports no row format either.
 	//
 	// A KEY_BLOCK_SIZE change on a table that stays compressed emits only
-	// the new size, and does not converge: MySQL keeps the old size on every
-	// existing index and reports it there. Compressed tables are out of
-	// scope (Spirit targets Aurora, which does not support them), so the
-	// diff does not re-create the indexes for it; re-creating the primary
-	// key would need a DROP PRIMARY KEY, which Spirit refuses.
+	// the new size. Compressed tables are out of scope (Spirit targets
+	// Aurora, which does not support them), so the diff does not re-create
+	// the indexes for it, and MySQL keeps the old size on every existing
+	// index and reports it there. The next diff swaps each secondary index,
+	// whose replacement takes the new size, and emits nothing for the
+	// primary key: re-creating it needs a DROP PRIMARY KEY, which Spirit
+	// refuses, and MySQL ignores a same-column DROP and ADD of it. From then
+	// on the diff is empty while SHOW CREATE TABLE still reports the old size
+	// on the primary key.
 	IgnoreRowFormat bool
 }
 
