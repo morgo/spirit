@@ -2,7 +2,6 @@ package statement
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/block/spirit/pkg/parser"
 	"github.com/block/spirit/pkg/parser/ast"
@@ -148,12 +147,9 @@ func canonicalizeExprParens(p *parser.Parser, text *string) {
 	// already delimited by its surrounding CHECK (...) / AS (...) syntax — and
 	// RestoreSkipRedundantParentheses drops them for that reason: at the top
 	// level there is no enclosing operator to reason about.
-	var sb strings.Builder
-	rCtx := format.NewRestoreCtx(
-		format.DefaultRestoreFlags|format.RestoreStringWithoutCharset|format.RestoreSkipRedundantParentheses,
-		&sb)
-	if err := expr.Restore(rCtx); err != nil {
+	rendered, ok := restoreExprText(expr, format.DefaultRestoreFlags|format.RestoreSkipRedundantParentheses)
+	if !ok {
 		return
 	}
-	*text = sb.String()
+	*text = rendered
 }

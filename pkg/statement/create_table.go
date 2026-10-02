@@ -1098,10 +1098,7 @@ func (ct *CreateTable) parseIndexColumnList(keys []*ast.IndexPartSpecification) 
 			}
 		} else if key.Expr != nil {
 			// Expression index (functional index)
-			var sb strings.Builder
-			rCtx := format.NewRestoreCtx(format.DefaultRestoreFlags|format.RestoreStringWithoutCharset, &sb)
-			if err := key.Expr.Restore(rCtx); err == nil {
-				expr := sb.String()
+			if expr, ok := restoreExprText(key.Expr, format.DefaultRestoreFlags); ok {
 				col.Expression = &expr
 			}
 		}
@@ -1255,10 +1252,7 @@ func (ct *CreateTable) parsePartitionOptions(partition *ast.PartitionOptions) *P
 	// Parse expression for HASH and RANGE
 	if partition.Expr != nil {
 		// Restore the full expression using the AST
-		var sb strings.Builder
-		rCtx := format.NewRestoreCtx(format.DefaultRestoreFlags|format.RestoreStringWithoutCharset, &sb)
-		if err := partition.Expr.Restore(rCtx); err == nil {
-			expr := sb.String()
+		if expr, ok := restoreExprText(partition.Expr, format.DefaultRestoreFlags); ok {
 			partOpts.Expression = &expr
 		}
 	}

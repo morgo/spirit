@@ -531,6 +531,61 @@ func TestDiff(t *testing.T) {
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, type enum('A','B'), tok varchar(15), CONSTRAINT chk_tok_def456 CHECK (type = 'A' AND tok IS NOT NULL OR type = 'B' AND tok IS NULL))",
 			expected: "",
 		},
+		// Charset introducers. A literal's introducer is kept when it changes
+		// the expression (_binary, a non-ASCII literal under another charset,
+		// the UTF-16/32 family, or the operand of COLLATE) and folded away
+		// when it spells the bare literal (utf8mb3, N'x', an ASCII literal
+		// under latin1). See restoreExprText.
+		{
+			name:     "GeneratedColumnBinaryIntroducerDiffers",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, g INT AS (CHAR_LENGTH('€')) STORED)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, g INT AS (CHAR_LENGTH(_binary'€')) STORED)",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `g` int GENERATED ALWAYS AS (CHAR_LENGTH(_BINARY'€')) STORED NULL",
+		},
+		{
+			name:     "ExpressionDefaultKeepsIntroducerUnderCollate",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c VARCHAR(10) DEFAULT ('a' COLLATE utf8mb4_bin))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c VARCHAR(10) DEFAULT (_latin1'a' COLLATE latin1_bin))",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `c` varchar(10) NULL DEFAULT (_LATIN1'a' COLLATE latin1_bin)",
+		},
+		{
+			name:     "FunctionalIndexBinaryIntroducerDiffers",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, z VARCHAR(10), KEY fk ((CONCAT(z, 'x'))))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, z VARCHAR(10), KEY fk ((CONCAT(z, _binary'x'))))",
+			expected: "ALTER TABLE `t1` DROP INDEX `fk`, ADD INDEX `fk` ((CONCAT(`z`, _BINARY'x')))",
+		},
+		{
+			name:     "CheckLatin1ASCIIIntroducerNoDiff",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c VARCHAR(10), CHECK (c <> _latin1'abc'))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c VARCHAR(10), CHECK (c <> 'abc'))",
+			expected: "",
+		},
+		{
+			name:     "CheckLatin1NonASCIIIntroducerDiffers",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c VARCHAR(10), CHECK (c <> _latin1'é'))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c VARCHAR(10), CHECK (c <> 'é'))",
+			expected: "ALTER TABLE `t1` DROP CHECK `t1_chk_1`, ADD CONSTRAINT `t1_chk_1` CHECK (`c`!='é')",
+		},
+		{
+			name:     "CheckUTF16IntroducerDiffers",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c VARCHAR(10), CHECK (c <> _utf16'x'))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c VARCHAR(10), CHECK (c <> 'x'))",
+			expected: "ALTER TABLE `t1` DROP CHECK `t1_chk_1`, ADD CONSTRAINT `t1_chk_1` CHECK (`c`!='x')",
+		},
+		{
+			name:     "CheckNationalLiteralNoDiff",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c VARCHAR(10), CHECK (c <> N'x'))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c VARCHAR(10), CHECK (c <> 'x'))",
+			expected: "",
+		},
+		{
+			// A literal-style default is a value: MySQL converts it to the
+			// column's charset and reports it with no introducer.
+			name:     "LiteralDefaultIntroducerNoDiff",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c VARCHAR(10) DEFAULT _latin1'x')",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c VARCHAR(10) DEFAULT 'x')",
+			expected: "",
+		},
 		{
 			// When constraint names differ AND expressions actually differ, it should still produce a diff.
 			name:     "CheckConstraintDifferentNameDifferentExpression",

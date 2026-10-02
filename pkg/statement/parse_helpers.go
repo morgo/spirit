@@ -3,10 +3,13 @@ package statement
 import (
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/block/spirit/pkg/parser"
 	"github.com/block/spirit/pkg/parser/ast"
+	"github.com/block/spirit/pkg/parser/charset"
 	"github.com/block/spirit/pkg/parser/format"
+	"github.com/block/spirit/pkg/parser/mysql"
 )
 
 // This file holds low-level, stateless parsing helpers used by the CreateTable
@@ -107,13 +110,11 @@ func restoreValueExprText(expr ast.ExprNode, bareTimestampKeyword bool) any {
 		// DEFAULT (concat('A')) round-tripped to concat('a'), emitting a
 		// different default value and making defaults that differ only in
 		// literal case compare equal.
-		var sb strings.Builder
-		rCtx := format.NewRestoreCtx(format.RestoreStringSingleQuotes|format.RestoreKeyWordLowercase|
-			format.RestoreNameBackQuotes|format.RestoreStringWithoutCharset, &sb)
-		if err := e.Restore(rCtx); err != nil {
+		restored, ok := restoreExprText(e, format.RestoreStringSingleQuotes|format.RestoreKeyWordLowercase|
+			format.RestoreNameBackQuotes)
+		if !ok {
 			return e.FnName.L // fallback to function name on error
 		}
-		restored := sb.String()
 		// Normalize: MySQL's canonical SHOW CREATE TABLE uses "CURRENT_TIMESTAMP" (no parens)
 		// when there is no fractional seconds precision, but the parser's Restore always adds "()".
 		// We only strip parens for timestamp-family functions; other functions like json_object()
@@ -124,14 +125,20 @@ func restoreValueExprText(expr ast.ExprNode, bareTimestampKeyword bool) any {
 		}
 		return restored
 	default:
-		// For other types, fall back to text representation
-		var sb strings.Builder
-		sb.Reset()
-		rCtx := format.NewRestoreCtx(format.DefaultRestoreFlags|format.RestoreStringWithoutCharset, &sb)
-		if err := expr.Restore(rCtx); err != nil {
+		// For other types, fall back to text representation. A literal-style
+		// default (or partition value) is a value, not an expression: MySQL
+		// converts it to the column's charset and reports it with no
+		// introducer, so every introducer is dropped from it. Inside an
+		// expression default the introducer stays meaningful and is handled
+		// by restoreExprText.
+		flags := format.DefaultRestoreFlags
+		if bareTimestampKeyword {
+			flags |= format.RestoreStringWithoutCharset
+		}
+		str, ok := restoreExprText(expr, flags)
+		if !ok {
 			return "<error>"
 		}
-		str := sb.String()
 		// if the string is quoted, remove quotes
 		if strings.HasPrefix(str, "'") && strings.HasSuffix(str, "'") {
 			str = str[1 : len(str)-1]
@@ -207,21 +214,117 @@ func (c *columnNameCollector) Leave(n ast.Node) (ast.Node, bool) { return n, tru
 // Unlike parseExpression, the result is NOT lowercased and string literals
 // keep their quotes — these expressions may contain case-sensitive literals.
 func restoreExpressionText(expr ast.ExprNode) (string, bool) {
-	for {
-		paren, ok := expr.(*ast.ParenthesesExpr)
-		if !ok {
-			break
-		}
-		expr = paren.Expr
-	}
+	return restoreExprText(unwrapParenExpr(expr), format.DefaultRestoreFlags)
+}
 
+// restoreExprText renders an expression to the text Spirit stores for it: the
+// given restore flags plus the charset-introducer policy every stored
+// expression shares. It is the one place that policy lives; every restore of a
+// generated-column, CHECK, functional-index, expression-default or partition
+// expression goes through it, so the parse of a user's DDL and the parse of
+// SHOW CREATE TABLE render a literal the same way.
+//
+// MySQL keeps a string literal's charset introducer in the expressions it
+// stores, and the introducer can change what the expression means:
+// CHAR_LENGTH(_binary'€') is 3 where CHAR_LENGTH('€') is 1, and
+// _latin1'a' COLLATE latin1_bin is error 1253 once the introducer is gone,
+// because latin1_bin is not a collation of the default charset. Dropping every
+// introducer (the former format.RestoreStringWithoutCharset) therefore emitted
+// a different expression from the one the user wrote. Introducers are kept
+// instead, except those that spell the same value as the bare literal, which
+// foldLiteralCharsets rewrites to the default charset first — MySQL adds the
+// session's introducer to every bare literal it stores, so a user-written 'x'
+// has to compare equal to the _utf8mb4'x' that SHOW CREATE TABLE reports for
+// it. format.RestoreStringWithoutDefaultCharset then omits the default
+// introducer, which is the form a bare literal parses to.
+func restoreExprText(expr ast.ExprNode, flags format.RestoreFlags) (string, bool) {
+	if expr == nil {
+		return "", false
+	}
+	foldLiteralCharsets(expr)
 	var sb strings.Builder
-	rCtx := format.NewRestoreCtx(format.DefaultRestoreFlags|format.RestoreStringWithoutCharset, &sb)
+	rCtx := format.NewRestoreCtx(flags|format.RestoreStringWithoutDefaultCharset, &sb)
 	if err := expr.Restore(rCtx); err != nil {
 		return "", false
 	}
-
 	return sb.String(), true
+}
+
+// foldLiteralCharsets rewrites, in place, the charset of every string literal
+// in expr whose introducer is equivalent to none, so that the literal renders
+// bare. An introducer is equivalent to none when it names:
+//
+//   - utf8mb4, the parser's default: a bare 'x' and _utf8mb4'x' are the same
+//     parse, and MySQL reports the latter for a bare literal stored from a
+//     utf8mb4 session;
+//   - utf8mb3 (also spelled utf8, and the N'x' national form): every valid
+//     utf8mb3 string is the same bytes in utf8mb4, so the value, its length
+//     and its comparisons against a column do not change. MySQL reports
+//     _utf8mb3 for bare literals stored from an older client;
+//   - any other ASCII-compatible charset (latin1, ascii, …) when the literal
+//     is pure ASCII, whose bytes and characters are the same in utf8mb4. MySQL
+//     reports _latin1 for bare literals stored from a latin1 client, which the
+//     mysql command-line client is by default.
+//
+// Kept are _binary (a binary literal measures and compares by bytes, so it is
+// never the bare literal's expression), the UTF-16/32 family (not
+// ASCII-compatible), a non-ASCII literal under any other charset (its bytes
+// are not those of the utf8mb4 spelling), and any literal that is the direct
+// operand of COLLATE, where the introducer is the charset the collation must
+// belong to.
+//
+// The fold is not a complete equivalence: two literals that carry the same
+// non-default introducer and are compared with each other use that charset's
+// default collation, and folding both moves the comparison to utf8mb4's. That
+// is accepted so that a table created from a non-utf8mb4 session converges
+// rather than re-emitting the same expression on every diff.
+func foldLiteralCharsets(expr ast.ExprNode) {
+	if expr == nil {
+		return
+	}
+	expr.Accept(literalCharsetFolder{})
+}
+
+// literalCharsetFolder is the ast.Visitor behind foldLiteralCharsets.
+type literalCharsetFolder struct{}
+
+func (literalCharsetFolder) Enter(n ast.Node) (ast.Node, bool) {
+	switch e := n.(type) {
+	case *ast.SetCollationExpr:
+		// The operand's introducer is load-bearing under COLLATE; skip it.
+		// Anything deeper (COLLATE over a function call) is still visited.
+		if _, ok := unwrapParenExpr(e.Expr).(*ast.ValueExpr); ok {
+			return n, true
+		}
+	case *ast.ValueExpr:
+		if e.Kind() == ast.KindString && literalCharsetFoldsToDefault(e.GetType().GetCharset(), e.GetString()) {
+			e.GetType().SetCharset(mysql.DefaultCharset)
+			e.GetType().SetCollate(mysql.DefaultCollationName)
+		}
+	}
+	return n, false
+}
+
+func (literalCharsetFolder) Leave(n ast.Node) (ast.Node, bool) { return n, true }
+
+// literalCharsetFoldsToDefault reports whether a string literal under charset
+// cs with the given value is the same literal under the default charset. See
+// foldLiteralCharsets for the rule.
+func literalCharsetFoldsToDefault(cs, value string) bool {
+	switch cs {
+	case "", mysql.DefaultCharset:
+		return false // already bare
+	case charset.CharsetUTF8, charset.CharsetUTF8MB3:
+		return true
+	case charset.CharsetBin, charset.CharsetUCS2, charset.CharsetUTF16, charset.CharsetUTF16LE, charset.CharsetUTF32:
+		return false
+	}
+	for i := range len(value) {
+		if value[i] >= utf8.RuneSelf {
+			return false
+		}
+	}
+	return true
 }
 
 // extractLengthFromTypeString extracts length from type string like
