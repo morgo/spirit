@@ -1892,16 +1892,93 @@ func TestDiff(t *testing.T) {
 			expected: "ALTER TABLE `t1` ADD CONSTRAINT `fk_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE SET NULL",
 		},
 		{
-			name:     "ChangeForeignKeyAction",
-			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE RESTRICT)",
-			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)",
-			expected: "ALTER TABLE `t1` DROP FOREIGN KEY `fk_user`, ADD CONSTRAINT `fk_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE",
+			// MySQL rejects a DROP FOREIGN KEY and an ADD CONSTRAINT under the
+			// same name in one ALTER (error 1826), so the ADD is a statement
+			// of its own after the primary ALTER.
+			name:   "ChangeForeignKeyAction",
+			source: "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE RESTRICT)",
+			target: "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)",
+			expectedStatements: []string{
+				"ALTER TABLE `t1` DROP FOREIGN KEY `fk_user`",
+				"ALTER TABLE `t1` ADD CONSTRAINT `fk_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE",
+			},
 		},
 		{
-			name:     "AddOnDeleteToExistingForeignKey",
+			name:   "AddOnDeleteToExistingForeignKey",
+			source: "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id))",
+			target: "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)",
+			expectedStatements: []string{
+				"ALTER TABLE `t1` DROP FOREIGN KEY `fk_user`",
+				"ALTER TABLE `t1` ADD CONSTRAINT `fk_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE",
+			},
+		},
+		{
+			// A foreign key changed under a new name fits one ALTER.
+			name:     "ChangeForeignKeyActionUnderNewName",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE RESTRICT)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user2 FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)",
+			expected: "ALTER TABLE `t1` DROP FOREIGN KEY `fk_user`, ADD CONSTRAINT `fk_user2` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE",
+		},
+		{
+			// Foreign key names are case-insensitive in MySQL, so a name that
+			// differs only in case collides the same way (error 1826).
+			name:   "ChangeForeignKeyActionUnderCaseChangedName",
+			source: "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE RESTRICT)",
+			target: "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT FK_USER FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)",
+			expectedStatements: []string{
+				"ALTER TABLE `t1` DROP FOREIGN KEY `fk_user`",
+				"ALTER TABLE `t1` ADD CONSTRAINT `FK_USER` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE",
+			},
+		},
+		{
+			// The re-add runs after the primary ALTER, so it sees every other
+			// change; a foreign key under a new name stays in the primary
+			// ALTER, and every same-name re-add shares the one trailing
+			// statement.
+			name:   "ForeignKeyReaddsFollowOtherChanges",
+			source: "CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, CONSTRAINT fk_a FOREIGN KEY (a) REFERENCES pa(id), CONSTRAINT fk_b FOREIGN KEY (b) REFERENCES pb(id))",
+			target: "CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, c INT, CONSTRAINT fk_a FOREIGN KEY (a) REFERENCES pa(id) ON DELETE CASCADE, CONSTRAINT fk_b FOREIGN KEY (b) REFERENCES pb(id) ON DELETE SET NULL, CONSTRAINT fk_c FOREIGN KEY (c) REFERENCES pc(id))",
+			expectedStatements: []string{
+				"ALTER TABLE `t1` ADD COLUMN `c` int NULL, DROP FOREIGN KEY `fk_a`, DROP FOREIGN KEY `fk_b`, ADD CONSTRAINT `fk_c` FOREIGN KEY (`c`) REFERENCES `pc` (`id`)",
+				"ALTER TABLE `t1` ADD CONSTRAINT `fk_a` FOREIGN KEY (`a`) REFERENCES `pa` (`id`) ON DELETE CASCADE, ADD CONSTRAINT `fk_b` FOREIGN KEY (`b`) REFERENCES `pb` (`id`) ON DELETE SET NULL",
+			},
+		},
+		// Schema-qualified references. SHOW CREATE TABLE qualifies a
+		// reference only when the parent is in another schema, and a parsed
+		// CREATE TABLE does not know its own schema, so two references differ
+		// only when both are qualified with different schemas.
+		{
+			name:     "AddForeignKeyToOtherSchema",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES db2.users(id))",
+			expected: "ALTER TABLE `t1` ADD CONSTRAINT `fk_user` FOREIGN KEY (`user_id`) REFERENCES `db2`.`users` (`id`)",
+		},
+		{
+			name:   "ForeignKeyReferencedSchemaChanged",
+			source: "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES db1.users(id))",
+			target: "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES db2.users(id))",
+			expectedStatements: []string{
+				"ALTER TABLE `t1` DROP FOREIGN KEY `fk_user`",
+				"ALTER TABLE `t1` ADD CONSTRAINT `fk_user` FOREIGN KEY (`user_id`) REFERENCES `db2`.`users` (`id`)",
+			},
+		},
+		{
+			name:     "ForeignKeyQualifiedMatchesUnqualified",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id))",
-			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)",
-			expected: "ALTER TABLE `t1` DROP FOREIGN KEY `fk_user`, ADD CONSTRAINT `fk_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES db1.users(id))",
+			expected: "",
+		},
+		{
+			name:     "ForeignKeyUnqualifiedMatchesQualified",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES db1.users(id))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id))",
+			expected: "",
+		},
+		{
+			name:     "ForeignKeySameSchemaSpelledEqual",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES db1.users(id))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES `db1`.`users`(id))",
+			expected: "",
 		},
 		{
 			// NO ACTION is MySQL's default referential action, and SHOW CREATE
@@ -1937,16 +2014,22 @@ func TestDiff(t *testing.T) {
 			expected: "",
 		},
 		{
-			name:     "ForeignKeyAddRestrictStillDiffs",
-			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id))",
-			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE RESTRICT)",
-			expected: "ALTER TABLE `t1` DROP FOREIGN KEY `fk_user`, ADD CONSTRAINT `fk_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE RESTRICT",
+			name:   "ForeignKeyAddRestrictStillDiffs",
+			source: "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id))",
+			target: "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE RESTRICT)",
+			expectedStatements: []string{
+				"ALTER TABLE `t1` DROP FOREIGN KEY `fk_user`",
+				"ALTER TABLE `t1` ADD CONSTRAINT `fk_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE RESTRICT",
+			},
 		},
 		{
-			name:     "ForeignKeyCascadeToNoAction",
-			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)",
-			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE NO ACTION)",
-			expected: "ALTER TABLE `t1` DROP FOREIGN KEY `fk_user`, ADD CONSTRAINT `fk_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`)",
+			name:   "ForeignKeyCascadeToNoAction",
+			source: "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)",
+			target: "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE NO ACTION)",
+			expectedStatements: []string{
+				"ALTER TABLE `t1` DROP FOREIGN KEY `fk_user`",
+				"ALTER TABLE `t1` ADD CONSTRAINT `fk_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`)",
+			},
 		},
 
 		// Composite Primary Key Changes

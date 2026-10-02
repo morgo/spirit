@@ -346,6 +346,8 @@ type Constraint struct {
 }
 ```
 
+A `ForeignKeyReference` records the referenced `Schema` when the reference is qualified (`REFERENCES db.parent`) and leaves it empty otherwise. MySQL qualifies a reference in `SHOW CREATE TABLE` only when the parent is in another schema, and a reference qualified with the table's own schema reads back unqualified, so an empty `Schema` means the table's own schema — which a parsed `CREATE TABLE` does not know. Two references therefore differ on schema only when both are qualified and name different schemas; a desired `REFERENCES db2.parent` is not told apart from a live `REFERENCES parent`.
+
 ### Partition Information
 
 For partitioned tables, `PartitionOptions` provides:
@@ -390,6 +392,7 @@ A `PARTITION BY` carries the `SUBPARTITION BY` clause, partition and subpartitio
 | An `SRID` attribute added, removed or changed on a column with a spatial index | `DROP INDEX` as a statement of its own **before** the primary `ALTER`; the `MODIFY COLUMN` and the `ADD SPATIAL INDEX` from the target share the primary `ALTER` | MySQL refuses the SRID change while the index exists, even when the same `ALTER` drops it (error 3644). Any other change to the column is a plain `MODIFY` |
 | An index whose column list is unchanged but whose `WITH PARSER`, `KEY_BLOCK_SIZE` or `SECONDARY_ENGINE_ATTRIBUTE` differs | `DROP INDEX` and `ADD INDEX` as two statements after the primary `ALTER` | MySQL pairs a same-name, same-columns `DROP`+`ADD` in one `ALTER` and keeps the old index, ignoring the option change |
 | More than one `FULLTEXT` index added (or rebuilt) | The first `ADD FULLTEXT INDEX` stays in the primary `ALTER`; each further one is a statement of its own after it | InnoDB builds one FULLTEXT index per `ALTER TABLE` (error 1795) |
+| A foreign key whose definition changes under the same name, or a name differing only in case | `DROP FOREIGN KEY` in the primary `ALTER`; every such `ADD CONSTRAINT` in one statement of its own after it. A foreign key changed under a new name fits the primary `ALTER` | MySQL rejects a same-name `DROP`+`ADD FOREIGN KEY` in one `ALTER` (error 1826, "Duplicate foreign key constraint name"), and foreign key names are case-insensitive and unique per schema |
 | `ADD PARTITION`, `COALESCE PARTITION`, `REORGANIZE PARTITION` alongside other changes | see the previous section | MySQL does not accept them next to other clauses |
 
 ## Normalization

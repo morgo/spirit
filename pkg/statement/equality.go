@@ -242,6 +242,12 @@ func constraintsEqualIgnoreNameAndEnforcement(a, b *Constraint) bool {
 		if a.References.Table != b.References.Table {
 			return false
 		}
+		// A schema is compared only when both references are qualified: an
+		// unqualified reference means the table's own schema, which a parsed
+		// CREATE TABLE does not know (see ForeignKeyReference).
+		if a.References.Schema != "" && b.References.Schema != "" && a.References.Schema != b.References.Schema {
+			return false
+		}
 		if !slices.Equal(a.References.Columns, b.References.Columns) {
 			return false
 		}

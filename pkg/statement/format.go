@@ -330,18 +330,22 @@ func formatAddConstraint(constr *Constraint) string {
 	case "FOREIGN KEY":
 		columns := sqlescape.EscapeIdentifierList(constr.Columns)
 		refColumns := sqlescape.EscapeIdentifierList(constr.References.Columns)
+		refTable := sqlescape.EscapeIdentifier(constr.References.Table)
+		if constr.References.Schema != "" {
+			refTable = sqlescape.EscapeIdentifier(constr.References.Schema) + "." + refTable
+		}
 
 		var fkClause string
 		if constr.Name != "" {
 			fkClause = fmt.Sprintf("ADD CONSTRAINT %s FOREIGN KEY (%s) REFERENCES %s (%s)",
 				sqlescape.EscapeIdentifier(constr.Name),
 				columns,
-				sqlescape.EscapeIdentifier(constr.References.Table),
+				refTable,
 				refColumns)
 		} else {
 			fkClause = fmt.Sprintf("ADD FOREIGN KEY (%s) REFERENCES %s (%s)",
 				columns,
-				sqlescape.EscapeIdentifier(constr.References.Table),
+				refTable,
 				refColumns)
 		}
 

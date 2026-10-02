@@ -409,8 +409,8 @@ func TestDiffIntegrationForeignKeyNoAction(t *testing.T) {
 
 	// A genuine action change (NO ACTION -> CASCADE) still produces a diff,
 	// and applying it converges. The desired FK uses a different constraint
-	// name because MySQL rejects a same-name DROP FOREIGN KEY + ADD
-	// CONSTRAINT within a single ALTER (Error 1826).
+	// name, which fits one ALTER; the same-name change, which MySQL rejects
+	// in one ALTER (error 1826), is TestDiffIntegrationForeignKeySameNameReadd.
 	desiredCascade, err := ParseCreateTable(
 		"CREATE TABLE diff_fkna_child (id int primary key, pid int, KEY fk_fkna_pid (pid), " +
 			"CONSTRAINT fk_fkna_pid2 FOREIGN KEY (pid) REFERENCES diff_fkna_parent (id) ON DELETE CASCADE)")
@@ -425,6 +425,83 @@ func TestDiffIntegrationForeignKeyNoAction(t *testing.T) {
 	require.NoError(t, err)
 	stmts, err = source.Diff(desiredCascade, nil)
 	require.NoError(t, err)
+	require.Nil(t, stmts)
+}
+
+// TestDiffIntegrationForeignKeySameNameReadd verifies against MySQL that a
+// foreign key whose definition changes under the same name is applied as a
+// DROP in the primary ALTER and an ADD in a statement of its own. MySQL
+// rejects the pair in one ALTER (error 1826, "Duplicate foreign key constraint
+// name"), which is what Spirit used to emit.
+func TestDiffIntegrationForeignKeySameNameReadd(t *testing.T) {
+	_ = testutils.NewTestTable(t, "diff_fkrd_parent",
+		"CREATE TABLE diff_fkrd_parent (id int primary key)")
+	tt := testutils.NewTestTable(t, "diff_fkrd_child",
+		"CREATE TABLE diff_fkrd_child (id int primary key, pid int, KEY pid (pid), "+
+			"CONSTRAINT fk_fkrd_pid FOREIGN KEY (pid) REFERENCES diff_fkrd_parent (id))")
+
+	// Document the server behavior the split depends on.
+	_, err := tt.DB.ExecContext(t.Context(), "ALTER TABLE diff_fkrd_child DROP FOREIGN KEY fk_fkrd_pid, "+
+		"ADD CONSTRAINT fk_fkrd_pid FOREIGN KEY (pid) REFERENCES diff_fkrd_parent (id) ON DELETE CASCADE")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "Error 1826")
+
+	targetSQL := "CREATE TABLE diff_fkrd_child (id int primary key, pid int, b int, KEY pid (pid), " +
+		"CONSTRAINT fk_fkrd_pid FOREIGN KEY (pid) REFERENCES diff_fkrd_parent (id) ON DELETE CASCADE)"
+	stmts := diffLiveTable(t, tt.DB, tt.Name, targetSQL)
+	require.Len(t, stmts, 2)
+	require.Equal(t, "ALTER TABLE `diff_fkrd_child` ADD COLUMN `b` int NULL, DROP FOREIGN KEY `fk_fkrd_pid`", stmts[0].Statement)
+	require.Equal(t, "ALTER TABLE `diff_fkrd_child` ADD CONSTRAINT `fk_fkrd_pid` FOREIGN KEY (`pid`) REFERENCES `diff_fkrd_parent` (`id`) ON DELETE CASCADE", stmts[1].Statement)
+	execStatements(t, tt.DB, stmts)
+
+	live := showCreateTable(t, tt.DB, tt.Name)
+	require.Contains(t, live, "CONSTRAINT `fk_fkrd_pid` FOREIGN KEY (`pid`) REFERENCES `diff_fkrd_parent` (`id`) ON DELETE CASCADE")
+	requireConverged(t, tt.DB, tt.Name, targetSQL)
+}
+
+// TestDiffIntegrationForeignKeyReferencedSchema verifies against MySQL that a
+// foreign key moved to a parent in another schema is a diff, and documents
+// how the referenced schema reads back: qualified only when it is another
+// schema, which is why a reference qualified with the table's own schema
+// compares equal to an unqualified one.
+func TestDiffIntegrationForeignKeyReferencedSchema(t *testing.T) {
+	// The child references otherDB first; it is created second so its
+	// database is dropped first on cleanup.
+	otherDB, other := testutils.CreateUniqueTestDatabase(t)
+	ownDB, db := testutils.CreateUniqueTestDatabase(t)
+	_, err := other.ExecContext(t.Context(), "CREATE TABLE parent (id int primary key)")
+	require.NoError(t, err)
+	_, err = db.ExecContext(t.Context(), "CREATE TABLE parent (id int primary key)")
+	require.NoError(t, err)
+	_, err = db.ExecContext(t.Context(), fmt.Sprintf("CREATE TABLE child (id int primary key, pid int, KEY pid (pid), "+
+		"CONSTRAINT fk_pid FOREIGN KEY (pid) REFERENCES `%s`.parent (id))", otherDB))
+	require.NoError(t, err)
+
+	live := showCreateTable(t, db, "child")
+	require.Contains(t, live, fmt.Sprintf("REFERENCES `%s`.`parent` (`id`)", otherDB))
+
+	// Repoint the foreign key at this schema's parent.
+	targetSQL := fmt.Sprintf("CREATE TABLE child (id int primary key, pid int, KEY pid (pid), "+
+		"CONSTRAINT fk_pid FOREIGN KEY (pid) REFERENCES `%s`.parent (id))", ownDB)
+	stmts := diffLiveTable(t, db, "child", targetSQL)
+	require.Len(t, stmts, 2)
+	require.Equal(t, "ALTER TABLE `child` DROP FOREIGN KEY `fk_pid`", stmts[0].Statement)
+	require.Equal(t, fmt.Sprintf("ALTER TABLE `child` ADD CONSTRAINT `fk_pid` FOREIGN KEY (`pid`) REFERENCES `%s`.`parent` (`id`)", ownDB), stmts[1].Statement)
+	execStatements(t, db, stmts)
+
+	// A reference into the table's own schema reads back unqualified ...
+	live = showCreateTable(t, db, "child")
+	require.Contains(t, live, "REFERENCES `parent` (`id`)")
+	require.NotContains(t, live, otherDB)
+	// ... and converges with the qualified desired definition.
+	requireConverged(t, db, "child", targetSQL)
+
+	// Repointing back to the other schema is a diff again.
+	stmts = diffLiveTable(t, db, "child", fmt.Sprintf("CREATE TABLE child (id int primary key, pid int, KEY pid (pid), "+
+		"CONSTRAINT fk_pid FOREIGN KEY (pid) REFERENCES `%s`.parent (id))", otherDB))
+	// The live reference is unqualified, so it cannot be told apart from
+	// a reference to any schema: this is the documented limitation of
+	// comparing a schema only when both sides are qualified.
 	require.Nil(t, stmts)
 }
 

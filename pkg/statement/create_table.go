@@ -320,12 +320,32 @@ func (c *Column) declaresNullAfterAutoIncrement() bool {
 	return nullAfter
 }
 
-// ForeignKeyReference represents a foreign key reference
+// ForeignKeyReference represents a foreign key reference.
+//
+// Schema is the referenced table's schema when the reference is qualified
+// (REFERENCES db.parent) and empty when it is not. SHOW CREATE TABLE
+// qualifies a reference only when the parent is in another schema, and a
+// reference qualified with the table's own schema reads back unqualified, so
+// an empty Schema means the table's own schema — which a parsed CREATE TABLE
+// does not know. Two references therefore compare equal unless both are
+// qualified and name different schemas (see
+// constraintsEqualIgnoreNameAndEnforcement); a desired REFERENCES db2.parent
+// is not told apart from a live REFERENCES parent, whichever schema that is.
 type ForeignKeyReference struct {
+	Schema   string   `json:"schema,omitempty"`
 	Table    string   `json:"table"`
 	Columns  []string `json:"columns"`
 	OnDelete *string  `json:"on_delete,omitempty"`
 	OnUpdate *string  `json:"on_update,omitempty"`
+}
+
+// referencedTable returns the referenced table as a definition spells it,
+// schema-qualified when the reference is.
+func (r *ForeignKeyReference) referencedTable() string {
+	if r.Schema != "" {
+		return r.Schema + "." + r.Table
+	}
+	return r.Table
 }
 
 // TableOptions represents table-level options
@@ -1131,6 +1151,7 @@ func (ct *CreateTable) parseConstraint(constraint *ast.Constraint) Constraint {
 		constr.Type = "FOREIGN KEY"
 		if constraint.Refer != nil {
 			fkRef := &ForeignKeyReference{
+				Schema:  constraint.Refer.Table.Schema.String(),
 				Table:   constraint.Refer.Table.Name.String(),
 				Columns: ct.parseIndexColumns(constraint.Refer.IndexPartSpecifications),
 			}
@@ -1160,7 +1181,7 @@ func (ct *CreateTable) parseConstraint(constraint *ast.Constraint) Constraint {
 			// Generate definition string
 			definition := fmt.Sprintf("FOREIGN KEY (%s) REFERENCES %s (%s)",
 				strings.Join(constr.Columns, ", "),
-				constr.References.Table,
+				constr.References.referencedTable(),
 				strings.Join(constr.References.Columns, ", "))
 			if fkRef.OnDelete != nil {
 				definition += fmt.Sprintf(" ON DELETE %s", *fkRef.OnDelete)
@@ -1694,8 +1715,9 @@ func (ct *CreateTable) parseExpression(expr ast.ExprNode) any {
 // and returns ALTER TABLE statements needed to transform source into target.
 // Most changes produce a single statement, but some require multiple
 // sequential statements: a spatial index dropped before the primary ALTER
-// changes its column's SRID, an option-only index rebuild or a partition
-// clause that cannot share an ALTER after it. See pkg/statement/README.md,
+// changes its column's SRID; an option-only index rebuild, a foreign key
+// added back under the name the primary ALTER drops, or a partition clause
+// that cannot share an ALTER after it. See pkg/statement/README.md,
 // "Statement Planning".
 // Returns nil if the tables are identical.
 // Returns an error if target has a primary key column that declares NULL, a
@@ -1744,8 +1766,10 @@ func (ct *CreateTable) Diff(target *CreateTable, opts *DiffOptions) ([]*Abstract
 	indexClauses, separateIndexStatements := ct.diffIndexes(target, rebuilt, spatialDrops)
 	alterClauses = append(alterClauses, indexClauses...)
 
-	// 3. Diff constraints (DROP, ADD)
-	constraintClauses := ct.diffConstraints(target, rebuilt)
+	// 3. Diff constraints (DROP, ADD). A foreign key added back under a name
+	// the same diff drops is returned as a separate statement, because MySQL
+	// rejects the same-name DROP and ADD in one ALTER (error 1826).
+	constraintClauses, separateConstraintStatements := ct.diffConstraints(target, rebuilt)
 	alterClauses = append(alterClauses, constraintClauses...)
 
 	// 4. Diff table options
@@ -1778,7 +1802,10 @@ func (ct *CreateTable) Diff(target *CreateTable, opts *DiffOptions) ([]*Abstract
 
 	// Option-only index changes run as their own ALTER statements, after the
 	// primary ALTER so they observe any column changes the re-add depends on.
+	// Foreign keys added back under a dropped name follow them, so the index
+	// a re-added foreign key may need exists by then.
 	additionalStatements = append(additionalStatements, separateIndexStatements...)
+	additionalStatements = append(additionalStatements, separateConstraintStatements...)
 
 	// Build the result
 	var results []*AbstractStatement
@@ -2410,7 +2437,9 @@ func (ct *CreateTable) diffIndexes(target *CreateTable, rebuilt, droppedBefore m
 	return clauses, separateStatements
 }
 
-// diffConstraints compares constraints and returns ALTER clauses for differences.
+// diffConstraints compares constraints and returns the ALTER clauses for the
+// differences, plus the clauses that cannot share the primary ALTER, each
+// inner slice one statement to run after it.
 //
 // rebuilt names the columns dropped and added back by diffColumns (see
 // rebuiltColumns). A CHECK constraint that reads one blocks the DROP COLUMN
@@ -2419,8 +2448,15 @@ func (ct *CreateTable) diffIndexes(target *CreateTable, rebuilt, droppedBefore m
 // and outside the pairing below, which would otherwise find the pair equal and
 // emit nothing. MySQL accepts the DROP CHECK and the ADD CONSTRAINT under the
 // same name in one statement.
-func (ct *CreateTable) diffConstraints(target *CreateTable, rebuilt map[string]bool) []string {
-	var clauses []string
+//
+// It does not accept that for a foreign key: a DROP FOREIGN KEY and an ADD
+// CONSTRAINT under the same name in one ALTER fail with error 1826, "Duplicate
+// foreign key constraint name", and foreign key names are case-insensitive
+// (and unique per schema), so a name differing only in case fails the same
+// way. The DROP stays in the primary ALTER and every such ADD goes into one
+// separate statement after it, where it also observes any column change the
+// primary ALTER made.
+func (ct *CreateTable) diffConstraints(target *CreateTable, rebuilt map[string]bool) (clauses []string, separateStatements [][]string) {
 
 	var p *parser.Parser
 	readsRebuilt := func(c *Constraint) bool {
@@ -2435,6 +2471,9 @@ func (ct *CreateTable) diffConstraints(target *CreateTable, rebuilt map[string]b
 	// droppedForRebuild are the source CHECKs dropped for a column rebuild;
 	// a same-named target constraint is added back whatever its text.
 	droppedForRebuild := make(map[string]bool)
+	// droppedForeignKeys are the lowercased names of the foreign keys this
+	// diff drops; a target foreign key under one of them is added separately.
+	droppedForeignKeys := make(map[string]bool)
 
 	// Build maps for easier lookup
 	sourceConstraints := make(map[string]*Constraint)
@@ -2514,6 +2553,7 @@ func (ct *CreateTable) diffConstraints(target *CreateTable, rebuilt map[string]b
 			switch sourceConstr.Type {
 			case "FOREIGN KEY":
 				dropClauses = append(dropClauses, fmt.Sprintf("DROP FOREIGN KEY %s", sqlescape.EscapeIdentifier(sourceConstr.Name)))
+				droppedForeignKeys[strings.ToLower(sourceConstr.Name)] = true
 			case "CHECK":
 				dropClauses = append(dropClauses, fmt.Sprintf("DROP CHECK %s", sqlescape.EscapeIdentifier(sourceConstr.Name)))
 			}
@@ -2524,8 +2564,10 @@ func (ct *CreateTable) diffConstraints(target *CreateTable, rebuilt map[string]b
 	slices.Sort(enforcementClauses)
 	clauses = append(clauses, enforcementClauses...)
 
-	// Collect ADD operations and sort by name for deterministic output
-	var addClauses []string
+	// Collect ADD operations and sort by name for deterministic output. A
+	// foreign key added back under a name the primary ALTER drops is collected
+	// for a statement of its own (error 1826, see above).
+	var addClauses, readdForeignKeyClauses []string
 	for _, targetConstr := range target.Constraints {
 		if matchedTargetByExpression[targetConstr.Name] {
 			continue // equivalent constraint exists in source under a different name
@@ -2537,13 +2579,21 @@ func (ct *CreateTable) diffConstraints(target *CreateTable, rebuilt map[string]b
 			if !rebuild && existsInSource && constraintsEqualExceptEnforcement(sourceConstr, &targetConstr) {
 				continue // enforcement-only change; handled by ALTER CHECK above
 			}
+			if targetConstr.Type == "FOREIGN KEY" && droppedForeignKeys[strings.ToLower(targetConstr.Name)] {
+				readdForeignKeyClauses = append(readdForeignKeyClauses, formatAddConstraint(&targetConstr))
+				continue
+			}
 			addClauses = append(addClauses, formatAddConstraint(&targetConstr))
 		}
 	}
 	slices.Sort(addClauses)
 	clauses = append(clauses, addClauses...)
+	if len(readdForeignKeyClauses) > 0 {
+		slices.Sort(readdForeignKeyClauses)
+		separateStatements = append(separateStatements, readdForeignKeyClauses)
+	}
 
-	return clauses
+	return clauses, separateStatements
 }
 
 // diffTableOptions compares table options and returns ALTER clauses for differences.
