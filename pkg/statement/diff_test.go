@@ -872,6 +872,38 @@ func TestDiff(t *testing.T) {
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, content TEXT)",
 			expected: "ALTER TABLE `t1` DROP INDEX `idx_content`",
 		},
+		// InnoDB builds one FULLTEXT index per ALTER (error 1795): the first
+		// add stays in the combined ALTER, each further one is a statement
+		// of its own after it.
+		{
+			name:   "TwoFulltextAdditionsAreSplit",
+			source: "CREATE TABLE t1 (id INT PRIMARY KEY, a TEXT, b TEXT)",
+			target: "CREATE TABLE t1 (id INT PRIMARY KEY, a TEXT, b TEXT, FULLTEXT KEY k1 (a), FULLTEXT KEY k2 (b))",
+			expectedStatements: []string{
+				"ALTER TABLE `t1` ADD FULLTEXT INDEX `k1` (`a`)",
+				"ALTER TABLE `t1` ADD FULLTEXT INDEX `k2` (`b`)",
+			},
+		},
+		{
+			name:   "ThreeFulltextAdditionsAlongsideOtherChanges",
+			source: "CREATE TABLE t1 (id INT PRIMARY KEY, a TEXT, b TEXT)",
+			target: "CREATE TABLE t1 (id INT PRIMARY KEY, a TEXT, b TEXT, c TEXT, FULLTEXT KEY k1 (a), FULLTEXT KEY k2 (b), FULLTEXT KEY k3 (c), KEY kc (c(10)))",
+			expectedStatements: []string{
+				"ALTER TABLE `t1` ADD COLUMN `c` text NULL, ADD FULLTEXT INDEX `k1` (`a`), ADD INDEX `kc` (`c`(10))",
+				"ALTER TABLE `t1` ADD FULLTEXT INDEX `k2` (`b`)",
+				"ALTER TABLE `t1` ADD FULLTEXT INDEX `k3` (`c`)",
+			},
+		},
+		{
+			// A rebuilt FULLTEXT index counts as the one creation.
+			name:   "FulltextRebuiltAndAddedAreSplit",
+			source: "CREATE TABLE t1 (id INT PRIMARY KEY, a TEXT, b TEXT, FULLTEXT KEY k1 (a))",
+			target: "CREATE TABLE t1 (id INT PRIMARY KEY, a TEXT, b TEXT, FULLTEXT KEY k1 (a, b), FULLTEXT KEY k2 (b))",
+			expectedStatements: []string{
+				"ALTER TABLE `t1` DROP INDEX `k1`, ADD FULLTEXT INDEX `k1` (`a`, `b`)",
+				"ALTER TABLE `t1` ADD FULLTEXT INDEX `k2` (`b`)",
+			},
+		},
 		// Constraint Modifications
 		{
 			name:     "ModifyCheckConstraint",

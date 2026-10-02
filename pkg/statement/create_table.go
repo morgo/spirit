@@ -2334,22 +2334,30 @@ func (ct *CreateTable) diffIndexes(target *CreateTable, rebuilt, droppedBefore m
 	slices.Sort(dropClauses)
 	clauses = append(clauses, dropClauses...)
 
-	// Collect ADD operations and sort by name for deterministic output
-	var addClauses []string
-	for _, targetIdx := range targetIdxList {
+	// Collect ADD operations and sort by clause text for deterministic output
+	type addition struct {
+		clause   string
+		fulltext bool
+	}
+	var additions []addition
+	add := func(idx *Index) {
+		additions = append(additions, addition{clause: formatAddIndex(idx), fulltext: idx.Type == "FULLTEXT"})
+	}
+	for i := range targetIdxList {
+		targetIdx := &targetIdxList[i]
 		sourceIdx, existsInSource := sourceIndexes[targetIdx.Name]
 
 		switch {
 		case !existsInSource:
 			// New index - add it
-			addClauses = append(addClauses, formatAddIndex(&targetIdx))
+			add(targetIdx)
 		case rebuiltIndexes[targetIdx.Name]:
 			// Dropped above for a column rebuild; add it back as the target
 			// defines it.
-			addClauses = append(addClauses, formatAddIndex(&targetIdx))
-		case !indexesEqual(sourceIdx, &targetIdx):
+			add(targetIdx)
+		case !indexesEqual(sourceIdx, targetIdx):
 			// Index exists but changed - check if only visibility changed
-			if indexesEqualIgnoreVisibility(sourceIdx, &targetIdx) {
+			if indexesEqualIgnoreVisibility(sourceIdx, targetIdx) {
 				// Only visibility changed - skip for now, handle in ALTER INDEX section
 				continue
 			}
@@ -2358,11 +2366,24 @@ func (ct *CreateTable) diffIndexes(target *CreateTable, rebuilt, droppedBefore m
 				continue
 			}
 			// Other changes - need to drop and re-add (drop already handled above)
-			addClauses = append(addClauses, formatAddIndex(&targetIdx))
+			add(targetIdx)
 		}
 	}
-	slices.Sort(addClauses)
-	clauses = append(clauses, addClauses...)
+	slices.SortFunc(additions, func(a, b addition) int { return strings.Compare(a.clause, b.clause) })
+	// InnoDB builds one FULLTEXT index per ALTER TABLE (error 1795, "InnoDB
+	// presently supports one FULLTEXT index creation at a time"), however the
+	// statement is otherwise shaped. The first FULLTEXT add stays in the
+	// combined ALTER; each further one runs as a statement of its own after
+	// it.
+	fulltextAdded := false
+	for _, a := range additions {
+		if a.fulltext && fulltextAdded {
+			separateStatements = append(separateStatements, []string{a.clause})
+			continue
+		}
+		fulltextAdded = fulltextAdded || a.fulltext
+		clauses = append(clauses, a.clause)
+	}
 
 	// Collect ALTER INDEX operations for visibility changes (must come after DROP/ADD)
 	var alterClauses []string

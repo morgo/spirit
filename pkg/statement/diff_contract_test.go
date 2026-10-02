@@ -764,6 +764,23 @@ func TestDiffMySQLContracts(t *testing.T) {
 			source: "(id INT PRIMARY KEY, p POINT NOT NULL SRID 0, SPATIAL KEY k (p))",
 			target: "(id INT PRIMARY KEY, p POINT NOT NULL SRID 0 COMMENT 'x', SPATIAL KEY k (p))",
 		},
+		// FULLTEXT indexes. InnoDB builds one per ALTER TABLE (error 1795);
+		// the diff used to put every addition in the combined ALTER.
+		{
+			name:   "two FULLTEXT additions",
+			source: "(id INT PRIMARY KEY, a TEXT, b TEXT)",
+			target: "(id INT PRIMARY KEY, a TEXT, b TEXT, FULLTEXT KEY k1 (a), FULLTEXT KEY k2 (b))",
+		},
+		{
+			name:   "three FULLTEXT additions alongside other changes",
+			source: "(id INT PRIMARY KEY, a TEXT, b TEXT)",
+			target: "(id INT PRIMARY KEY, a TEXT, b TEXT, c TEXT, KEY kc (c(10)), FULLTEXT KEY k1 (a), FULLTEXT KEY k2 (b), FULLTEXT KEY k3 (c))",
+		},
+		{
+			name:   "FULLTEXT rebuilt and another added",
+			source: "(id INT PRIMARY KEY, a TEXT, b TEXT, FULLTEXT KEY k1 (a))",
+			target: "(id INT PRIMARY KEY, a TEXT, b TEXT, FULLTEXT KEY k1 (a, b), FULLTEXT KEY k2 (b))",
+		},
 	}
 	for _, c := range contracts {
 		t.Run(c.name, func(t *testing.T) {
