@@ -210,21 +210,23 @@ func TestTemporalDefaultConverges(t *testing.T) {
 	})
 }
 
+// The MODIFY carries the literal as written, so MySQL reads it under the
+// session's own rules (see temporalDefaultNormalizer on TIME_TRUNCATE_FRACTIONAL).
 func TestTemporalDefaultStillDiffsRealChanges(t *testing.T) {
 	requireDefaultStillDiffs(t,
 		"a datetime DEFAULT '2020-01-02'",
 		"a datetime DEFAULT '2020-01-01 00:00:00'",
-		"MODIFY COLUMN `a` datetime NULL DEFAULT '2020-01-02 00:00:00'")
+		"MODIFY COLUMN `a` datetime NULL DEFAULT '2020-01-02'")
 	requireDefaultStillDiffs(t,
 		"a datetime(3) DEFAULT '2020-01-01 10:00:00.1236'",
 		"a datetime(3) DEFAULT '2020-01-01 10:00:00.123'",
-		"MODIFY COLUMN `a` datetime(3) NULL DEFAULT '2020-01-01 10:00:00.124'")
+		"MODIFY COLUMN `a` datetime(3) NULL DEFAULT '2020-01-01 10:00:00.1236'")
 	requireDefaultStillDiffs(t,
 		"a time DEFAULT '1:3'",
 		"a time DEFAULT '01:02:00'",
-		"MODIFY COLUMN `a` time NULL DEFAULT '01:03:00'")
+		"MODIFY COLUMN `a` time NULL DEFAULT '1:3'")
 	requireDefaultStillDiffs(t,
 		"a date DEFAULT 20200102",
 		"a date DEFAULT '2020-01-01'",
-		"MODIFY COLUMN `a` date NULL DEFAULT '2020-01-02'")
+		"MODIFY COLUMN `a` date NULL DEFAULT 20200102")
 }

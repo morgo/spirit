@@ -45,7 +45,18 @@ func init() { registerNormalizer(temporalDefaultNormalizer{}) }
 // and date.
 //
 // The result is recorded as a [DefaultKindString], the form SHOW CREATE TABLE
-// reports, so a declared number compares equal to the live string.
+// reports, so a declared number compares equal to the live string. It is the
+// value Diff compares, not the one it emits: a MODIFY writes the literal as
+// the schema spelled it (Column.DefaultAsWritten), so MySQL reads it under the
+// session's own rules. That matters for the rounding above, which is the
+// default behaviour but not the only one: with TIME_TRUNCATE_FRACTIONAL in
+// the session's sql_mode, MySQL truncates a fraction past the column's
+// precision instead ('12:34:56.9' is '12:34:56', not '12:34:57'). The rule
+// cannot see the session, so it models the default. Under that mode a literal
+// with more fractional digits than the column keeps stores the truncated
+// value, as a CREATE TABLE would, but compares unequal to it, so the diff
+// emits the same MODIFY on every run until the schema spells the value the
+// column keeps. Everything else about the rule holds in both modes.
 //
 // Left alone, so that the diff keeps emitting the literal as written:
 //

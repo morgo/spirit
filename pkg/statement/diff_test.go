@@ -295,7 +295,7 @@ func TestDiff(t *testing.T) {
 			name:     "NumericDefaultAdded",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c DECIMAL(6,2))",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c DECIMAL(6,2) DEFAULT 1.2)",
-			expected: "ALTER TABLE `t1` MODIFY COLUMN `c` decimal(6,2) NULL DEFAULT 1.20",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `c` decimal(6,2) NULL DEFAULT 1.2",
 		},
 		{
 			name:     "NumericDefaultChanged",
@@ -334,13 +334,13 @@ func TestDiff(t *testing.T) {
 			name:     "TemporalDefaultAdded",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c DATETIME)",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c DATETIME DEFAULT '2020-1-1')",
-			expected: "ALTER TABLE `t1` MODIFY COLUMN `c` datetime NULL DEFAULT '2020-01-01 00:00:00'",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `c` datetime NULL DEFAULT '2020-1-1'",
 		},
 		{
 			name:     "TemporalDefaultChanged",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c TIME DEFAULT '01:02:00')",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c TIME DEFAULT '1:3')",
-			expected: "ALTER TABLE `t1` MODIFY COLUMN `c` time NULL DEFAULT '01:03:00'",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `c` time NULL DEFAULT '1:3'",
 		},
 		{
 			// MySQL stores an expression default in its own parenthesization
@@ -1765,19 +1765,19 @@ func TestDiff(t *testing.T) {
 			name:     "BooleanDefaultFalse",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, is_active BOOL)",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, is_active BOOL DEFAULT FALSE)",
-			expected: "ALTER TABLE `t1` MODIFY COLUMN `is_active` tinyint(1) NULL DEFAULT 0",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `is_active` tinyint(1) NULL DEFAULT FALSE",
 		},
 		{
 			name:     "BooleanDefaultTrue",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, is_active BOOL)",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, is_active BOOL DEFAULT TRUE)",
-			expected: "ALTER TABLE `t1` MODIFY COLUMN `is_active` tinyint(1) NULL DEFAULT 1",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `is_active` tinyint(1) NULL DEFAULT TRUE",
 		},
 		{
 			name:     "AddBooleanColumnWithDefault",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY)",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, is_instant BOOL DEFAULT FALSE)",
-			expected: "ALTER TABLE `t1` ADD COLUMN `is_instant` tinyint(1) NULL DEFAULT 0",
+			expected: "ALTER TABLE `t1` ADD COLUMN `is_instant` tinyint(1) NULL DEFAULT FALSE",
 		},
 		{
 			name:     "AddColumnFirst",
@@ -3167,7 +3167,7 @@ func TestDiff_IgnoreNotNullRelaxation(t *testing.T) {
 			reference: "CREATE TABLE t1 (id INT PRIMARY KEY, customer_id BIGINT NULL DEFAULT '0')",
 			validated: "CREATE TABLE t1 (id INT PRIMARY KEY, customer_id BIGINT NOT NULL)",
 			relax:     true,
-			expected:  "ALTER TABLE `t1` MODIFY COLUMN `customer_id` bigint NULL DEFAULT 0",
+			expected:  "ALTER TABLE `t1` MODIFY COLUMN `customer_id` bigint NULL DEFAULT '0'",
 		},
 	}
 

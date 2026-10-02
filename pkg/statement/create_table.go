@@ -53,12 +53,26 @@ type Column struct {
 	OnUpdate        *string        `json:"on_update,omitempty"`        // ON UPDATE expression for TIMESTAMP/DATETIME, e.g. "current_timestamp"
 	GeneratedExpr   *string        `json:"generated_expr,omitempty"`   // Expression for GENERATED ALWAYS AS (...) columns
 	GeneratedStored bool           `json:"generated_stored,omitempty"` // true = STORED, false = VIRTUAL (only meaningful when GeneratedExpr is set)
-	Checks          []ColumnCheck  `json:"checks,omitempty"`           // Column-level CHECK constraints, in declaration order; hoisted into Constraints by columnCheckNormalizer
-	SRID            *uint32        `json:"srid,omitempty"`             // SRID attribute for spatial columns
-	Invisible       bool           `json:"invisible,omitempty"`        // INVISIBLE (MySQL 8.0.23+); VISIBLE is the default and is not recorded
-	NotSecondary    bool           `json:"not_secondary,omitempty"`    // NOT SECONDARY: excluded from the secondary engine
-	ColumnFormat    *string        `json:"column_format,omitempty"`    // COLUMN_FORMAT FIXED|DYNAMIC; DEFAULT is not recorded
-	Storage         *string        `json:"storage,omitempty"`          // STORAGE DISK|MEMORY; DEFAULT is not recorded
+	// DefaultAsWritten is the literal DEFAULT as the schema spelled it, kept
+	// for emission. Default holds the value MySQL stores for that literal, in
+	// the text SHOW CREATE TABLE reports: the normalization rules rewrite it
+	// to that reading, and Diff compares it. The two can name different
+	// values. MySQL reports a float with six significant digits, so `float
+	// DEFAULT 1234567` reads back as '1234570', and a MODIFY that emitted the
+	// reading would store 1234570; a temporal fraction past the column's
+	// precision rounds or truncates with the session's TIME_TRUNCATE_FRACTIONAL,
+	// which no rule can see. The written literal is the one MySQL reads itself,
+	// so emitting it stores exactly what a CREATE TABLE with it would have.
+	// Nil for an expression default, which is emitted from Default, and when a
+	// rule rewrites the emitted form on purpose (charUTF8MB4DefaultNormalizer).
+	// Not compared: see columnFieldsNotCompared.
+	DefaultAsWritten *DefaultLiteral `json:"default_as_written,omitempty"`
+	Checks           []ColumnCheck   `json:"checks,omitempty"`        // Column-level CHECK constraints, in declaration order; hoisted into Constraints by columnCheckNormalizer
+	SRID             *uint32         `json:"srid,omitempty"`          // SRID attribute for spatial columns
+	Invisible        bool            `json:"invisible,omitempty"`     // INVISIBLE (MySQL 8.0.23+); VISIBLE is the default and is not recorded
+	NotSecondary     bool            `json:"not_secondary,omitempty"` // NOT SECONDARY: excluded from the secondary engine
+	ColumnFormat     *string         `json:"column_format,omitempty"` // COLUMN_FORMAT FIXED|DYNAMIC; DEFAULT is not recorded
+	Storage          *string         `json:"storage,omitempty"`       // STORAGE DISK|MEMORY; DEFAULT is not recorded
 	// SecondaryEngineAttribute is the SECONDARY_ENGINE_ATTRIBUTE JSON text as
 	// written. MySQL reports it re-serialized, so it is compared as JSON
 	// (engineAttributeEqual) and emitted as written.
@@ -928,6 +942,11 @@ func (ct *CreateTable) parseColumn(col *ast.ColumnDef) Column {
 					// stores DEFAULT (CURRENT_TIMESTAMP) as DEFAULT (now())).
 					defaultRaw := fmt.Sprintf("%v", restoreValueExprText(defaultExpr, !column.DefaultIsExpr))
 					column.Default = &defaultRaw
+				}
+				if !column.DefaultIsExpr {
+					// Keep the literal for emission before the normalization
+					// rules rewrite Default to MySQL's reading of it.
+					column.DefaultAsWritten = &DefaultLiteral{Text: *column.Default, Kind: column.DefaultKind}
 				}
 			}
 		case ast.ColumnOptionComment:

@@ -125,9 +125,9 @@ func TestBinaryDefaultBytesLeavesOtherDefaultsAlone(t *testing.T) {
 	}
 }
 
-// A default that is genuinely different must still diff, and the emitted MODIFY
-// must carry the padded value in a form MySQL stores unchanged: NULs escaped
-// inside a string, or a bare hex literal.
+// A default that is genuinely different must still diff. The MODIFY carries
+// the literal as written (the padding is the compared reading, not the
+// emitted one); MySQL pads it the way it did at CREATE.
 func TestBinaryDefaultBytesStillDiffsRealChanges(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -139,31 +139,31 @@ func TestBinaryDefaultBytesStillDiffsRealChanges(t *testing.T) {
 			name:     "a different string",
 			declared: "`b` binary(3) DEFAULT 'b'",
 			live:     "`b` binary(3) DEFAULT 'a\\0\\0'",
-			want:     "MODIFY COLUMN `b` binary(3) NULL DEFAULT 'b\\0\\0'",
+			want:     "MODIFY COLUMN `b` binary(3) NULL DEFAULT 'b'",
 		},
 		{
 			name:     "a default added to a column that had none",
 			declared: "`b` binary(3) DEFAULT 'a'",
 			live:     "`b` binary(3)",
-			want:     "MODIFY COLUMN `b` binary(3) NULL DEFAULT 'a\\0\\0'",
+			want:     "MODIFY COLUMN `b` binary(3) NULL DEFAULT 'a'",
 		},
 		{
 			name:     "a default that is not UTF-8",
 			declared: "`b` binary(3) DEFAULT x'ff'",
 			live:     "`b` binary(3)",
-			want:     "MODIFY COLUMN `b` binary(3) NULL DEFAULT x'ff0000'",
+			want:     "MODIFY COLUMN `b` binary(3) NULL DEFAULT x'ff'",
 		},
 		{
 			name:     "a width change pads to the new width",
 			declared: "`b` binary(4) DEFAULT 'a'",
 			live:     "`b` binary(3) DEFAULT 'a\\0\\0'",
-			want:     "MODIFY COLUMN `b` binary(4) NULL DEFAULT 'a\\0\\0\\0'",
+			want:     "MODIFY COLUMN `b` binary(4) NULL DEFAULT 'a'",
 		},
 		{
-			name:     "a varbinary hex default is emitted as the string it stores",
+			name:     "a varbinary hex default is emitted as written",
 			declared: "`b` varbinary(4) DEFAULT x'61'",
 			live:     "`b` varbinary(4)",
-			want:     "MODIFY COLUMN `b` varbinary(4) NULL DEFAULT 'a'",
+			want:     "MODIFY COLUMN `b` varbinary(4) NULL DEFAULT x'61'",
 		},
 		{
 			name:     "a varbinary default that is not UTF-8",

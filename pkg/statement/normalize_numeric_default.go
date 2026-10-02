@@ -47,8 +47,13 @@ func init() { registerNormalizer(numericDefaultNormalizer{}) }
 // MySQL prints a double (see utils.FormatMySQLDouble): the shortest text that
 // reads back as the same double, in fixed notation up to 15 integer digits and
 // down to 14 leading zeros, exponent notation past that; a float is printed
-// with at most 6 significant digits (utils.FormatMySQLFloat). With a declared
-// scale, float(M,D) and double(M,D) round the fraction to D places in double
+// with at most 6 significant digits (utils.FormatMySQLFloat). That reading is
+// lossy — 1234567 and 1234570 are different floats that both report as
+// '1234570' — which is why the rule rewrites only the value Diff compares
+// (Column.Default) and emission writes the literal as the schema spelled it
+// (Column.DefaultAsWritten): a MODIFY carrying the six-digit reading would
+// store a different value than the CREATE did. With a declared scale,
+// float(M,D) and double(M,D) round the fraction to D places in double
 // arithmetic (rint, half to even) and print exactly D decimals:
 //
 //	double DEFAULT 1e2 / 1.50 / 1.0E-7 / 1e15 / 1e16   -> '100' / '1.5' / '0.0000001' / '1e15' / '1e16'

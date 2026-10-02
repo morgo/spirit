@@ -2608,7 +2608,7 @@ func TestDiffIntegrationBinaryDefaultBytesConverges(t *testing.T) {
 	stmts, err := live.Diff(desired, nil)
 	require.NoError(t, err)
 	require.Len(t, stmts, 1)
-	require.Contains(t, stmts[0].Statement, "DEFAULT 'a\\0\\0'")
+	require.Contains(t, stmts[0].Statement, "`a` binary(3) NULL DEFAULT 'a'") // the literal as written; MySQL pads it
 	testutils.RunSQL(t, stmts[0].Statement)
 
 	liveSQL := showCreateTable(t, tt.DB, tt.Name)
@@ -2641,7 +2641,7 @@ func TestDiffIntegrationBinaryDefaultBytesHexConverges(t *testing.T) {
 	stmts, err := live.Diff(desired, nil)
 	require.NoError(t, err)
 	require.Len(t, stmts, 1)
-	require.Contains(t, stmts[0].Statement, "`h` binary(3) NULL DEFAULT x'ff0000'")
+	require.Contains(t, stmts[0].Statement, "`h` binary(3) NULL DEFAULT x'ff'")
 	require.Contains(t, stmts[0].Statement, "`v` varbinary(4) NULL DEFAULT x'ff'")
 	testutils.RunSQL(t, stmts[0].Statement)
 
@@ -2785,10 +2785,10 @@ func TestDiffIntegrationBinaryLiteralDefaultsConverge(t *testing.T) {
 	stmts, err := live.Diff(desired, nil)
 	require.NoError(t, err)
 	require.Len(t, stmts, 1)
-	require.Contains(t, stmts[0].Statement, "`i` int NULL DEFAULT 26")
-	require.Contains(t, stmts[0].Statement, "`b` bit(8) NULL DEFAULT b'1100001'")
-	require.Contains(t, stmts[0].Statement, "`f` bit(1) NOT NULL DEFAULT b'0'")
-	require.Contains(t, stmts[0].Statement, "`v` varchar(4) NULL DEFAULT '\\''")
+	require.Contains(t, stmts[0].Statement, "`i` int NULL DEFAULT x'1a'")
+	require.Contains(t, stmts[0].Statement, "`b` bit(8) NULL DEFAULT x'61'")
+	require.Contains(t, stmts[0].Statement, "`f` bit(1) NOT NULL DEFAULT 0")
+	require.Contains(t, stmts[0].Statement, "`v` varchar(4) NULL DEFAULT x'27'")
 	testutils.RunSQL(t, stmts[0].Statement)
 
 	liveSQL := showCreateTable(t, tt.DB, tt.Name)
@@ -3051,8 +3051,8 @@ func TestDiffIntegrationCharDefaultSpacesConverges(t *testing.T) {
 	stmts, err := live.Diff(desired, nil)
 	require.NoError(t, err)
 	require.Len(t, stmts, 1)
-	require.Contains(t, stmts[0].Statement, "`c` char(4) NULL DEFAULT 'a'")
-	require.Contains(t, stmts[0].Statement, "`v` varchar(4) NULL DEFAULT 'ab  '")
+	require.Contains(t, stmts[0].Statement, "`c` char(4) NULL DEFAULT 'a  '")
+	require.Contains(t, stmts[0].Statement, "`v` varchar(4) NULL DEFAULT 'ab      '")
 	testutils.RunSQL(t, stmts[0].Statement)
 
 	var stored string
@@ -3156,8 +3156,8 @@ func TestDiffIntegrationEnumSetDefaultConverges(t *testing.T) {
 	stmts, err := live.Diff(desired, nil)
 	require.NoError(t, err)
 	require.Len(t, stmts, 1)
-	require.Contains(t, stmts[0].Statement, "`e` enum('a','B') NULL DEFAULT 'B'")
-	require.Contains(t, stmts[0].Statement, "`s` set('a','b','c') NULL DEFAULT 'a,c'")
+	require.Contains(t, stmts[0].Statement, "`e` enum('a','B') NULL DEFAULT 'b '")
+	require.Contains(t, stmts[0].Statement, "`s` set('a','b','c') NULL DEFAULT 'c,a '")
 	testutils.RunSQL(t, stmts[0].Statement)
 
 	var stored string
@@ -3460,6 +3460,114 @@ func TestDiffIntegrationVirtualToRegularKeepsValues(t *testing.T) {
 			}
 			assert.Equal(t, expected, showCreateTable(t, db, "t"))
 			requireConverged(t, db, "t", "CREATE TABLE t "+c.target)
+		})
+	}
+}
+
+// TestDiffIntegrationFloatDefaultValueAsWritten verifies that the DEFAULT a
+// diff emits on a FLOAT column stores the value the schema's literal names,
+// not the six-significant-digit reading SHOW CREATE TABLE reports. MySQL
+// reports `float DEFAULT 1234567` as '1234570', and 1234567 and 1234570 are
+// different floats; emitting the reading stored the wrong one. The stored
+// value is read back through CAST(... AS DOUBLE) and compared with a direct
+// CREATE of the target.
+func TestDiffIntegrationFloatDefaultValueAsWritten(t *testing.T) {
+	for _, literal := range []string{"1.23456789", "1234567", "0.123456789", "1.234567e-30", "1.1754944e-38", "16777217"} {
+		t.Run(literal, func(t *testing.T) {
+			_, db := testutils.CreateUniqueTestDatabase(t)
+			exec := func(stmt string) {
+				t.Helper()
+				_, err := db.ExecContext(t.Context(), stmt)
+				require.NoError(t, err, "executing: %s", stmt)
+			}
+			storedDefault := func() string {
+				t.Helper()
+				exec("TRUNCATE TABLE t")
+				exec("INSERT INTO t (id) VALUES (1)")
+				var v string
+				require.NoError(t, db.QueryRowContext(t.Context(), "SELECT CAST(f AS DOUBLE) FROM t").Scan(&v))
+				return v
+			}
+			target := "(id INT PRIMARY KEY, f FLOAT DEFAULT " + literal + ")"
+			exec("CREATE TABLE t " + target)
+			expectedCreate := showCreateTable(t, db, "t")
+			expectedValue := storedDefault()
+			exec("DROP TABLE t")
+
+			// Added through a diff, then changed through one.
+			exec("CREATE TABLE t (id INT PRIMARY KEY)")
+			stmts := diffLiveTable(t, db, "t", "CREATE TABLE t "+target)
+			require.Len(t, stmts, 1)
+			assert.Contains(t, stmts[0].Statement, "DEFAULT "+literal, "the literal is emitted as written")
+			execStatements(t, db, stmts)
+			assert.Equal(t, expectedValue, storedDefault())
+			assert.Equal(t, expectedCreate, showCreateTable(t, db, "t"))
+			requireConverged(t, db, "t", "CREATE TABLE t "+target)
+
+			exec("ALTER TABLE t MODIFY COLUMN f FLOAT DEFAULT 1")
+			execStatements(t, db, diffLiveTable(t, db, "t", "CREATE TABLE t "+target))
+			assert.Equal(t, expectedValue, storedDefault())
+			requireConverged(t, db, "t", "CREATE TABLE t "+target)
+		})
+	}
+}
+
+// TestDiffIntegrationTemporalDefaultTruncateFractional verifies that a
+// temporal DEFAULT a diff emits stores the value MySQL reads for the written
+// literal under the session's own sql_mode. temporalDefaultNormalizer models
+// MySQL's default rounding of a fraction past the column's precision; with
+// TIME_TRUNCATE_FRACTIONAL set, MySQL truncates instead, and emitting the
+// rounded reading stored a value one unit too high. The emitted literal is
+// the written one, so the result matches a direct CREATE of the target. The
+// price, pinned here, is that such a literal keeps diffing under that mode:
+// the rule cannot see the session, so it compares the rounded value against
+// the truncated one the table reports.
+func TestDiffIntegrationTemporalDefaultTruncateFractional(t *testing.T) {
+	cases := []struct {
+		name   string
+		target string
+	}{
+		{"time", "(id INT PRIMARY KEY, c TIME DEFAULT '12:34:56.9')"},
+		{"time with precision", "(id INT PRIMARY KEY, c TIME(1) DEFAULT '12:34:56.99')"},
+		{"datetime", "(id INT PRIMARY KEY, c DATETIME DEFAULT '2024-01-01 23:59:59.9')"},
+		{"timestamp", "(id INT PRIMARY KEY, c TIMESTAMP NULL DEFAULT '2024-01-01 23:59:59.9')"},
+		{"date", "(id INT PRIMARY KEY, c DATE DEFAULT '2024-01-01 23:59:59.9')"},
+		{"time from a number", "(id INT PRIMARY KEY, c TIME DEFAULT 1.55)"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dbName, _ := testutils.CreateUniqueTestDatabase(t)
+			// One connection, so the SET SESSION applies to every statement.
+			db, err := sql.Open("block-mysql", testutils.DSNForDatabase(dbName))
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, db.Close()) })
+			db.SetMaxOpenConns(1)
+			exec := func(stmt string) {
+				t.Helper()
+				_, err := db.ExecContext(t.Context(), stmt)
+				require.NoError(t, err, "executing: %s", stmt)
+			}
+			exec("SET SESSION sql_mode = CONCAT(@@sql_mode, ',TIME_TRUNCATE_FRACTIONAL')")
+
+			exec("CREATE TABLE t " + c.target)
+			expected := showCreateTable(t, db, "t")
+			exec("DROP TABLE t")
+
+			exec("CREATE TABLE t (id INT PRIMARY KEY)")
+			stmts := diffLiveTable(t, db, "t", "CREATE TABLE t "+c.target)
+			require.Len(t, stmts, 1)
+			execStatements(t, db, stmts)
+			assert.Equal(t, expected, showCreateTable(t, db, "t"), "the default must be what MySQL reads for the written literal under this session's mode")
+
+			// The documented residual: the rounded reading compares unequal to
+			// the truncated value, so the same MODIFY is emitted again, and
+			// applying it changes nothing.
+			again := diffLiveTable(t, db, "t", "CREATE TABLE t "+c.target)
+			require.Len(t, again, 1, "under TIME_TRUNCATE_FRACTIONAL an over-precise literal keeps diffing; if this converges now, update temporalDefaultNormalizer's doc")
+			assert.Contains(t, again[0].Statement, "MODIFY COLUMN `c` ")
+			assert.Contains(t, again[0].Statement, "DEFAULT "+c.target[strings.LastIndex(c.target, "DEFAULT ")+len("DEFAULT "):len(c.target)-1], "the literal as written")
+			execStatements(t, db, again)
+			assert.Equal(t, expected, showCreateTable(t, db, "t"))
 		})
 	}
 }

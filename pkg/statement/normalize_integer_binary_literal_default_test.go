@@ -120,9 +120,9 @@ func TestIntegerBinaryLiteralDefaultLeavesOtherDefaultsAlone(t *testing.T) {
 	}
 }
 
-// A different default must still diff, and the MODIFY must carry the integer
-// bare.
+// A different default must still diff, and the MODIFY carries the literal as
+// written; the integer is the compared reading only.
 func TestIntegerBinaryLiteralDefaultStillDiffsRealChanges(t *testing.T) {
-	requireDefaultStillDiffs(t, "`b` int DEFAULT 0x1A", "`b` int DEFAULT '27'", "MODIFY COLUMN `b` int NULL DEFAULT 26")
-	requireDefaultStillDiffs(t, "`b` int DEFAULT b'1010'", "`b` int", "MODIFY COLUMN `b` int NULL DEFAULT 10")
+	requireDefaultStillDiffs(t, "`b` int DEFAULT 0x1A", "`b` int DEFAULT '27'", "MODIFY COLUMN `b` int NULL DEFAULT x'1a'")
+	requireDefaultStillDiffs(t, "`b` int DEFAULT b'1010'", "`b` int", "MODIFY COLUMN `b` int NULL DEFAULT b'1010'")
 }

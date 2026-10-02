@@ -342,15 +342,19 @@ func TestNumericDefaultConverges(t *testing.T) {
 	})
 }
 
-// A genuinely different default must still diff, and the MODIFY must carry
-// the stored form: bare on a numeric column, quoted on a string one.
+// A genuinely different default must still diff, and the MODIFY carries the
+// literal as written, so MySQL stores exactly what the CREATE would have; the
+// stored form the rule computes is compared, never emitted (a float's
+// six-digit reading would store a different value).
 func TestNumericDefaultStillDiffsRealChanges(t *testing.T) {
-	requireDefaultStillDiffs(t, "`a` decimal(6,2) DEFAULT 1.2", "`a` decimal(6,2) DEFAULT '1.21'", "MODIFY COLUMN `a` decimal(6,2) NULL DEFAULT 1.20")
-	requireDefaultStillDiffs(t, "`a` int DEFAULT '001'", "`a` int DEFAULT '2'", "MODIFY COLUMN `a` int NULL DEFAULT 1")
-	requireDefaultStillDiffs(t, "`a` double DEFAULT 1e16", "`a` double DEFAULT '1e15'", "MODIFY COLUMN `a` double NULL DEFAULT 1e16")
-	requireDefaultStillDiffs(t, "`a` float DEFAULT 1.23456789", "`a` float DEFAULT '1.23456'", "MODIFY COLUMN `a` float NULL DEFAULT 1.23457")
-	requireDefaultStillDiffs(t, "`a` varchar(10) DEFAULT 1.50", "`a` varchar(10) DEFAULT '1.5'", "MODIFY COLUMN `a` varchar(10) NULL DEFAULT '1.50'")
-	requireDefaultStillDiffs(t, "`a` varchar(10) DEFAULT 1.50", "`a` varchar(10)", "MODIFY COLUMN `a` varchar(10) NULL DEFAULT '1.50'")
+	requireDefaultStillDiffs(t, "`a` decimal(6,2) DEFAULT 1.2", "`a` decimal(6,2) DEFAULT '1.21'", "MODIFY COLUMN `a` decimal(6,2) NULL DEFAULT 1.2")
+	requireDefaultStillDiffs(t, "`a` int DEFAULT '001'", "`a` int DEFAULT '2'", "MODIFY COLUMN `a` int NULL DEFAULT '001'")
+	// A float literal is emitted in the parser's restored spelling (1e+16),
+	// the same double.
+	requireDefaultStillDiffs(t, "`a` double DEFAULT 1e16", "`a` double DEFAULT '1e15'", "MODIFY COLUMN `a` double NULL DEFAULT 1e+16")
+	requireDefaultStillDiffs(t, "`a` float DEFAULT 1.23456789", "`a` float DEFAULT '1.23456'", "MODIFY COLUMN `a` float NULL DEFAULT 1.23456789")
+	requireDefaultStillDiffs(t, "`a` varchar(10) DEFAULT 1.50", "`a` varchar(10) DEFAULT '1.5'", "MODIFY COLUMN `a` varchar(10) NULL DEFAULT 1.50")
+	requireDefaultStillDiffs(t, "`a` varchar(10) DEFAULT 1.50", "`a` varchar(10)", "MODIFY COLUMN `a` varchar(10) NULL DEFAULT 1.50")
 	// A value MySQL rejects is emitted as written, so the MODIFY fails the
 	// way the CREATE would have.
 	requireDefaultStillDiffs(t, "`a` tinyint DEFAULT 127.5", "`a` tinyint DEFAULT '127'", "MODIFY COLUMN `a` tinyint NULL DEFAULT 127.5")

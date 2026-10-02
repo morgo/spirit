@@ -47,7 +47,7 @@ func (autoIncrementNotNullNormalizer) Normalize(ct *CreateTable) *CreateTable {
 			col.Nullable = false
 		}
 		if col.Default != nil && !col.DefaultIsExpr && *col.Default == "NULL" && col.DefaultKind != DefaultKindString {
-			col.Default = nil
+			col.Default, col.DefaultAsWritten = nil, nil
 		}
 	}
 	return ct

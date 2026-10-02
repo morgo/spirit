@@ -143,9 +143,16 @@ func formatColumnDefinition(col *Column) string {
 
 	// Default value (not permitted on generated columns)
 	if col.Default != nil && col.GeneratedExpr == nil {
-		defaultVal := *col.Default
+		defaultVal, kind := *col.Default, col.DefaultKind
+		if col.DefaultAsWritten != nil && !col.DefaultIsExpr {
+			// The literal as the schema spelled it, which MySQL reads the
+			// same way it would in a CREATE TABLE. Default is the reading
+			// the rules compare, which can name another value (see
+			// Column.DefaultAsWritten).
+			defaultVal, kind = col.DefaultAsWritten.Text, col.DefaultAsWritten.Kind
+		}
 		switch {
-		case col.DefaultIsExpr && col.DefaultKind == DefaultKindString:
+		case col.DefaultIsExpr && kind == DefaultKindString:
 			// Expression default whose expression is a string literal,
 			// e.g. DEFAULT ('{}') — the only default form MySQL accepts on
 			// BLOB/TEXT/JSON/GEOMETRY columns. The stored value is raw, so
@@ -154,17 +161,17 @@ func formatColumnDefinition(col *Column) string {
 		case col.DefaultIsExpr:
 			// Expression defaults must be wrapped in parentheses, e.g. DEFAULT (json_object())
 			parts = append(parts, fmt.Sprintf("DEFAULT (%s)", defaultVal))
-		case col.DefaultKind == DefaultKindString:
+		case kind == DefaultKindString:
 			// Quoted string literal. The stored value is the true raw value
 			// (unescaped at parse time), so quote+escape exactly once. This
 			// must bypass the needsQuotes heuristic: a literal 'TRUE' or
 			// 'NULL' or '2020' has to stay quoted, otherwise MySQL would
 			// store the keyword/number instead of the string.
 			parts = append(parts, fmt.Sprintf("DEFAULT '%s'", sqlescape.EscapeString(defaultVal)))
-		case col.DefaultKind == DefaultKindBitLiteral,
-			col.DefaultKind == DefaultKindHexLiteral,
-			col.DefaultKind == DefaultKindNumber,
-			col.DefaultKind == DefaultKindKeywordBool:
+		case kind == DefaultKindBitLiteral,
+			kind == DefaultKindHexLiteral,
+			kind == DefaultKindNumber,
+			kind == DefaultKindKeywordBool:
 			// A literal MySQL reports and accepts unquoted. The recorded text
 			// is already the canonical spelling of its kind — a bit literal is
 			// restored in the minimal form MySQL reports (b'0101' as b'101'),

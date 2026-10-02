@@ -4,6 +4,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -68,6 +69,12 @@ var columnFieldsNotCompared = map[string]string{
 	// materialized into a table-level index by indexNormalizer and diffed by
 	// diffIndexes instead of being part of per-column equality.
 	"Unique": "materialized into a table-level index by indexNormalizer; diffed by diffIndexes, not here",
+	// DefaultAsWritten is the literal as the schema spelled it, kept so that
+	// emission writes it back unchanged. Default holds the value MySQL stores
+	// for it (the normalization rules rewrite it to that reading), which is
+	// what equality compares: two spellings of one stored value are the same
+	// column, and must not MODIFY on every run.
+	"DefaultAsWritten": "the written literal, kept for emission; Default is the normalized reading that is compared",
 }
 
 // TestColumnsEqualAllFieldsAccounted is the primary tripwire: it enumerates the
@@ -235,4 +242,35 @@ func TestColumnsEqualWithContextDetectsEveryField(t *testing.T) {
 					"if you added field %s, make sure columnsEqualWithContext compares it", m.name, m.name)
 		})
 	}
+}
+
+// TestDefaultAsWrittenIsEmittedAndNotCompared pins the split between the two
+// default fields: the rules rewrite Default to MySQL's reading, which is what
+// equality sees, while emission writes DefaultAsWritten back unchanged.
+func TestDefaultAsWrittenIsEmittedAndNotCompared(t *testing.T) {
+	ct, err := ParseCreateTable("CREATE TABLE t (f FLOAT DEFAULT 1234567, d DATETIME DEFAULT '2020-1-1', e DECIMAL(6,2) DEFAULT (1 + 1))")
+	require.NoError(t, err)
+	f, d, e := ct.Columns[0], ct.Columns[1], ct.Columns[2]
+
+	assert.Equal(t, "1234570", *f.Default, "the compared reading is MySQL's six-digit report")
+	require.NotNil(t, f.DefaultAsWritten)
+	assert.Equal(t, DefaultLiteral{Text: "1234567", Kind: DefaultKindNumber}, *f.DefaultAsWritten)
+	assert.Contains(t, formatColumnDefinition(&f), "DEFAULT 1234567")
+
+	assert.Equal(t, "2020-01-01 00:00:00", *d.Default)
+	assert.Equal(t, DefaultLiteral{Text: "2020-1-1", Kind: DefaultKindString}, *d.DefaultAsWritten)
+	assert.Contains(t, formatColumnDefinition(&d), "DEFAULT '2020-1-1'")
+
+	assert.Nil(t, e.DefaultAsWritten, "an expression default is emitted from Default")
+	assert.Contains(t, formatColumnDefinition(&e), "DEFAULT (1+1)")
+
+	// Two spellings of one stored value are the same column.
+	other, err := ParseCreateTable("CREATE TABLE t (f FLOAT DEFAULT 1234570, d DATETIME DEFAULT '2020-01-01 00:00:00', e DECIMAL(6,2) DEFAULT (1 + 1))")
+	require.NoError(t, err)
+	stmts, err := other.Diff(ct, nil)
+	require.NoError(t, err)
+	assert.Empty(t, stmts)
+	// And without DefaultAsWritten the column is emitted from Default.
+	f.DefaultAsWritten = nil
+	assert.Contains(t, formatColumnDefinition(&f), "DEFAULT 1234570")
 }
