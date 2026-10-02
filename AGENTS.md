@@ -293,7 +293,7 @@ Key principles:
 ## Unsupported Features (Do Not Implement)
 
 - **RENAME column** — some rename operations are intentionally not supported. Renaming primary key columns and dangerous overlap patterns (e.g., `RENAME COLUMN c1 TO n1, ADD COLUMN c1 ...`) are blocked. Simple non-PK column renames are supported.
-- **ALTER/DROP PRIMARY KEY** — primary key must remain unchanged
+- **ALTER/DROP PRIMARY KEY** — primary key must remain unchanged. The one `DROP PRIMARY KEY` accepted is one the same statement adds back on the same columns (the `primarykey` check compares them to the table's), which is how a table `KEY_BLOCK_SIZE` change re-creates it at the new size
 - **Lossy conversions** (e.g., shortening VARCHAR below max data length)
 - **FOREIGN KEYS or TRIGGERS** on migrated tables
 - **Read-replica fidelity** (<10s lag guarantees)
