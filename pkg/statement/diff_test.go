@@ -259,6 +259,62 @@ func TestDiff(t *testing.T) {
 			expected: "ALTER TABLE `t1` MODIFY COLUMN `id` int AUTO_INCREMENT NULL",
 		},
 		{
+			// MySQL reports a functional index key part wrapped in its own
+			// parentheses, KEY k (((`c` + 1))); the authored KEY k ((c+1)) is
+			// the same index.
+			name:     "FunctionalIndexParensConverge",
+			source:   "CREATE TABLE `t1` (`id` int NOT NULL, `c` int DEFAULT NULL, PRIMARY KEY (`id`), KEY `k` (((`c` + 1))))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k ((c+1)))",
+			expected: "",
+		},
+		{
+			name:     "FunctionalIndexAdded",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k ((c+1)))",
+			expected: "ALTER TABLE `t1` ADD INDEX `k` ((`c`+1))",
+		},
+		{
+			name:     "FunctionalIndexExpressionChanged",
+			source:   "CREATE TABLE `t1` (`id` int NOT NULL, `c` int DEFAULT NULL, PRIMARY KEY (`id`), KEY `k` (((`c` + 1))))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k ((c+2)))",
+			expected: "ALTER TABLE `t1` DROP INDEX `k`, ADD INDEX `k` ((`c`+2))",
+		},
+		{
+			// MySQL reports column references in a stored expression in the
+			// column's declared case; the authored spelling is the same
+			// expression (columnReferenceCaseNormalizer).
+			name:     "GeneratedColumnReferenceCaseConverges",
+			source:   "CREATE TABLE `t1` (`id` int NOT NULL, `c` int DEFAULT NULL, `g` int GENERATED ALWAYS AS ((`c` + 1)) STORED, PRIMARY KEY (`id`))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, g INT AS (C + 1) STORED)",
+			expected: "",
+		},
+		{
+			name:     "FunctionalIndexReferenceCaseConverges",
+			source:   "CREATE TABLE `t1` (`id` int NOT NULL, `c` int DEFAULT NULL, PRIMARY KEY (`id`), KEY `k` (((`c` + 1))))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k ((C+1)))",
+			expected: "",
+		},
+		{
+			name:     "CheckReferenceCaseConverges",
+			source:   "CREATE TABLE `t1` (`id` int NOT NULL, `c` int DEFAULT NULL, PRIMARY KEY (`id`), CONSTRAINT `t1_chk_1` CHECK ((`c` > 0)))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, CONSTRAINT t1_chk_1 CHECK (C > 0))",
+			expected: "",
+		},
+		{
+			name:     "PartitionReferenceCaseConverges",
+			source:   "CREATE TABLE `t1` (`id` int NOT NULL, PRIMARY KEY (`id`)) PARTITION BY HASH (`id`) PARTITIONS 2",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY) PARTITION BY HASH (ID) PARTITIONS 2",
+			expected: "",
+		},
+		{
+			// The respelling follows the declared column, so an emitted
+			// expression names the column as the table declares it.
+			name:     "GeneratedColumnEmittedInDeclaredCase",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, Col INT)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, Col INT, g INT AS (COL + 1) STORED)",
+			expected: "ALTER TABLE `t1` ADD COLUMN `g` int GENERATED ALWAYS AS (`Col`+1) STORED NULL",
+		},
+		{
 			// Reverse direction: the user's BOOLEAN schema as source, canonical
 			// tinyint(1) as target. Still equal — canonicalization is symmetric.
 			name:     "BooleanVsCanonicalTinyint",

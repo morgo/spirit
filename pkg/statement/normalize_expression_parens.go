@@ -10,11 +10,12 @@ import (
 
 func init() { registerNormalizer(expressionParenNormalizer{}) }
 
-// expressionParenNormalizer rewrites CHECK-constraint, generated-column and
-// partitioning expressions into a canonical parenthesization, mirroring the
-// fact that MySQL stores these expressions in its own fully parenthesized
-// form. A user's CHECK (a = 1 AND b = 2) comes back from SHOW CREATE TABLE as
-// CHECK (((`a` = 1) and (`b` = 2))), and PARTITION BY RANGE (a + b) as
+// expressionParenNormalizer rewrites CHECK-constraint, generated-column,
+// functional-index and partitioning expressions into a canonical
+// parenthesization, mirroring the fact that MySQL stores these expressions in
+// its own fully parenthesized form. A user's CHECK (a = 1 AND b = 2) comes
+// back from SHOW CREATE TABLE as CHECK (((`a` = 1) and (`b` = 2))), KEY k
+// ((a + 1)) as KEY k (((`a` + 1))), and PARTITION BY RANGE (a + b) as
 // PARTITION BY RANGE ((`a` + `b`)), while the parser preserves whichever
 // parentheses the input happened to contain. Without a canonical form the
 // desired and live expressions differ textually forever and a declarative
@@ -76,6 +77,11 @@ func (expressionParenNormalizer) Normalize(ct *CreateTable) *CreateTable {
 		canonicalizeExprParens(p, c.Expression)
 		definition := checkConstraintDefinition(c)
 		c.Definition = &definition
+	}
+	for i := range ct.Indexes {
+		for j := range ct.Indexes[i].ColumnList {
+			canonicalizeExprParens(p, ct.Indexes[i].ColumnList[j].Expression)
+		}
 	}
 	if ct.Partition != nil {
 		canonicalizeExprParens(p, ct.Partition.Expression)

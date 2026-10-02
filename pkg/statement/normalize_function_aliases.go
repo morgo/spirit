@@ -110,9 +110,11 @@ func (functionAliasNormalizer) Normalize(ct *CreateTable) *CreateTable {
 	return ct
 }
 
-// functionAliasRewriter is the ast.Visitor behind canonicalizeFuncAliases: it
+// functionAliasRewriter is the exprRewriter behind canonicalizeFuncAliases: it
 // renames each aliased function call on the way back up the tree.
 type functionAliasRewriter struct{ renamed bool }
+
+func (r *functionAliasRewriter) Changed() bool { return r.renamed }
 
 func (r *functionAliasRewriter) Enter(n ast.Node) (ast.Node, bool) { return n, false }
 
@@ -133,42 +135,11 @@ func (r *functionAliasRewriter) Leave(n ast.Node) (ast.Node, bool) {
 }
 
 // canonicalizeFuncAliases rewrites the aliased function names in an expression
-// text, in place, and reports whether anything changed. A nil or empty text is
-// left alone.
-//
-// render must be the same restore the text was originally produced with, so
-// that an expression holding an alias and one already spelling the stored name
-// render identically — that identity is the whole point of the rule. An
-// expression with no alias in it is left byte-for-byte untouched rather than
-// re-rendered, so this rule cannot perturb a form another rule established
-// (which is what keeps it order-independent).
+// text, in place, and reports whether anything changed. render must be the
+// same restore the text was originally produced with (see
+// rewriteExpressionText).
 func canonicalizeFuncAliases(p *parser.Parser, text *string, render func(ast.ExprNode) (string, bool)) bool {
-	if text == nil || *text == "" {
-		return false
-	}
-	expr, ok := parseExpressionText(p, *text)
-	if !ok {
-		return false
-	}
-	rewriter := &functionAliasRewriter{}
-	node, ok := expr.Accept(rewriter)
-	if !ok || !rewriter.renamed {
-		return false
-	}
-	// The rewriter only ever renames a call in place, so the node it hands
-	// back is the expression it was given. Check rather than assert anyway:
-	// normalization runs on every parse, and leaving the text alone beats
-	// panicking if a future visitor change breaks that.
-	rewritten, ok := node.(ast.ExprNode)
-	if !ok {
-		return false
-	}
-	rendered, ok := render(rewritten)
-	if !ok {
-		return false
-	}
-	*text = rendered
-	return true
+	return rewriteExpressionText(p, text, render, &functionAliasRewriter{})
 }
 
 // restoreExprDefaultText and restoreLiteralStyleText are restoreValueExprText's

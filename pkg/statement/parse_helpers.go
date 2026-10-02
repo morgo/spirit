@@ -179,6 +179,52 @@ func parseExpressionText(p *parser.Parser, text string) (ast.ExprNode, bool) {
 	return sel.Fields.Fields[0].Expr, true
 }
 
+// exprRewriter is an ast.Visitor that rewrites an expression tree in place and
+// reports whether it changed anything, for rewriteExpressionText.
+type exprRewriter interface {
+	ast.Visitor
+	Changed() bool
+}
+
+// rewriteExpressionText re-parses an expression text, runs rewriter over the
+// tree and, if it changed anything, replaces the text with render's rendering
+// of the result, in place. It reports whether the text changed. A nil or empty
+// text, or one that does not re-parse, is left alone.
+//
+// render must be the same restore the text was originally produced with, so
+// that a rewritten expression and one already in the rewritten form render
+// identically — that identity is the point of every rule built on this. An
+// expression the rewriter leaves alone is left byte-for-byte untouched rather
+// than re-rendered, so a rule built on this cannot perturb a form another rule
+// established (which is what keeps the rules order-independent).
+func rewriteExpressionText(p *parser.Parser, text *string, render func(ast.ExprNode) (string, bool), rewriter exprRewriter) bool {
+	if text == nil || *text == "" {
+		return false
+	}
+	expr, ok := parseExpressionText(p, *text)
+	if !ok {
+		return false
+	}
+	node, ok := expr.Accept(rewriter)
+	if !ok || !rewriter.Changed() {
+		return false
+	}
+	// A rewriter edits nodes in place, so the node handed back is the
+	// expression it was given. Check rather than assert anyway: normalization
+	// runs on every parse, and leaving the text alone beats panicking if a
+	// future visitor change breaks that.
+	rewritten, ok := node.(ast.ExprNode)
+	if !ok {
+		return false
+	}
+	rendered, ok := render(rewritten)
+	if !ok {
+		return false
+	}
+	*text = rendered
+	return true
+}
+
 // expressionColumnNames returns the names of the columns an expression text
 // reads, e.g. dt for YEAR(`dt`). It returns false when the text does not
 // parse.

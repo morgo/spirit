@@ -382,6 +382,53 @@ func TestDiffMySQLContracts(t *testing.T) {
 			source: "(x INT PRIMARY KEY)",
 			target: "(x INT PRIMARY KEY, id INT AUTO_INCREMENT, UNIQUE KEY k (id))",
 		},
+
+		// Functional index parenthesization and column-reference case
+		// (expressionParenNormalizer, columnReferenceCaseNormalizer).
+		{
+			name:   "functional index converges",
+			source: "(id INT PRIMARY KEY, c INT)",
+			target: "(id INT PRIMARY KEY, c INT, KEY k ((c+1)))",
+		},
+		{
+			name:     "functional index in another parenthesization is a no-op",
+			source:   "(id INT PRIMARY KEY, c INT, KEY k ((c+1)))",
+			target:   "(id INT PRIMARY KEY, c INT, KEY k (((c)+(1))))",
+			wantNoop: true,
+		},
+		{
+			name:   "functional index expression change",
+			source: "(id INT PRIMARY KEY, c INT, KEY k ((c+1)))",
+			target: "(id INT PRIMARY KEY, c INT, KEY k ((c+2)))",
+		},
+		{
+			name:   "functional index written in another column case",
+			source: "(id INT PRIMARY KEY, c INT)",
+			target: "(id INT PRIMARY KEY, c INT, KEY k ((C+1)))",
+		},
+		{
+			name:   "generated column written in another column case",
+			source: "(id INT PRIMARY KEY, c INT)",
+			target: "(id INT PRIMARY KEY, c INT, g INT AS (C + 1) STORED)",
+		},
+		{
+			name:     "generated column reference case is a no-op",
+			source:   "(id INT PRIMARY KEY, c INT, g INT AS (c + 1) VIRTUAL)",
+			target:   "(id INT PRIMARY KEY, c INT, g INT AS (C + 1) VIRTUAL)",
+			wantNoop: true,
+		},
+		{
+			name:     "CHECK reference case is a no-op",
+			source:   "(id INT PRIMARY KEY, c INT, CONSTRAINT chk CHECK (c > 0))",
+			target:   "(id INT PRIMARY KEY, c INT, CONSTRAINT chk CHECK (C > 0))",
+			wantNoop: true,
+		},
+		{
+			name:     "partition expression reference case is a no-op",
+			source:   "(id INT PRIMARY KEY) PARTITION BY HASH (id) PARTITIONS 2",
+			target:   "(id INT PRIMARY KEY) PARTITION BY HASH (ID) PARTITIONS 2",
+			wantNoop: true,
+		},
 	}
 	for _, c := range contracts {
 		t.Run(c.name, func(t *testing.T) {
