@@ -2055,24 +2055,51 @@ func TestDiff(t *testing.T) {
 		},
 		{
 			// MySQL rejects a DROP FOREIGN KEY and an ADD CONSTRAINT under the
-			// same name in one ALTER (error 1826), so the ADD is a statement
-			// of its own after the primary ALTER.
-			name:   "ChangeForeignKeyAction",
-			source: "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE RESTRICT)",
-			target: "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)",
-			expectedStatements: []string{
-				"ALTER TABLE `t1` DROP FOREIGN KEY `fk_user`",
-				"ALTER TABLE `t1` ADD CONSTRAINT `fk_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE",
-			},
+			// same name in one ALTER (error 1826), so the new definition is
+			// added under a replacement name next to the DROP, and keeps it:
+			// the table is never without the constraint, and a foreign key is
+			// paired by definition whatever its name (below).
+			name:     "ChangeForeignKeyAction",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE RESTRICT)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)",
+			expected: "ALTER TABLE `t1` DROP FOREIGN KEY `fk_user`, ADD CONSTRAINT `_fk_user_new` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE",
 		},
 		{
-			name:   "AddOnDeleteToExistingForeignKey",
-			source: "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id))",
-			target: "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)",
-			expectedStatements: []string{
-				"ALTER TABLE `t1` DROP FOREIGN KEY `fk_user`",
-				"ALTER TABLE `t1` ADD CONSTRAINT `fk_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE",
-			},
+			name:     "AddOnDeleteToExistingForeignKey",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)",
+			expected: "ALTER TABLE `t1` DROP FOREIGN KEY `fk_user`, ADD CONSTRAINT `_fk_user_new` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE",
+		},
+		{
+			// The replacement name avoids every index and constraint name on
+			// either side: MySQL names the index it creates for a foreign
+			// key after the constraint.
+			name:     "ChangeForeignKeyActionReplacementNameTaken",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, KEY _fk_user_new (user_id), CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, KEY _fk_user_new (user_id), CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)",
+			expected: "ALTER TABLE `t1` DROP FOREIGN KEY `fk_user`, ADD CONSTRAINT `_fk_user_new2` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE",
+		},
+		{
+			// The foreign key keeps the replacement name, and is paired with
+			// the target's by definition, as any renamed foreign key is.
+			name:     "ForeignKeyUnderReplacementNameNoDiff",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT _fk_user_new FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)",
+			expected: "",
+		},
+		{
+			// A later change under the desired name fits one ALTER under
+			// the two names, and brings the name back.
+			name:     "ForeignKeyUnderReplacementNameChangedAgain",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT _fk_user_new FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL)",
+			expected: "ALTER TABLE `t1` DROP FOREIGN KEY `_fk_user_new`, ADD CONSTRAINT `fk_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE SET NULL",
+		},
+		{
+			name:     "ForeignKeyRenamedWithSameDefinitionNoDiff",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_old FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)",
+			expected: "",
 		},
 		{
 			// A foreign key changed under a new name fits one ALTER.
@@ -2084,26 +2111,19 @@ func TestDiff(t *testing.T) {
 		{
 			// Foreign key names are case-insensitive in MySQL, so a name that
 			// differs only in case collides the same way (error 1826).
-			name:   "ChangeForeignKeyActionUnderCaseChangedName",
-			source: "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE RESTRICT)",
-			target: "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT FK_USER FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)",
-			expectedStatements: []string{
-				"ALTER TABLE `t1` DROP FOREIGN KEY `fk_user`",
-				"ALTER TABLE `t1` ADD CONSTRAINT `FK_USER` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE",
-			},
+			name:     "ChangeForeignKeyActionUnderCaseChangedName",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE RESTRICT)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT FK_USER FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)",
+			expected: "ALTER TABLE `t1` DROP FOREIGN KEY `fk_user`, ADD CONSTRAINT `_FK_USER_new` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE",
 		},
 		{
-			// The re-add runs after the primary ALTER, so it sees every other
-			// change; a foreign key under a new name stays in the primary
-			// ALTER, and every same-name re-add shares the one trailing
-			// statement.
-			name:   "ForeignKeyReaddsFollowOtherChanges",
-			source: "CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, CONSTRAINT fk_a FOREIGN KEY (a) REFERENCES pa(id), CONSTRAINT fk_b FOREIGN KEY (b) REFERENCES pb(id))",
-			target: "CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, c INT, CONSTRAINT fk_a FOREIGN KEY (a) REFERENCES pa(id) ON DELETE CASCADE, CONSTRAINT fk_b FOREIGN KEY (b) REFERENCES pb(id) ON DELETE SET NULL, CONSTRAINT fk_c FOREIGN KEY (c) REFERENCES pc(id))",
-			expectedStatements: []string{
-				"ALTER TABLE `t1` ADD COLUMN `c` int NULL, DROP FOREIGN KEY `fk_a`, DROP FOREIGN KEY `fk_b`, ADD CONSTRAINT `fk_c` FOREIGN KEY (`c`) REFERENCES `pc` (`id`)",
-				"ALTER TABLE `t1` ADD CONSTRAINT `fk_a` FOREIGN KEY (`a`) REFERENCES `pa` (`id`) ON DELETE CASCADE, ADD CONSTRAINT `fk_b` FOREIGN KEY (`b`) REFERENCES `pb` (`id`) ON DELETE SET NULL",
-			},
+			// The new definitions join the primary ALTER under replacement
+			// names, next to every other change; a foreign key under a new
+			// name joins it under its own.
+			name:     "ForeignKeyReplacementsJoinOtherChanges",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, CONSTRAINT fk_a FOREIGN KEY (a) REFERENCES pa(id), CONSTRAINT fk_b FOREIGN KEY (b) REFERENCES pb(id))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, c INT, CONSTRAINT fk_a FOREIGN KEY (a) REFERENCES pa(id) ON DELETE CASCADE, CONSTRAINT fk_b FOREIGN KEY (b) REFERENCES pb(id) ON DELETE SET NULL, CONSTRAINT fk_c FOREIGN KEY (c) REFERENCES pc(id))",
+			expected: "ALTER TABLE `t1` ADD COLUMN `c` int NULL, DROP FOREIGN KEY `fk_a`, DROP FOREIGN KEY `fk_b`, ADD CONSTRAINT `_fk_a_new` FOREIGN KEY (`a`) REFERENCES `pa` (`id`) ON DELETE CASCADE, ADD CONSTRAINT `_fk_b_new` FOREIGN KEY (`b`) REFERENCES `pb` (`id`) ON DELETE SET NULL, ADD CONSTRAINT `fk_c` FOREIGN KEY (`c`) REFERENCES `pc` (`id`)",
 		},
 		// Schema-qualified references. SHOW CREATE TABLE qualifies a
 		// reference only when the parent is in another schema, and a parsed
@@ -2116,13 +2136,10 @@ func TestDiff(t *testing.T) {
 			expected: "ALTER TABLE `t1` ADD CONSTRAINT `fk_user` FOREIGN KEY (`user_id`) REFERENCES `db2`.`users` (`id`)",
 		},
 		{
-			name:   "ForeignKeyReferencedSchemaChanged",
-			source: "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES db1.users(id))",
-			target: "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES db2.users(id))",
-			expectedStatements: []string{
-				"ALTER TABLE `t1` DROP FOREIGN KEY `fk_user`",
-				"ALTER TABLE `t1` ADD CONSTRAINT `fk_user` FOREIGN KEY (`user_id`) REFERENCES `db2`.`users` (`id`)",
-			},
+			name:     "ForeignKeyReferencedSchemaChanged",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES db1.users(id))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES db2.users(id))",
+			expected: "ALTER TABLE `t1` DROP FOREIGN KEY `fk_user`, ADD CONSTRAINT `_fk_user_new` FOREIGN KEY (`user_id`) REFERENCES `db2`.`users` (`id`)",
 		},
 		{
 			name:     "ForeignKeyQualifiedMatchesUnqualified",
@@ -2176,22 +2193,16 @@ func TestDiff(t *testing.T) {
 			expected: "",
 		},
 		{
-			name:   "ForeignKeyAddRestrictStillDiffs",
-			source: "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id))",
-			target: "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE RESTRICT)",
-			expectedStatements: []string{
-				"ALTER TABLE `t1` DROP FOREIGN KEY `fk_user`",
-				"ALTER TABLE `t1` ADD CONSTRAINT `fk_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE RESTRICT",
-			},
+			name:     "ForeignKeyAddRestrictStillDiffs",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE RESTRICT)",
+			expected: "ALTER TABLE `t1` DROP FOREIGN KEY `fk_user`, ADD CONSTRAINT `_fk_user_new` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE RESTRICT",
 		},
 		{
-			name:   "ForeignKeyCascadeToNoAction",
-			source: "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)",
-			target: "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE NO ACTION)",
-			expectedStatements: []string{
-				"ALTER TABLE `t1` DROP FOREIGN KEY `fk_user`",
-				"ALTER TABLE `t1` ADD CONSTRAINT `fk_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`)",
-			},
+			name:     "ForeignKeyCascadeToNoAction",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE NO ACTION)",
+			expected: "ALTER TABLE `t1` DROP FOREIGN KEY `fk_user`, ADD CONSTRAINT `_fk_user_new` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`)",
 		},
 
 		// Composite Primary Key Changes
@@ -3809,19 +3820,19 @@ func TestDiffTableKeyBlockSizeChangeResizesIndexes(t *testing.T) {
 	}
 }
 
-// temporaryIndexName stays inside MySQL's 64-character identifier limit and
+// replacementName stays inside MySQL's 64-character identifier limit and
 // clear of every name in use, whatever its case.
-func TestTemporaryIndexName(t *testing.T) {
+func TestReplacementName(t *testing.T) {
 	taken := map[string]bool{"k": true, "_k_new": true, "_k_new2": true}
-	assert.Equal(t, "_k_new3", temporaryIndexName("k", taken))
+	assert.Equal(t, "_k_new3", replacementName("k", taken))
 	assert.True(t, taken["_k_new3"], "the chosen name is taken from then on")
-	assert.Equal(t, "_K_new4", temporaryIndexName("K", taken), "names are compared case-insensitively, and the given case kept")
+	assert.Equal(t, "_K_new4", replacementName("K", taken), "names are compared case-insensitively, and the given case kept")
 
 	long := strings.Repeat("é", 64)
-	got := temporaryIndexName(long, map[string]bool{})
+	got := replacementName(long, map[string]bool{})
 	assert.Len(t, []rune(got), 64)
 	assert.Equal(t, "_"+strings.Repeat("é", 59)+"_new", got)
-	got = temporaryIndexName(long, map[string]bool{strings.ToLower(got): true})
+	got = replacementName(long, map[string]bool{strings.ToLower(got): true})
 	assert.Len(t, []rune(got), 64)
 	assert.Equal(t, "_"+strings.Repeat("é", 58)+"_new2", got)
 }

@@ -1808,9 +1808,9 @@ func (ct *CreateTable) Diff(target *CreateTable, opts *DiffOptions) ([]*Abstract
 	alterClauses = append(alterClauses, indexClauses...)
 
 	// 3. Diff constraints (DROP, ADD). A foreign key added back under a name
-	// the same diff drops is returned as a separate statement, because MySQL
-	// rejects the same-name DROP and ADD in one ALTER (error 1826).
-	constraintClauses, separateConstraintStatements := ct.diffConstraints(target, rebuilt)
+	// the same diff drops takes a replacement name, because MySQL rejects the
+	// same-name DROP and ADD in one ALTER (error 1826).
+	constraintClauses := ct.diffConstraints(target, rebuilt)
 	alterClauses = append(alterClauses, constraintClauses...)
 
 	// 4. Diff table options
@@ -1843,11 +1843,8 @@ func (ct *CreateTable) Diff(target *CreateTable, opts *DiffOptions) ([]*Abstract
 
 	// Index replacements run as their own ALTER statements, after the
 	// primary ALTER so they observe any column or table option change the
-	// replacement depends on. Foreign keys added back under a dropped name
-	// follow them, so the index a re-added foreign key may need exists by
-	// then.
+	// replacement depends on.
 	additionalStatements = append(additionalStatements, separateIndexStatements...)
-	additionalStatements = append(additionalStatements, separateConstraintStatements...)
 
 	// Build the result
 	var results []*AbstractStatement
@@ -2439,7 +2436,7 @@ func (ct *CreateTable) diffIndexes(target *CreateTable, rebuilt, droppedBefore m
 	var renames []string
 	swap := func(sourceIdx, targetIdx *Index) {
 		replaced[sourceIdx.Name] = true
-		tmp := temporaryIndexName(sourceIdx.Name, takenIndexNames)
+		tmp := replacementName(sourceIdx.Name, takenIndexNames)
 		replacement := *targetIdx
 		replacement.Name = tmp
 		separateStatements = append(separateStatements, []string{
@@ -2610,12 +2607,14 @@ func (ct *CreateTable) indexesKeepOldBlockSize(target *CreateTable, opts *DiffOp
 	return dest.KeyBlockSize != nil || (rowFormat != nil && strings.EqualFold(*rowFormat, "COMPRESSED"))
 }
 
-// temporaryIndexName names the replacement index of a swap (see diffIndexes):
-// the index's own name wrapped as _<name>_new, like the shadow table, cut to
-// MySQL's 64-character identifier limit and numbered until it is free. taken
-// holds the lowercased index names in use (MySQL compares them
-// case-insensitively), and the chosen name is added to it.
-func temporaryIndexName(name string, taken map[string]bool) string {
+// replacementName names the replacement of an index swap (see diffIndexes),
+// which is renamed back afterwards, or of a foreign key re-created under its
+// own name (see diffConstraints), which keeps it: the object's own name
+// wrapped as _<name>_new, like the shadow table, cut to MySQL's 64-character
+// identifier limit and numbered until it is free. taken holds the lowercased
+// names in use (MySQL compares them case-insensitively), and the chosen name
+// is added to it.
+func replacementName(name string, taken map[string]bool) string {
 	const maxLen = mysql.MaxIndexIdentifierLen
 	for n := 1; ; n++ {
 		suffix := "_new"
@@ -2650,10 +2649,23 @@ func temporaryIndexName(name string, taken map[string]bool) string {
 // CONSTRAINT under the same name in one ALTER fail with error 1826, "Duplicate
 // foreign key constraint name", and foreign key names are case-insensitive
 // (and unique per schema), so a name differing only in case fails the same
-// way. The DROP stays in the primary ALTER and every such ADD goes into one
-// separate statement after it, where it also observes any column change the
-// primary ALTER made.
-func (ct *CreateTable) diffConstraints(target *CreateTable, rebuilt map[string]bool) (clauses []string, separateStatements [][]string) {
+// way. Such a foreign key is re-created under a replacement name instead: the
+// ALTER drops the old constraint and adds the new definition as _<name>_new
+// (see replacementName) in the same statement, so the table is never without
+// it. Dropping in one statement and re-adding in the next would leave the
+// child table unconstrained in between: a row with no parent inserted then is
+// accepted, and the re-add fails on it. The foreign key keeps the replacement
+// name. Moving it to its own name afterwards would be a second ADD FOREIGN
+// KEY, a table copy when foreign_key_checks is on, for a name the diff does
+// not compare: a foreign key is paired by definition whatever its name
+// (constraintsEqualIgnoreName, below), so the next diff finds the table
+// converged, and a later change under the desired name fits one ALTER under
+// the two names and brings the name back. The replacement name avoids every
+// constraint and index name on either side of the diff (MySQL names the index
+// it creates for a foreign key after the constraint when the columns have
+// none); a collision with a foreign key of another table in the schema fails
+// the ALTER with error 1826, and nothing has changed.
+func (ct *CreateTable) diffConstraints(target *CreateTable, rebuilt map[string]bool) (clauses []string) {
 
 	var p *parser.Parser
 	readsRebuilt := func(c *Constraint) bool {
@@ -2669,7 +2681,8 @@ func (ct *CreateTable) diffConstraints(target *CreateTable, rebuilt map[string]b
 	// a same-named target constraint is added back whatever its text.
 	droppedForRebuild := make(map[string]bool)
 	// droppedForeignKeys are the lowercased names of the foreign keys this
-	// diff drops; a target foreign key under one of them is added separately.
+	// diff drops; a target foreign key under one of them is added under a
+	// replacement name (see above).
 	droppedForeignKeys := make(map[string]bool)
 
 	// Build maps for easier lookup
@@ -2684,6 +2697,27 @@ func (ct *CreateTable) diffConstraints(target *CreateTable, rebuilt map[string]b
 	}
 
 	// Build a set of source constraint names that have an equivalent match in the
+	// takenNames are the lowercased constraint and index names on either
+	// side, which a replacement foreign key name must avoid.
+	var takenNames map[string]bool
+	replacementForeignKeyName := func(name string) string {
+		if takenNames == nil {
+			takenNames = make(map[string]bool)
+			for _, c := range ct.Constraints {
+				takenNames[strings.ToLower(c.Name)] = true
+			}
+			for _, c := range target.Constraints {
+				takenNames[strings.ToLower(c.Name)] = true
+			}
+			for _, idx := range ct.Indexes {
+				takenNames[strings.ToLower(idx.Name)] = true
+			}
+			for _, idx := range target.Indexes {
+				takenNames[strings.ToLower(idx.Name)] = true
+			}
+		}
+		return replacementName(name, takenNames)
+	}
 	// target under a different name. This handles the case where MySQL generates
 	// different auto-names for CHECK constraints whose original expression text
 	// differs only cosmetically (e.g. charset introducers like _utf8mb3 that are
@@ -2762,9 +2796,9 @@ func (ct *CreateTable) diffConstraints(target *CreateTable, rebuilt map[string]b
 	clauses = append(clauses, enforcementClauses...)
 
 	// Collect ADD operations and sort by name for deterministic output. A
-	// foreign key added back under a name the primary ALTER drops is collected
-	// for a statement of its own (error 1826, see above).
-	var addClauses, readdForeignKeyClauses []string
+	// foreign key added back under a name this ALTER drops is added under a
+	// replacement name (error 1826, see above).
+	var addClauses []string
 	for _, targetConstr := range target.Constraints {
 		if matchedTargetByExpression[targetConstr.Name] {
 			continue // equivalent constraint exists in source under a different name
@@ -2777,7 +2811,9 @@ func (ct *CreateTable) diffConstraints(target *CreateTable, rebuilt map[string]b
 				continue // enforcement-only change; handled by ALTER CHECK above
 			}
 			if targetConstr.Type == "FOREIGN KEY" && droppedForeignKeys[strings.ToLower(targetConstr.Name)] {
-				readdForeignKeyClauses = append(readdForeignKeyClauses, formatAddConstraint(&targetConstr))
+				replacement := targetConstr
+				replacement.Name = replacementForeignKeyName(targetConstr.Name)
+				addClauses = append(addClauses, formatAddConstraint(&replacement))
 				continue
 			}
 			addClauses = append(addClauses, formatAddConstraint(&targetConstr))
@@ -2785,12 +2821,8 @@ func (ct *CreateTable) diffConstraints(target *CreateTable, rebuilt map[string]b
 	}
 	slices.Sort(addClauses)
 	clauses = append(clauses, addClauses...)
-	if len(readdForeignKeyClauses) > 0 {
-		slices.Sort(readdForeignKeyClauses)
-		separateStatements = append(separateStatements, readdForeignKeyClauses)
-	}
 
-	return clauses, separateStatements
+	return clauses
 }
 
 // diffTableOptions compares table options and returns ALTER clauses for differences.

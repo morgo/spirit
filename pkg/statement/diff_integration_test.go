@@ -440,7 +440,7 @@ func TestDiffIntegrationForeignKeySameNameReadd(t *testing.T) {
 		"CREATE TABLE diff_fkrd_child (id int primary key, pid int, KEY pid (pid), "+
 			"CONSTRAINT fk_fkrd_pid FOREIGN KEY (pid) REFERENCES diff_fkrd_parent (id))")
 
-	// Document the server behavior the split depends on.
+	// Document the server behavior the replacement name depends on.
 	_, err := tt.DB.ExecContext(t.Context(), "ALTER TABLE diff_fkrd_child DROP FOREIGN KEY fk_fkrd_pid, "+
 		"ADD CONSTRAINT fk_fkrd_pid FOREIGN KEY (pid) REFERENCES diff_fkrd_parent (id) ON DELETE CASCADE")
 	require.Error(t, err)
@@ -449,13 +449,44 @@ func TestDiffIntegrationForeignKeySameNameReadd(t *testing.T) {
 	targetSQL := "CREATE TABLE diff_fkrd_child (id int primary key, pid int, b int, KEY pid (pid), " +
 		"CONSTRAINT fk_fkrd_pid FOREIGN KEY (pid) REFERENCES diff_fkrd_parent (id) ON DELETE CASCADE)"
 	stmts := diffLiveTable(t, tt.DB, tt.Name, targetSQL)
-	require.Len(t, stmts, 2)
-	require.Equal(t, "ALTER TABLE `diff_fkrd_child` ADD COLUMN `b` int NULL, DROP FOREIGN KEY `fk_fkrd_pid`", stmts[0].Statement)
-	require.Equal(t, "ALTER TABLE `diff_fkrd_child` ADD CONSTRAINT `fk_fkrd_pid` FOREIGN KEY (`pid`) REFERENCES `diff_fkrd_parent` (`id`) ON DELETE CASCADE", stmts[1].Statement)
-	execStatements(t, tt.DB, stmts)
+	require.Len(t, stmts, 1)
+	require.Equal(t, "ALTER TABLE `diff_fkrd_child` ADD COLUMN `b` int NULL, DROP FOREIGN KEY `fk_fkrd_pid`, "+
+		"ADD CONSTRAINT `_fk_fkrd_pid_new` FOREIGN KEY (`pid`) REFERENCES `diff_fkrd_parent` (`id`) ON DELETE CASCADE", stmts[0].Statement)
 
+	// The table is never without the constraint: a row with no parent is
+	// refused before the statement and after it.
+	orphan := "INSERT INTO diff_fkrd_child (id, pid) VALUES (100, 999)"
+	requireOrphanRefused := func() {
+		t.Helper()
+		_, err := tt.DB.ExecContext(t.Context(), orphan)
+		require.Error(t, err, "the child table must stay constrained")
+		require.Contains(t, err.Error(), "Error 1452")
+	}
+	requireOrphanRefused()
+	execStatements(t, tt.DB, stmts)
+	requireOrphanRefused()
+
+	// The foreign key keeps the replacement name; the next diff pairs it
+	// with the desired one by definition.
 	live := showCreateTable(t, tt.DB, tt.Name)
-	require.Contains(t, live, "CONSTRAINT `fk_fkrd_pid` FOREIGN KEY (`pid`) REFERENCES `diff_fkrd_parent` (`id`) ON DELETE CASCADE")
+	require.Contains(t, live, "CONSTRAINT `_fk_fkrd_pid_new` FOREIGN KEY (`pid`) REFERENCES `diff_fkrd_parent` (`id`) ON DELETE CASCADE")
+	require.NotContains(t, live, "CONSTRAINT `fk_fkrd_pid`")
+	requireConverged(t, tt.DB, tt.Name, targetSQL)
+
+	// A later change under the desired name fits one ALTER under the two
+	// names, and brings the name back.
+	targetSQL = "CREATE TABLE diff_fkrd_child (id int primary key, pid int, b int, KEY pid (pid), " +
+		"CONSTRAINT fk_fkrd_pid FOREIGN KEY (pid) REFERENCES diff_fkrd_parent (id) ON DELETE SET NULL)"
+	stmts = diffLiveTable(t, tt.DB, tt.Name, targetSQL)
+	require.Len(t, stmts, 1)
+	require.Equal(t, "ALTER TABLE `diff_fkrd_child` DROP FOREIGN KEY `_fk_fkrd_pid_new`, "+
+		"ADD CONSTRAINT `fk_fkrd_pid` FOREIGN KEY (`pid`) REFERENCES `diff_fkrd_parent` (`id`) ON DELETE SET NULL", stmts[0].Statement)
+	requireOrphanRefused()
+	execStatements(t, tt.DB, stmts)
+	requireOrphanRefused()
+	live = showCreateTable(t, tt.DB, tt.Name)
+	require.Contains(t, live, "CONSTRAINT `fk_fkrd_pid` FOREIGN KEY (`pid`) REFERENCES `diff_fkrd_parent` (`id`) ON DELETE SET NULL")
+	require.NotContains(t, live, "_new")
 	requireConverged(t, tt.DB, tt.Name, targetSQL)
 }
 
@@ -484,9 +515,8 @@ func TestDiffIntegrationForeignKeyReferencedSchema(t *testing.T) {
 	targetSQL := fmt.Sprintf("CREATE TABLE child (id int primary key, pid int, KEY pid (pid), "+
 		"CONSTRAINT fk_pid FOREIGN KEY (pid) REFERENCES `%s`.parent (id))", ownDB)
 	stmts := diffLiveTable(t, db, "child", targetSQL)
-	require.Len(t, stmts, 2)
-	require.Equal(t, "ALTER TABLE `child` DROP FOREIGN KEY `fk_pid`", stmts[0].Statement)
-	require.Equal(t, fmt.Sprintf("ALTER TABLE `child` ADD CONSTRAINT `fk_pid` FOREIGN KEY (`pid`) REFERENCES `%s`.`parent` (`id`)", ownDB), stmts[1].Statement)
+	require.Len(t, stmts, 1)
+	require.Equal(t, fmt.Sprintf("ALTER TABLE `child` DROP FOREIGN KEY `fk_pid`, ADD CONSTRAINT `_fk_pid_new` FOREIGN KEY (`pid`) REFERENCES `%s`.`parent` (`id`)", ownDB), stmts[0].Statement)
 	execStatements(t, db, stmts)
 
 	// A reference into the table's own schema reads back unqualified ...
