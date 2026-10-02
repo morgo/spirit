@@ -248,14 +248,14 @@ func TestColumnsEqualWithContextDetectsEveryField(t *testing.T) {
 // default fields: the rules rewrite Default to MySQL's reading, which is what
 // equality sees, while emission writes DefaultAsWritten back unchanged.
 func TestDefaultAsWrittenIsEmittedAndNotCompared(t *testing.T) {
-	ct, err := ParseCreateTable("CREATE TABLE t (f FLOAT DEFAULT 1234567, d DATETIME DEFAULT '2020-1-1', e DECIMAL(6,2) DEFAULT (1 + 1))")
+	ct, err := ParseCreateTable("CREATE TABLE t (f FLOAT DEFAULT 0.1, d DATETIME DEFAULT '2020-1-1', e DECIMAL(6,2) DEFAULT (1 + 1))")
 	require.NoError(t, err)
 	f, d, e := ct.Columns[0], ct.Columns[1], ct.Columns[2]
 
-	assert.Equal(t, "1234570", *f.Default, "the compared reading is MySQL's six-digit report")
+	assert.Equal(t, "0.10000000149011612", *f.Default, "the compared reading is the exact stored value")
 	require.NotNil(t, f.DefaultAsWritten)
-	assert.Equal(t, DefaultLiteral{Text: "1234567", Kind: DefaultKindNumber}, *f.DefaultAsWritten)
-	assert.Contains(t, formatColumnDefinition(&f), "DEFAULT 1234567")
+	assert.Equal(t, DefaultLiteral{Text: "0.1", Kind: DefaultKindNumber}, *f.DefaultAsWritten)
+	assert.Contains(t, formatColumnDefinition(&f), "DEFAULT 0.1")
 
 	assert.Equal(t, "2020-01-01 00:00:00", *d.Default)
 	assert.Equal(t, DefaultLiteral{Text: "2020-1-1", Kind: DefaultKindString}, *d.DefaultAsWritten)
@@ -265,12 +265,12 @@ func TestDefaultAsWrittenIsEmittedAndNotCompared(t *testing.T) {
 	assert.Contains(t, formatColumnDefinition(&e), "DEFAULT (1+1)")
 
 	// Two spellings of one stored value are the same column.
-	other, err := ParseCreateTable("CREATE TABLE t (f FLOAT DEFAULT 1234570, d DATETIME DEFAULT '2020-01-01 00:00:00', e DECIMAL(6,2) DEFAULT (1 + 1))")
+	other, err := ParseCreateTable("CREATE TABLE t (f FLOAT DEFAULT '0.1', d DATETIME DEFAULT '2020-01-01 00:00:00', e DECIMAL(6,2) DEFAULT (1 + 1))")
 	require.NoError(t, err)
 	stmts, err := other.Diff(ct, nil)
 	require.NoError(t, err)
 	assert.Empty(t, stmts)
 	// And without DefaultAsWritten the column is emitted from Default.
 	f.DefaultAsWritten = nil
-	assert.Contains(t, formatColumnDefinition(&f), "DEFAULT 1234570")
+	assert.Contains(t, formatColumnDefinition(&f), "DEFAULT 0.10000000149011612")
 }

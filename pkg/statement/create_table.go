@@ -54,15 +54,14 @@ type Column struct {
 	GeneratedExpr   *string        `json:"generated_expr,omitempty"`   // Expression for GENERATED ALWAYS AS (...) columns
 	GeneratedStored bool           `json:"generated_stored,omitempty"` // true = STORED, false = VIRTUAL (only meaningful when GeneratedExpr is set)
 	// DefaultAsWritten is the literal DEFAULT as the schema spelled it, kept
-	// for emission. Default holds the value MySQL stores for that literal, in
-	// the text SHOW CREATE TABLE reports: the normalization rules rewrite it
-	// to that reading, and Diff compares it. The two can name different
-	// values. MySQL reports a float with six significant digits, so `float
-	// DEFAULT 1234567` reads back as '1234570', and a MODIFY that emitted the
-	// reading would store 1234570; a temporal fraction past the column's
-	// precision rounds or truncates with the session's TIME_TRUNCATE_FRACTIONAL,
-	// which no rule can see. The written literal is the one MySQL reads itself,
-	// so emitting it stores exactly what a CREATE TABLE with it would have.
+	// for emission. Default holds the value MySQL stores for that literal, as
+	// the normalization rules read it (the text SHOW CREATE TABLE reports
+	// where that text is exact), and Diff compares it. The two can name
+	// different values: MySQL reports a float with six significant digits, so
+	// the live `float DEFAULT 1234567` reads back as '1234570', and a MODIFY
+	// that emitted that text would store 1234570. The written literal is the
+	// one MySQL reads itself, so emitting it stores exactly what a CREATE
+	// TABLE with it would have.
 	// Nil for an expression default, which is emitted from Default, and when a
 	// rule rewrites the emitted form on purpose (charUTF8MB4DefaultNormalizer).
 	// Not compared: see columnFieldsNotCompared.

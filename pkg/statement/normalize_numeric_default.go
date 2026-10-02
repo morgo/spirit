@@ -43,22 +43,30 @@ func init() { registerNormalizer(numericDefaultNormalizer{}) }
 //	decimal(6,2) DEFAULT 12345 / 9999.995               -> error 1067 (more than 4 integer digits)
 //	decimal(6,2) unsigned DEFAULT -0.001                -> error 1067
 //
-// float and double store the nearest binary value and report it the way
-// MySQL prints a double (see utils.FormatMySQLDouble): the shortest text that
+// float and double store the nearest binary value. A double is read the way
+// MySQL prints one (see utils.FormatMySQLDouble): the shortest text that
 // reads back as the same double, in fixed notation up to 15 integer digits and
-// down to 14 leading zeros, exponent notation past that; a float is printed
-// with at most 6 significant digits (utils.FormatMySQLFloat). That reading is
-// lossy — 1234567 and 1234570 are different floats that both report as
-// '1234570' — which is why the rule rewrites only the value Diff compares
-// (Column.Default) and emission writes the literal as the schema spelled it
-// (Column.DefaultAsWritten): a MODIFY carrying the six-digit reading would
-// store a different value than the CREATE did. With a declared scale,
+// down to 14 leading zeros, exponent notation past that. A float is read as
+// the double its stored value is (float64(float32(f))), printed the same way.
+// That is not the text SHOW CREATE TABLE reports for it, which has at most 6
+// significant digits (utils.FormatMySQLFloat) and is lossy: 1234567 and
+// 1234568 are different floats that both report as '1234570', so a reading
+// taken from that text would make a schema that changes DEFAULT 1234567 to
+// 1234568 diff empty. Reading the exact value keeps every two floats apart.
+// The price is that a float literal whose six-digit text does not read back
+// as the same float never converges: the live '1234570' reads as 1234570 and
+// the declared 1234567 as 1234567, so the diff emits the MODIFY (with the
+// literal as written) on every run until the schema spells a value SHOW CREATE
+// TABLE can, one of at most six significant digits. A float whose six-digit
+// text does read back (0.1, 1e-45, 1e38) converges. With a declared scale,
 // float(M,D) and double(M,D) round the fraction to D places in double
-// arithmetic (rint, half to even) and print exactly D decimals:
+// arithmetic (rint, half to even) and print exactly D decimals, which SHOW
+// CREATE TABLE prints in full:
 //
 //	double DEFAULT 1e2 / 1.50 / 1.0E-7 / 1e15 / 1e16   -> '100' / '1.5' / '0.0000001' / '1e15' / '1e16'
 //	double DEFAULT 123456789012345678                 -> '1.2345678901234568e17'
-//	float DEFAULT 0.1 / 1.23456789 / 1234567 / 1e-45  -> '0.1' / '1.23457' / '1234570' / '1.4013e-45'
+//	float DEFAULT 0.1 / 1.5 / 1e-45                   -> '0.10000000149011612' / '1.5' / '1.401298464324817e-45'
+//	float DEFAULT 1234567 / 1234568 / '1234570'       -> '1234567' / '1234568' / '1234570' (every one '1234570' in SHOW CREATE TABLE)
 //	float DEFAULT 3.4028235e38                        -> error 1264 (above FLT_MAX as a double)
 //	float(7,4) DEFAULT 1.5 / float(10,2) DEFAULT 1.005 -> '1.5000' / '1.00'
 //	double(10,3) DEFAULT 2.0005                       -> '2.001'  (2.0005 is above the half in binary)
@@ -382,7 +390,10 @@ func realDefaultText(c *Column, float bool) (string, bool) {
 		return strconv.FormatFloat(stored, 'f', dec, 64), true
 	}
 	if float {
-		return utils.FormatMySQLFloat(float32(f)), true
+		// The exact stored value, not SHOW CREATE TABLE's six significant
+		// digits: that text is lossy, and a lossy reading would compare
+		// two different defaults as one (see the type's doc).
+		f = float64(float32(f))
 	}
 	return utils.FormatMySQLDouble(f), true
 }

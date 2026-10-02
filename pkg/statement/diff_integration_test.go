@@ -3466,13 +3466,38 @@ func TestDiffIntegrationVirtualToRegularKeepsValues(t *testing.T) {
 
 // TestDiffIntegrationFloatDefaultValueAsWritten verifies that the DEFAULT a
 // diff emits on a FLOAT column stores the value the schema's literal names,
-// not the six-significant-digit reading SHOW CREATE TABLE reports. MySQL
-// reports `float DEFAULT 1234567` as '1234570', and 1234567 and 1234570 are
-// different floats; emitting the reading stored the wrong one. The stored
-// value is read back through CAST(... AS DOUBLE) and compared with a direct
-// CREATE of the target.
+// and that a float is compared by that value, not by the six-significant-digit
+// reading SHOW CREATE TABLE reports. MySQL reports `float DEFAULT 1234567` as
+// '1234570'; 1234567, 1234568 and 1234570 are three different floats under
+// that one report, so emitting the report stored the wrong value and
+// comparing by it hid a change. A literal whose six-digit report reads back
+// as the same float converges. One that does not keeps diffing: the live
+// '1234570' is not 1234567, the MODIFY is emitted again with the literal as
+// written, and applying it stores the same value again. The stored value is
+// read back through CAST(... AS DOUBLE) and compared with a direct CREATE of
+// the target.
 func TestDiffIntegrationFloatDefaultValueAsWritten(t *testing.T) {
-	for _, literal := range []string{"1.23456789", "1234567", "0.123456789", "1.234567e-30", "1.1754944e-38", "16777217"} {
+	cases := []struct {
+		literal   string
+		emitted   string // the parser spells a positive exponent with its sign
+		converges bool
+	}{
+		{"0.1", "0.1", true},
+		{"1.23457", "1.23457", true},
+		{"1234570", "1234570", true},
+		{"1e-45", "1e-45", true},
+		{"1e38", "1e+38", true},
+		{"3.4e38", "3.4e+38", true},
+		{"1e15", "1e+15", true},
+		{"1.23456789", "1.23456789", false},
+		{"1234567", "1234567", false},
+		{"0.123456789", "0.123456789", false},
+		{"1.234567e-30", "1.234567e-30", false},
+		{"1.1754944e-38", "1.1754944e-38", false},
+		{"16777217", "16777217", false},
+	}
+	for _, c := range cases {
+		literal := c.literal
 		t.Run(literal, func(t *testing.T) {
 			_, db := testutils.CreateUniqueTestDatabase(t)
 			exec := func(stmt string) {
@@ -3498,18 +3523,70 @@ func TestDiffIntegrationFloatDefaultValueAsWritten(t *testing.T) {
 			exec("CREATE TABLE t (id INT PRIMARY KEY)")
 			stmts := diffLiveTable(t, db, "t", "CREATE TABLE t "+target)
 			require.Len(t, stmts, 1)
-			assert.Contains(t, stmts[0].Statement, "DEFAULT "+literal, "the literal is emitted as written")
+			assert.Contains(t, stmts[0].Statement, "DEFAULT "+c.emitted, "the literal is emitted as written")
 			execStatements(t, db, stmts)
 			assert.Equal(t, expectedValue, storedDefault())
 			assert.Equal(t, expectedCreate, showCreateTable(t, db, "t"))
-			requireConverged(t, db, "t", "CREATE TABLE t "+target)
+
+			// The residual: converged, or the same MODIFY again, which
+			// changes nothing.
+			requireFloatResidual := func() {
+				t.Helper()
+				residual := diffLiveTable(t, db, "t", "CREATE TABLE t "+target)
+				if c.converges {
+					require.Nil(t, residual, "expected the live table to have converged")
+					return
+				}
+				require.Len(t, residual, 1, "a literal SHOW CREATE TABLE cannot spell keeps diffing")
+				assert.Equal(t, "ALTER TABLE `t` MODIFY COLUMN `f` float NULL DEFAULT "+c.emitted, residual[0].Statement)
+				execStatements(t, db, residual)
+				assert.Equal(t, expectedValue, storedDefault())
+				assert.Equal(t, expectedCreate, showCreateTable(t, db, "t"))
+			}
+			requireFloatResidual()
 
 			exec("ALTER TABLE t MODIFY COLUMN f FLOAT DEFAULT 1")
-			execStatements(t, db, diffLiveTable(t, db, "t", "CREATE TABLE t "+target))
+			stmts = diffLiveTable(t, db, "t", "CREATE TABLE t "+target)
+			require.Len(t, stmts, 1)
+			execStatements(t, db, stmts)
 			assert.Equal(t, expectedValue, storedDefault())
-			requireConverged(t, db, "t", "CREATE TABLE t "+target)
+			assert.Equal(t, expectedCreate, showCreateTable(t, db, "t"))
+			requireFloatResidual()
 		})
 	}
+}
+
+// TestDiffIntegrationFloatDefaultChangeUnderOneReport verifies that a change
+// between two FLOAT defaults SHOW CREATE TABLE reports alike is still a
+// change: the live `float DEFAULT 1234567` reports as '1234570', the schema
+// now says 1234568, and the diff must emit the MODIFY (a reading that
+// compared the six-digit report would have called them equal) and store the
+// new value.
+func TestDiffIntegrationFloatDefaultChangeUnderOneReport(t *testing.T) {
+	_, db := testutils.CreateUniqueTestDatabase(t)
+	exec := func(stmt string) {
+		t.Helper()
+		_, err := db.ExecContext(t.Context(), stmt)
+		require.NoError(t, err, "executing: %s", stmt)
+	}
+	storedDefault := func() float64 {
+		t.Helper()
+		exec("TRUNCATE TABLE t")
+		exec("INSERT INTO t (id) VALUES (1)")
+		var v float64
+		require.NoError(t, db.QueryRowContext(t.Context(), "SELECT CAST(f AS DOUBLE) FROM t").Scan(&v))
+		return v
+	}
+	exec("CREATE TABLE t (id INT PRIMARY KEY, f FLOAT DEFAULT 1234567)")
+	require.Contains(t, showCreateTable(t, db, "t"), "DEFAULT '1234570'", "MySQL reports the float with six significant digits")
+	require.InDelta(t, 1234567, storedDefault(), 0)
+
+	stmts := diffLiveTable(t, db, "t", "CREATE TABLE t (id INT PRIMARY KEY, f FLOAT DEFAULT 1234568)")
+	require.Len(t, stmts, 1)
+	assert.Equal(t, "ALTER TABLE `t` MODIFY COLUMN `f` float NULL DEFAULT 1234568", stmts[0].Statement)
+	execStatements(t, db, stmts)
+	assert.InDelta(t, 1234568, storedDefault(), 0)
+	assert.Contains(t, showCreateTable(t, db, "t"), "DEFAULT '1234570'")
 }
 
 // TestDiffIntegrationTemporalDefaultTruncateFractional verifies that a

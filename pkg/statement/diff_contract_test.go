@@ -716,16 +716,24 @@ func TestDiffMySQLContracts(t *testing.T) {
 			source: "(id INT PRIMARY KEY, c DOUBLE(10,3))",
 			target: "(id INT PRIMARY KEY, c DOUBLE(10,3) DEFAULT 2.0005)",
 		},
+		// A float is compared by its exact value. One whose six-digit SHOW
+		// CREATE TABLE text reads back as the same float converges; one
+		// spelled past six digits keeps diffing, which
+		// TestDiffIntegrationFloatDefaultValueAsWritten pins.
 		{
-			name:   "float default rounded to six digits converges",
+			name:   "float default with six digits converges",
 			source: "(id INT PRIMARY KEY, c FLOAT)",
-			target: "(id INT PRIMARY KEY, c FLOAT DEFAULT 1.23456789)",
+			target: "(id INT PRIMARY KEY, c FLOAT DEFAULT 1.23457)",
 		},
 		{
-			name:     "float default spelled past six digits is a no-op",
-			source:   "(id INT PRIMARY KEY, c FLOAT DEFAULT 1.23457)",
-			target:   "(id INT PRIMARY KEY, c FLOAT DEFAULT 1.23456789)",
-			wantNoop: true,
+			name:   "float default from an exponent converges",
+			source: "(id INT PRIMARY KEY, c FLOAT)",
+			target: "(id INT PRIMARY KEY, c FLOAT DEFAULT 1e38)",
+		},
+		{
+			name:   "float default changed below six digits",
+			source: "(id INT PRIMARY KEY, c FLOAT DEFAULT 1234570)",
+			target: "(id INT PRIMARY KEY, c FLOAT DEFAULT 1234560)",
 		},
 		{
 			name:   "float denormal default converges",

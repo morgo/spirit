@@ -281,9 +281,18 @@ func TestDiff(t *testing.T) {
 			expected: "",
 		},
 		{
-			name:     "NumericDefaultFloatSixDigits",
+			// A float is compared by its exact value, not by the six
+			// significant digits SHOW CREATE TABLE prints: the live '1.23457'
+			// is a different float from 1.23456789.
+			name:     "NumericDefaultFloatPastSixDigitsDiffers",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c FLOAT DEFAULT '1.23457')",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c FLOAT DEFAULT 1.23456789)",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `c` float NULL DEFAULT 1.23456789",
+		},
+		{
+			name:     "NumericDefaultFloatSixDigitsNoDiff",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c FLOAT DEFAULT '1.23457')",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c FLOAT DEFAULT 1.23457e0)",
 			expected: "",
 		},
 		{

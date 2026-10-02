@@ -138,26 +138,34 @@ func TestNumericDefault(t *testing.T) {
 		{"a double(10,3) DEFAULT 2.0005", "2.001", DefaultKindNumber},
 		{"a double DEFAULT '1e16'", "1e16", DefaultKindNumber},
 
-		// float: at most 6 significant digits of the float's exact value.
-		{"a float DEFAULT 0.1", "0.1", DefaultKindNumber},
-		{"a float DEFAULT 0.3", "0.3", DefaultKindNumber},
-		{"a float DEFAULT 1.23456789", "1.23457", DefaultKindNumber},
-		{"a float DEFAULT 123456.789", "123457", DefaultKindNumber},
-		{"a float DEFAULT 1234567", "1234570", DefaultKindNumber},
-		{"a float DEFAULT 1234565", "1234560", DefaultKindNumber},
-		{"a float DEFAULT 0.1234565", "0.123457", DefaultKindNumber},
-		{"a float DEFAULT 12345678", "12345700", DefaultKindNumber},
-		{"a float DEFAULT 16777217", "16777200", DefaultKindNumber},
-		{"a float DEFAULT 1e-7", "0.0000001", DefaultKindNumber},
-		{"a float DEFAULT 1e-45", "1.4013e-45", DefaultKindNumber},
-		{"a float DEFAULT 1e38", "1e38", DefaultKindNumber},
-		{"a float DEFAULT 3.4e38", "3.4e38", DefaultKindNumber},
-		{"a float DEFAULT 3.4028234663852886e38", "3.40282e38", DefaultKindNumber},
+		// float: the exact stored value, printed as a double (what SELECT
+		// CAST(c AS DOUBLE) prints). SHOW CREATE TABLE prints at most 6
+		// significant digits of it ('1234570' for 1234567, 1234568 and
+		// 1234570 alike), a lossy text the rule does not read through.
+		{"a float DEFAULT 0.1", "0.10000000149011612", DefaultKindNumber},
+		{"a float DEFAULT 0.3", "0.30000001192092896", DefaultKindNumber},
+		{"a float DEFAULT 1.5", "1.5", DefaultKindNumber},
+		{"a float DEFAULT 100", "100", DefaultKindNumber},
+		{"a float DEFAULT 1.23456789", "1.2345678806304932", DefaultKindNumber},
+		{"a float DEFAULT 123456.789", "123456.7890625", DefaultKindNumber},
+		{"a float DEFAULT 1234567", "1234567", DefaultKindNumber},
+		{"a float DEFAULT 1234568", "1234568", DefaultKindNumber},
+		{"a float DEFAULT 1234565", "1234565", DefaultKindNumber},
+		{"a float DEFAULT 0.1234565", "0.12345650047063828", DefaultKindNumber},
+		{"a float DEFAULT 12345678", "12345678", DefaultKindNumber},
+		{"a float DEFAULT 16777217", "16777216", DefaultKindNumber},
+		{"a float DEFAULT 1e-7", "0.00000010000000116860974", DefaultKindNumber},
+		{"a float DEFAULT 1e-45", "1.401298464324817e-45", DefaultKindNumber},
+		{"a float DEFAULT 1e15", "999999986991104", DefaultKindNumber},
+		{"a float DEFAULT 1e38", "9.999999680285692e37", DefaultKindNumber},
+		{"a float DEFAULT 3.4e38", "3.3999999521443642e38", DefaultKindNumber},
+		{"a float DEFAULT 3.4028234663852886e38", "3.4028234663852886e38", DefaultKindNumber},
 		{"a float DEFAULT -0.0", "0", DefaultKindNumber},
-		{"a float DEFAULT 0x01000001", "16777200", DefaultKindNumber},
+		{"a float DEFAULT 0x01000001", "16777216", DefaultKindNumber},
 		{"a float(7,4) DEFAULT 1.5", "1.5000", DefaultKindNumber},
 		{"a float(10,2) DEFAULT 1.005", "1.00", DefaultKindNumber},
-		{"a float DEFAULT '1.23457'", "1.23457", DefaultKindNumber},
+		{"a float DEFAULT '1.23457'", "1.234570026397705", DefaultKindNumber},
+		{"a float DEFAULT '1234570'", "1234570", DefaultKindNumber},
 
 		// char, varchar, binary and varbinary store the literal's text.
 		{"a varchar(10) DEFAULT 1", "1", DefaultKindString},
@@ -294,7 +302,7 @@ func TestNumericDefaultIsIdempotent(t *testing.T) {
 		"e float DEFAULT 1.23456789, f float(7,4) DEFAULT 1.5, g varchar(10) DEFAULT 1.50, h binary(5) DEFAULT 1.5, " +
 		"i double DEFAULT 123456789012345678, j float DEFAULT 1e-45)")
 	require.NoError(t, err)
-	want := []string{"1", "1.20", "1e16", "0.0000001", "1.23457", "1.5000", "1.50", "1.5\x00\x00", "1.2345678901234568e17", "1.4013e-45"}
+	want := []string{"1", "1.20", "1e16", "0.0000001", "1.2345678806304932", "1.5000", "1.50", "1.5\x00\x00", "1.2345678901234568e17", "1.401298464324817e-45"}
 	for i, c := range ct.Columns {
 		assert.Equal(t, want[i], *c.Default, c.Name)
 	}
@@ -341,8 +349,12 @@ func TestNumericDefaultConverges(t *testing.T) {
 		{"double with a scale negative below the scale", "(a double(30,20) DEFAULT -1e-17)", "(`a` double(30,20) DEFAULT '0.00000000000000000000')"},
 		{"double with a scale negative half below the scale", "(a double(30,20) DEFAULT -0.5e-17)", "(`a` double(30,20) DEFAULT '0.00000000000000000000')"},
 		{"float with a scale negative", "(a float(10,4) DEFAULT -1.23456789)", "(`a` float(10,4) DEFAULT '-1.2346')"},
-		{"float rounded to 6 digits", "(a float DEFAULT 1.23456789)", "(`a` float DEFAULT '1.23457')"},
-		{"float integer", "(a float DEFAULT 1234567)", "(`a` float DEFAULT '1234570')"},
+		// A float converges when SHOW CREATE TABLE's six significant digits
+		// read back as the same float; see TestNumericDefaultStillDiffsRealChanges
+		// for the ones that do not.
+		{"float with six digits", "(a float DEFAULT 0.1)", "(`a` float DEFAULT '0.1')"},
+		{"float integer with six digits", "(a float DEFAULT 1234570)", "(`a` float DEFAULT '1234570')"},
+		{"float from an exponent", "(a float DEFAULT 1e38)", "(`a` float DEFAULT '1e38')"},
 		{"float denormal", "(a float DEFAULT 1e-45)", "(`a` float DEFAULT '1.4013e-45')"},
 		{"float with a scale", "(a float(7,4) DEFAULT 1.5)", "(`a` float(7,4) DEFAULT '1.5000')"},
 		{"varchar from a decimal", "(a varchar(10) DEFAULT 1.50)", "(`a` varchar(10) DEFAULT '1.50')"},
@@ -358,8 +370,7 @@ func TestNumericDefaultConverges(t *testing.T) {
 
 // A genuinely different default must still diff, and the MODIFY carries the
 // literal as written, so MySQL stores exactly what the CREATE would have; the
-// stored form the rule computes is compared, never emitted (a float's
-// six-digit reading would store a different value).
+// stored form the rule computes is compared, never emitted.
 func TestNumericDefaultStillDiffsRealChanges(t *testing.T) {
 	requireDefaultStillDiffs(t, "`a` decimal(6,2) DEFAULT 1.2", "`a` decimal(6,2) DEFAULT '1.21'", "MODIFY COLUMN `a` decimal(6,2) NULL DEFAULT 1.2")
 	requireDefaultStillDiffs(t, "`a` int DEFAULT '001'", "`a` int DEFAULT '2'", "MODIFY COLUMN `a` int NULL DEFAULT '001'")
@@ -367,6 +378,14 @@ func TestNumericDefaultStillDiffsRealChanges(t *testing.T) {
 	// the same double.
 	requireDefaultStillDiffs(t, "`a` double DEFAULT 1e16", "`a` double DEFAULT '1e15'", "MODIFY COLUMN `a` double NULL DEFAULT 1e+16")
 	requireDefaultStillDiffs(t, "`a` float DEFAULT 1.23456789", "`a` float DEFAULT '1.23456'", "MODIFY COLUMN `a` float NULL DEFAULT 1.23456789")
+	// Two floats SHOW CREATE TABLE prints alike ('1234570') are two
+	// defaults: the rule compares the exact value, never the six-digit text.
+	requireDefaultStillDiffs(t, "`a` float DEFAULT 1234568", "`a` float DEFAULT '1234570'", "MODIFY COLUMN `a` float NULL DEFAULT 1234568")
+	// Which also means a literal the six-digit text cannot spell keeps
+	// diffing against the live table (the documented residual): the MODIFY
+	// stores 1234567 again, and the table keeps reporting '1234570'.
+	requireDefaultStillDiffs(t, "`a` float DEFAULT 1234567", "`a` float DEFAULT '1234570'", "MODIFY COLUMN `a` float NULL DEFAULT 1234567")
+	requireDefaultStillDiffs(t, "`a` float DEFAULT 1.23456789", "`a` float DEFAULT '1.23457'", "MODIFY COLUMN `a` float NULL DEFAULT 1.23456789")
 	requireDefaultStillDiffs(t, "`a` varchar(10) DEFAULT 1.50", "`a` varchar(10) DEFAULT '1.5'", "MODIFY COLUMN `a` varchar(10) NULL DEFAULT 1.50")
 	requireDefaultStillDiffs(t, "`a` varchar(10) DEFAULT 1.50", "`a` varchar(10)", "MODIFY COLUMN `a` varchar(10) NULL DEFAULT 1.50")
 	// A value MySQL rejects is emitted as written, so the MODIFY fails the
