@@ -317,6 +317,46 @@ func TestDiffMySQLContracts(t *testing.T) {
 			source: `(id INT PRIMARY KEY, c INT, KEY k (c) SECONDARY_ENGINE_ATTRIBUTE='{"k":1}')`,
 			target: `(id INT PRIMARY KEY, c INT, KEY k (c) SECONDARY_ENGINE_ATTRIBUTE='{"k":1}' INVISIBLE)`,
 		},
+		// Index options MySQL accepts and does not store.
+		{
+			name:     "primary key VISIBLE is a no-op",
+			source:   "(id INT PRIMARY KEY)",
+			target:   "(id INT, PRIMARY KEY (id) VISIBLE)",
+			wantNoop: true,
+		},
+		{
+			name:     "secondary index VISIBLE is a no-op",
+			source:   "(id INT PRIMARY KEY, c INT, KEY k (c))",
+			target:   "(id INT PRIMARY KEY, c INT, KEY k (c) VISIBLE)",
+			wantNoop: true,
+		},
+		{
+			name:     "USING HASH is a no-op on InnoDB",
+			source:   "(id INT PRIMARY KEY, c INT, KEY k (c))",
+			target:   "(id INT PRIMARY KEY, c INT, KEY k (c) USING HASH)",
+			wantNoop: true,
+		},
+		{
+			name:   "USING BTREE is applied",
+			source: "(id INT PRIMARY KEY, c INT, KEY k (c))",
+			target: "(id INT PRIMARY KEY, c INT, KEY k (c) USING BTREE)",
+		},
+		{
+			name:   "USING BTREE is removed",
+			source: "(id INT PRIMARY KEY, c INT, KEY k (c) USING BTREE)",
+			target: "(id INT PRIMARY KEY, c INT, KEY k (c))",
+		},
+		{
+			name:     "index KEY_BLOCK_SIZE is a no-op on an uncompressed table",
+			source:   "(id INT NOT NULL AUTO_INCREMENT, x INT PRIMARY KEY, UNIQUE KEY k (id))",
+			target:   "(id INT NOT NULL AUTO_INCREMENT, x INT PRIMARY KEY, UNIQUE KEY k (id) KEY_BLOCK_SIZE=8)",
+			wantNoop: true,
+		},
+		{
+			name:   "index KEY_BLOCK_SIZE is applied on a compressed table",
+			source: "(id INT PRIMARY KEY, c INT, KEY k (c)) ROW_FORMAT=COMPRESSED",
+			target: "(id INT PRIMARY KEY, c INT, KEY k (c) KEY_BLOCK_SIZE=8) ROW_FORMAT=COMPRESSED",
+		},
 	}
 	for _, c := range contracts {
 		t.Run(c.name, func(t *testing.T) {

@@ -326,8 +326,7 @@ func TestSchemaAnalyzer_IndexVisibilityStructured(t *testing.T) {
 
 	statusIdx := indexes.ByName("idx_status")
 	require.NotNil(t, statusIdx, "Should find idx_status")
-	require.NotNil(t, statusIdx.Invisible)
-	require.False(t, *statusIdx.Invisible, "idx_status should be explicitly visible")
+	require.Nil(t, statusIdx.Invisible, "VISIBLE is the default and is not recorded (indexDefaultsNormalizer)")
 
 	nameIdx := indexes.ByName("idx_name")
 	require.NotNil(t, nameIdx, "Should find idx_name")
@@ -894,9 +893,9 @@ func TestComprehensiveParsingFromTiDBTestSuite(t *testing.T) {
 				}
 
 				require.NotNil(t, testIndex)
-				// Last option should win (VISIBLE), so Invisible should be false
-				require.NotNil(t, testIndex.Invisible)
-				require.False(t, *testIndex.Invisible)
+				// Last option should win (VISIBLE), which is the default and
+				// is not recorded (indexDefaultsNormalizer).
+				require.Nil(t, testIndex.Invisible)
 			},
 		},
 
@@ -924,7 +923,7 @@ func TestComprehensiveParsingFromTiDBTestSuite(t *testing.T) {
 		},
 		{
 			Name:        "Index with USING HASH",
-			SQL:         "CREATE TABLE t (id INT, INDEX idx (id) USING HASH);",
+			SQL:         "CREATE TABLE t (id INT, INDEX idx (id) USING HASH) ENGINE=MEMORY;",
 			ShouldParse: true,
 			Validate: func(t *testing.T, createTable *CreateTable) {
 				indexes := createTable.GetIndexes()
@@ -945,7 +944,7 @@ func TestComprehensiveParsingFromTiDBTestSuite(t *testing.T) {
 		},
 		{
 			Name:        "Index with USING HASH and INVISIBLE",
-			SQL:         "CREATE TABLE t (id INT, INDEX idx (id) USING HASH INVISIBLE);",
+			SQL:         "CREATE TABLE t (id INT, INDEX idx (id) USING HASH INVISIBLE) ENGINE=MEMORY;",
 			ShouldParse: true,
 			Validate: func(t *testing.T, createTable *CreateTable) {
 				indexes := createTable.GetIndexes()
@@ -993,7 +992,7 @@ func TestComprehensiveParsingFromTiDBTestSuite(t *testing.T) {
 		// Key block size tests
 		{
 			Name:        "Index with KEY_BLOCK_SIZE",
-			SQL:         "CREATE TABLE t (id INT, INDEX idx (id) KEY_BLOCK_SIZE = 16);",
+			SQL:         "CREATE TABLE t (id INT, INDEX idx (id) KEY_BLOCK_SIZE = 16) ROW_FORMAT=COMPRESSED;",
 			ShouldParse: true,
 			Validate: func(t *testing.T, createTable *CreateTable) {
 				indexes := createTable.GetIndexes()
@@ -1039,7 +1038,7 @@ func TestComprehensiveParsingFromTiDBTestSuite(t *testing.T) {
 		// Complex multi-option index tests
 		{
 			Name:        "UNIQUE index with multiple options",
-			SQL:         "CREATE TABLE t (email VARCHAR(255), UNIQUE KEY uk_email (email) USING BTREE COMMENT 'Unique email' KEY_BLOCK_SIZE = 8 INVISIBLE);",
+			SQL:         "CREATE TABLE t (email VARCHAR(255), UNIQUE KEY uk_email (email) USING BTREE COMMENT 'Unique email' KEY_BLOCK_SIZE = 8 INVISIBLE) ROW_FORMAT=COMPRESSED;",
 			ShouldParse: true,
 			Validate: func(t *testing.T, createTable *CreateTable) {
 				indexes := createTable.GetIndexes()
@@ -1165,7 +1164,7 @@ func TestComprehensiveParsingFromTiDBTestSuite(t *testing.T) {
 				INDEX idx_activity_type (activity_type) INVISIBLE COMMENT 'Activity type lookup',
 				UNIQUE KEY uk_user_timestamp (user_id, timestamp) USING BTREE KEY_BLOCK_SIZE = 16 INVISIBLE,
 				FULLTEXT idx_data (data) WITH PARSER ngram COMMENT 'JSON search'
-			) ENGINE=InnoDB CHARSET=utf8mb4 COMMENT='User activity tracking';`,
+			) ENGINE=InnoDB CHARSET=utf8mb4 ROW_FORMAT=COMPRESSED COMMENT='User activity tracking';`,
 			ShouldParse: true,
 			Validate: func(t *testing.T, ct *CreateTable) {
 				// Validate table

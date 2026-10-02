@@ -276,8 +276,8 @@ func TestDiff(t *testing.T) {
 			// KEY_BLOCK_SIZE on an unchanged column list is an option-only
 			// change; emit it as two separate statements (see AddFulltextParser).
 			name:   "AddIndexKeyBlockSize",
-			source: "CREATE TABLE t1 (id INT PRIMARY KEY, b VARCHAR(100), KEY idx_b (b))",
-			target: "CREATE TABLE t1 (id INT PRIMARY KEY, b VARCHAR(100), KEY idx_b (b) KEY_BLOCK_SIZE=8)",
+			source: "CREATE TABLE t1 (id INT PRIMARY KEY, b VARCHAR(100), KEY idx_b (b)) ROW_FORMAT=COMPRESSED",
+			target: "CREATE TABLE t1 (id INT PRIMARY KEY, b VARCHAR(100), KEY idx_b (b) KEY_BLOCK_SIZE=8) ROW_FORMAT=COMPRESSED",
 			expectedStatements: []string{
 				"ALTER TABLE `t1` DROP INDEX `idx_b`",
 				"ALTER TABLE `t1` ADD INDEX `idx_b` (`b`) KEY_BLOCK_SIZE=8",
@@ -285,8 +285,8 @@ func TestDiff(t *testing.T) {
 		},
 		{
 			name:   "RemoveIndexKeyBlockSize",
-			source: "CREATE TABLE t1 (id INT PRIMARY KEY, b VARCHAR(100), KEY idx_b (b) KEY_BLOCK_SIZE=8)",
-			target: "CREATE TABLE t1 (id INT PRIMARY KEY, b VARCHAR(100), KEY idx_b (b))",
+			source: "CREATE TABLE t1 (id INT PRIMARY KEY, b VARCHAR(100), KEY idx_b (b) KEY_BLOCK_SIZE=8) ROW_FORMAT=COMPRESSED",
+			target: "CREATE TABLE t1 (id INT PRIMARY KEY, b VARCHAR(100), KEY idx_b (b)) ROW_FORMAT=COMPRESSED",
 			expectedStatements: []string{
 				"ALTER TABLE `t1` DROP INDEX `idx_b`",
 				"ALTER TABLE `t1` ADD INDEX `idx_b` (`b`)",
@@ -294,7 +294,16 @@ func TestDiff(t *testing.T) {
 		},
 		{
 			name:     "IndexKeyBlockSizeNoChange",
-			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, b VARCHAR(100), KEY idx_b (b) KEY_BLOCK_SIZE=8)",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, b VARCHAR(100), KEY idx_b (b) KEY_BLOCK_SIZE=8) ROW_FORMAT=COMPRESSED",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, b VARCHAR(100), KEY idx_b (b) KEY_BLOCK_SIZE=8) ROW_FORMAT=COMPRESSED",
+			expected: "",
+		},
+		{
+			// InnoDB drops an index KEY_BLOCK_SIZE on an uncompressed table,
+			// so it is not a change there (indexDefaultsNormalizer). The diff
+			// used to rebuild the index on every run.
+			name:     "IndexKeyBlockSizeIgnoredOnUncompressedTable",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, b VARCHAR(100), KEY idx_b (b))",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, b VARCHAR(100), KEY idx_b (b) KEY_BLOCK_SIZE=8)",
 			expected: "",
 		},
@@ -302,8 +311,8 @@ func TestDiff(t *testing.T) {
 			// An index rebuilt for an unrelated reason (here: a column list
 			// change) must preserve KEY_BLOCK_SIZE in the re-add.
 			name:     "IndexRebuildPreservesKeyBlockSize",
-			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, KEY idx_ab (a) KEY_BLOCK_SIZE=8)",
-			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, KEY idx_ab (a, b) KEY_BLOCK_SIZE=8)",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, KEY idx_ab (a) KEY_BLOCK_SIZE=8) ROW_FORMAT=COMPRESSED",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, KEY idx_ab (a, b) KEY_BLOCK_SIZE=8) ROW_FORMAT=COMPRESSED",
 			expected: "ALTER TABLE `t1` DROP INDEX `idx_ab`, ADD INDEX `idx_ab` (`a`, `b`) KEY_BLOCK_SIZE=8",
 		},
 		{
@@ -510,10 +519,39 @@ func TestDiff(t *testing.T) {
 			expected: "ALTER TABLE `t1` ALTER INDEX `idx_name` VISIBLE",
 		},
 		{
-			name:     "ModifyIndexType",
+			// InnoDB has no hash indexes: USING HASH builds a B-tree and is
+			// not reported, so it is not a change (indexDefaultsNormalizer).
+			name:     "UsingHashIsNoChangeOnInnoDB",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, name VARCHAR(100), INDEX idx_name (name))",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, name VARCHAR(100), INDEX idx_name (name) USING HASH)",
+			expected: "",
+		},
+		{
+			name:     "ModifyIndexTypeBtree",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, name VARCHAR(100), INDEX idx_name (name))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, name VARCHAR(100), INDEX idx_name (name) USING BTREE)",
+			expected: "ALTER TABLE `t1` DROP INDEX `idx_name`, ADD INDEX `idx_name` (`name`) USING BTREE",
+		},
+		{
+			name:     "ModifyIndexTypeHashOnMemoryEngine",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, name VARCHAR(100), INDEX idx_name (name)) ENGINE=MEMORY",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, name VARCHAR(100), INDEX idx_name (name) USING HASH) ENGINE=MEMORY",
 			expected: "ALTER TABLE `t1` DROP INDEX `idx_name`, ADD INDEX `idx_name` (`name`) USING HASH",
+		},
+		{
+			// VISIBLE is the default and is never reported, on a secondary
+			// index or on the primary key (where the ALTER INDEX used to be
+			// emitted with an empty name).
+			name:     "ExplicitVisibleIndexNoChange",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, name VARCHAR(100), INDEX idx_name (name))",
+			target:   "CREATE TABLE t1 (id INT, name VARCHAR(100), PRIMARY KEY (id) VISIBLE, INDEX idx_name (name) VISIBLE)",
+			expected: "",
+		},
+		{
+			name:     "ExplicitVisibleTargetRestoresVisibility",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, name VARCHAR(100), INDEX idx_name (name) INVISIBLE)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, name VARCHAR(100), INDEX idx_name (name) VISIBLE)",
+			expected: "ALTER TABLE `t1` ALTER INDEX `idx_name` VISIBLE",
 		},
 		{
 			name:     "AddIndexWithComment",
