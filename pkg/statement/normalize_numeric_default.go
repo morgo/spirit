@@ -363,8 +363,11 @@ func realDefaultText(c *Column, float bool) (string, bool) {
 		return "", false
 	}
 	if c.Scale != nil && c.Precision != nil {
-		// Field_real::truncate: the fraction is rounded to D places in double
-		// arithmetic, and the result must fit M-D integer digits.
+		// Field_real::truncate: floor(x) + rint(frac * 10^D) / 10^D in double
+		// arithmetic, and the result must fit M-D integer digits. The floor
+		// is MySQL's, not a truncation toward zero: -1e-17 at D=20 stores as
+		// 0 and -0.0005 at D=3 as 0.000, while -2.0005 is -2.001 (verified
+		// on MySQL 8.0; see TestNumericDefaultConverges).
 		dec := *c.Scale
 		pow := math.Pow10(dec)
 		limit := math.Pow10(*c.Precision-dec) - 1/pow

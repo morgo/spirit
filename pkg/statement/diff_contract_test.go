@@ -579,6 +579,31 @@ func TestDiffMySQLContracts(t *testing.T) {
 			wantNoop: true,
 		},
 		{
+			// MySQL rounds a scaled real default as floor(x) + rint(frac·10^D)/10^D
+			// (Field_real::truncate), not toward zero: -1e-17 at D=20 stores
+			// as 0 and -0.0005 at D=3 as 0.000, while -0.0006 is -0.001 and
+			// -2.0005 is -2.001. A model that truncated the fraction would
+			// never converge on the first two.
+			name:   "scaled double default below the scale converges on zero",
+			source: "(id INT PRIMARY KEY, c DOUBLE(30,20))",
+			target: "(id INT PRIMARY KEY, c DOUBLE(30,20) DEFAULT -1e-17)",
+		},
+		{
+			name:   "scaled double negative half default converges on zero",
+			source: "(id INT PRIMARY KEY, c DOUBLE(10,3))",
+			target: "(id INT PRIMARY KEY, c DOUBLE(10,3) DEFAULT -0.0005)",
+		},
+		{
+			name:   "scaled double negative default past half converges",
+			source: "(id INT PRIMARY KEY, c DOUBLE(10,3))",
+			target: "(id INT PRIMARY KEY, c DOUBLE(10,3) DEFAULT -0.0006)",
+		},
+		{
+			name:   "scaled double negative default above one converges",
+			source: "(id INT PRIMARY KEY, c DOUBLE(10,3))",
+			target: "(id INT PRIMARY KEY, c DOUBLE(10,3) DEFAULT -2.0005)",
+		},
+		{
 			name:   "double default from an exponent converges",
 			source: "(id INT PRIMARY KEY, c DOUBLE)",
 			target: "(id INT PRIMARY KEY, c DOUBLE DEFAULT 1e2)",

@@ -327,6 +327,20 @@ func TestNumericDefaultConverges(t *testing.T) {
 		{"double 17 digits", "(a double DEFAULT 123456789012345678)", "(`a` double DEFAULT '1.2345678901234568e17')"},
 		{"double from hex", "(a double DEFAULT 0x1A)", "(`a` double DEFAULT '26')"},
 		{"double with a scale", "(a double(10,3) DEFAULT 2.0005)", "(`a` double(10,3) DEFAULT '2.001')"},
+		// MySQL rounds a scaled real as floor(x) + rint(frac * 10^D) / 10^D
+		// (Field_real::truncate), so a negative value is not truncated toward
+		// zero: -1e-17 at D=20 stores as 0, -0.0005 at D=3 as 0.000, and
+		// -2.0005 as -2.001. Each live form is MySQL 8.0's SHOW CREATE TABLE.
+		{"double with a scale negative", "(a double(10,3) DEFAULT -2.0005)", "(`a` double(10,3) DEFAULT '-2.001')"},
+		{"double with a scale negative half to even", "(a double(10,3) DEFAULT -1.0005)", "(`a` double(10,3) DEFAULT '-1.000')"},
+		{"double with a scale negative half to zero", "(a double(10,3) DEFAULT -0.0005)", "(`a` double(10,3) DEFAULT '0.000')"},
+		{"double with a scale negative past half", "(a double(10,3) DEFAULT -0.0006)", "(`a` double(10,3) DEFAULT '-0.001')"},
+		{"double with a scale negative exponent", "(a double(10,3) DEFAULT -2.5e-3)", "(`a` double(10,3) DEFAULT '-0.002')"},
+		{"double with a scale negative even half", "(a double(5,2) DEFAULT -0.125)", "(`a` double(5,2) DEFAULT '-0.12')"},
+		{"double with a scale negative odd half", "(a double(5,2) DEFAULT -0.135)", "(`a` double(5,2) DEFAULT '-0.14')"},
+		{"double with a scale negative below the scale", "(a double(30,20) DEFAULT -1e-17)", "(`a` double(30,20) DEFAULT '0.00000000000000000000')"},
+		{"double with a scale negative half below the scale", "(a double(30,20) DEFAULT -0.5e-17)", "(`a` double(30,20) DEFAULT '0.00000000000000000000')"},
+		{"float with a scale negative", "(a float(10,4) DEFAULT -1.23456789)", "(`a` float(10,4) DEFAULT '-1.2346')"},
 		{"float rounded to 6 digits", "(a float DEFAULT 1.23456789)", "(`a` float DEFAULT '1.23457')"},
 		{"float integer", "(a float DEFAULT 1234567)", "(`a` float DEFAULT '1234570')"},
 		{"float denormal", "(a float DEFAULT 1e-45)", "(`a` float DEFAULT '1.4013e-45')"},
