@@ -343,6 +343,44 @@ func TestDiff(t *testing.T) {
 			expected: "ALTER TABLE `t1` MODIFY COLUMN `c` time NULL DEFAULT '01:03:00'",
 		},
 		{
+			// MySQL stores an expression default in its own parenthesization
+			// and without unary pluses, like every other stored expression.
+			name:     "ExpressionDefaultNegatedLiteral",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT DEFAULT (-(1)))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT DEFAULT (-1))",
+			expected: "",
+		},
+		{
+			name:     "ExpressionDefaultUnaryPlus",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT DEFAULT (1))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT DEFAULT (+1))",
+			expected: "",
+		},
+		{
+			name:     "ExpressionDefaultNegatedArgument",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT DEFAULT (abs(-(1))))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT DEFAULT (abs(-1)))",
+			expected: "",
+		},
+		{
+			name:     "ExpressionDefaultChanged",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT DEFAULT (-(1)))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT DEFAULT (-2))",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `c` int NULL DEFAULT (-2)",
+		},
+		{
+			name:     "CheckUnaryPlus",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, CONSTRAINT chk CHECK ((`c` > 1)))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, CONSTRAINT chk CHECK (c > +1))",
+			expected: "",
+		},
+		{
+			name:     "GeneratedUnaryPlus",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, g INT GENERATED ALWAYS AS ((`c` + 1)) VIRTUAL)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, g INT GENERATED ALWAYS AS (+c + +1) VIRTUAL)",
+			expected: "",
+		},
+		{
 			// MySQL reports a functional index key part wrapped in its own
 			// parentheses, KEY k (((`c` + 1))); the authored KEY k ((c+1)) is
 			// the same index.

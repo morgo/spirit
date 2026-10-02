@@ -604,6 +604,65 @@ func TestDiffMySQLContracts(t *testing.T) {
 			target:   "(id INT PRIMARY KEY, c TIME DEFAULT '-0:00:00.4')",
 			wantNoop: true,
 		},
+		// Expression defaults and unary plus (expressionParenNormalizer): MySQL
+		// stores an expression in its own parenthesization and drops every
+		// unary plus when it parses it.
+		{
+			name:   "expression default with a negated literal converges",
+			source: "(id INT PRIMARY KEY, c INT)",
+			target: "(id INT PRIMARY KEY, c INT DEFAULT (-1))",
+		},
+		{
+			name:   "expression default changed",
+			source: "(id INT PRIMARY KEY, c INT DEFAULT (-1))",
+			target: "(id INT PRIMARY KEY, c INT DEFAULT (-2))",
+		},
+		{
+			name:     "expression default negated as MySQL spells it is a no-op",
+			source:   "(id INT PRIMARY KEY, c INT DEFAULT (-(1)))",
+			target:   "(id INT PRIMARY KEY, c INT DEFAULT (-1))",
+			wantNoop: true,
+		},
+		{
+			name:   "expression default with a unary plus converges",
+			source: "(id INT PRIMARY KEY, c INT)",
+			target: "(id INT PRIMARY KEY, c INT DEFAULT (+1))",
+		},
+		{
+			name:   "expression default with a negated argument converges",
+			source: "(id INT PRIMARY KEY, c INT)",
+			target: "(id INT PRIMARY KEY, c INT DEFAULT (abs(-1)))",
+		},
+		{
+			name:   "expression default with a negated call converges",
+			source: "(id INT PRIMARY KEY, c DOUBLE)",
+			target: "(id INT PRIMARY KEY, c DOUBLE DEFAULT (-pi()))",
+		},
+		{
+			name:   "expression default with a negated string converges",
+			source: "(id INT PRIMARY KEY, c INT)",
+			target: "(id INT PRIMARY KEY, c INT DEFAULT (-'1'))",
+		},
+		{
+			name:   "expression default with a unary plus on a string converges",
+			source: "(id INT PRIMARY KEY, c VARCHAR(10))",
+			target: "(id INT PRIMARY KEY, c VARCHAR(10) DEFAULT (+'1'))",
+		},
+		{
+			name:   "expression default with a negated product converges",
+			source: "(id INT PRIMARY KEY, c INT)",
+			target: "(id INT PRIMARY KEY, c INT DEFAULT (2 * -1))",
+		},
+		{
+			name:   "check constraint with a unary plus converges",
+			source: "(id INT PRIMARY KEY, c INT)",
+			target: "(id INT PRIMARY KEY, c INT, CONSTRAINT chk CHECK (c > +1))",
+		},
+		{
+			name:   "generated column with a unary plus converges",
+			source: "(id INT PRIMARY KEY, c INT)",
+			target: "(id INT PRIMARY KEY, c INT, g INT GENERATED ALWAYS AS (+c + +1) VIRTUAL)",
+		},
 	}
 	for _, c := range contracts {
 		t.Run(c.name, func(t *testing.T) {

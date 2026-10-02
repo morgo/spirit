@@ -92,6 +92,14 @@ func unwrapParenExpr(expr ast.ExprNode) ast.ExprNode {
 // the bare keyword inside the parentheses — DEFAULT (now) — would not even
 // parse, since a bare `now` there is a column reference.
 func restoreValueExprText(expr ast.ExprNode, bareTimestampKeyword bool) any {
+	return restoreValueExprTextWith(expr, bareTimestampKeyword, 0)
+}
+
+// restoreValueExprTextWith is restoreValueExprText with extra restore flags
+// added to whichever flag set the expression's shape selects, so that a
+// normalization rule can render in the shape's own form plus, say,
+// RestoreSkipRedundantParentheses.
+func restoreValueExprTextWith(expr ast.ExprNode, bareTimestampKeyword bool, extra format.RestoreFlags) any {
 	if expr == nil {
 		return nil
 	}
@@ -111,7 +119,7 @@ func restoreValueExprText(expr ast.ExprNode, bareTimestampKeyword bool) any {
 		// different default value and making defaults that differ only in
 		// literal case compare equal.
 		restored, ok := restoreExprText(e, format.RestoreStringSingleQuotes|format.RestoreKeyWordLowercase|
-			format.RestoreNameBackQuotes)
+			format.RestoreNameBackQuotes|extra)
 		if !ok {
 			return e.FnName.L // fallback to function name on error
 		}
@@ -131,7 +139,7 @@ func restoreValueExprText(expr ast.ExprNode, bareTimestampKeyword bool) any {
 		// introducer, so every introducer is dropped from it. Inside an
 		// expression default the introducer stays meaningful and is handled
 		// by restoreExprText.
-		flags := format.DefaultRestoreFlags
+		flags := format.DefaultRestoreFlags | extra
 		if bareTimestampKeyword {
 			flags |= format.RestoreStringWithoutCharset
 		}
