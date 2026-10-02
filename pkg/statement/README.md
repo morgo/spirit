@@ -671,6 +671,9 @@ if alterStmt != "" {
 3. **SPATIAL Indexes**: Not fully supported in some helper functions
 4. **Statements must be parseable by pkg/parser**: unparseable DDL cannot be migrated. The most commonly occurring scenarios tend to be complex DEFAULT or CHECK expressions; since the parser is part of this repo, fixes land here directly.
 
+5. **FLOAT default precision:** `SHOW CREATE TABLE` and `INFORMATION_SCHEMA.COLUMNS.COLUMN_DEFAULT` print unscaled `FLOAT` defaults with only six significant digits. Distinct stored values can therefore have identical metadata. Comparing the declared literal exactly prevents additional rounding, but cannot recover precision already lost by the server: a live default of `1234567` reports `1234570`, so a desired default of `1234570` can still produce no diff. Apply that default change explicitly when exact values matter.
+6. **Implicit foreign-key indexes:** when writing a desired schema by hand, declare each foreign key's supporting index explicitly. Otherwise a later diff can try to drop the implicit index shown by MySQL, and MySQL refuses the drop while the foreign key needs it.
+
 ## Best Practices
 
 1. **Use SHOW CREATE TABLE**: Always parse the output of `SHOW CREATE TABLE` rather than user-provided CREATE statements. We refer to this in some places as "the canonical show create table".

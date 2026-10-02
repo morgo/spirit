@@ -52,7 +52,11 @@ func init() { registerNormalizer(numericDefaultNormalizer{}) }
 // significant digits (utils.FormatMySQLFloat) and is lossy: 1234567 and
 // 1234568 are different floats that both report as '1234570', so a reading
 // taken from that text would make a schema that changes DEFAULT 1234567 to
-// 1234568 diff empty. Reading the exact value keeps every two floats apart.
+// 1234568 diff empty. Reading the exact value keeps distinct declared floats apart. A live
+// SHOW CREATE TABLE value has already lost precision: a stored 1234567
+// and a declared 1234570 still compare equal because the source reports
+// 1234570. An offline diff cannot recover the original default from that
+// metadata.
 // The price is that a float literal whose six-digit text does not read back
 // as the same float never converges: the live '1234570' reads as 1234570 and
 // the declared 1234567 as 1234567, so the diff emits the MODIFY (with the

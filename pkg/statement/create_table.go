@@ -1802,13 +1802,28 @@ func (ct *CreateTable) Diff(target *CreateTable, opts *DiffOptions) ([]*Abstract
 		slices.Sort(drops)
 		preStatements = append(preStatements, drops)
 	}
-	indexClauses, separateIndexStatements := ct.diffIndexes(target, rebuilt, spatialDrops)
+	// A foreign key can create an implicit index in the primary ALTER.
+	// Share reservations between both planners so later index swaps avoid
+	// those indexes, including ones named after a replacement foreign key.
+	takenNames := make(map[string]bool)
+	for _, schema := range []*CreateTable{ct, target} {
+		for _, idx := range schema.GetIndexes() {
+			takenNames[strings.ToLower(idx.Name)] = true
+		}
+		for _, constraint := range schema.Constraints {
+			takenNames[strings.ToLower(constraint.Name)] = true
+			if constraint.Type == "FOREIGN KEY" && constraint.Name == "" && len(constraint.Columns) > 0 {
+				takenNames[strings.ToLower(constraint.Columns[0])] = true
+			}
+		}
+	}
+	indexClauses, separateIndexStatements := ct.diffIndexes(target, rebuilt, spatialDrops, takenNames)
 	alterClauses = append(alterClauses, indexClauses...)
 
 	// 3. Diff constraints (DROP, ADD). A foreign key added back under a name
 	// the same diff drops takes a replacement name, because MySQL rejects the
 	// same-name DROP and ADD in one ALTER (error 1826).
-	constraintClauses := ct.diffConstraints(target, rebuilt)
+	constraintClauses := ct.diffConstraints(target, rebuilt, takenNames)
 	alterClauses = append(alterClauses, constraintClauses...)
 
 	// 4. Diff table options
@@ -2346,7 +2361,7 @@ func (ct *CreateTable) spatialIndexesBlockingSRIDChange(target *CreateTable) map
 // droppedBefore names the source indexes a statement before this ALTER has
 // already dropped (see spatialIndexesBlockingSRIDChange). They are diffed as
 // absent from the source: a same-named target index is a plain ADD.
-func (ct *CreateTable) diffIndexes(target *CreateTable, rebuilt, droppedBefore map[string]bool) (clauses []string, separateStatements [][]string) {
+func (ct *CreateTable) diffIndexes(target *CreateTable, rebuilt, droppedBefore, takenNames map[string]bool) (clauses []string, separateStatements [][]string) {
 	// Inline column-level UNIQUE / PRIMARY KEY have already been materialized
 	// into ct.Indexes by normalization (see indexNormalizer, primaryKeyNormalizer),
 	// so both index sets can be walked directly. The lists are copied because
@@ -2415,23 +2430,16 @@ func (ct *CreateTable) diffIndexes(target *CreateTable, rebuilt, droppedBefore m
 	// per ALTER, error 1795). Adding before dropping is what gets the swap
 	// through where a standalone DROP INDEX is refused: the only index on an
 	// AUTO_INCREMENT column (error 1075) or the index a foreign key depends
-	// on (error 1553). The temporary name avoids every index name on either
-	// side, compared case-insensitively as MySQL does. A run that stops
+	// on (error 1553). The temporary name avoids every reserved index and
+	// constraint name, compared case-insensitively as MySQL does. A run that stops
 	// between the statements leaves the index under the temporary name; the
 	// next diff drops that one and adds the target's.
-	takenIndexNames := make(map[string]bool, len(sourceIdxList)+len(targetIdxList))
-	for _, idx := range sourceIdxList {
-		takenIndexNames[strings.ToLower(idx.Name)] = true
-	}
-	for _, idx := range targetIdxList {
-		takenIndexNames[strings.ToLower(idx.Name)] = true
-	}
 	var swapClauses []string     // every swap but a FULLTEXT one: one statement
 	var fulltextSwaps [][]string // one statement per FULLTEXT swap
 	var renames []string
 	swap := func(sourceIdx, targetIdx *Index) {
 		replaced[sourceIdx.Name] = true
-		tmp := replacementName(sourceIdx.Name, takenIndexNames)
+		tmp := replacementName(sourceIdx.Name, takenNames)
 		replacement := *targetIdx
 		replacement.Name = tmp
 		pair := []string{
@@ -2626,7 +2634,7 @@ func replacementName(name string, taken map[string]bool) string {
 // it creates for a foreign key after the constraint when the columns have
 // none); a collision with a foreign key of another table in the schema fails
 // the ALTER with error 1826, and nothing has changed.
-func (ct *CreateTable) diffConstraints(target *CreateTable, rebuilt map[string]bool) (clauses []string) {
+func (ct *CreateTable) diffConstraints(target *CreateTable, rebuilt, takenNames map[string]bool) (clauses []string) {
 
 	var p *parser.Parser
 	readsRebuilt := func(c *Constraint) bool {
@@ -2645,27 +2653,6 @@ func (ct *CreateTable) diffConstraints(target *CreateTable, rebuilt map[string]b
 	// diff drops; a target foreign key under one of them is added under a
 	// replacement name (see above).
 	droppedForeignKeys := make(map[string]bool)
-	// takenNames are the lowercased constraint and index names on either
-	// side, which a replacement foreign key name must avoid.
-	var takenNames map[string]bool
-	replacementForeignKeyName := func(name string) string {
-		if takenNames == nil {
-			takenNames = make(map[string]bool)
-			for _, c := range ct.Constraints {
-				takenNames[strings.ToLower(c.Name)] = true
-			}
-			for _, c := range target.Constraints {
-				takenNames[strings.ToLower(c.Name)] = true
-			}
-			for _, idx := range ct.Indexes {
-				takenNames[strings.ToLower(idx.Name)] = true
-			}
-			for _, idx := range target.Indexes {
-				takenNames[strings.ToLower(idx.Name)] = true
-			}
-		}
-		return replacementName(name, takenNames)
-	}
 
 	// Build maps for easier lookup
 	sourceConstraints := make(map[string]*Constraint)
@@ -2773,7 +2760,7 @@ func (ct *CreateTable) diffConstraints(target *CreateTable, rebuilt map[string]b
 			}
 			if targetConstr.Type == "FOREIGN KEY" && droppedForeignKeys[strings.ToLower(targetConstr.Name)] {
 				replacement := targetConstr
-				replacement.Name = replacementForeignKeyName(targetConstr.Name)
+				replacement.Name = replacementName(targetConstr.Name, takenNames)
 				addClauses = append(addClauses, formatAddConstraint(&replacement))
 				continue
 			}
