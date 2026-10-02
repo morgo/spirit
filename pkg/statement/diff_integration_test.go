@@ -7,7 +7,8 @@ import (
 	"testing"
 	"unicode"
 
-	_ "github.com/block/mysql"
+	drivermysql "github.com/block/mysql"
+	"github.com/block/spirit/pkg/parser/mysql"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/stretchr/testify/assert"
@@ -429,10 +430,9 @@ func TestDiffIntegrationForeignKeyNoAction(t *testing.T) {
 }
 
 // TestDiffIntegrationForeignKeySameNameReadd verifies against MySQL that a
-// foreign key whose definition changes under the same name is applied as a
-// DROP in the primary ALTER and an ADD in a statement of its own. MySQL
-// rejects the pair in one ALTER (error 1826, "Duplicate foreign key constraint
-// name"), which is what Spirit used to emit.
+// foreign key whose definition changes under the same name is replaced in
+// one ALTER under a fresh name. MySQL rejects the same-name pair in one ALTER
+// (error 1826, "Duplicate foreign key constraint name").
 func TestDiffIntegrationForeignKeySameNameReadd(t *testing.T) {
 	_ = testutils.NewTestTable(t, "diff_fkrd_parent",
 		"CREATE TABLE diff_fkrd_parent (id int primary key)")
@@ -460,7 +460,11 @@ func TestDiffIntegrationForeignKeySameNameReadd(t *testing.T) {
 		t.Helper()
 		_, err := tt.DB.ExecContext(t.Context(), orphan)
 		require.Error(t, err, "the child table must stay constrained")
-		require.Contains(t, err.Error(), "Error 1452")
+		var mysqlErr *drivermysql.MySQLError
+		require.ErrorAs(t, err, &mysqlErr)
+		// MySQL can report either the generic or detailed foreign-key
+		// violation. Both prove the orphan was refused by the constraint.
+		require.Contains(t, []uint16{mysql.ErrNoReferencedRow, mysql.ErrNoReferencedRow2}, mysqlErr.Number)
 	}
 	requireOrphanRefused()
 	execStatements(t, tt.DB, stmts)
