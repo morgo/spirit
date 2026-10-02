@@ -1,10 +1,11 @@
 package statement
 
 import (
-	"encoding/json"
 	"reflect"
 	"slices"
 	"strings"
+
+	"github.com/block/spirit/pkg/utils"
 )
 
 // This file holds the comparison helpers used by Diff to decide whether two
@@ -48,10 +49,13 @@ func columnExtendedAttributesEqual(a, b *Column) bool {
 
 // engineAttributeEqual compares two SECONDARY_ENGINE_ATTRIBUTE values. MySQL
 // stores the attribute as a JSON document and reports it re-serialized — keys
-// reordered, a space after every colon and comma — so the text a user wrote
-// rarely matches SHOW CREATE TABLE byte for byte. Two values are equal when
-// they are the same JSON document. A value that is not valid JSON (MySQL
-// rejects it, but the parser does not) is compared as text.
+// reordered, a space after every colon and comma, 1e2 as 100.0 — so the text
+// a user wrote rarely matches SHOW CREATE TABLE byte for byte. Two values are
+// equal when they are the same JSON document, with numbers compared as MySQL
+// stores them (utils.JSONEqual): an integer exactly, so a change from
+// 9007199254740992 to 9007199254740993, which MySQL stores and reports, is a
+// change here too, rather than two equal float64s. A value that is not valid
+// JSON (MySQL rejects it, but the parser does not) is compared as text.
 func engineAttributeEqual(a, b *string) bool {
 	if a == nil || b == nil {
 		return a == nil && b == nil
@@ -59,11 +63,8 @@ func engineAttributeEqual(a, b *string) bool {
 	if *a == *b {
 		return true
 	}
-	var docA, docB any
-	if json.Unmarshal([]byte(*a), &docA) != nil || json.Unmarshal([]byte(*b), &docB) != nil {
-		return false
-	}
-	return reflect.DeepEqual(docA, docB)
+	equal, valid := utils.JSONEqual(*a, *b)
+	return valid && equal
 }
 
 // indexesEqual checks if two indexes are equal

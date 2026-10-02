@@ -554,6 +554,30 @@ func TestDiffMySQLContracts(t *testing.T) {
 			target:   "(id INT PRIMARY KEY, c INT UNSIGNED DEFAULT '-0.4')",
 			wantNoop: true,
 		},
+		// SECONDARY_ENGINE_ATTRIBUTE compared as JSON with MySQL's number
+		// model: integers exact, so a change past 2^53 is a change; 1e2 and
+		// 100.0 one value; an integer past uint64 the double MySQL stores.
+		{
+			name:   "index attribute changing a large integer converges",
+			source: `(id INT PRIMARY KEY, c INT, KEY k (c) SECONDARY_ENGINE_ATTRIBUTE='{"x":9007199254740992}')`,
+			target: `(id INT PRIMARY KEY, c INT, KEY k (c) SECONDARY_ENGINE_ATTRIBUTE='{"x":9007199254740993}')`,
+		},
+		{
+			name:   "column attribute changing a large integer converges",
+			source: `(id INT PRIMARY KEY, c INT SECONDARY_ENGINE_ATTRIBUTE='{"x":9007199254740992}')`,
+			target: `(id INT PRIMARY KEY, c INT SECONDARY_ENGINE_ATTRIBUTE='{"x":9007199254740993}')`,
+		},
+		{
+			name:   "table attribute changing a large integer converges",
+			source: `(id INT PRIMARY KEY) SECONDARY_ENGINE_ATTRIBUTE='{"x":9007199254740992}'`,
+			target: `(id INT PRIMARY KEY) SECONDARY_ENGINE_ATTRIBUTE='{"x":9007199254740993}'`,
+		},
+		{
+			name:     "attribute number forms MySQL re-serializes are a no-op",
+			source:   `(id INT PRIMARY KEY, c INT SECONDARY_ENGINE_ATTRIBUTE='{"z":1e2,"y":1.0,"w":12345678901234567890123}')`,
+			target:   `(id INT PRIMARY KEY, c INT SECONDARY_ENGINE_ATTRIBUTE='{"w": 1.2345678901234568e22, "y": 1.0, "z": 100.0}')`,
+			wantNoop: true,
+		},
 		{
 			name:   "double default from an exponent converges",
 			source: "(id INT PRIMARY KEY, c DOUBLE)",

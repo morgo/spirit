@@ -1136,6 +1136,30 @@ func TestDiff(t *testing.T) {
 			expected: "",
 		},
 		{
+			// MySQL stores a JSON integer exactly and reports the change;
+			// comparing through float64 folded everything past 2^53 together.
+			name:     "SecondaryEngineAttributeLargeIntegerDiffers",
+			source:   `CREATE TABLE t1 (id INT PRIMARY KEY, c INT SECONDARY_ENGINE_ATTRIBUTE='{"x":9007199254740992}')`,
+			target:   `CREATE TABLE t1 (id INT PRIMARY KEY, c INT SECONDARY_ENGINE_ATTRIBUTE='{"x":9007199254740993}')`,
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `c` int NULL SECONDARY_ENGINE_ATTRIBUTE='{\\\"x\\\":9007199254740993}'",
+		},
+		{
+			name:   "IndexSecondaryEngineAttributeLargeIntegerDiffers",
+			source: `CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k (c) SECONDARY_ENGINE_ATTRIBUTE='{"x":9007199254740992}')`,
+			target: `CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k (c) SECONDARY_ENGINE_ATTRIBUTE='{"x":9007199254740993}')`,
+			expectedStatements: []string{
+				"ALTER TABLE `t1` DROP INDEX `k`",
+				"ALTER TABLE `t1` ADD INDEX `k` (`c`) SECONDARY_ENGINE_ATTRIBUTE='{\\\"x\\\":9007199254740993}'",
+			},
+		},
+		{
+			// MySQL reports 1e2 as 100.0 and an integer past uint64 as a double.
+			name:     "SecondaryEngineAttributeNumberFormsNoDiff",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, `c` int DEFAULT NULL /*!80021 SECONDARY_ENGINE_ATTRIBUTE '{\"w\": 1.2345678901234568e22, \"y\": 1.0, \"z\": 100.0}' */)",
+			target:   `CREATE TABLE t1 (id INT PRIMARY KEY, c INT SECONDARY_ENGINE_ATTRIBUTE='{"z":1e2,"y":1,"w":12345678901234567890123}')`,
+			expected: "",
+		},
+		{
 			name:     "SecondaryEngineAttributeAdded",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT)",
 			target:   `CREATE TABLE t1 (id INT PRIMARY KEY, c INT SECONDARY_ENGINE_ATTRIBUTE='{"x":1}')`,
