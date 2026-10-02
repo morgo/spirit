@@ -578,6 +578,29 @@ func TestDiffMySQLContracts(t *testing.T) {
 			target:   `(id INT PRIMARY KEY, c INT SECONDARY_ENGINE_ATTRIBUTE='{"w": 1.2345678901234568e22, "y": 1.0, "z": 100.0}')`,
 			wantNoop: true,
 		},
+		// An index whose options alone change is replaced by a swap: the
+		// replacement is added under a temporary name and the old index
+		// dropped in one statement, then renamed back. The standalone DROP
+		// INDEX the two-statement plan used to start with is refused for the
+		// only index on an AUTO_INCREMENT column (error 1075) and for the
+		// index a foreign key depends on (error 1553).
+		{
+			name:   "option change on the only index of an AUTO_INCREMENT column",
+			source: "(id INT AUTO_INCREMENT, x INT PRIMARY KEY, UNIQUE KEY k (id))",
+			target: `(id INT AUTO_INCREMENT, x INT PRIMARY KEY, UNIQUE KEY k (id) SECONDARY_ENGINE_ATTRIBUTE='{"x":1}')`,
+		},
+		{
+			name:   "option change on the index a foreign key depends on",
+			source: "(id INT PRIMARY KEY, p INT, KEY k (p), CONSTRAINT fk_p FOREIGN KEY (p) REFERENCES t (id)) ROW_FORMAT=COMPRESSED",
+			target: "(id INT PRIMARY KEY, p INT, KEY k (p) KEY_BLOCK_SIZE=4, CONSTRAINT fk_p FOREIGN KEY (p) REFERENCES t (id)) ROW_FORMAT=COMPRESSED",
+		},
+		{
+			// The replacement is appended after the existing indexes, as any
+			// re-created index is, so the swapped index is declared last.
+			name:   "option change next to an index under the temporary name",
+			source: "(id INT PRIMARY KEY, c INT, KEY _K_new (id), KEY k (c)) ROW_FORMAT=COMPRESSED",
+			target: "(id INT PRIMARY KEY, c INT, KEY _K_new (id), KEY k (c) KEY_BLOCK_SIZE=4) ROW_FORMAT=COMPRESSED",
+		},
 		{
 			// MySQL rounds a scaled real default as floor(x) + rint(frac·10^D)/10^D
 			// (Field_real::truncate), not toward zero: -1e-17 at D=20 stores

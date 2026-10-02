@@ -71,9 +71,9 @@ func TestDiffIntegrationFulltextParser(t *testing.T) {
 
 	stmts, err := source.Diff(target, nil)
 	require.NoError(t, err)
-	require.Len(t, stmts, 2, "option-only index change must be two separate statements")
-	require.Equal(t, "ALTER TABLE `diff_ft_parser` DROP INDEX `ft_b`", stmts[0].Statement)
-	require.Equal(t, "ALTER TABLE `diff_ft_parser` ADD FULLTEXT INDEX `ft_b` (`b`) WITH PARSER ngram", stmts[1].Statement)
+	require.Len(t, stmts, 2, "option-only index change must be a swap and a rename")
+	require.Equal(t, "ALTER TABLE `diff_ft_parser` ADD FULLTEXT INDEX `_ft_b_new` (`b`) WITH PARSER ngram, DROP INDEX `ft_b`", stmts[0].Statement)
+	require.Equal(t, "ALTER TABLE `diff_ft_parser` RENAME INDEX `_ft_b_new` TO `ft_b`", stmts[1].Statement)
 
 	// Execute the emitted statements exactly as the Runner would, and verify
 	// the parser change actually took effect — no extra manual ALTERs.
@@ -233,9 +233,9 @@ func TestDiffIntegrationKeyBlockSize(t *testing.T) {
 
 	stmts, err := source.Diff(target, nil)
 	require.NoError(t, err)
-	require.Len(t, stmts, 2, "option-only index change must be two separate statements")
-	require.Equal(t, "ALTER TABLE `diff_kbs` DROP INDEX `idx_b`", stmts[0].Statement)
-	require.Equal(t, "ALTER TABLE `diff_kbs` ADD INDEX `idx_b` (`b`) KEY_BLOCK_SIZE=8", stmts[1].Statement)
+	require.Len(t, stmts, 2, "option-only index change must be a swap and a rename")
+	require.Equal(t, "ALTER TABLE `diff_kbs` ADD INDEX `_idx_b_new` (`b`) KEY_BLOCK_SIZE=8, DROP INDEX `idx_b`", stmts[0].Statement)
+	require.Equal(t, "ALTER TABLE `diff_kbs` RENAME INDEX `_idx_b_new` TO `idx_b`", stmts[1].Statement)
 
 	// Execute the emitted statements exactly as the Runner would, and verify
 	// KEY_BLOCK_SIZE actually took effect — no extra manual ALTERs.

@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -576,13 +577,14 @@ func TestDiff(t *testing.T) {
 		{
 			// Adding WITH PARSER to an index with an unchanged column list is
 			// an option-only change. A combined DROP+ADD in a single ALTER is a
-			// MySQL no-op, so the diff must emit two separate statements.
+			// MySQL no-op, so the diff swaps the index for a replacement under
+			// a temporary name and renames it back in a final statement.
 			name:   "AddFulltextParser",
 			source: "CREATE TABLE t1 (id INT PRIMARY KEY, b TEXT, FULLTEXT KEY ft_b (b))",
 			target: "CREATE TABLE t1 (id INT PRIMARY KEY, b TEXT, FULLTEXT KEY ft_b (b) WITH PARSER ngram)",
 			expectedStatements: []string{
-				"ALTER TABLE `t1` DROP INDEX `ft_b`",
-				"ALTER TABLE `t1` ADD FULLTEXT INDEX `ft_b` (`b`) WITH PARSER ngram",
+				"ALTER TABLE `t1` ADD FULLTEXT INDEX `_ft_b_new` (`b`) WITH PARSER ngram, DROP INDEX `ft_b`",
+				"ALTER TABLE `t1` RENAME INDEX `_ft_b_new` TO `ft_b`",
 			},
 		},
 		{
@@ -590,8 +592,8 @@ func TestDiff(t *testing.T) {
 			source: "CREATE TABLE t1 (id INT PRIMARY KEY, b TEXT, FULLTEXT KEY ft_b (b) WITH PARSER ngram)",
 			target: "CREATE TABLE t1 (id INT PRIMARY KEY, b TEXT, FULLTEXT KEY ft_b (b))",
 			expectedStatements: []string{
-				"ALTER TABLE `t1` DROP INDEX `ft_b`",
-				"ALTER TABLE `t1` ADD FULLTEXT INDEX `ft_b` (`b`)",
+				"ALTER TABLE `t1` ADD FULLTEXT INDEX `_ft_b_new` (`b`), DROP INDEX `ft_b`",
+				"ALTER TABLE `t1` RENAME INDEX `_ft_b_new` TO `ft_b`",
 			},
 		},
 		{
@@ -610,13 +612,13 @@ func TestDiff(t *testing.T) {
 		},
 		{
 			// KEY_BLOCK_SIZE on an unchanged column list is an option-only
-			// change; emit it as two separate statements (see AddFulltextParser).
+			// change; it is swapped like AddFulltextParser.
 			name:   "AddIndexKeyBlockSize",
 			source: "CREATE TABLE t1 (id INT PRIMARY KEY, b VARCHAR(100), KEY idx_b (b)) ROW_FORMAT=COMPRESSED",
 			target: "CREATE TABLE t1 (id INT PRIMARY KEY, b VARCHAR(100), KEY idx_b (b) KEY_BLOCK_SIZE=8) ROW_FORMAT=COMPRESSED",
 			expectedStatements: []string{
-				"ALTER TABLE `t1` DROP INDEX `idx_b`",
-				"ALTER TABLE `t1` ADD INDEX `idx_b` (`b`) KEY_BLOCK_SIZE=8",
+				"ALTER TABLE `t1` ADD INDEX `_idx_b_new` (`b`) KEY_BLOCK_SIZE=8, DROP INDEX `idx_b`",
+				"ALTER TABLE `t1` RENAME INDEX `_idx_b_new` TO `idx_b`",
 			},
 		},
 		{
@@ -624,8 +626,31 @@ func TestDiff(t *testing.T) {
 			source: "CREATE TABLE t1 (id INT PRIMARY KEY, b VARCHAR(100), KEY idx_b (b) KEY_BLOCK_SIZE=8) ROW_FORMAT=COMPRESSED",
 			target: "CREATE TABLE t1 (id INT PRIMARY KEY, b VARCHAR(100), KEY idx_b (b)) ROW_FORMAT=COMPRESSED",
 			expectedStatements: []string{
-				"ALTER TABLE `t1` DROP INDEX `idx_b`",
-				"ALTER TABLE `t1` ADD INDEX `idx_b` (`b`)",
+				"ALTER TABLE `t1` ADD INDEX `_idx_b_new` (`b`), DROP INDEX `idx_b`",
+				"ALTER TABLE `t1` RENAME INDEX `_idx_b_new` TO `idx_b`",
+			},
+		},
+		{
+			// The replacement's temporary name avoids every index name on
+			// either side, compared case-insensitively as MySQL does (error
+			// 1061 otherwise).
+			name:   "OptionOnlyChangeNextToTheTemporaryName",
+			source: "CREATE TABLE t1 (id INT PRIMARY KEY, b VARCHAR(100), KEY idx_b (b), KEY _IDX_B_new (id)) ROW_FORMAT=COMPRESSED",
+			target: "CREATE TABLE t1 (id INT PRIMARY KEY, b VARCHAR(100), KEY idx_b (b) KEY_BLOCK_SIZE=8, KEY _IDX_B_new (id)) ROW_FORMAT=COMPRESSED",
+			expectedStatements: []string{
+				"ALTER TABLE `t1` ADD INDEX `_idx_b_new2` (`b`) KEY_BLOCK_SIZE=8, DROP INDEX `idx_b`",
+				"ALTER TABLE `t1` RENAME INDEX `_idx_b_new2` TO `idx_b`",
+			},
+		},
+		{
+			// Every replacement is renamed back in one final statement.
+			name:   "TwoOptionOnlyChangesShareTheRename",
+			source: "CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, KEY ka (a), KEY kb (b)) ROW_FORMAT=COMPRESSED",
+			target: "CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, KEY ka (a) KEY_BLOCK_SIZE=4, KEY kb (b) KEY_BLOCK_SIZE=4) ROW_FORMAT=COMPRESSED",
+			expectedStatements: []string{
+				"ALTER TABLE `t1` ADD INDEX `_ka_new` (`a`) KEY_BLOCK_SIZE=4, DROP INDEX `ka`",
+				"ALTER TABLE `t1` ADD INDEX `_kb_new` (`b`) KEY_BLOCK_SIZE=4, DROP INDEX `kb`",
+				"ALTER TABLE `t1` RENAME INDEX `_ka_new` TO `ka`, RENAME INDEX `_kb_new` TO `kb`",
 			},
 		},
 		{
@@ -1148,8 +1173,8 @@ func TestDiff(t *testing.T) {
 			source: `CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k (c) SECONDARY_ENGINE_ATTRIBUTE='{"x":9007199254740992}')`,
 			target: `CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k (c) SECONDARY_ENGINE_ATTRIBUTE='{"x":9007199254740993}')`,
 			expectedStatements: []string{
-				"ALTER TABLE `t1` DROP INDEX `k`",
-				"ALTER TABLE `t1` ADD INDEX `k` (`c`) SECONDARY_ENGINE_ATTRIBUTE='{\\\"x\\\":9007199254740993}'",
+				"ALTER TABLE `t1` ADD INDEX `_k_new` (`c`) SECONDARY_ENGINE_ATTRIBUTE='{\\\"x\\\":9007199254740993}', DROP INDEX `k`",
+				"ALTER TABLE `t1` RENAME INDEX `_k_new` TO `k`",
 			},
 		},
 		{
@@ -2568,14 +2593,15 @@ func TestDiff(t *testing.T) {
 		},
 		// An index's SECONDARY_ENGINE_ATTRIBUTE. Adding or removing it alone
 		// is an option-only change: a combined DROP+ADD is a MySQL no-op that
-		// leaves the attribute as it was, so the two go in separate statements.
+		// leaves the attribute as it was, so the index is swapped for a
+		// replacement under a temporary name.
 		{
 			name:   "IndexSecondaryEngineAttributeAdded",
 			source: "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k (c))",
 			target: "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k (c) SECONDARY_ENGINE_ATTRIBUTE='{\"k\":1}')",
 			expectedStatements: []string{
-				"ALTER TABLE `t1` DROP INDEX `k`",
-				"ALTER TABLE `t1` ADD INDEX `k` (`c`) SECONDARY_ENGINE_ATTRIBUTE='{\\\"k\\\":1}'",
+				"ALTER TABLE `t1` ADD INDEX `_k_new` (`c`) SECONDARY_ENGINE_ATTRIBUTE='{\\\"k\\\":1}', DROP INDEX `k`",
+				"ALTER TABLE `t1` RENAME INDEX `_k_new` TO `k`",
 			},
 		},
 		{
@@ -2583,8 +2609,8 @@ func TestDiff(t *testing.T) {
 			source: "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k (c) SECONDARY_ENGINE_ATTRIBUTE='{\"k\":1}')",
 			target: "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, KEY k (c))",
 			expectedStatements: []string{
-				"ALTER TABLE `t1` DROP INDEX `k`",
-				"ALTER TABLE `t1` ADD INDEX `k` (`c`)",
+				"ALTER TABLE `t1` ADD INDEX `_k_new` (`c`), DROP INDEX `k`",
+				"ALTER TABLE `t1` RENAME INDEX `_k_new` TO `k`",
 			},
 		},
 		{
@@ -3648,4 +3674,21 @@ func TestDiffPartitionStorageOptionChange(t *testing.T) {
 			}
 		})
 	}
+}
+
+// temporaryIndexName stays inside MySQL's 64-character identifier limit and
+// clear of every name in use, whatever its case.
+func TestTemporaryIndexName(t *testing.T) {
+	taken := map[string]bool{"k": true, "_k_new": true, "_k_new2": true}
+	assert.Equal(t, "_k_new3", temporaryIndexName("k", taken))
+	assert.True(t, taken["_k_new3"], "the chosen name is taken from then on")
+	assert.Equal(t, "_K_new4", temporaryIndexName("K", taken), "names are compared case-insensitively, and the given case kept")
+
+	long := strings.Repeat("é", 64)
+	got := temporaryIndexName(long, map[string]bool{})
+	assert.Len(t, []rune(got), 64)
+	assert.Equal(t, "_"+strings.Repeat("é", 59)+"_new", got)
+	got = temporaryIndexName(long, map[string]bool{strings.ToLower(got): true})
+	assert.Len(t, []rune(got), 64)
+	assert.Equal(t, "_"+strings.Repeat("é", 58)+"_new2", got)
 }

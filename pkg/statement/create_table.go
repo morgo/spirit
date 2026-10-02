@@ -1781,10 +1781,11 @@ func (ct *CreateTable) Diff(target *CreateTable, opts *DiffOptions) ([]*Abstract
 	columnClauses := ct.diffColumns(target, opts, rebuilt)
 	alterClauses = append(alterClauses, columnClauses...)
 
-	// 2. Diff indexes (DROP, ADD). Option-only index changes (same column
-	// list, different WITH PARSER / KEY_BLOCK_SIZE / etc.) are returned as
-	// separate statements because MySQL no-ops a combined DROP+ADD of the same
-	// index in a single ALTER. A spatial index on a column whose SRID changes
+	// 2. Diff indexes (DROP, ADD). An index whose options alone change (same
+	// column list, different WITH PARSER / KEY_BLOCK_SIZE / etc.) is replaced
+	// in statements of its own after the primary ALTER, because MySQL no-ops
+	// a combined DROP+ADD of the same index in a single ALTER (see
+	// diffIndexes). A spatial index on a column whose SRID changes
 	// is dropped in a statement of its own before the primary ALTER, because
 	// MySQL rejects the SRID change while the index exists, even when the
 	// same ALTER drops it (error 3644); the target's index is added back in
@@ -1836,10 +1837,10 @@ func (ct *CreateTable) Diff(target *CreateTable, opts *DiffOptions) ([]*Abstract
 		}
 	}
 
-	// Option-only index changes run as their own ALTER statements, after the
-	// primary ALTER so they observe any column changes the re-add depends on.
-	// Foreign keys added back under a dropped name follow them, so the index
-	// a re-added foreign key may need exists by then.
+	// Index replacements run as their own ALTER statements, after the
+	// primary ALTER so they observe any column change the replacement
+	// depends on. Foreign keys added back under a dropped name follow them,
+	// so the index a re-added foreign key may need exists by then.
 	additionalStatements = append(additionalStatements, separateIndexStatements...)
 	additionalStatements = append(additionalStatements, separateConstraintStatements...)
 
@@ -2327,13 +2328,14 @@ func (ct *CreateTable) spatialIndexesBlockingSRIDChange(target *CreateTable) map
 // diffIndexes compares indexes and returns ALTER clauses for differences.
 //
 // Most index changes are emitted into the combined ALTER (the returned
-// []string). However, an index whose column list is identical but whose
-// options differ (e.g. WITH PARSER or KEY_BLOCK_SIZE) cannot be changed by a
-// combined `DROP INDEX x, ADD INDEX x (<same cols>)` in a single ALTER: MySQL
-// pairs the two clauses up and keeps the existing index, silently ignoring the
-// option change. To make such a change actually take effect, the DROP and ADD
-// must run as two separate ALTER statements. Those are returned via the second
-// value as standalone clause-lists (each becomes its own ALTER statement).
+// []string). An index whose column list is identical but whose options differ
+// (WITH PARSER, KEY_BLOCK_SIZE, SECONDARY_ENGINE_ATTRIBUTE) cannot be changed
+// by a combined `DROP INDEX x, ADD INDEX x (<same cols>)` in a single ALTER:
+// MySQL pairs the two clauses up and keeps the existing index, silently
+// ignoring the option change. Such an index is swapped for a replacement in
+// statements of its own (see swap below), returned via the second value as
+// standalone clause-lists (each becomes its own ALTER statement) that run
+// after the combined ALTER.
 //
 // rebuilt names the columns dropped and added back by diffColumns (see
 // rebuiltColumns). A functional index that reads one blocks the DROP COLUMN
@@ -2395,12 +2397,45 @@ func (ct *CreateTable) diffIndexes(target *CreateTable, rebuilt, droppedBefore m
 	// guards against emitting "DROP PRIMARY KEY" twice from the source loop.
 	pkDropAdded := false
 
-	// optionOnlyChanged tracks index names whose column list is unchanged but
-	// whose options differ (e.g. WITH PARSER / KEY_BLOCK_SIZE). These must be
-	// emitted as separate DROP + ADD statements rather than combined into one
-	// ALTER, because MySQL no-ops a combined DROP+ADD of the same name and
-	// column list. Such indexes are routed out of dropClauses/addClauses below.
-	optionOnlyChanged := make(map[string]bool)
+	// replaced tracks the indexes re-created outside the primary ALTER:
+	// those whose column list is unchanged but whose options differ (WITH
+	// PARSER, KEY_BLOCK_SIZE, SECONDARY_ENGINE_ATTRIBUTE). MySQL pairs a
+	// same-name, same-columns DROP+ADD in one ALTER and keeps the old index,
+	// so each is re-created by swap instead; they are routed out of
+	// dropClauses, the additions and the visibility clauses below.
+	replaced := make(map[string]bool)
+
+	// swap re-creates an index as the target defines it, in a statement of
+	// its own after the primary ALTER: the replacement is added under a
+	// temporary name and the old index dropped in the same statement, and a
+	// final statement renames every replacement back. Adding before dropping
+	// is what gets the swap through where a standalone DROP INDEX is refused:
+	// the only index on an AUTO_INCREMENT column (error 1075) or the index a
+	// foreign key depends on (error 1553). The temporary name avoids every
+	// index name on either side, compared case-insensitively as MySQL does.
+	// A run that stops between the two statements leaves the index under
+	// the temporary name; the next diff drops that one and adds the
+	// target's.
+	takenIndexNames := make(map[string]bool, len(sourceIdxList)+len(targetIdxList))
+	for _, idx := range sourceIdxList {
+		takenIndexNames[strings.ToLower(idx.Name)] = true
+	}
+	for _, idx := range targetIdxList {
+		takenIndexNames[strings.ToLower(idx.Name)] = true
+	}
+	var renames []string
+	swap := func(sourceIdx, targetIdx *Index) {
+		replaced[sourceIdx.Name] = true
+		tmp := temporaryIndexName(sourceIdx.Name, takenIndexNames)
+		replacement := *targetIdx
+		replacement.Name = tmp
+		separateStatements = append(separateStatements, []string{
+			formatAddIndex(&replacement),
+			fmt.Sprintf("DROP INDEX %s", sqlescape.EscapeIdentifier(sourceIdx.Name)),
+		})
+		renames = append(renames, fmt.Sprintf("RENAME INDEX %s TO %s",
+			sqlescape.EscapeIdentifier(tmp), sqlescape.EscapeIdentifier(sourceIdx.Name)))
+	}
 
 	for i := range sourceIdxList {
 		sourceIdx := &sourceIdxList[i]
@@ -2430,15 +2465,11 @@ func (ct *CreateTable) diffIndexes(target *CreateTable, rebuilt, droppedBefore m
 					pkDropAdded = true
 				}
 			case indexNeedsSeparateRebuild(sourceIdx, targetIdx):
-				// A no-op-prone option (WITH PARSER / KEY_BLOCK_SIZE) changed on
-				// an unchanged column list. A combined DROP+ADD in one ALTER
-				// would be a MySQL no-op, so emit two separate statements that
-				// MySQL will actually apply.
-				optionOnlyChanged[sourceIdx.Name] = true
-				separateStatements = append(separateStatements,
-					[]string{fmt.Sprintf("DROP INDEX %s", sqlescape.EscapeIdentifier(sourceIdx.Name))},
-					[]string{formatAddIndex(targetIdx)},
-				)
+				// A no-op-prone option (WITH PARSER / KEY_BLOCK_SIZE /
+				// SECONDARY_ENGINE_ATTRIBUTE) changed on an unchanged column
+				// list. A combined DROP+ADD in one ALTER would be a MySQL
+				// no-op, so the index is swapped for a replacement.
+				swap(sourceIdx, targetIdx)
 			default:
 				dropClauses = append(dropClauses, fmt.Sprintf("DROP INDEX %s", sqlescape.EscapeIdentifier(sourceIdx.Name)))
 			}
@@ -2446,6 +2477,9 @@ func (ct *CreateTable) diffIndexes(target *CreateTable, rebuilt, droppedBefore m
 	}
 	slices.Sort(dropClauses)
 	clauses = append(clauses, dropClauses...)
+	if len(renames) > 0 {
+		separateStatements = append(separateStatements, renames)
+	}
 
 	// Collect ADD operations and sort by clause text for deterministic output
 	type addition struct {
@@ -2474,8 +2508,8 @@ func (ct *CreateTable) diffIndexes(target *CreateTable, rebuilt, droppedBefore m
 				// Only visibility changed - skip for now, handle in ALTER INDEX section
 				continue
 			}
-			// Option-only changes are emitted as separate statements above.
-			if optionOnlyChanged[targetIdx.Name] {
+			// A replaced index is re-created by its swap statements above.
+			if replaced[targetIdx.Name] {
 				continue
 			}
 			// Other changes - need to drop and re-add (drop already handled above)
@@ -2503,7 +2537,7 @@ func (ct *CreateTable) diffIndexes(target *CreateTable, rebuilt, droppedBefore m
 	for _, targetIdx := range targetIdxList {
 		sourceIdx, existsInSource := sourceIndexes[targetIdx.Name]
 
-		if existsInSource && !rebuiltIndexes[targetIdx.Name] &&
+		if existsInSource && !rebuiltIndexes[targetIdx.Name] && !replaced[targetIdx.Name] &&
 			!indexesEqual(sourceIdx, &targetIdx) && indexesEqualIgnoreVisibility(sourceIdx, &targetIdx) {
 			// Only visibility changed
 			targetVisible := targetIdx.Invisible == nil || !*targetIdx.Invisible
@@ -2518,6 +2552,30 @@ func (ct *CreateTable) diffIndexes(target *CreateTable, rebuilt, droppedBefore m
 	clauses = append(clauses, alterClauses...)
 
 	return clauses, separateStatements
+}
+
+// temporaryIndexName names the replacement index of a swap (see diffIndexes):
+// the index's own name wrapped as _<name>_new, like the shadow table, cut to
+// MySQL's 64-character identifier limit and numbered until it is free. taken
+// holds the lowercased index names in use (MySQL compares them
+// case-insensitively), and the chosen name is added to it.
+func temporaryIndexName(name string, taken map[string]bool) string {
+	const maxLen = mysql.MaxIndexIdentifierLen
+	for n := 1; ; n++ {
+		suffix := "_new"
+		if n > 1 {
+			suffix += strconv.Itoa(n)
+		}
+		base := []rune(name)
+		if room := maxLen - 1 - len(suffix); len(base) > room {
+			base = base[:room]
+		}
+		candidate := "_" + string(base) + suffix
+		if key := strings.ToLower(candidate); !taken[key] {
+			taken[key] = true
+			return candidate
+		}
+	}
 }
 
 // diffConstraints compares constraints and returns the ALTER clauses for the
