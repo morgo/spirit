@@ -55,10 +55,18 @@ func init() { registerNormalizer(expressionParenNormalizer{}) }
 // two trees, which is why it reasons about precedence rather than shape (see
 // ast.canRestoreWithoutParentheses).
 //
-// One deliberate exception: an associative operator's parentheses are dropped
+// One deliberate exception: the parentheses of a nested AND or OR are dropped
 // even when regrouping changes the tree, so a AND (b AND c) and (a AND b) AND c
-// converge on a AND b AND c. They evaluate identically, so collapsing them
-// removes a spurious diff rather than hiding a real one.
+// converge on a AND b AND c. The two evaluate identically, and MySQL itself
+// stores either as the flat chain, so collapsing them removes a spurious diff
+// rather than hiding a real one. No other operator regroups: MySQL keeps the
+// written grouping of every other one, and for most of them the grouping is
+// the value. The bitwise &, | and ^ are the sharp edge — they operate on
+// binary strings when both operands are binary strings and on integers
+// otherwise, so _binary'12' & (_binary'21' & 7) is 4 where
+// (_binary'12' & _binary'21') & 7 is 0 — and double addition, BIGINT overflow
+// and every non-commutative operator differ by grouping too (see
+// ast.isAssociativeRestoreOp).
 type expressionParenNormalizer struct{}
 
 func (expressionParenNormalizer) Name() string { return "expression-parens" }

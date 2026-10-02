@@ -817,6 +817,32 @@ func TestDiffMySQLContracts(t *testing.T) {
 			target:   "(id INT PRIMARY KEY, c TIME DEFAULT '-0:00:00.4')",
 			wantNoop: true,
 		},
+		// Operand grouping (expressionParenNormalizer): only a nested AND or
+		// OR regroups. A bitwise operator evaluates on binary strings or on
+		// integers by operand, so its grouping is the value: the diff used to
+		// emit _binary'12' & _binary'21' & 7, which is 0, for a default of 4.
+		// TestDiffIntegrationExpressionGroupingValues checks the values.
+		{
+			name:   "expression default keeps the grouping of bitwise operands",
+			source: "(id INT PRIMARY KEY)",
+			target: "(id INT PRIMARY KEY, c INT DEFAULT (_binary'12' & (_binary'21' & 7)))",
+		},
+		{
+			name:   "generated column keeps the grouping of bitwise operands",
+			source: "(id INT PRIMARY KEY, a INT, b INT)",
+			target: "(id INT PRIMARY KEY, a INT, b INT, g INT AS (a | (b | id)) STORED)",
+		},
+		{
+			name:   "check keeps the grouping of bitwise operands",
+			source: "(id INT PRIMARY KEY, a INT, b INT)",
+			target: "(id INT PRIMARY KEY, a INT, b INT, CONSTRAINT ck CHECK (a ^ (b ^ id) > 0))",
+		},
+		{
+			name:     "nested AND still regroups",
+			source:   "(id INT PRIMARY KEY, a INT, b INT, CONSTRAINT ck CHECK (a > 0 AND (b > 0 AND id > 0)))",
+			target:   "(id INT PRIMARY KEY, a INT, b INT, CONSTRAINT ck CHECK ((a > 0 AND b > 0) AND id > 0))",
+			wantNoop: true,
+		},
 		// Expression defaults and unary plus (expressionParenNormalizer): MySQL
 		// stores an expression in its own parenthesization and drops every
 		// unary plus when it parses it.

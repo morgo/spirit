@@ -3618,3 +3618,48 @@ func TestDiffIntegrationExpressionDefaultIntroducerValues(t *testing.T) {
 		})
 	}
 }
+
+// TestDiffIntegrationExpressionGroupingValues verifies that an expression
+// whose operand grouping decides its value stores, when added through a diff,
+// the value a direct CREATE of the target stores. The diff used to regroup a
+// nested bitwise operator the way it regroups a nested AND, and MySQL
+// evaluates & | ^ on binary strings when both operands are binary strings and
+// on integers otherwise, so _binary'12' & (_binary'21' & 7) is 4 where the
+// regrouped (_binary'12' & _binary'21') & 7 is 0.
+func TestDiffIntegrationExpressionGroupingValues(t *testing.T) {
+	for _, expr := range []string{
+		"_binary'12' & (_binary'21' & 7)",
+		"_binary'12' | (_binary'21' | 7)",
+		"_binary'12' ^ (_binary'21' ^ 7)",
+	} {
+		t.Run(expr, func(t *testing.T) {
+			_, db := testutils.CreateUniqueTestDatabase(t)
+			exec := func(stmt string) {
+				t.Helper()
+				_, err := db.ExecContext(t.Context(), stmt)
+				require.NoError(t, err, "executing: %s", stmt)
+			}
+			storedDefault := func() string {
+				t.Helper()
+				exec("TRUNCATE TABLE t")
+				exec("INSERT INTO t (id) VALUES (1)")
+				var v string
+				require.NoError(t, db.QueryRowContext(t.Context(), "SELECT c FROM t").Scan(&v))
+				return v
+			}
+			target := "(id INT PRIMARY KEY, c INT DEFAULT (" + expr + "))"
+			exec("CREATE TABLE t " + target)
+			expectedCreate := showCreateTable(t, db, "t")
+			expectedValue := storedDefault()
+			exec("DROP TABLE t")
+
+			exec("CREATE TABLE t (id INT PRIMARY KEY)")
+			stmts := diffLiveTable(t, db, "t", "CREATE TABLE t "+target)
+			require.Len(t, stmts, 1)
+			execStatements(t, db, stmts)
+			assert.Equal(t, expectedValue, storedDefault(), "the expression default must keep its grouping: %s", stmts[0].Statement)
+			assert.Equal(t, expectedCreate, showCreateTable(t, db, "t"))
+			requireConverged(t, db, "t", "CREATE TABLE t "+target)
+		})
+	}
+}

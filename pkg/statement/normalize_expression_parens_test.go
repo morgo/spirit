@@ -37,6 +37,9 @@ func TestCanonicalExprParensIsFixedPoint(t *testing.T) {
 		"((a + b) * (c - 1)) / 2 > a",
 		"a & 3 | b = 0",
 		"a & (3 | b) = 0",
+		"a & (b & c) = 0",
+		"a | (b | c) = 0",
+		"a ^ (b ^ c) = 0",
 		"(a << 1) + b > 0",
 		"a BETWEEN 1 AND 10 AND b > 0",
 		"a = (b BETWEEN 1 AND 10)",
@@ -111,6 +114,12 @@ func TestCanonicalExprParensKeepsDistinctExpressionsDistinct(t *testing.T) {
 		{"a - (b - c) > 0", "(a - b) - c > 0"},
 		{"a / (b / c) > 0", "a / b / c > 0"},
 		{"a & (3 | b) = 0", "a & 3 | b = 0"},
+		// Bitwise operators evaluate on binary strings or on integers by
+		// operand, so their grouping is the value: _binary'12' & (_binary'21'
+		// & 7) is 4 and (_binary'12' & _binary'21') & 7 is 0.
+		{"a & (b & c) = 0", "(a & b) & c = 0"},
+		{"a | (b | c) = 0", "(a | b) | c = 0"},
+		{"a ^ (b ^ c) = 0", "(a ^ b) ^ c = 0"},
 		{"a = (b BETWEEN 1 AND 10)", "(a = b) BETWEEN 1 AND 10"},
 		{"-(a + b) < c", "-a + b < c"},
 		{"a = (b IN (1,2))", "(a = b) IN (1,2)"},
