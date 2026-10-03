@@ -27,9 +27,10 @@ func TestForNonInstantBurn(t *testing.T) {
 	defer utils.CloseAndLog(db)
 	var version string
 	require.NoError(t, db.QueryRowContext(t.Context(), `SELECT version()`).Scan(&version))
-	// Skip on MySQL 9.x (total_row_versions limit was raised beyond 64).
-	if strings.HasPrefix(version, "9.") {
-		t.Skip("Skipping this test for MySQL 9.x: total_row_versions limit was raised beyond 64")
+	// Skip after MySQL 8 (total_row_versions limit was raised beyond 64 in 9.0).
+	// Compare the major version, not a "9." prefix: 26.7 follows 9.7.
+	if major, _, _ := strings.Cut(version, "."); major != "8" {
+		t.Skipf("Skipping this test for MySQL %s: total_row_versions limit was raised beyond 64", version)
 	}
 
 	tt := testutils.NewTestTable(t, "instantburn", `CREATE TABLE instantburn (

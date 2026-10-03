@@ -6,6 +6,11 @@ on:
     branches: [ main ]
 permissions:
   contents: read
+
+# MySQL 8.0.28 is the oldest version Spirit tests against. It is the base of
+# Aurora MySQL 3.04 (LTS), whose standard support ends on 2026-10-31. After the
+# v0.18.0 release this runner moves to the next supported Aurora LTS (Aurora
+# MySQL 3.10, MySQL 8.0.42), and the minimum tested version rises with it.
 jobs:
   build:
     runs-on: ubuntu-latest

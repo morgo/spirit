@@ -19,10 +19,6 @@ func replicaPrivilegeCheck(ctx context.Context, r Resources, logger *slog.Logger
 		return nil // The user is not using the replica DSN feature.
 	}
 	for _, replica := range r.Replicas {
-		var version string
-		if err := replica.QueryRowContext(ctx, "select substr(version(), 1, 1)").Scan(&version); err != nil {
-			return err //  can not get version
-		}
 		rows, err := replica.QueryContext(ctx, throttler.MySQL8LagQuery)
 		if err != nil {
 			return err
