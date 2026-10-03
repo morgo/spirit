@@ -33,9 +33,11 @@ type Lifecycle struct {
 //	defer end(&retErr)
 //
 // end replaces a context.Canceled result with a fatal-abort cause (see
-// status.AbortCause), records the evidence the result carries (see
-// RecordError), and only then cancels the context, so the cause it reads is
-// the one that stopped the run.
+// status.AbortCause), then records the evidence the result carries (see
+// RecordError), then cancels the context. Recording after the substitution
+// records the evidence of the error Run returns, which a fatal-abort cause can
+// carry and context.Canceled cannot. Cancelling last changes nothing: a
+// context keeps the first cause it was cancelled with.
 func (l *Lifecycle) Begin(ctx context.Context) (context.Context, func(*error)) {
 	ctx, cancel := context.WithCancelCause(ctx)
 	l.SetCancel(cancel)

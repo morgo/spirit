@@ -60,7 +60,7 @@ defer end(&retErr)
 2. It records the evidence that the error carries.
 3. It cancels the context.
 
-The cause is read before the context is cancelled, so the cause it reads is the one that stopped the run.
+The evidence is recorded after the substitution, so it is the evidence of the error `Run` actually returns: a fatal-abort cause can carry `status.ErrDurableMutation` or `status.ErrOwnershipAmbiguous`, and `context.Canceled` never does. Cancelling last does not change the outcome. A context keeps the first cause it was cancelled with, so `cancel(nil)` cannot hide a fatal cause that is already set.
 
 `Lifecycle` is a named field and is not embedded. Each runner forwards its own `Cancel`, `Abort` and `Result` to it. As a result, the runner's public API does not gain `MarkDurableMutation`, `SetTerminalOwnership` or `RecordError`. Datasync uses only the cancel side; it reports no `Result`. Tests that drive phases without calling `Run` use `SetCancel`.
 

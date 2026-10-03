@@ -1,6 +1,7 @@
 package migration
 
 import (
+	"reflect"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -246,5 +247,16 @@ func TestContinuousChecksumStatusSurfaces(t *testing.T) {
 			require.NotContains(t, block, "checksum")
 			require.NotContains(t, block, "throttle")
 		}
+	}
+}
+
+// TestSnapshotSourceIsComplete pins that the migration runner fills in every
+// runtime.Source function, the sentinel schema included. With Source a struct,
+// a field left nil compiles, and a missing SentinelSchema only drops the
+// table name from the sentinel row.
+func TestSnapshotSourceIsComplete(t *testing.T) {
+	src := reflect.ValueOf((&Runner{}).snapshot(status.Initial).Source)
+	for i := range src.NumField() {
+		require.False(t, src.Field(i).IsNil(), "runtime.Source.%s is not set", src.Type().Field(i).Name)
 	}
 }

@@ -20,9 +20,8 @@ func TestLifecycleCancelBeforeBegin(t *testing.T) {
 	l.Cancel(errors.New("abort"))
 }
 
-// TestLifecycleEndReturnsFatalCause pins the order end runs its steps in: it
-// reads the cause before it cancels the context, so a run stopped by a fatal
-// abort returns that cause rather than context.Canceled.
+// TestLifecycleEndReturnsFatalCause pins that a run stopped by a fatal abort
+// returns that cause rather than context.Canceled.
 func TestLifecycleEndReturnsFatalCause(t *testing.T) {
 	var l Lifecycle
 	ctx, end := l.Begin(t.Context())
@@ -32,6 +31,20 @@ func TestLifecycleEndReturnsFatalCause(t *testing.T) {
 	err := ctx.Err() // what a phase stopped by the cancellation returns
 	end(&err)
 	require.Equal(t, cause, err)
+}
+
+// TestLifecycleRecordsEvidenceFromFatalCause pins that end records the
+// evidence of the error Run returns, after the fatal-abort cause has replaced
+// context.Canceled, not the evidence of the context.Canceled it replaced.
+func TestLifecycleRecordsEvidenceFromFatalCause(t *testing.T) {
+	var l Lifecycle
+	ctx, end := l.Begin(t.Context())
+	l.Cancel(status.FatalAbort(fmt.Errorf("%w: switch outcome unknown", status.ErrOwnershipAmbiguous)))
+	<-ctx.Done()
+	err := ctx.Err()
+	end(&err)
+	require.ErrorIs(t, err, status.ErrOwnershipAmbiguous)
+	require.Equal(t, status.WorkflowTerminalOwnershipAmbiguous, l.Result().TerminalOwnership)
 }
 
 // TestLifecycleEndKeepsOperatorCancel pins that an operator cancellation is

@@ -35,7 +35,7 @@ import (
 //
 // The test uses a minimal Runner constructed by hand: targets and
 // checkpointTable are left empty/nil so the (now-guarded) checkpoint-drop
-// path is a no-op. the cancel function is a counter we
+// path is a no-op. The cancel function is a counter we
 // observe.
 func TestFatalErrorIsIdempotent(t *testing.T) {
 	var cancelCalls atomic.Int32
