@@ -520,7 +520,7 @@ func (w *reverseWindow) reverseCutover(ctx context.Context) error {
 			if err := w.unretireSourceTable(ctx, s.db, t.TableName); err != nil {
 				return fmt.Errorf("reverse cutover: un-retire source %d table %q: %w", si, t.TableName, err)
 			}
-			r.durableMutation.Store(true)
+			r.lifecycle.MarkDurableMutation()
 		}
 	}
 
@@ -606,10 +606,10 @@ func (w *reverseWindow) runReverseCutoverCallback(ctx context.Context) error {
 		}
 	}
 	if result.DurableMutation {
-		r.durableMutation.Store(true)
+		r.lifecycle.MarkDurableMutation()
 	}
 	if result.OwnershipAmbiguous {
-		r.terminalOwnership.Store(uint32(status.WorkflowTerminalOwnershipAmbiguous))
+		r.lifecycle.SetTerminalOwnership(status.WorkflowTerminalOwnershipAmbiguous)
 	}
 	if err == nil && result.OwnershipAmbiguous {
 		err = status.ErrOwnershipAmbiguous
@@ -641,8 +641,8 @@ func (w *reverseWindow) finalizeReverse(ctx context.Context) error {
 	if err := w.persistPhase(ctx, phaseReverseFinalized); err != nil {
 		return fmt.Errorf("reverse cutover: persist finalized phase: %w", err)
 	}
-	r.durableMutation.Store(true)
-	r.terminalOwnership.Store(uint32(status.WorkflowTerminalOwnershipReverseFinalized))
+	r.lifecycle.MarkDurableMutation()
+	r.lifecycle.SetTerminalOwnership(status.WorkflowTerminalOwnershipReverseFinalized)
 	// 6. Drop the revert marker and the checkpoint.
 	if err := w.dropMarker(ctx); err != nil {
 		return fmt.Errorf("reverse cutover: drop revert marker: %w", err)

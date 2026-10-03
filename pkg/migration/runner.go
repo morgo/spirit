@@ -83,12 +83,7 @@ type Runner struct {
 
 	status     status.Tracker // owns the current state and per-state timing.
 	replClient change.Source  // feed contains all binlog subscription activity.
-	throttler  throttler.Throttler
-
-	// throttlerMu guards throttler. setupThrottler assigns it partway through
-	// setup, while an API caller may already be polling Progress() — which reads
-	// the throttler to report whether the migration is currently paused.
-	throttlerMu sync.RWMutex
+	throttler  runtime.SharedThrottler
 
 	copier      copier.Copier
 	copyChunker table.Chunker // the chunker for copying
@@ -127,14 +122,9 @@ type Runner struct {
 
 	// Attached logger
 	logger *slog.Logger
-	// cancelFunc cancels the migration context with a cause. Run returns that
-	// cause (see status.AbortCause) instead of the context.Canceled error the
-	// phases observe, so a fatal abort is reported as the failure it is and
-	// not as an operator cancellation. Cancel passes a nil cause.
-	cancelFunc context.CancelCauseFunc
-	// cancelMu guards cancelFunc: Run assigns it while Cancel, Abort, Close
-	// and fatalError may already be reading it from other goroutines.
-	cancelMu sync.Mutex
+	// lifecycle cancels the running invocation and keeps the correctness
+	// evidence it leaves (Result).
+	lifecycle runtime.Lifecycle
 
 	// fatal aborts the run on the first fatal change-feed condition; see
 	// fatalError.
@@ -148,10 +138,6 @@ type Runner struct {
 
 	// MetricsSink
 	metricsSink metrics.Sink
-
-	// Correctness evidence from the most recent Run invocation.
-	durableMutation   atomic.Bool
-	terminalOwnership atomic.Uint32
 
 	// testAfterCutover is a test-only seam that runs after the cutover has
 	// committed and before the post-cutover cleanup.
@@ -359,44 +345,18 @@ func (r *Runner) attemptMySQLDDL(ctx context.Context) error {
 	return r.changes[0].attemptMySQLDDL(ctx)
 }
 
-// recordCopyCompleted reports the copy aggregate settled during this
-// Runner.Run invocation. The chunker restores its settled row count from the
-// checkpoint, while its chunk count starts afresh, so the restored rows are
-// subtracted here to keep the two figures on the same invocation.
-func (r *Runner) recordCopyCompleted() {
-	chunker := r.copier.GetChunker()
-	if chunker == nil {
-		return
-	}
-	_, chunks, _ := chunker.Progress()
-	r.status.RecordCopyCompleted(chunker.RowsCopied()-r.copyRowsAtResume, chunks)
-}
-
 func (r *Runner) runCopy(ctx context.Context) error {
-	defer r.recordCopyCompleted()
+	defer runtime.RecordCopyCompleted(&r.status, r.copier, r.copyRowsAtResume)
 	return r.status.DoContext(ctx, status.CopyRows, func() error {
 		return r.copier.Run(ctx)
 	})
 }
 
 func (r *Runner) Run(ctx context.Context) (retErr error) {
-	ctx, cancel := context.WithCancelCause(ctx)
-	defer cancel(nil)
-	r.cancelMu.Lock()
-	r.cancelFunc = cancel
-	r.cancelMu.Unlock()
+	ctx, end := r.lifecycle.Begin(ctx)
+	defer end(&retErr)
 	r.status.SetMetricsSink(r.metricsSink, r.logger)
 	r.status.Begin()
-	r.durableMutation.Store(false)
-	r.terminalOwnership.Store(uint32(status.WorkflowTerminalOwnershipNone))
-	defer func() {
-		r.recordWorkflowError(retErr)
-	}()
-	// Registered after recordWorkflowError so it runs first, and before the
-	// deferred cancelFunc(nil) so the cause read is the one that aborted us.
-	defer func() {
-		retErr = status.AbortCause(ctx, retErr)
-	}()
 	bi := buildinfo.Get()
 	r.logger.Info("Starting spirit migration",
 		"version", bi.Version,
@@ -536,7 +496,7 @@ func (r *Runner) Run(ctx context.Context) (retErr error) {
 	// Note: this function returns an error when in multi-table mode.
 	err = r.attemptMySQLDDL(ctx)
 	if err == nil {
-		r.durableMutation.Store(true)
+		r.lifecycle.MarkDurableMutation()
 		r.dropStaleCopyTables(ctx)
 		r.logger.Info("apply complete",
 			"instant-ddl", r.usedInstantDDL,
@@ -650,7 +610,7 @@ func (r *Runner) Run(ctx context.Context) (retErr error) {
 		if err := cutover.Run(ctx); err != nil {
 			return fmt.Errorf("cutover failed: %w", err)
 		}
-		r.durableMutation.Store(true)
+		r.lifecycle.MarkDurableMutation()
 		if r.testAfterCutover != nil {
 			r.testAfterCutover()
 		}
@@ -998,23 +958,6 @@ func (r *Runner) closeReplicas() error {
 	return errors.Join(errs...)
 }
 
-// setThrottler publishes the resolved throttler. It is written once during
-// setup, but Progress() may be reading it concurrently — see throttlerMu.
-func (r *Runner) setThrottler(t throttler.Throttler) {
-	r.throttlerMu.Lock()
-	defer r.throttlerMu.Unlock()
-	r.throttler = t
-}
-
-// currentThrottler returns the resolved throttler, or nil if setup has not got
-// that far (or found nothing to throttle on, in which case the copier keeps its
-// own Noop).
-func (r *Runner) currentThrottler() throttler.Throttler {
-	r.throttlerMu.RLock()
-	defer r.throttlerMu.RUnlock()
-	return r.throttler
-}
-
 // autoscaleConfigs turns the autoscaling plan into the copier's and the
 // checksum's scaling bounds, after fitting the read side to the connection
 // pool. It may lower r.migration.Threads, which both the copier and the
@@ -1095,12 +1038,12 @@ func (r *Runner) replClientConfig(flushConcurrency, flushBatchSize int) *change.
 // against.
 //
 // Resolved per call rather than captured, because setup replaces the throttler
-// (setThrottler) after the change client is built, and nil until it does. The
+// (throttler.Set) after the change client is built, and nil until it does. The
 // nil check is belt-and-braces — GradualOnly already answers a nil throttler
 // with a Noop — but a drain must not panic on a signal it consults for advice,
 // and that should not rest on another package's nil handling.
 func (r *Runner) flushUnderLoad() bool {
-	t := r.currentThrottler()
+	t := r.throttler.Get()
 	if t == nil {
 		return false
 	}
@@ -1117,7 +1060,7 @@ func (r *Runner) flushUnderLoad() bool {
 // the snapshot open for longer). Progress().Throttle mirrors that split — see
 // runtime.Snapshot.ThrottleStatus.
 func (r *Runner) setThrottlerOnPhases() {
-	t := r.currentThrottler()
+	t := r.throttler.Get()
 	r.copier.SetThrottler(t)
 	r.checker.SetThrottler(t)
 }
@@ -1190,9 +1133,9 @@ func (r *Runner) setupThrottler(ctx context.Context) error {
 		// chunk to every test that paces with it — real wall-clock cost, no
 		// extra coverage. Checksum throttling is covered directly in
 		// pkg/checksum.
-		r.setThrottler(r.migration.testThrottler)
-		r.copier.SetThrottler(r.currentThrottler())
-		return r.currentThrottler().Open(ctx)
+		r.throttler.Set(r.migration.testThrottler)
+		r.copier.SetThrottler(r.throttler.Get())
+		return r.throttler.Get().Open(ctx)
 	}
 
 	var throttlers []throttler.Throttler
@@ -1213,9 +1156,9 @@ func (r *Runner) setupThrottler(ctx context.Context) error {
 		return nil // use default Noop throttler
 	}
 
-	r.setThrottler(throttler.NewMultiThrottler(throttlers...))
+	r.throttler.Set(throttler.NewMultiThrottler(throttlers...))
 	r.setThrottlerOnPhases()
-	if err := r.currentThrottler().Open(ctx); err != nil {
+	if err := r.throttler.Get().Open(ctx); err != nil {
 		// multiThrottler already closes child throttlers on partial Open
 		// failure, but the *sql.DB connections backing replica throttlers
 		// are owned by r.replicas (and the Aurora monitor pool is owned
@@ -1388,26 +1331,14 @@ func (r *Runner) fatalError(reason change.FatalReason) bool {
 			}
 			return r.checkpointTbl().Drop(ctx)
 		},
-		Cancel: r.cancel,
+		Cancel: r.lifecycle.Cancel,
 	})
-}
-
-func (r *Runner) recordWorkflowError(err error) {
-	if errors.Is(err, status.ErrDurableMutation) {
-		r.durableMutation.Store(true)
-	}
-	if errors.Is(err, status.ErrOwnershipAmbiguous) {
-		r.terminalOwnership.Store(uint32(status.WorkflowTerminalOwnershipAmbiguous))
-	}
 }
 
 // Result returns correctness evidence retained from the most recent Run
 // invocation. It is intentionally separate from phase metrics.
 func (r *Runner) Result() status.WorkflowResult {
-	return status.WorkflowResult{
-		DurableMutation:   r.durableMutation.Load(),
-		TerminalOwnership: status.WorkflowTerminalOwnership(r.terminalOwnership.Load()),
-	}
+	return r.lifecycle.Result()
 }
 
 // copyTables snapshots the copy chunker and returns the per-table progress.
@@ -1434,21 +1365,16 @@ func (r *Runner) snapshot(state status.State) *runtime.Snapshot {
 		Tables:     r.copyTables(),
 		Checkpoint: &r.lastCheckpoint,
 		Resumed:    r.usedResumeFromCheckpoint.Load(),
-		Source:     statusSource{r},
+		Source: runtime.Source{
+			Copier:         func() copier.Copier { return r.copier },
+			Applier:        func() applier.Applier { return r.applier },
+			Checker:        func() checksum.Checker { return r.checker },
+			Feeds:          func() []change.Source { return []change.Source{r.replClient} },
+			Throttler:      r.throttler.Get,
+			SentinelSchema: func() string { return r.changes[0].table.SchemaName },
+		},
 	}
 }
-
-// statusSource hands runtime the runner's subsystems. It reads each one only
-// when the state being reported on needs it, which is after setup has assigned
-// it (see runtime.Source).
-type statusSource struct{ r *Runner }
-
-func (s statusSource) Copier() copier.Copier          { return s.r.copier }
-func (s statusSource) Applier() applier.Applier       { return s.r.applier }
-func (s statusSource) Checker() checksum.Checker      { return s.r.checker }
-func (s statusSource) Feeds() []change.Source         { return []change.Source{s.r.replClient} }
-func (s statusSource) Throttler() throttler.Throttler { return s.r.currentThrottler() }
-func (s statusSource) SentinelSchema() string         { return s.r.changes[0].table.SchemaName }
 
 func (r *Runner) Progress() status.Progress {
 	return r.snapshot(r.status.Get()).Progress()
@@ -1496,7 +1422,7 @@ func (r *Runner) Close() error {
 			errs = append(errs, err)
 		}
 	}
-	if t := r.currentThrottler(); t != nil {
+	if t := r.throttler.Get(); t != nil {
 		if err := t.Close(); err != nil {
 			errs = append(errs, err)
 		}
@@ -1646,7 +1572,7 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 	// The baseline is taken only here, past every step that can still send
 	// setup down the fresh-copy path: the fresh chunker starts at zero, and a
 	// baseline left over from an abandoned resume would underflow the
-	// unsigned subtraction in recordCopyCompleted.
+	// unsigned subtraction in runtime.RecordCopyCompleted.
 	r.copyRowsAtResume = r.copyChunker.RowsCopied()
 	r.usedResumeFromCheckpoint.Store(true)
 	return nil
@@ -1883,23 +1809,12 @@ func (r *Runner) invalidateChecksumWatermark(ctx context.Context) error {
 // Cancel stops a running migration. It is an operator cancellation: Run
 // returns context.Canceled.
 func (r *Runner) Cancel() {
-	r.cancel(nil)
+	r.lifecycle.Cancel(nil)
 }
 
 // Abort stops a running migration with cause (see status.Aborter). The
 // checkpoint dumper calls it when it cannot write a checkpoint, so Run returns
 // the write error instead of context.Canceled.
 func (r *Runner) Abort(cause error) {
-	r.cancel(cause)
-}
-
-// cancel cancels the migration context with cause. A nil cause is a plain
-// cancellation (context.Canceled).
-func (r *Runner) cancel(cause error) {
-	r.cancelMu.Lock()
-	cancel := r.cancelFunc
-	r.cancelMu.Unlock()
-	if cancel != nil {
-		cancel(cause)
-	}
+	r.lifecycle.Cancel(cause)
 }

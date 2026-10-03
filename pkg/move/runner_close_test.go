@@ -35,13 +35,14 @@ import (
 //
 // The test uses a minimal Runner constructed by hand: targets and
 // checkpointTable are left empty/nil so the (now-guarded) checkpoint-drop
-// path is a no-op. cancelFunc is a counter we observe.
+// path is a no-op. The cancel function is a counter we
+// observe.
 func TestFatalErrorIsIdempotent(t *testing.T) {
 	var cancelCalls atomic.Int32
 	r := &Runner{
-		logger:     slog.Default(),
-		cancelFunc: func(error) { cancelCalls.Add(1) },
+		logger: slog.Default(),
 	}
+	r.lifecycle.SetCancel(func(error) { cancelCalls.Add(1) })
 
 	require.True(t, r.fatalError(change.FatalReasonSchemaChange), "first call must return true")
 	require.Equal(t, int32(1), cancelCalls.Load(), "first call must cancel once")
@@ -57,15 +58,15 @@ func TestFatalErrorIsIdempotent(t *testing.T) {
 // TestFatalErrorConcurrentRace exercises the FatalGate's once guard:
 // many goroutines call fatalError in parallel before any has finished
 // setting status, simulating N repl clients (one per source) hitting a
-// fatal stream error at the same time. The Once ensures cancelFunc fires
+// fatal stream error at the same time. The Once ensures the cancel function fires
 // exactly once even when the racing callers all pass the pre-CutOver
 // status check. Run with -race.
 func TestFatalErrorConcurrentRace(t *testing.T) {
 	var cancelCalls atomic.Int32
 	r := &Runner{
-		logger:     slog.Default(),
-		cancelFunc: func(error) { cancelCalls.Add(1) },
+		logger: slog.Default(),
 	}
+	r.lifecycle.SetCancel(func(error) { cancelCalls.Add(1) })
 
 	const goroutines = 32
 	start := make(chan struct{})
@@ -80,7 +81,7 @@ func TestFatalErrorConcurrentRace(t *testing.T) {
 	wg.Wait()
 
 	require.Equal(t, int32(1), cancelCalls.Load(),
-		"cancelFunc must fire exactly once regardless of concurrent fatalError calls")
+		"the cancel function must fire exactly once regardless of concurrent fatalError calls")
 }
 
 // TestFatalErrorPastCutoverIsNoop pins the existing contract that
@@ -90,9 +91,9 @@ func TestFatalErrorConcurrentRace(t *testing.T) {
 func TestFatalErrorPastCutoverIsNoop(t *testing.T) {
 	var cancelCalls atomic.Int32
 	r := &Runner{
-		logger:     slog.Default(),
-		cancelFunc: func(error) { cancelCalls.Add(1) },
+		logger: slog.Default(),
 	}
+	r.lifecycle.SetCancel(func(error) { cancelCalls.Add(1) })
 	r.status.Set(status.CutOver)
 
 	require.False(t, r.fatalError(change.FatalReasonSchemaChange), "fatalError at/past cutover must return false")
@@ -101,12 +102,12 @@ func TestFatalErrorPastCutoverIsNoop(t *testing.T) {
 }
 
 // TestFatalErrorSafeWithoutCancelFunc verifies fatalError tolerates a nil
-// cancelFunc (early setup / test paths that bypass Run). Without the
+// cancel function (early setup / test paths that bypass Run). Without the
 // nil-check it nil-derefs.
 func TestFatalErrorSafeWithoutCancelFunc(t *testing.T) {
 	r := &Runner{
 		logger: slog.Default(),
-		// cancelFunc intentionally nil
+		// cancel function intentionally nil
 	}
 	require.NotPanics(t, func() {
 		require.True(t, r.fatalError(change.FatalReasonStreamError))
@@ -114,7 +115,7 @@ func TestFatalErrorSafeWithoutCancelFunc(t *testing.T) {
 }
 
 // TestCancelAndAbortBeforeRun verifies Cancel and Abort are no-ops on a
-// runner that has not been Run: cancelFunc is only set by Run, so without
+// runner that has not been Run: the cancel function is only set by Run, so without
 // the nil-check they nil-deref.
 func TestCancelAndAbortBeforeRun(t *testing.T) {
 	r, err := NewRunner(&Move{})
@@ -146,9 +147,9 @@ func TestCancelConcurrentWithRun(t *testing.T) {
 func TestCancelAbortAndCloseCancelTheRun(t *testing.T) {
 	var causes []error
 	r := &Runner{
-		logger:     slog.Default(),
-		cancelFunc: func(err error) { causes = append(causes, err) },
+		logger: slog.Default(),
 	}
+	r.lifecycle.SetCancel(func(err error) { causes = append(causes, err) })
 	abortErr := errors.New("checkpoint write failed")
 	r.Cancel()
 	r.Abort(abortErr)
@@ -162,9 +163,9 @@ func TestCancelAbortAndCloseCancelTheRun(t *testing.T) {
 func TestFatalErrorCancelsWithCause(t *testing.T) {
 	var cause error
 	r := &Runner{
-		logger:     slog.Default(),
-		cancelFunc: func(err error) { cause = err },
+		logger: slog.Default(),
 	}
+	r.lifecycle.SetCancel(func(err error) { cause = err })
 	require.True(t, r.fatalError(change.FatalReasonFlushError))
 	require.Error(t, cause)
 	require.NotErrorIs(t, cause, context.Canceled)
@@ -187,10 +188,10 @@ func TestFatalErrorReasonCheckpointHandling(t *testing.T) {
 		var cancelCalls atomic.Int32
 		r := &Runner{
 			logger:          slog.Default(),
-			cancelFunc:      func(error) { cancelCalls.Add(1) },
 			targets:         []applier.Target{{KeyRange: "0", DB: db}},
 			checkpointTable: table.NewTableInfo(db, dbName, checkpointTableName),
 		}
+		r.lifecycle.SetCancel(func(error) { cancelCalls.Add(1) })
 		require.True(t, checkpointTableExists(t, r), "checkpoint table must exist after setup")
 		return r, &cancelCalls
 	}

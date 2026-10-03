@@ -66,7 +66,7 @@ func setupRunnerForChecksumTest(t *testing.T, dbSuffix string) (*Runner, context
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithCancelCause(t.Context())
-	r.cancelFunc = cancel
+	r.lifecycle.SetCancel(cancel)
 	r.dbConfig = dbconn.NewDBConfig()
 
 	srcDB, err := dbconn.New(sourceDSN, r.dbConfig)
@@ -140,9 +140,8 @@ func TestChecksumErrorPreservesCheckpoint(t *testing.T) {
 			r, ctx := setupRunnerForChecksumTest(t, "preserve_"+tc.name)
 
 			// Track whether fatalError-equivalent behavior fired.
-			origCancel := r.cancelFunc
 			var cancelled bool
-			r.cancelFunc = func(cause error) { cancelled = true; origCancel(cause) }
+			r.lifecycle.SetCancel(func(error) { cancelled = true })
 
 			// Drive only the checker.Run() line from postCopyPhase. The
 			// rest of postCopyPhase (ANALYZE TABLE, secondary-index restore)
@@ -153,7 +152,7 @@ func TestChecksumErrorPreservesCheckpoint(t *testing.T) {
 			err := r.checker.Run(ctx)
 			require.Error(t, err, "the checker's error must propagate")
 			require.False(t, cancelled,
-				"runner cancelFunc must not fire on a checksum error path")
+				"the runner's cancel function must not fire on a checksum error path")
 			require.NotEqual(t, status.ErrCleanup, r.status.Get(),
 				"status must not transition to ErrCleanup on a checksum error")
 			require.True(t, checkpointTableExists(t, r),

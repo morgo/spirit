@@ -1,9 +1,13 @@
-// Package runtime renders the periodic status block and the Progress report
-// shared by the finite runners (pkg/migration and pkg/move). Both runners walk
-// the same states with the same subsystems, so their reports are built here
-// from a Snapshot rather than from two copies of the same switch that drift
-// apart. For the same reason it holds FatalGate, the state transition both
-// runners make when their change feed fails.
+// Package runtime holds the runner pieces that pkg/migration, pkg/move and
+// pkg/datasync would otherwise each keep a copy of, and let drift apart.
+//
+// The finite runners (migration and move) walk the same states with the same
+// subsystems, so their periodic status block and Progress report are built
+// here from a Snapshot rather than from two copies of the same switch.
+// FatalGate is the state transition both make when their change feed fails,
+// and SharedThrottler the throttler both resolve while already being polled.
+// All three runners use Lifecycle, the cancel function and correctness
+// evidence of a Run invocation, and RecordCopyCompleted.
 //
 // The name matches the standard library's runtime package. A file that needs
 // both must import one under an alias.
@@ -23,18 +27,27 @@ import (
 )
 
 // Source gives a Snapshot the runner's subsystems. Setup assigns them while an
-// API caller may already be polling, so a Snapshot only asks for the ones the
-// current state reports on, which are the ones setup has finished assigning.
-type Source interface {
-	Copier() copier.Copier
-	Applier() applier.Applier
-	Checker() checksum.Checker
-	Feeds() []change.Source
-	Throttler() throttler.Throttler
-	// SentinelSchema, when not empty, adds the sentinel table's name to the
-	// sentinel row. A move's sources can span several schemas, so it reports
-	// none.
-	SentinelSchema() string
+// API caller may already be polling, so they are read through functions, and a
+// Snapshot only calls the ones the current state reports on, which are the
+// ones setup has finished assigning. Every function but SentinelSchema must be
+// set.
+type Source struct {
+	Copier    func() copier.Copier
+	Applier   func() applier.Applier
+	Checker   func() checksum.Checker
+	Feeds     func() []change.Source
+	Throttler func() throttler.Throttler
+	// SentinelSchema, when set and not empty, adds the sentinel table's name
+	// to the sentinel row. A move's sources can span several schemas, so it
+	// leaves it nil.
+	SentinelSchema func() string
+}
+
+func (s *Source) sentinelSchema() string {
+	if s.SentinelSchema == nil {
+		return ""
+	}
+	return s.SentinelSchema()
 }
 
 // Snapshot is what a runner reports on. The runner builds one per call, and
@@ -123,7 +136,7 @@ func (s *Snapshot) Status() string {
 		b.Row("applier", "%s", applier.StatusRow(s.Source.Applier()))
 	case status.WaitingOnSentinelTable:
 		b = s.header("")
-		if schema := s.Source.SentinelSchema(); schema != "" {
+		if schema := s.Source.sentinelSchema(); schema != "" {
 			b.Row("sentinel", "table=%s.%s  waiting=%s  max-wait=%s",
 				schema,
 				sentinel.TableName,
