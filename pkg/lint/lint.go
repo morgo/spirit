@@ -166,6 +166,17 @@ func extractTablesFromChanges(changes []*statement.AbstractStatement) map[string
 	tables := make(map[string]struct{})
 	for _, stmt := range changes {
 		tables[stmt.Table] = struct{}{}
+		// PostState reports a table renamed by ALTER TABLE ... RENAME under
+		// its new name.
+		at, ok := stmt.AsAlterTable()
+		if !ok {
+			continue
+		}
+		for _, spec := range at.Specs {
+			if spec.Tp == ast.AlterTableRenameTable && spec.NewTable != nil {
+				tables[spec.NewTable.Name.O] = struct{}{}
+			}
+		}
 	}
 	return tables
 }

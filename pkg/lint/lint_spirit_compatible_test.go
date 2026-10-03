@@ -184,3 +184,101 @@ func TestSpiritCompatible_ExistingTablesIgnored(t *testing.T) {
 func TestSpiritCompatible_TemporaryTableIgnored(t *testing.T) {
 	require.Empty(t, lintSpiritCompatible(t, nil, `CREATE TEMPORARY TABLE tmp (id BIGINT)`))
 }
+
+// TestSpiritCompatible_MixedCaseTableName verifies a new table whose name is
+// not all lowercase is still checked.
+func TestSpiritCompatible_MixedCaseTableName(t *testing.T) {
+	violations := lintSpiritCompatible(t, nil, `CREATE TABLE Orders (id BIGINT)`)
+	require.Len(t, violations, 1)
+	require.Equal(t, "Orders", violations[0].Location.Table)
+	require.Contains(t, violations[0].Message, "no primary key")
+}
+
+// TestSpiritCompatible_CreateTableLike verifies CREATE TABLE ... LIKE is
+// checked as a copy of its source, without the source's foreign keys, which
+// LIKE does not copy.
+func TestSpiritCompatible_CreateTableLike(t *testing.T) {
+	existing := []string{
+		`CREATE TABLE legacy (id BIGINT NOT NULL PRIMARY KEY, parent_id BIGINT,
+			CONSTRAINT fk1 FOREIGN KEY (parent_id) REFERENCES parent (id))`,
+		`CREATE TABLE unkeyed (id BIGINT)`,
+	}
+	require.Empty(t, lintSpiritCompatible(t, existing, `CREATE TABLE legacy_copy LIKE legacy`))
+
+	violations := lintSpiritCompatible(t, existing, `CREATE TABLE unkeyed_copy LIKE unkeyed`)
+	require.Len(t, violations, 1)
+	require.Equal(t, "unkeyed_copy", violations[0].Location.Table)
+	require.Contains(t, violations[0].Message, "no primary key")
+
+	// The source may be created earlier in the same changes.
+	violations = lintSpiritCompatible(t, nil, `CREATE TABLE a (id FLOAT NOT NULL PRIMARY KEY)`, `CREATE TABLE b LIKE a`)
+	require.Len(t, violations, 2)
+
+	// Nothing is known about a copy of a table that is not in the schema.
+	require.Empty(t, lintSpiritCompatible(t, nil, `CREATE TABLE c LIKE missing`))
+}
+
+// TestSpiritCompatible_ForeignKeyAddedLater verifies a foreign key added by a
+// later ALTER names its parent, like one declared in the CREATE TABLE.
+func TestSpiritCompatible_ForeignKeyAddedLater(t *testing.T) {
+	violations := lintSpiritCompatible(t, nil,
+		`CREATE TABLE child (id BIGINT NOT NULL PRIMARY KEY, parent_id BIGINT)`,
+		`ALTER TABLE child ADD CONSTRAINT fk_child_parent FOREIGN KEY (parent_id) REFERENCES parent (id)`)
+	require.Len(t, violations, 1)
+	require.Contains(t, violations[0].Message, `"parent"`)
+	require.Contains(t, violations[0].Message, "fk_child_parent")
+}
+
+// TestSpiritCompatible_NewParentOfExistingTable verifies a new table that an
+// existing table's foreign key references is reported: Spirit refuses either
+// end of a foreign key.
+func TestSpiritCompatible_NewParentOfExistingTable(t *testing.T) {
+	existing := []string{`CREATE TABLE child (id BIGINT NOT NULL PRIMARY KEY, parent_id BIGINT)`}
+	for _, alter := range []string{
+		`ALTER TABLE child ADD CONSTRAINT fk_child_parent FOREIGN KEY (parent_id) REFERENCES Parent (id)`,
+		`ALTER TABLE child ADD COLUMN other_id BIGINT REFERENCES parent (id)`,
+	} {
+		t.Run(alter, func(t *testing.T) {
+			violations := lintSpiritCompatible(t, existing, `CREATE TABLE parent (id BIGINT NOT NULL PRIMARY KEY)`, alter)
+			require.Len(t, violations, 1)
+			v := violations[0]
+			require.Equal(t, SeverityError, v.Severity)
+			require.Equal(t, "parent", v.Location.Table)
+			require.Contains(t, v.Message, `table "child" references it`)
+		})
+	}
+}
+
+// TestSpiritCompatible_RenamedLaterInChanges verifies a new table renamed
+// later in the same changes is checked under its new name and schema.
+func TestSpiritCompatible_RenamedLaterInChanges(t *testing.T) {
+	violations := lintSpiritCompatible(t, nil, `CREATE TABLE t1 (id BIGINT)`, `ALTER TABLE t1 RENAME TO t2`)
+	require.Len(t, violations, 1)
+	require.Equal(t, "t2", violations[0].Location.Table)
+
+	violations = lintSpiritCompatible(t, nil, `CREATE TABLE t1 (id BIGINT NOT NULL PRIMARY KEY)`, "ALTER TABLE t1 RENAME TO `bad.schema`.t2")
+	require.Len(t, violations, 1)
+	require.Contains(t, violations[0].Message, "schema name")
+
+	// Renaming away from a bad name clears the violation.
+	require.Empty(t, lintSpiritCompatible(t, nil, "CREATE TABLE `a.b` (id BIGINT NOT NULL PRIMARY KEY)", "ALTER TABLE `a.b` RENAME TO ab"))
+}
+
+// TestSpiritCompatible_RenamedLaterLintOnlyChanges verifies RunLinters keeps a
+// violation reported under a rename target when it lints only the changes.
+func TestSpiritCompatible_RenamedLaterLintOnlyChanges(t *testing.T) {
+	var changes []*statement.AbstractStatement
+	for _, sql := range []string{`CREATE TABLE t1 (id BIGINT)`, `ALTER TABLE t1 RENAME TO t2`} {
+		stmts, err := statement.New(sql)
+		require.NoError(t, err)
+		changes = append(changes, stmts...)
+	}
+	violations, err := RunLinters(nil, changes, Config{
+		LintOnlyChanges: true,
+		Enabled:         map[string]bool{"primary_key": false},
+	})
+	require.NoError(t, err)
+	violations = filterByLinter(violations, "spirit_compatible")
+	require.Len(t, violations, 1)
+	require.Equal(t, "t2", violations[0].Location.Table)
+}

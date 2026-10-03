@@ -682,9 +682,10 @@ Ensures a new table can be altered by Spirit later. Each rule mirrors a runtime 
 - The table has no primary key.
 - A primary key column is a `FLOAT` or a `BIT`.
 - The table has a foreign key. This also makes the referenced (parent) table unalterable by Spirit. An inline column `REFERENCES` counts, because MySQL 9.0 and later create a foreign key for it.
+- An existing table's foreign key references the new table.
 - The table or schema name contains a `.` or a backtick.
 
-Only tables created by the changes are checked, in their post-state: an `ALTER TABLE` later in the same changes that fixes the table clears the violation. Existing tables are not reported, so a legacy table does not block unrelated changes. `CREATE TEMPORARY TABLE` is not checked.
+Only tables created by the changes are checked, in their post-state: an `ALTER TABLE` later in the same changes that fixes the table clears the violation, and one that renames it is checked under the new name. `CREATE TABLE ... LIKE` is checked as a copy of its source table, without the source's foreign keys, which `LIKE` does not copy. If the source is not in the schema, the table is skipped. Existing tables are not reported, so a legacy table does not block unrelated changes. `CREATE TEMPORARY TABLE` is not checked.
 
 A server with `sql_generate_invisible_primary_key=ON` adds a primary key to a table created without one. The linter does not know the server's settings, so it still reports the table.
 

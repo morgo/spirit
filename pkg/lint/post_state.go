@@ -34,7 +34,7 @@ func PostState(existing []*statement.CreateTable, changes []*statement.AbstractS
 		if change.IsCreateTable() {
 			ct, err := change.ParseCreateTable()
 			if err == nil && ct != nil {
-				byName[strings.ToLower(ct.TableName)] = ct
+				byName[strings.ToLower(ct.TableName)] = createTableLike(ct, byName)
 			}
 			continue
 		}
@@ -68,20 +68,97 @@ func PostState(existing []*statement.CreateTable, changes []*statement.AbstractS
 	return out
 }
 
+// createTableLike returns the table a CREATE TABLE ... LIKE creates: a copy of
+// the source's columns, indexes, CHECK constraints, options and partitioning
+// under the new name. LIKE does not copy foreign keys. Raw is nil, because no
+// statement spells out the copy's definition. ct is returned unchanged when it
+// is not a LIKE, or when the source is not in the schema built so far; Raw then
+// still carries the LIKE, which is how a linter tells such a table apart.
+func createTableLike(ct *statement.CreateTable, byName map[string]*statement.CreateTable) *statement.CreateTable {
+	if ct.Raw == nil || ct.Raw.ReferTable == nil {
+		return ct
+	}
+	source, ok := byName[strings.ToLower(ct.Raw.ReferTable.Name.O)]
+	if !ok {
+		return ct
+	}
+	like := *source
+	like.Raw = nil
+	like.TableName = ct.TableName
+	like.Temporary = ct.Temporary
+	like.IfNotExists = ct.IfNotExists
+	like.Columns = append(statement.Columns(nil), source.Columns...)
+	like.Indexes = append(statement.Indexes(nil), source.Indexes...)
+	like.Constraints = nil
+	for _, c := range source.Constraints {
+		if c.Type != "FOREIGN KEY" {
+			like.Constraints = append(like.Constraints, c)
+		}
+	}
+	if source.TableOptions != nil {
+		opts := *source.TableOptions
+		like.TableOptions = &opts
+	}
+	return &like
+}
+
+// isUnresolvedLike reports whether ct is a CREATE TABLE ... LIKE whose source
+// PostState could not find, so nothing is known about its definition.
+func isUnresolvedLike(ct *statement.CreateTable) bool {
+	return ct.Raw != nil && ct.Raw.ReferTable != nil
+}
+
+// createdTablesInChanges returns the tables created by a CREATE TABLE
+// statement in changes, keyed by the (lowercased) name each has after the
+// changes, with the schema it is in after them ("" when the statement does not
+// qualify it). A created table renamed by a later ALTER TABLE ... RENAME is
+// keyed by its new name, as PostState keys it.
+func createdTablesInChanges(changes []*statement.AbstractStatement) map[string]string {
+	out := make(map[string]string)
+	for _, change := range changes {
+		if change == nil {
+			continue
+		}
+		if change.IsCreateTable() {
+			ct, err := change.ParseCreateTable()
+			if err != nil || ct == nil {
+				continue
+			}
+			schema := ""
+			if ct.Raw != nil && ct.Raw.Table != nil {
+				schema = ct.Raw.Table.Schema.O
+			}
+			out[strings.ToLower(ct.TableName)] = schema
+			continue
+		}
+		at, ok := change.AsAlterTable()
+		if !ok {
+			continue
+		}
+		key := strings.ToLower(change.Table)
+		if _, created := out[key]; !created {
+			continue
+		}
+		for _, spec := range at.Specs {
+			if spec.Tp != ast.AlterTableRenameTable || spec.NewTable == nil {
+				continue
+			}
+			delete(out, key)
+			key = strings.ToLower(spec.NewTable.Name.O)
+			out[key] = spec.NewTable.Schema.O
+		}
+	}
+	return out
+}
+
 // newTablesInChanges returns the set of (lowercased) table names that are
-// created by a CREATE TABLE statement in changes. Columns inside these tables
-// are considered "new", not legacy.
+// created by a CREATE TABLE statement in changes, under the name each has
+// after the changes. Columns inside these tables are considered "new", not
+// legacy.
 func newTablesInChanges(changes []*statement.AbstractStatement) map[string]bool {
 	out := make(map[string]bool)
-	for _, change := range changes {
-		if change == nil || !change.IsCreateTable() {
-			continue
-		}
-		ct, err := change.ParseCreateTable()
-		if err != nil || ct == nil {
-			continue
-		}
-		out[strings.ToLower(ct.TableName)] = true
+	for name := range createdTablesInChanges(changes) {
+		out[name] = true
 	}
 	return out
 }

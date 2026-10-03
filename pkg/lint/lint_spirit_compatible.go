@@ -24,15 +24,18 @@ func init() {
 //     cannot be located by key. See table.TableInfo.FloatPrimaryKeyError and
 //     BitPrimaryKeyError.
 //   - a foreign key, as either end of it (hasforeignkeys): a new table with a
-//     FOREIGN KEY also makes the table it references unalterable. An inline
-//     column REFERENCES counts: MySQL 9.0 and later create a foreign key for
-//     it (addforeignkey).
+//     FOREIGN KEY also makes the table it references unalterable, and a new
+//     table referenced by an existing table's foreign key is reported too. An
+//     inline column REFERENCES counts: MySQL 9.0 and later create a foreign
+//     key for it (addforeignkey).
 //   - a '.' or a backtick in the table or schema name (tableidentifier). See
 //     utils.UnsupportedIdentifierError.
 //
 // Only tables created by the changes are checked, and they are checked in
-// their post-state, so a later ALTER in the same changes that fixes the table
-// is taken into account. Existing tables are left to the runtime checks: a
+// their post-state, so a later ALTER in the same changes that fixes or renames
+// the table is taken into account. A CREATE TABLE ... LIKE is checked as a
+// copy of its source; one whose source is not in the schema is skipped, since
+// nothing is known about it. Existing tables are left to the runtime checks: a
 // legacy table that Spirit cannot alter should not block unrelated changes.
 //
 // A server with sql_generate_invisible_primary_key=ON adds a primary key to a
@@ -53,17 +56,47 @@ func (l *SpiritCompatibleLinter) Description() string {
 }
 
 func (l *SpiritCompatibleLinter) Lint(existingTables []*statement.CreateTable, changes []*statement.AbstractStatement) (violations []Violation) {
-	created := newTablesInChanges(changes)
-	for _, ct := range PostState(existingTables, changes) {
-		if !created[strings.ToLower(ct.TableName)] || ct.Temporary {
+	created := createdTablesInChanges(changes)
+	post := PostState(existingTables, changes)
+	byName := make(map[string]*statement.CreateTable, len(post))
+	for _, ct := range post {
+		byName[strings.ToLower(ct.TableName)] = ct
+	}
+	for _, ct := range post {
+		schema, isCreated := created[strings.ToLower(ct.TableName)]
+		if !isCreated || ct.Temporary || isUnresolvedLike(ct) {
 			continue
 		}
-		violations = append(violations, l.checkTable(ct)...)
+		violations = append(violations, l.checkTable(ct, schema)...)
+	}
+	// A foreign key from a table the changes do not create makes a new table
+	// its parent. One from a new table is reported on that table, which names
+	// the parent.
+	for _, child := range post {
+		if _, isCreated := created[strings.ToLower(child.TableName)]; isCreated {
+			continue
+		}
+		for _, fk := range foreignKeys(child) {
+			key := strings.ToLower(fk.parent)
+			parent, ok := byName[key]
+			if _, isCreated := created[key]; !isCreated || !ok || parent.Temporary {
+				continue
+			}
+			violations = append(violations, Violation{
+				Linter:     l,
+				Severity:   SeverityError,
+				Location:   &Location{Table: parent.TableName},
+				Message:    fmt.Sprintf("Spirit cannot alter table %q: table %q references it with %s", parent.TableName, child.TableName, fk.describe()),
+				Suggestion: new(fmt.Sprintf("Remove the foreign key from table %q and enforce the relationship in the application", child.TableName)),
+			})
+		}
 	}
 	return violations
 }
 
-func (l *SpiritCompatibleLinter) checkTable(ct *statement.CreateTable) []Violation {
+// checkTable checks a table the changes create. schema is the schema it is in
+// after the changes, or "" when they do not name one.
+func (l *SpiritCompatibleLinter) checkTable(ct *statement.CreateTable, schema string) []Violation {
 	var violations []Violation
 	tableName := ct.GetTableName()
 	add := func(v Violation) {
@@ -75,11 +108,7 @@ func (l *SpiritCompatibleLinter) checkTable(ct *statement.CreateTable) []Violati
 		violations = append(violations, v)
 	}
 
-	identifiers := []struct{ kind, name string }{{"table name", tableName}}
-	if ct.Raw != nil && ct.Raw.Table != nil {
-		identifiers = append(identifiers, struct{ kind, name string }{"schema name", ct.Raw.Table.Schema.O})
-	}
-	for _, id := range identifiers {
+	for _, id := range []struct{ kind, name string }{{"table name", tableName}, {"schema name", schema}} {
 		if err := utils.UnsupportedIdentifierError(id.kind, id.name); err != nil {
 			add(Violation{Message: fmt.Sprintf("Spirit cannot alter table %q: %s", tableName, err)})
 		}
@@ -113,43 +142,79 @@ func (l *SpiritCompatibleLinter) checkTable(ct *statement.CreateTable) []Violati
 		})
 	}
 
-	for _, c := range ct.Constraints {
-		if c.Type != "FOREIGN KEY" {
-			continue
-		}
-		parent := ""
-		if c.References != nil {
-			parent = c.References.Table
-		}
+	for _, fk := range foreignKeys(ct) {
 		v := Violation{
-			Message:    fmt.Sprintf("Spirit cannot alter table %q%s: it has a FOREIGN KEY constraint", tableName, referencedTableClause(parent)),
+			Message:    fmt.Sprintf("Spirit cannot alter table %q%s: it has %s", tableName, referencedTableClause(fk.parent), fk.describe()),
 			Suggestion: new("Remove the foreign key and enforce the relationship in the application"),
 		}
-		if c.Name != "" {
-			name := c.Name
-			v.Message = fmt.Sprintf("Spirit cannot alter table %q%s: it has FOREIGN KEY constraint %q", tableName, referencedTableClause(parent), name)
+		switch {
+		case fk.column != "":
+			column := fk.column
+			v.Location = &Location{Table: tableName, Column: &column}
+			v.Suggestion = new(fmt.Sprintf("Remove the REFERENCES clause from column %q", column))
+		case fk.name != "":
+			name := fk.name
 			v.Location = &Location{Table: tableName, Constraint: &name}
 		}
 		add(v)
 	}
-	for i := range ct.Columns {
-		col := &ct.Columns[i]
-		ref := inlineReference(col)
-		if ref == nil {
+	return violations
+}
+
+// foreignKey is a foreign key a table declares: a FOREIGN KEY constraint, or a
+// column with an inline REFERENCES, which MySQL 9.0 and later create a foreign
+// key for.
+type foreignKey struct {
+	name   string // the constraint name, "" when unnamed or inline
+	column string // the column with an inline REFERENCES, "" for a constraint
+	parent string // the referenced table, "" when unknown
+}
+
+func (fk foreignKey) describe() string {
+	switch {
+	case fk.column != "":
+		return fmt.Sprintf("an inline REFERENCES on column %q, which MySQL 9.0 and later create a foreign key for", fk.column)
+	case fk.name != "":
+		return fmt.Sprintf("FOREIGN KEY constraint %q", fk.name)
+	default:
+		return "a FOREIGN KEY constraint"
+	}
+}
+
+// foreignKeys returns the foreign keys ct declares.
+func foreignKeys(ct *statement.CreateTable) []foreignKey {
+	var fks []foreignKey
+	for _, c := range ct.Constraints {
+		if c.Type != "FOREIGN KEY" {
 			continue
 		}
-		parent := ""
-		if ref.Table != nil {
-			parent = ref.Table.Name.O
+		fk := foreignKey{name: c.Name}
+		// PostState builds a constraint added by an ALTER from its AST alone,
+		// without References.
+		switch {
+		case c.References != nil:
+			fk.parent = c.References.Table
+		case c.Raw != nil && c.Raw.Refer != nil && c.Raw.Refer.Table != nil:
+			fk.parent = c.Raw.Refer.Table.Name.O
 		}
-		add(Violation{
-			Message: fmt.Sprintf("Spirit cannot alter table %q%s: column %q is declared with an inline REFERENCES, which MySQL 9.0 and later create a foreign key for",
-				tableName, referencedTableClause(parent), col.Name),
-			Location:   &Location{Table: tableName, Column: &col.Name},
-			Suggestion: new(fmt.Sprintf("Remove the REFERENCES clause from column %q", col.Name)),
-		})
+		fks = append(fks, fk)
 	}
-	return violations
+	for _, col := range ct.Columns {
+		if col.Raw == nil {
+			continue
+		}
+		for _, opt := range col.Raw.Options {
+			if opt.Tp != ast.ColumnOptionReference || opt.Refer == nil {
+				continue
+			}
+			fk := foreignKey{column: col.Name}
+			if opt.Refer.Table != nil {
+				fk.parent = opt.Refer.Table.Name.O
+			}
+			fks = append(fks, fk)
+		}
+	}
+	return fks
 }
 
 // referencedTableClause names the parent of a foreign key, which Spirit cannot
@@ -179,17 +244,4 @@ func columnMySQLType(col *statement.Column) byte {
 		return mysql.TypeUnspecified
 	}
 	return col.Raw.Tp.GetType()
-}
-
-// inlineReference returns the column's inline REFERENCES clause, or nil.
-func inlineReference(col *statement.Column) *ast.ReferenceDef {
-	if col.Raw == nil {
-		return nil
-	}
-	for _, opt := range col.Raw.Options {
-		if opt.Tp == ast.ColumnOptionReference && opt.Refer != nil {
-			return opt.Refer
-		}
-	}
-	return nil
 }
