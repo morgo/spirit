@@ -1339,7 +1339,7 @@ func TestReverseCutoverResultCallbackPreservesFailureEvidence(t *testing.T) {
 	w := &reverseWindow{r: r}
 
 	err := w.runReverseCutoverCallback(t.Context())
-	r.recordWorkflowError(err)
+	r.lifecycle.RecordError(err)
 
 	require.ErrorIs(t, err, callbackErr)
 	require.ErrorIs(t, err, status.ErrDurableMutation)

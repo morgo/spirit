@@ -129,8 +129,8 @@ func testResumeFromCheckpointE2E(t *testing.T, deferSecondaryIndexes bool) {
 
 	// Do all the setup stuff from runnner.Run()
 	// Just don't run copier.Run() or cutover etc.
-	var ctx context.Context
-	ctx, r.cancelFunc = context.WithCancelCause(t.Context())
+	ctx, cancel := context.WithCancelCause(t.Context())
+	r.lifecycle.SetCancel(cancel)
 	r.dbConfig = dbconn.NewDBConfig()
 	srcDB, err := dbconn.New(r.move.SourceDSN, r.dbConfig)
 	require.NoError(t, err)
@@ -155,7 +155,7 @@ func testResumeFromCheckpointE2E(t *testing.T, deferSecondaryIndexes bool) {
 	require.NoError(t, r.DumpCheckpoint(ctx))
 
 	// Close everything manually.
-	r.cancelFunc(nil)
+	r.lifecycle.Cancel(nil)
 	require.NoError(t, r.sources[0].db.Close())
 	require.NoError(t, r.targets[0].DB.Close())
 	require.NoError(t, r.Close())
@@ -441,8 +441,8 @@ func TestPostCopyAnalyzeTargetSchema(t *testing.T) {
 
 	// Drive the same setup the real Run() does, then run the copier so the
 	// target table exists and is populated, then call postCopyPhase directly.
-	var ctx context.Context
-	ctx, r.cancelFunc = context.WithCancelCause(t.Context())
+	ctx, cancel := context.WithCancelCause(t.Context())
+	r.lifecycle.SetCancel(cancel)
 	r.dbConfig = dbconn.NewDBConfig()
 	srcDB, err := dbconn.New(r.move.SourceDSN, r.dbConfig)
 	require.NoError(t, err)
@@ -461,7 +461,7 @@ func TestPostCopyAnalyzeTargetSchema(t *testing.T) {
 	require.NoError(t, r.setupDiscovery(ctx))
 	require.NoError(t, r.setupUnderLocks(ctx))
 	t.Cleanup(func() {
-		r.cancelFunc(nil)
+		r.lifecycle.Cancel(nil)
 		// Runner.Close() closes the target DB and repl clients but not the raw
 		// source DB connection, so close it explicitly to avoid a goroutine leak
 		// (goleak runs in TestMain).
@@ -542,8 +542,8 @@ func TestDeltasFlushedDuringIndexRestore(t *testing.T) {
 	// Drive the same setup the real Run() does (mirroring
 	// TestPostCopyAnalyzeTargetSchema), then run the copier so the target
 	// tables exist and are populated.
-	var ctx context.Context
-	ctx, r.cancelFunc = context.WithCancelCause(t.Context())
+	ctx, cancel := context.WithCancelCause(t.Context())
+	r.lifecycle.SetCancel(cancel)
 	r.dbConfig = dbconn.NewDBConfig()
 	srcDB, err := dbconn.New(r.move.SourceDSN, r.dbConfig)
 	require.NoError(t, err)
@@ -562,7 +562,7 @@ func TestDeltasFlushedDuringIndexRestore(t *testing.T) {
 	require.NoError(t, r.setupDiscovery(ctx))
 	require.NoError(t, r.setupUnderLocks(ctx))
 	t.Cleanup(func() {
-		r.cancelFunc(nil)
+		r.lifecycle.Cancel(nil)
 		// Runner.Close() closes the target DB and repl clients but not the raw
 		// source DB connection, so close it explicitly to avoid a goroutine leak
 		// (goleak runs in TestMain).
@@ -617,7 +617,7 @@ func TestDeltasFlushedDuringIndexRestore(t *testing.T) {
 		// exits before the outer cleanup tears down connections: release the
 		// MDL blocker, cancel the context, and wait for it.
 		release()
-		r.cancelFunc(nil)
+		r.lifecycle.Cancel(nil)
 		<-done
 	})
 

@@ -345,9 +345,18 @@ func TestSyncInitialCopy(t *testing.T) {
 	}
 	runner, err := NewRunner(s)
 	require.NoError(t, err)
+	sink := &copyAggregateSink{}
+	runner.SetMetricsSink(sink)
 
 	require.NoError(t, runUntilCopied(t, runner))
 	require.NoError(t, runner.Close())
+
+	// The copy aggregate is reported once, when the copy ends, and counts the
+	// rows the chunker settled.
+	rows, chunks := sink.aggregates()
+	require.Equal(t, []uint64{3}, rows)
+	require.Len(t, chunks, 1)
+	require.Positive(t, chunks[0])
 
 	tgt, err := sql.Open("block-mysql", targetDSN)
 	require.NoError(t, err)
@@ -358,6 +367,32 @@ func TestSyncInitialCopy(t *testing.T) {
 	var v string
 	require.NoError(t, tgt.QueryRowContext(context.Background(), "SELECT val FROM t1 WHERE id = 2").Scan(&v))
 	require.Equal(t, "two", v)
+}
+
+// copyAggregateSink records the copy aggregate the runner reports when the copy
+// ends.
+type copyAggregateSink struct {
+	mu     sync.Mutex
+	rows   []uint64
+	chunks []uint64
+}
+
+func (s *copyAggregateSink) Send(context.Context, *metrics.Metrics) error { return nil }
+func (s *copyAggregateSink) RecordWorkflowPhaseStarted(status.State)      {}
+func (s *copyAggregateSink) RecordWorkflowPhaseFinished(status.State, status.WorkflowPhaseOutcome) {
+}
+
+func (s *copyAggregateSink) RecordWorkflowCopyCompleted(rows, chunks uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.rows = append(s.rows, rows)
+	s.chunks = append(s.chunks, chunks)
+}
+
+func (s *copyAggregateSink) aggregates() (rows, chunks []uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]uint64(nil), s.rows...), append([]uint64(nil), s.chunks...)
 }
 
 // TestRunnerStatusTask exercises the status.Task surface (Progress, Status,
@@ -425,9 +460,9 @@ func TestRunnerStatusTask(t *testing.T) {
 }
 
 // TestFatalErrorConcurrentWithRunSetup exercises the seam between Run (which
-// assigns cancelFunc under progMu during setup) and the change client's
+// publishes its cancel function during setup) and the change client's
 // stream goroutine invoking fatalError. Under -race this fails if fatalError
-// reads cancelFunc without taking progMu (matching Cancel()). It also gates
+// reads the cancel function unsynchronized. It also gates
 // the sync.Once semantics: the record-and-cancel side effects happen at most
 // once across repeated invocations.
 func TestFatalErrorConcurrentWithRunSetup(t *testing.T) {
@@ -438,9 +473,7 @@ func TestFatalErrorConcurrentWithRunSetup(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Go(func() {
 		// Simulate Run's setup assignment (see Runner.Run).
-		runner.progMu.Lock()
-		runner.cancelFunc = func(error) { cancelCalls.Add(1) }
-		runner.progMu.Unlock()
+		runner.lifecycle.SetCancel(func(error) { cancelCalls.Add(1) })
 	})
 	wg.Go(func() {
 		require.True(t, runner.fatalError(change.FatalReasonStreamError))

@@ -23,6 +23,7 @@ import (
 	"github.com/block/spirit/pkg/dbconn/sqlescape"
 	"github.com/block/spirit/pkg/metrics"
 	parsermysql "github.com/block/spirit/pkg/parser/mysql"
+	"github.com/block/spirit/pkg/runtime"
 	"github.com/block/spirit/pkg/statement"
 	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/table"
@@ -110,11 +111,12 @@ type Runner struct {
 	// phase transitions. It defaults to a NoopSink, so a caller that installs
 	// nothing pays only for the discarded values.
 	metricsSink metrics.Sink
-	// cancelFunc cancels the run context with a cause. recordFatal passes the
+	// lifecycle cancels the run context with a cause. recordFatal passes the
 	// fatal error, which Run then returns (see status.AbortCause) in place of
 	// the context.Canceled error the copy or any other phase observes.
-	// Cancel, Close and the checksum-failure path pass a nil cause.
-	cancelFunc context.CancelCauseFunc
+	// Cancel, Close and the checksum-failure path pass a nil cause. Datasync
+	// reports no status.WorkflowResult, so the evidence it records is unread.
+	lifecycle runtime.Lifecycle
 	// sourceDBConfig connects to the read-only source, with ForceKill disabled
 	// (see Run). targetDBConfig connects to the writable target and keeps the
 	// standard safe defaults.
@@ -136,7 +138,7 @@ type Runner struct {
 	fatalOnce sync.Once
 
 	// progMu guards the progress-related fields (applier, copier, copyChunker,
-	// replClient, cancelFunc) that Run assigns during setup and
+	// replClient) that Run assigns during setup and
 	// that the status.Task accessors (Progress/Status/DumpCheckpoint/Cancel)
 	// read concurrently from a separate monitoring goroutine.
 	progMu sync.RWMutex
@@ -215,21 +217,8 @@ func (r *Runner) replClientConfig() *change.ClientConfig {
 	return replConfig
 }
 
-// recordCopyCompleted reports the copy aggregate settled during this
-// Runner.Run invocation. The chunker restores its settled row count from the
-// checkpoint, while its chunk count starts afresh, so the restored rows are
-// subtracted here to keep the two figures on the same invocation.
-func (r *Runner) recordCopyCompleted() {
-	chunker := r.copier.GetChunker()
-	if chunker == nil {
-		return
-	}
-	_, chunks, _ := chunker.Progress()
-	r.status.RecordCopyCompleted(chunker.RowsCopied()-r.copyRowsAtResume, chunks)
-}
-
 func (r *Runner) runCopy(ctx context.Context) error {
-	defer r.recordCopyCompleted()
+	defer runtime.RecordCopyCompleted(&r.status, r.copier, r.copyRowsAtResume)
 	return r.status.DoContext(ctx, status.CopyRows, func() error {
 		r.logger.Info("Starting copy", "resuming", r.resuming.Load())
 		if err := r.copier.Run(ctx); err != nil {
@@ -269,16 +258,10 @@ func (r *Runner) SetMetricsSink(sink metrics.Sink) {
 // secondary-index restore can return the wrapped context error. A fatal source
 // event (e.g. DDL) returns an error.
 func (r *Runner) Run(ctx context.Context) (retErr error) {
-	ctx, cancel := context.WithCancelCause(ctx)
-	defer cancel(nil)
-	// Registered after cancel so it runs first: a fatal abort returns the
-	// recorded fatal error, not the copy's context.Canceled.
-	defer func() {
-		retErr = status.AbortCause(ctx, retErr)
-	}()
-	r.progMu.Lock()
-	r.cancelFunc = cancel
-	r.progMu.Unlock()
+	// end returns the recorded fatal error, not the copy's context.Canceled,
+	// when a fatal abort stopped the run.
+	ctx, end := r.lifecycle.Begin(ctx)
+	defer end(&retErr)
 	r.status.SetMetricsSink(r.metricsSink, r.logger)
 	r.status.Begin()
 	r.logger.Info("Starting sync", "source_dsn", dbconn.RedactDSN(r.sync.SourceDSN))
@@ -482,12 +465,7 @@ func (r *Runner) runContinuous(ctx context.Context) error {
 		if checksumErr != nil && ctx.Err() == nil {
 			r.logger.Error("lockless checksum failed; stopping sync", "error", checksumErr)
 			// Trigger the drain + shutdown path with a context cancellation.
-			r.progMu.RLock()
-			cancelParent := r.cancelFunc
-			r.progMu.RUnlock()
-			if cancelParent != nil {
-				cancelParent(nil)
-			}
+			r.lifecycle.Cancel(nil)
 		}
 	}
 
@@ -1672,7 +1650,7 @@ func (r *Runner) startResume(ctx context.Context, watermark, pos string) error {
 	// The baseline is taken only here, past every step that can still send
 	// setup down the fresh-copy path: the fresh chunker starts at zero, and a
 	// baseline left over from an abandoned resume would underflow the
-	// unsigned subtraction in recordCopyCompleted.
+	// unsigned subtraction in runtime.RecordCopyCompleted.
 	r.copyRowsAtResume = r.copyChunker.RowsCopied()
 	return r.checkpointTbl().Create(ctx)
 }
@@ -1943,8 +1921,8 @@ func (r *Runner) startBackgroundRoutines(ctx context.Context) {
 // fresh rather than resume.
 //
 // fatalError is safe to call concurrently: it is invoked from the change
-// client's stream goroutine, so cancelFunc (written by Run under progMu)
-// must be read under progMu like Cancel() does, and fatalOnce makes the
+// client's stream goroutine, which may run while Run is still publishing its
+// cancel function (runtime.Lifecycle guards it), and fatalOnce makes the
 // record-and-cancel side effects idempotent.
 func (r *Runner) fatalError(reason change.FatalReason) bool {
 	r.recordFatal(fmt.Errorf("the change source signaled a fatal error (%s); sync cannot continue safely — see prior log lines for the cause", reason))
@@ -1964,15 +1942,10 @@ func (r *Runner) recordFatal(err error) {
 		r.fatalMu.Lock()
 		r.fatalErr = err
 		r.fatalMu.Unlock()
-		r.progMu.RLock()
-		cancel := r.cancelFunc
-		r.progMu.RUnlock()
-		// cancelFunc can be nil if this fires before Run has set it (e.g. test
-		// paths that bypass Run); nil-check before calling. err is the cause,
-		// so a phase stopped by this cancellation returns err.
-		if cancel != nil {
-			cancel(err)
-		}
+		// A no-op if this fires before Run has set the cancel function (e.g.
+		// test paths that bypass Run). err is the cause, so a phase stopped by
+		// this cancellation returns err.
+		r.lifecycle.Cancel(err)
 	})
 }
 
@@ -2230,14 +2203,9 @@ func (r *Runner) DumpCheckpoint(ctx context.Context) error {
 }
 
 // Cancel stops the sync by cancelling the Run context. Safe to call before
-// Run has started (no-op until cancelFunc is set).
+// Run has started (a no-op until Run sets its cancel function).
 func (r *Runner) Cancel() {
-	r.progMu.RLock()
-	cancel := r.cancelFunc
-	r.progMu.RUnlock()
-	if cancel != nil {
-		cancel(nil)
-	}
+	r.lifecycle.Cancel(nil)
 }
 
 // appendVerificationStatus separates traversal from unresolved verification.

@@ -34,7 +34,7 @@ func TestCheckpointWriteFailureRecordedAsFatal(t *testing.T) {
 
 	var cancelled bool
 	var cause error
-	r.cancelFunc = func(err error) { cancelled = true; cause = err }
+	r.lifecycle.SetCancel(func(err error) { cancelled = true; cause = err })
 
 	err = r.DumpCheckpoint(context.Background())
 	require.Error(t, err, "a failed checkpoint write must return an error to WatchTask")

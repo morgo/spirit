@@ -17,7 +17,7 @@ func (*busyProgressThrottler) Utilization() float64 { return 1.2 }
 
 func TestMoveContinuousChecksumThrottleProgress(t *testing.T) {
 	r := &Runner{}
-	r.setThrottler(&busyProgressThrottler{})
+	r.throttler.Set(&busyProgressThrottler{})
 	require.True(t, r.snapshot(status.Checksum).ThrottleStatus().Throttled)
 	require.Empty(t, r.snapshot(status.WaitingOnSentinelTable).ThrottleStatus(), "no checker yet")
 	v := &pacingChecker{}
@@ -27,7 +27,7 @@ func TestMoveContinuousChecksumThrottleProgress(t *testing.T) {
 	require.True(t, r.snapshot(status.WaitingOnSentinelTable).ThrottleStatus().Throttled, "reading a pass")
 	require.InDelta(t, 1.2, r.snapshot(status.WaitingOnSentinelTable).ThrottleStatus().Utilization, 0.001)
 	require.Empty(t, r.snapshot(status.CutOver).ThrottleStatus())
-	r.setThrottler(&throttler.Mock{})
+	r.throttler.Set(&throttler.Mock{})
 	require.Empty(t, r.snapshot(status.WaitingOnSentinelTable).ThrottleStatus()) // Binary signals do not pace checksums.
 }
 

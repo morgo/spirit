@@ -19,22 +19,25 @@ type continuousChecker struct{ *checksum.MockChecker }
 
 func (continuousChecker) ContinuousActive() bool { return true }
 
-// fakeSource answers Source with fixed subsystems. Only the checker and the
-// sentinel schema vary between tests.
+// fakeSource holds the subsystems a test Source reports. Only the checker
+// varies between tests (the sentinel schema is set on Source directly).
 type fakeSource struct {
 	checker checksum.Checker
-	schema  string
 }
 
-func (*fakeSource) Copier() copier.Copier          { return copiertest.Stub{Chunk: 1000} }
-func (*fakeSource) Applier() applier.Applier       { return &applier.MockApplier{} }
-func (f *fakeSource) Checker() checksum.Checker    { return f.checker }
-func (*fakeSource) Throttler() throttler.Throttler { return &throttler.Noop{} }
-func (f *fakeSource) SentinelSchema() string       { return f.schema }
+func (f *fakeSource) source() Source {
+	return Source{
+		Copier:    func() copier.Copier { return copiertest.Stub{Chunk: 1000} },
+		Applier:   func() applier.Applier { return &applier.MockApplier{} },
+		Checker:   func() checksum.Checker { return f.checker },
+		Feeds:     f.feeds,
+		Throttler: func() throttler.Throttler { return &throttler.Noop{} },
+	}
+}
 
 // Feeds includes a feed not yet created (nil), which must be skipped rather
 // than dereferenced.
-func (*fakeSource) Feeds() []change.Source {
+func (*fakeSource) feeds() []change.Source {
 	return []change.Source{&change.MockSource{DeltaLen: 2}, nil, &change.MockSource{DeltaLen: 3}}
 }
 
@@ -46,7 +49,7 @@ func newSnapshot(noun string, state status.State) (*Snapshot, *fakeSource) {
 		Tracker:    &status.Tracker{},
 		Tables:     []status.TableProgress{{TableName: "t1", RowsCopied: 50, RowsTotal: 100}},
 		Checkpoint: &status.LastCheckpoint{},
-		Source:     src,
+		Source:     src.source(),
 	}, src
 }
 
@@ -74,8 +77,8 @@ func TestStatusSumsFeeds(t *testing.T) {
 }
 
 func TestStatusSentinelRow(t *testing.T) {
-	snap, src := newSnapshot("migration", status.WaitingOnSentinelTable)
-	src.schema = "test"
+	snap, _ := newSnapshot("migration", status.WaitingOnSentinelTable)
+	snap.Source.SentinelSchema = func() string { return "test" }
 	require.Contains(t, snap.Status(), "table=test._spirit_sentinel  waiting=")
 
 	block := render("move", status.WaitingOnSentinelTable)

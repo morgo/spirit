@@ -2,6 +2,7 @@ package move
 
 import (
 	"context"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -144,4 +145,20 @@ func TestMoveProgressPolledConcurrently(t *testing.T) {
 	cancel()
 	pollers.Wait()
 	require.NoError(t, runErr)
+}
+
+// TestSnapshotSourceIsComplete pins that the move runner fills in every
+// runtime.Source function but SentinelSchema, which a move leaves nil because
+// its sources can span several schemas. With Source a struct, a field left nil
+// compiles and panics only when a report reads it.
+func TestSnapshotSourceIsComplete(t *testing.T) {
+	src := reflect.ValueOf((&Runner{}).snapshot(status.Initial).Source)
+	for i := range src.NumField() {
+		name := src.Type().Field(i).Name
+		if name == "SentinelSchema" {
+			require.True(t, src.Field(i).IsNil(), "a move reports no sentinel schema")
+			continue
+		}
+		require.False(t, src.Field(i).IsNil(), "runtime.Source.%s is not set", name)
+	}
 }

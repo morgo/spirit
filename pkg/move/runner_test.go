@@ -922,8 +922,8 @@ func buildTestRunner(t *testing.T, move *Move) (*Runner, context.Context) {
 	r, err := NewRunner(move)
 	require.NoError(t, err)
 
-	var ctx context.Context
-	ctx, r.cancelFunc = context.WithCancelCause(t.Context())
+	ctx, cancel := context.WithCancelCause(t.Context())
+	r.lifecycle.SetCancel(cancel)
 	r.dbConfig = dbconn.NewDBConfig()
 	sourceDSNs := move.SourceDSNs
 	if len(sourceDSNs) == 0 {
