@@ -1365,21 +1365,16 @@ func (r *Runner) snapshot(state status.State) *runtime.Snapshot {
 		Tables:     r.copyTables(),
 		Checkpoint: &r.lastCheckpoint,
 		Resumed:    r.usedResumeFromCheckpoint.Load(),
-		Source:     statusSource{r},
+		Source: runtime.Source{
+			Copier:         func() copier.Copier { return r.copier },
+			Applier:        func() applier.Applier { return r.applier },
+			Checker:        func() checksum.Checker { return r.checker },
+			Feeds:          func() []change.Source { return []change.Source{r.replClient} },
+			Throttler:      r.throttler.Get,
+			SentinelSchema: func() string { return r.changes[0].table.SchemaName },
+		},
 	}
 }
-
-// statusSource hands runtime the runner's subsystems. It reads each one only
-// when the state being reported on needs it, which is after setup has assigned
-// it (see runtime.Source).
-type statusSource struct{ r *Runner }
-
-func (s statusSource) Copier() copier.Copier          { return s.r.copier }
-func (s statusSource) Applier() applier.Applier       { return s.r.applier }
-func (s statusSource) Checker() checksum.Checker      { return s.r.checker }
-func (s statusSource) Feeds() []change.Source         { return []change.Source{s.r.replClient} }
-func (s statusSource) Throttler() throttler.Throttler { return s.r.throttler.Get() }
-func (s statusSource) SentinelSchema() string         { return s.r.changes[0].table.SchemaName }
 
 func (r *Runner) Progress() status.Progress {
 	return r.snapshot(r.status.Get()).Progress()
