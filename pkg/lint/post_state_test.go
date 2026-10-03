@@ -380,3 +380,58 @@ func TestPostState_ColumnCharsetCollation(t *testing.T) {
 		require.Equal(t, "utf8mb4_0900_ai_ci", *col.Collation)
 	})
 }
+
+// TestPostState_CreateTableLike verifies a CREATE TABLE ... LIKE takes the
+// source's definition, without its foreign keys, which LIKE does not copy.
+func TestPostState_CreateTableLike(t *testing.T) {
+	existing, err := statement.ParseCreateTable(`CREATE TABLE src (
+		id BIGINT NOT NULL PRIMARY KEY,
+		parent_id BIGINT,
+		CONSTRAINT chk_id CHECK (id > 0),
+		CONSTRAINT fk_parent FOREIGN KEY (parent_id) REFERENCES parent (id)
+	) ENGINE=InnoDB`)
+	require.NoError(t, err)
+	like, err := statement.New("CREATE TABLE dst LIKE src")
+	require.NoError(t, err)
+
+	post := PostState([]*statement.CreateTable{existing}, like)
+	dst := findTable(post, "dst")
+	require.NotNil(t, dst)
+	require.Equal(t, "dst", dst.TableName)
+	require.Nil(t, dst.Raw)
+	require.Len(t, dst.Columns, 2)
+	require.Equal(t, []string{"id"}, primaryKeyColumns(dst))
+	require.Len(t, dst.Constraints, 1)
+	require.Equal(t, "CHECK", dst.Constraints[0].Type)
+	require.Equal(t, "InnoDB", *dst.TableOptions.Engine)
+
+	// The source is unchanged.
+	src := findTable(post, "src")
+	require.Len(t, src.Constraints, 2)
+}
+
+// TestPostState_CreateTableLikeUnknownSource verifies a LIKE whose source is
+// not known keeps its own definition, with the LIKE in Raw.
+func TestPostState_CreateTableLikeUnknownSource(t *testing.T) {
+	like, err := statement.New("CREATE TABLE dst LIKE missing")
+	require.NoError(t, err)
+	post := PostState(nil, like)
+	require.Len(t, post, 1)
+	require.True(t, isUnresolvedLike(post[0]))
+}
+
+// TestNewTablesInChanges_FollowsRename verifies a created table renamed later
+// in the changes is known by its new name, as PostState keys it.
+func TestNewTablesInChanges_FollowsRename(t *testing.T) {
+	var changes []*statement.AbstractStatement
+	for _, sql := range []string{
+		"CREATE TABLE t1 (id BIGINT PRIMARY KEY)",
+		"ALTER TABLE t1 RENAME TO T2",
+		"ALTER TABLE existing RENAME TO t3",
+	} {
+		stmts, err := statement.New(sql)
+		require.NoError(t, err)
+		changes = append(changes, stmts...)
+	}
+	require.Equal(t, map[string]bool{"t2": true}, newTablesInChanges(changes))
+}

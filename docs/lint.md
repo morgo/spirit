@@ -65,6 +65,7 @@ These linters detect issues that could cause problems during online schema chang
 | `invisible_index_before_drop` | Dropping indexes without first making them invisible is risky |
 | `multiple_alter_table` | Multiple ALTERs on the same table should be combined for efficiency |
 | `rename_column` | Column renames break ORMs and can't be deployed atomically with application changes |
+| `spirit_compatible` | New tables must be alterable by Spirit later: a primary key with no FLOAT or BIT column, no foreign keys, no `.` or backtick in the name |
 | `unsafe` | Detects unsafe operations in schema changes |
 
 ### Data Type Safety
