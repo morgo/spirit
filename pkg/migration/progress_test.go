@@ -71,7 +71,7 @@ func TestThrottleStatusReportsReasonDuringCopy(t *testing.T) {
 	require.Empty(t, ts.Reason)
 	require.Zero(t, ts.Utilization)
 
-	r.setThrottler(&throttler.Mock{})
+	r.throttler.Set(&throttler.Mock{})
 	ts = r.snapshot(status.CopyRows).ThrottleStatus()
 	require.True(t, ts.Throttled)
 	require.Equal(t, "mock throttler (always throttled)", ts.Reason)
@@ -82,7 +82,7 @@ func TestThrottleStatusNarrowsToLoadSignalsDuringChecksum(t *testing.T) {
 	// so status must not report it as paused on a binary signal it is ignoring.
 	// The mock is binary-only, so it throttles the copy but not the checksum.
 	r := &Runner{}
-	r.setThrottler(&throttler.Mock{})
+	r.throttler.Set(&throttler.Mock{})
 
 	require.True(t, r.snapshot(status.CopyRows).ThrottleStatus().Throttled)
 
@@ -95,7 +95,7 @@ func TestThrottleStatusNarrowsToLoadSignalsDuringChecksum(t *testing.T) {
 // Inactive sentinel waiting and non-checksum phases never report load throttling.
 func TestThrottleStatusIsZeroInUnpacedPhases(t *testing.T) {
 	r := &Runner{}
-	r.setThrottler(&throttler.Mock{}) // always throttled
+	r.throttler.Set(&throttler.Mock{}) // always throttled
 
 	unpaced := []status.State{
 		status.Initial,
@@ -120,7 +120,7 @@ func TestThrottleStatusIsZeroInUnpacedPhases(t *testing.T) {
 // TestProgressPolledConcurrentlyWithRun covers the seam the new Progress fields
 // opened up: an API caller polls Progress() from its own goroutine while setup is
 // still writing the state those fields report. Under -race this fails if the
-// throttler is read unsynchronized (hence throttlerMu) — the resume flag is
+// throttler is read unsynchronized (hence runtime.SharedThrottler) — the resume flag is
 // atomic for the same reason, written by resumeFromCheckpoint during setup.
 //
 // WithTestThrottler is what makes the write side real: without any replica DSN
@@ -193,9 +193,7 @@ func TestSetThrottlerOnPhasesReachesChecker(t *testing.T) {
 	checker := &recordingChecker{}
 	r.checker = checker
 	resolved := &throttler.Noop{}
-	r.throttlerMu.Lock()
-	r.throttler = resolved
-	r.throttlerMu.Unlock()
+	r.throttler.Set(resolved)
 	r.setThrottlerOnPhases()
 	require.Same(t, resolved, checker.got, "resolved throttler must reach the checksum phase")
 }
@@ -210,11 +208,11 @@ func (c *activeContinuousChecker) ContinuousActive() bool { return c.active }
 func TestContinuousChecksumThrottleStatus(t *testing.T) {
 	checker := &activeContinuousChecker{}
 	r := &Runner{checker: checker}
-	r.setThrottler(&gradualTestThrottler{throttled: true})
+	r.throttler.Set(&gradualTestThrottler{throttled: true})
 	require.Equal(t, status.ThrottleStatus{}, r.snapshot(status.WaitingOnSentinelTable).ThrottleStatus())
 	checker.active = true
 	require.True(t, r.snapshot(status.WaitingOnSentinelTable).ThrottleStatus().Throttled)
-	r.setThrottler(&throttler.Mock{})
+	r.throttler.Set(&throttler.Mock{})
 	require.False(t, r.snapshot(status.WaitingOnSentinelTable).ThrottleStatus().Throttled, "replica/binary signals do not pace checksum")
 	checker.active = false
 	require.Equal(t, status.ThrottleStatus{}, r.snapshot(status.WaitingOnSentinelTable).ThrottleStatus())
@@ -231,7 +229,7 @@ func (*explainedLoadThrottler) ThrottleReason() string { return "server load" }
 func TestContinuousChecksumStatusSurfaces(t *testing.T) {
 	checker := &activeContinuousChecker{}
 	r := &Runner{checker: checker, replClient: &change.MockSource{}, changes: []*tableChange{{table: &table.TableInfo{SchemaName: "test"}}}}
-	r.setThrottler(&explainedLoadThrottler{gradualTestThrottler{throttled: true}})
+	r.throttler.Set(&explainedLoadThrottler{gradualTestThrottler{throttled: true}})
 	r.status.Set(status.WaitingOnSentinelTable)
 	for _, active := range []bool{false, true, false} {
 		checker.active = active

@@ -26,6 +26,7 @@ import (
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/flags"
 	"github.com/block/spirit/pkg/metrics"
+	"github.com/block/spirit/pkg/runtime"
 	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
@@ -340,7 +341,7 @@ func TestCheckpoint(t *testing.T) {
 	// resume.
 	sink := &copyAggregateSink{}
 	r.status.SetMetricsSink(sink, r.logger)
-	r.recordCopyCompleted()
+	runtime.RecordCopyCompleted(&r.status, r.copier, r.copyRowsAtResume)
 	require.Equal(t, r.copyChunker.RowsCopied()-restored, sink.rows)
 	require.Equal(t, uint64(11), sink.chunks, "the eleven chunks this runner copied after resuming")
 }

@@ -31,7 +31,7 @@ func TestMoveAutoscaleNonAurora(t *testing.T) {
 	require.Equal(t, 3, r.move.Threads)
 	require.Equal(t, 5, r.move.WriteThreads)
 	require.Empty(t, r.monitorDBs)
-	require.False(t, r.currentThrottler().IsThrottled())
+	require.False(t, r.throttler.Get().IsThrottled())
 }
 
 func TestMoveAutoscaleDisabled(t *testing.T) {
@@ -46,7 +46,7 @@ func TestMoveAutoscaleDisabled(t *testing.T) {
 
 func TestMoveThrottleStatus(t *testing.T) {
 	r := &Runner{}
-	r.setThrottler(&throttler.Mock{})
+	r.throttler.Set(&throttler.Mock{})
 	require.True(t, r.snapshot(status.CopyRows).ThrottleStatus().Throttled)
 	require.False(t, r.snapshot(status.Checksum).ThrottleStatus().Throttled)
 	require.Empty(t, r.snapshot(status.CutOver).ThrottleStatus())
@@ -86,7 +86,7 @@ func TestMoveThrottlesWithoutAutoscaling(t *testing.T) {
 	signal := &closeCountingThrottler{}
 	groups := []host.Group{{Indices: []int{0}}}
 	require.NoError(t, r.applyAuroraResults(t.Context(), groups, []throttler.AuroraResult{{Throttlers: []throttler.Throttler{signal}}}))
-	require.True(t, r.currentThrottler().IsThrottled())
+	require.True(t, r.throttler.Get().IsThrottled())
 	require.False(t, r.autoscale.Enabled)
 	require.Equal(t, 3, r.move.Threads)
 	require.Equal(t, 5, r.move.WriteThreads)
@@ -128,7 +128,7 @@ func TestMoveSetupThrottling(t *testing.T) {
 	// Without the flag, every Aurora target still throttles the move.
 	r := newRunner(t, &Move{Common: flags.Common{Threads: 3, WriteThreads: 5, MaxCommitLatency: 100 * time.Millisecond}}, aurora(false), aurora(false))
 	require.NoError(t, r.setupThrottling(t.Context()))
-	require.True(t, r.currentThrottler().IsThrottled())
+	require.True(t, r.throttler.Get().IsThrottled())
 	require.False(t, r.autoscale.Enabled)
 	require.Equal(t, 3, r.move.Threads)
 	require.Equal(t, 5, r.move.WriteThreads)
@@ -168,7 +168,7 @@ func TestMoveAutoscaleNeedsEveryTarget(t *testing.T) {
 		signal := &closeCountingThrottler{}
 		results := []throttler.AuroraResult{{Throttlers: []throttler.Throttler{signal}}, other}
 		require.NoError(t, r.applyAuroraResults(t.Context(), groups, results))
-		require.True(t, r.currentThrottler().IsThrottled())
+		require.True(t, r.throttler.Get().IsThrottled())
 		require.False(t, r.autoscale.Enabled)
 		require.Equal(t, 3, r.move.Threads)
 		require.Equal(t, 5, r.move.WriteThreads)

@@ -167,7 +167,7 @@ pkg/
   fmt/        → Schema file formatter (canonicalize CREATE TABLE .sql files)
   throttler/  → Rate limiting interface (noop, mock, replica-lag based)
   status/     → State machine and progress reporting
-  runtime/    → Status block, Progress report and fatal change-feed handler shared by the migration and move runners
+  runtime/    → Runner pieces shared by the triplet: status block, Progress report, fatal change-feed handler, Run lifecycle
   metrics/    → Metric types for observability
   buildinfo/  → Build version and metadata
   utils/      → Shared helpers with no spirit dependencies (see "Shared helpers" below)
@@ -252,6 +252,9 @@ These three runners began as copy-paste forks and **drift silently** — a safet
 | The periodic `Status()` block, `Progress()` and its throttle status | `pkg/runtime` (`Snapshot`, built per call; subsystems read lazily through `Source`) | migration, move (datasync has its own states) |
 | Which fatal change-feed reasons keep the checkpoint, and the operator message | `change.FatalReason.PreservesCheckpoint` / `Advice` | migration, move (datasync keeps its checkpoint) |
 | The fatal change-feed handler (`change.ClientConfig.CancelFunc`): the `>= CutOver` no-op guard, `ErrCleanup`, the checkpoint drop, the `status.FatalAbort` cause, all once | `pkg/runtime` (`FatalGate.Trip`; the runner supplies its noun, checkpoint drop and cancel in `FatalTarget`) | migration, move (datasync records the cause and keeps its checkpoint: `recordFatal`) |
+| A Run invocation's cancel function (`Begin` derives the context and returns the deferred `end`, which substitutes a fatal-abort cause for `context.Canceled` before it cancels; `Cancel` with a nil cause is an operator cancel) and its `status.WorkflowResult` evidence | `pkg/runtime` (`Lifecycle`, a named field — the runner forwards `Cancel`/`Abort`/`Result`, so its public API does not grow the evidence setters) | migration, move, datasync (datasync reports no `Result`) |
+| The throttler setup resolves while `Progress` and the feed's `UnderLoad` already read it | `pkg/runtime` (`SharedThrottler`) | migration, move (datasync reads its load signal under `progMu`) |
+| The copy aggregate reported when the copy ends, net of the rows restored on resume | `pkg/runtime` (`RecordCopyCompleted`) | migration, move, datasync |
 | Fitting the checksum's read bounds (start and ceiling) to `--max-connections` | `dbconn.ReadBoundsForPool` (the runner supplies its reserve and how many connections one reader holds on the busiest pool) | migration, move (datasync partitions its target pool in `Request.Fit`, below) |
 | Checkpoint table (one schema + create/drop/exists/write/read) | `pkg/checkpoint` (`Table` + `Mode`) | migration, move, datasync |
 | Sentinel cutover gate (`Create`/`Exists`/`Wait`) | `pkg/sentinel` | migration, move (datasync has no cutover) |

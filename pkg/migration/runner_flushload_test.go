@@ -45,18 +45,18 @@ func TestFlushUnderLoadReadsLoadSignalsOnly(t *testing.T) {
 
 	// Before setup resolves one there is nothing to read, and nil must not
 	// panic a drain that is already running.
-	require.Nil(t, r.currentThrottler())
+	require.Nil(t, r.throttler.Get())
 	require.False(t, r.flushUnderLoad())
 
 	// A throttled binary throttler — the replica-lag class — must not narrow
 	// the drain. throttler.Mock is always throttled and is not gradual.
-	r.setThrottler(&throttler.Mock{})
-	require.True(t, r.currentThrottler().IsThrottled(), "the double must be throttled, or this proves nothing")
+	r.throttler.Set(&throttler.Mock{})
+	require.True(t, r.throttler.Get().IsThrottled(), "the double must be throttled, or this proves nothing")
 	require.False(t, r.flushUnderLoad(), "a non-load signal must not narrow the drain")
 
 	// A gradual throttler is the Aurora load signal, and does.
 	gradual := &gradualTestThrottler{}
-	r.setThrottler(gradual)
+	r.throttler.Set(gradual)
 	require.False(t, r.flushUnderLoad())
 	gradual.throttled = true
 	require.True(t, r.flushUnderLoad())

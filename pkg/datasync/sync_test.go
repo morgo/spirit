@@ -425,9 +425,9 @@ func TestRunnerStatusTask(t *testing.T) {
 }
 
 // TestFatalErrorConcurrentWithRunSetup exercises the seam between Run (which
-// assigns cancelFunc under progMu during setup) and the change client's
+// publishes its cancel function during setup) and the change client's
 // stream goroutine invoking fatalError. Under -race this fails if fatalError
-// reads cancelFunc without taking progMu (matching Cancel()). It also gates
+// reads the cancel function unsynchronized. It also gates
 // the sync.Once semantics: the record-and-cancel side effects happen at most
 // once across repeated invocations.
 func TestFatalErrorConcurrentWithRunSetup(t *testing.T) {
@@ -438,9 +438,7 @@ func TestFatalErrorConcurrentWithRunSetup(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Go(func() {
 		// Simulate Run's setup assignment (see Runner.Run).
-		runner.progMu.Lock()
-		runner.cancelFunc = func(error) { cancelCalls.Add(1) }
-		runner.progMu.Unlock()
+		runner.lifecycle.SetCancel(func(error) { cancelCalls.Add(1) })
 	})
 	wg.Go(func() {
 		require.True(t, runner.fatalError(change.FatalReasonStreamError))

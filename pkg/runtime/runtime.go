@@ -1,9 +1,13 @@
-// Package runtime renders the periodic status block and the Progress report
-// shared by the finite runners (pkg/migration and pkg/move). Both runners walk
-// the same states with the same subsystems, so their reports are built here
-// from a Snapshot rather than from two copies of the same switch that drift
-// apart. For the same reason it holds FatalGate, the state transition both
-// runners make when their change feed fails.
+// Package runtime holds the runner pieces that pkg/migration, pkg/move and
+// pkg/datasync would otherwise each keep a copy of, and let drift apart.
+//
+// The finite runners (migration and move) walk the same states with the same
+// subsystems, so their periodic status block and Progress report are built
+// here from a Snapshot rather than from two copies of the same switch.
+// FatalGate is the state transition both make when their change feed fails,
+// and SharedThrottler the throttler both resolve while already being polled.
+// All three runners use Lifecycle, the cancel function and correctness
+// evidence of a Run invocation, and RecordCopyCompleted.
 //
 // The name matches the standard library's runtime package. A file that needs
 // both must import one under an alias.
