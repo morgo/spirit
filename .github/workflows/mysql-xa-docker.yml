@@ -10,6 +10,18 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      # The XA guards depend on how the server writes XA prepare and commit
+      # events to the binlog, so they run on 8.4 (the base compose.yml image)
+      # and on 8.0, which Aurora MySQL 3 is based on.
+      matrix:
+        include:
+          - name: '8.4'
+            compose-files: -f compose.yml
+          - name: '8.0.46'
+            compose-files: -f compose.yml -f 8.0.46.yml
+    name: build (${{ matrix.name }})
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
@@ -26,7 +38,9 @@ jobs:
 
       - name: Test XA stream guards
         if: steps.filter.outputs.code == 'true'
-        run: docker compose -f compose.yml --profile xa up mysql xa-test --abort-on-container-exit --exit-code-from xa-test
+        env:
+          COMPOSE_FILES: ${{ matrix.compose-files }}
+        run: docker compose $COMPOSE_FILES --profile xa up mysql xa-test --abort-on-container-exit --exit-code-from xa-test
         working-directory: compose
 
       - name: Skip — documentation-only change

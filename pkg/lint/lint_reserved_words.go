@@ -16,9 +16,17 @@ func init() {
 //
 //	SELECT WORD FROM information_schema.KEYWORDS WHERE RESERVED=1
 //
-// on MySQL 8.0.46, 8.4, 9.7 and 26.7. Most words are reserved in all of them.
-// The exceptions are MASTER_BIND and MASTER_SSL_VERIFY_SERVER_CERT (8.0 only),
-// LIBRARY (9.7+), and EXTERNAL, QUALIFY and TABLESAMPLE (26.7+).
+// on the latest patch release of MySQL 8.0, 8.4, 9.7 and 26.7 (8.0.46, 8.4.11,
+// 9.7.2 and 26.7.0). Most words are reserved in all of them. The exceptions
+// are MASTER_BIND and MASTER_SSL_VERIFY_SERVER_CERT (8.0 only), QUALIFY and
+// TABLESAMPLE (8.4+), and EXTERNAL and LIBRARY (9.7+).
+// TestReservedWordsCoverServer checks the list against the server of each CI
+// version job.
+//
+// Earlier patch releases can differ, and their KEYWORDS table is not always
+// accurate: 9.7.0 also rejects MANUAL and PARALLEL as identifiers (they became
+// nonreserved in 9.7.2), while its KEYWORDS table marks them, and EXTERNAL,
+// QUALIFY and TABLESAMPLE, as nonreserved. Those two words are not listed.
 // Reserved words cannot be used as identifiers without backtick quoting.
 // Total: 266 reserved words
 var mysqlReservedWords = map[string]bool{

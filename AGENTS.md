@@ -352,9 +352,9 @@ GitHub Actions workflows (`.github/workflows/`):
 - **mysql267-docker.yml** — integration tests against MySQL 26.7 with replication
 - **mysql84-singleversion-docker.yml** — runs the version-agnostic "single-version" suite (build tag `singleversion`) once, against MySQL 8.4. It selects tests with a `-run` regex defined in the `singleversion-test` service in `compose/compose.yml`, so a new `singleversion` test must either match that pattern by name or be added to it — `go test` exits 0 when `-run` matches nothing, so a mismatch silently skips the test.
 - **mysql-semisync-docker.yml** — integration tests against MySQL 8.4 with semi-sync replication and a delayed replica
-- **mysql-xa-docker.yml** — XA transaction tests against MySQL 8.4, on their own server (XA events are visible to every change stream on the server)
+- **mysql-xa-docker.yml** — XA transaction tests against MySQL 8.4 and 8.0.46, on their own server (XA events are visible to every change stream on the server)
 
-Version-agnostic jobs (single-version, semi-sync, XA, build-and-run) run on MySQL 8.4, the default image in `compose/compose.yml`, `compose/semisync.yml` and `compose/replication-tls/replication-ci.yml`. A job that targets a specific version adds an overlay file (`8.0.28.yml`, `8.0.46.yml`, `26.7.yml`, ...). Non-Aurora MySQL 8.0 is end of life; 8.0 releases are tested because Aurora MySQL 3 is based on them.
+Version-agnostic jobs (single-version, semi-sync, build-and-run) run on MySQL 8.4, the default image in `compose/compose.yml`, `compose/semisync.yml` and `compose/replication-tls/replication-ci.yml`. A job that targets a specific version adds an overlay file (`8.0.28.yml`, `8.0.46.yml`, `26.7.yml`, ...). Non-Aurora MySQL 8.0 is end of life; 8.0 releases are tested because Aurora MySQL 3 is based on them.
 - **govulncheck.yml** — scans dependencies for known vulnerabilities
 - **buildandrun-docker.yml** — build and run smoke test
 - **release.yml** — release automation

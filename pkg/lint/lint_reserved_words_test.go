@@ -1,12 +1,40 @@
 package lint
 
 import (
+	"database/sql"
 	"strings"
 	"testing"
 
+	_ "github.com/block/mysql"
 	"github.com/block/spirit/pkg/statement"
+	"github.com/block/spirit/pkg/testutils"
+	"github.com/block/spirit/pkg/utils"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// TestReservedWordsCoverServer checks that every word the connected server
+// reports as reserved is in mysqlReservedWords. Each CI version job runs it, so
+// a word a supported MySQL release starts reserving fails CI instead of being
+// silently missed by the linter.
+func TestReservedWordsCoverServer(t *testing.T) {
+	db, err := sql.Open("block-mysql", testutils.DSN())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	rows, err := db.QueryContext(t.Context(), `SELECT WORD FROM information_schema.KEYWORDS WHERE RESERVED=1`)
+	require.NoError(t, err)
+	defer utils.CloseAndLog(rows)
+	var n int
+	for rows.Next() {
+		var word string
+		require.NoError(t, rows.Scan(&word))
+		n++
+		assert.True(t, mysqlReservedWords[word], "server reserves %q but mysqlReservedWords does not list it", word)
+	}
+	require.NoError(t, rows.Err())
+	require.NotZero(t, n, "server reported no reserved words")
+}
 
 func TestReservedWordsLinter_TableName(t *testing.T) {
 	tests := []struct {
@@ -106,7 +134,7 @@ func TestReservedWordsLinter_ColumnName(t *testing.T) {
 			expectedWord:    "from",
 		},
 		{
-			// Reserved from MySQL 26.7 only: the list covers every supported version.
+			// Reserved from MySQL 8.4 only: the list covers every supported version.
 			name: "reserved word QUALIFY as column name",
 			sql: `CREATE TABLE users (
 				id INT PRIMARY KEY,
