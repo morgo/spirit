@@ -26,7 +26,7 @@ import (
 	"github.com/block/spirit/pkg/host"
 	"github.com/block/spirit/pkg/metrics"
 	"github.com/block/spirit/pkg/move/check"
-	"github.com/block/spirit/pkg/runstatus"
+	"github.com/block/spirit/pkg/runtime"
 	"github.com/block/spirit/pkg/sentinel"
 	"github.com/block/spirit/pkg/statement"
 	"github.com/block/spirit/pkg/status"
@@ -193,14 +193,9 @@ type Runner struct {
 
 	dbConfig *dbconn.DBConfig
 
-	// fatalOnce makes fatalError idempotent. Move wires N repl clients
-	// (one per source) to the same fatalError callback, so a concurrent
-	// burst of fatal events is realistic and without Once could
-	// double-drop the checkpoint and double-cancel the context. The
-	// individual operations underneath are idempotent, but routing
-	// everything through Once keeps the side-effect set small enough to
-	// reason about and avoids racing with Close() teardown.
-	fatalOnce sync.Once
+	// fatal aborts the run on the first fatal change-feed condition; see
+	// fatalError.
+	fatal runtime.FatalGate
 
 	// watchTaskWait blocks until the WatchTask goroutines have exited.
 	// Set in startBackgroundRoutines and invoked from Close() so that
@@ -299,6 +294,14 @@ func (r *Runner) Close() error {
 	for i := range r.sources {
 		if r.sources[i].replClient != nil {
 			r.sources[i].replClient.Close()
+		}
+	}
+	// Stop the applier's async write workers, as migration does. The copier's
+	// Run stops them when it returns (Stop is idempotent), so this matters only
+	// to a path that started them some other way and never stopped them.
+	if r.applier != nil {
+		if err := r.applier.Stop(); err != nil {
+			errs = append(errs, err)
 		}
 	}
 	for _, target := range r.targets {
@@ -843,18 +846,21 @@ func (r *Runner) fitReadThreadsToPools() error {
 			copies = max(copies, n)
 		}
 	}
-	// Preserve at least one reader, matching migration; advisory control-plane
-	// queries may queue when the requested budget cannot cover all headroom.
-	available := max(1, (r.move.MaxConnections-reserve)/copies)
-	start := min(r.move.Threads, available)
-	if start != r.move.Threads {
-		r.logger.Info("fitting read threads to the connection pool", "threads", start, "max_connections", r.move.MaxConnections, "reserved", reserve)
-	}
 	// Autoscaling can have a ceiling above its starting count. Checksum
 	// workers draw connections up to that ceiling, so fit it as well without
 	// changing the fixed pool budget inherited from --max-connections.
+	ceiling := r.move.Threads
 	if r.autoscale.Enabled {
-		r.autoscale.MaxReadThreads = min(max(r.move.Threads, r.autoscale.MaxReadThreads), available)
+		ceiling = max(r.move.Threads, r.autoscale.MaxReadThreads)
+	}
+	// Preserve at least one reader, matching migration; advisory control-plane
+	// queries may queue when the requested budget cannot cover all headroom.
+	start, ceiling := dbconn.ReadBoundsForPool(r.move.Threads, ceiling, r.move.MaxConnections, reserve, copies)
+	if start != r.move.Threads {
+		r.logger.Info("fitting read threads to the connection pool", "threads", start, "max_connections", r.move.MaxConnections, "reserved", reserve)
+	}
+	if r.autoscale.Enabled {
+		r.autoscale.MaxReadThreads = ceiling
 	}
 	r.move.Threads = start
 	return nil
@@ -1701,47 +1707,28 @@ func (r *Runner) assertNoRevertMarker(ctx context.Context, phase string) error {
 // terminated and cleaned up), and false when the error should not be treated
 // as fatal (in which case the client may continue without logging the DDL).
 //
-// The reason decides what happens to the checkpoint: a schema change
-// invalidates it (resuming against a changed table definition could corrupt
-// data), while a stream error preserves it — a dead binlog stream is exactly
-// the failure checkpoint resume exists to recover from, so a re-run picks up
-// the copy and replays the change stream from the checkpointed positions.
-//
-// fatalError is safe to call concurrently — every source's repl client is
-// wired to this same callback, so a burst of fatal events from multiple
-// binlog goroutines is realistic. fatalOnce makes the invalidate-and-cancel
-// side effects idempotent and prevents racing with Close() teardown of
-// r.checkpointTable / r.targets / r.cancelFunc.
+// The policy (cutover guard, checkpoint invalidation, abort cause) is shared
+// with migration: see runtime.FatalGate.Trip. fatalError is safe to call
+// concurrently — every source's repl client is wired to this same callback.
 func (r *Runner) fatalError(reason change.FatalReason) bool {
-	if r.status.Get() >= status.CutOver {
-		return false
-	}
-	r.fatalOnce.Do(func() {
-		r.status.Set(status.ErrCleanup)
-		if advice := reason.Advice("move"); advice != "" {
-			r.logger.Error(advice)
-		}
-		// Unless the reason leaves the checkpoint resumable, invalidate it, so
-		// we don't try to resume: the move would otherwise be blocked from
-		// proceeding permanently, and letting it start again is the better
-		// choice. Use a background context since the move context may already
-		// be cancelled. checkpointTable can still be nil if fatalError fires
-		// during early setup, before createCheckpointTable runs — skip the
-		// drop in that case.
-		if !reason.PreservesCheckpoint() && r.checkpointTable != nil && len(r.targets) > 0 && r.targets[0].DB != nil {
-			if err := r.checkpointTbl().Drop(context.Background()); err != nil {
-				r.logger.Error("could not remove checkpoint",
-					"error", err,
-				)
+	return r.fatal.Trip(reason, runtime.FatalTarget{
+		Noun:    "move",
+		Tracker: &r.status,
+		Logger:  r.logger,
+		DropCheckpoint: func(ctx context.Context) error {
+			// checkpointTable is nil if the feed fails during early setup,
+			// before createCheckpointTable runs.
+			if r.checkpointTable == nil || len(r.targets) == 0 || r.targets[0].DB == nil {
+				return nil
 			}
-		}
-		r.cancel(status.FatalAbort(fmt.Errorf("move aborted: fatal change feed condition (%s); see the preceding log lines for details", reason)))
+			return r.checkpointTbl().Drop(ctx)
+		},
+		Cancel: r.cancel,
 	})
-	return true
 }
 
 // Status returns the periodic report on the whole move: a header line plus one
-// indented row per subsystem (see runstatus.Snapshot.Status).
+// indented row per subsystem (see runtime.Snapshot.Status).
 func (r *Runner) Status() string {
 	return r.snapshot(r.status.Get()).Status()
 }
@@ -2077,8 +2064,8 @@ func (r *Runner) copyTables() []status.TableProgress {
 }
 
 // snapshot captures what Status and Progress report on, for the given state.
-func (r *Runner) snapshot(state status.State) *runstatus.Snapshot {
-	return &runstatus.Snapshot{
+func (r *Runner) snapshot(state status.State) *runtime.Snapshot {
+	return &runtime.Snapshot{
 		Noun:       "move",
 		State:      state,
 		Tracker:    &r.status,
@@ -2089,9 +2076,9 @@ func (r *Runner) snapshot(state status.State) *runstatus.Snapshot {
 	}
 }
 
-// statusSource hands runstatus the runner's subsystems. It reads each one only
+// statusSource hands runtime the runner's subsystems. It reads each one only
 // when the state being reported on needs it, which is after setup has assigned
-// it (see runstatus.Source).
+// it (see runtime.Source).
 type statusSource struct{ r *Runner }
 
 func (s statusSource) Copier() copier.Copier          { return s.r.copier }

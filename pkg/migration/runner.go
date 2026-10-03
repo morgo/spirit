@@ -24,7 +24,7 @@ import (
 	"github.com/block/spirit/pkg/dbconn/sqlescape"
 	"github.com/block/spirit/pkg/metrics"
 	"github.com/block/spirit/pkg/migration/check"
-	"github.com/block/spirit/pkg/runstatus"
+	"github.com/block/spirit/pkg/runtime"
 	"github.com/block/spirit/pkg/sentinel"
 	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/table"
@@ -136,14 +136,9 @@ type Runner struct {
 	// and fatalError may already be reading it from other goroutines.
 	cancelMu sync.Mutex
 
-	// fatalOnce makes fatalError idempotent. Without it a concurrent burst
-	// of fatal events from the binlog goroutine and the migration loop
-	// could double-drop the checkpoint and double-cancel the context. The
-	// individual operations underneath are idempotent, but routing
-	// everything through Once keeps the side-effect set small enough to
-	// reason about and avoids racing with Close() teardown of r.db and
-	// r.checkpointTable.
-	fatalOnce sync.Once
+	// fatal aborts the run on the first fatal change-feed condition; see
+	// fatalError.
+	fatal runtime.FatalGate
 
 	// watchTaskWait blocks until the WatchTask goroutines (status/checkpoint
 	// dumpers) have exited. Set in startBackgroundRoutines and invoked from
@@ -437,7 +432,7 @@ func (r *Runner) Run(ctx context.Context) (retErr error) {
 	//   - Read workers, because the checksum pins one connection per transaction
 	//     for a whole phase — a ceiling the pool cannot hold blocks on checkout
 	//     with a table lock held. Migration.Validate rejects a pool that cannot
-	//     hold the configured count; readBoundsForPool handles the count
+	//     hold the configured count; dbconn.ReadBoundsForPool handles the count
 	//     autoscaling derives later.
 	//   - The drain, because its work expires. A flush batch queueing behind a
 	//     saturated copy is spending the binlog retention window, and running out
@@ -1044,10 +1039,10 @@ func (r *Runner) autoscaleConfigs() (copier.AutoscaleConfig, checksum.AutoscaleC
 	// Fit both read bounds to the pool. The start matters as much as the ceiling
 	// here: r.migration.Threads is what the checksum takes as its Concurrency and
 	// what the copier takes as its starting read-worker count, and both of them
-	// floor the ceiling back up to it (see readBoundsForPool). Under autoscaling
-	// it is instance-derived and has never been checked against the operator's
-	// pool.
-	if fitStart, fitCeiling := dbconn.ReadBoundsForPool(r.migration.Threads, maxRead, r.migration.MaxConnections, r.checksumPhaseReserve()); fitStart != r.migration.Threads || fitCeiling != maxRead {
+	// floor the ceiling back up to it (see dbconn.ReadBoundsForPool). Under
+	// autoscaling it is instance-derived and has never been checked against the
+	// operator's pool.
+	if fitStart, fitCeiling := dbconn.ReadBoundsForPool(r.migration.Threads, maxRead, r.migration.MaxConnections, r.checksumPhaseReserve(), 1); fitStart != r.migration.Threads || fitCeiling != maxRead {
 		r.logger.Warn("read thread bounds do not fit the connection pool; capping them",
 			"threads", r.migration.Threads, "capped_threads", fitStart,
 			"read_ceiling", maxRead, "capped_read_ceiling", fitCeiling,
@@ -1120,7 +1115,7 @@ func (r *Runner) flushUnderLoad() bool {
 // narrows it to the load signals (see checksum's loadOnlyThrottler — a read-only
 // snapshot pass cannot cause replica lag, so pausing it on lag would only hold
 // the snapshot open for longer). Progress().Throttle mirrors that split — see
-// runstatus.Snapshot.ThrottleStatus.
+// runtime.Snapshot.ThrottleStatus.
 func (r *Runner) setThrottlerOnPhases() {
 	t := r.currentThrottler()
 	r.copier.SetThrottler(t)
@@ -1377,41 +1372,24 @@ func (r *Runner) setup(ctx context.Context) error {
 // or false if it was ignored (e.g. because the migration is already
 // past cutover, where Spirit's own RENAME TABLE DDL is expected).
 //
-// The reason decides what happens to the checkpoint: a schema change
-// invalidates it (resuming against a changed table definition could corrupt
-// data), while a stream error preserves it — a dead binlog stream is exactly
-// the failure checkpoint resume exists to recover from, so a re-run picks up
-// the copy and replays the binlog from the checkpointed position.
-//
-// fatalError is safe to call concurrently. fatalOnce makes the
-// invalidate-and-cancel side effects idempotent and prevents racing
-// with Close() teardown of r.db / r.checkpointTable / r.cancelFunc.
+// The policy (cutover guard, checkpoint invalidation, abort cause) is shared
+// with move: see runtime.FatalGate.Trip. fatalError is safe to call
+// concurrently.
 func (r *Runner) fatalError(reason change.FatalReason) bool {
-	if r.status.Get() >= status.CutOver {
-		return false
-	}
-	r.fatalOnce.Do(func() {
-		r.status.Set(status.ErrCleanup)
-		if advice := reason.Advice("migration"); advice != "" {
-			r.logger.Error(advice)
-		}
-		// Unless the reason leaves the checkpoint resumable, invalidate it, so
-		// we don't try to resume: the migration would otherwise be blocked from
-		// proceeding permanently, and letting it start again is the better
-		// choice. Use a background context since the migration context may
-		// already be cancelled. checkpointTable can still be nil if fatalError
-		// fires during early setup, before createCheckpointTable runs — skip
-		// the drop in that case.
-		if !reason.PreservesCheckpoint() && r.checkpointTable != nil && r.db != nil {
-			if err := r.checkpointTbl().Drop(context.Background()); err != nil {
-				r.logger.Error("could not remove checkpoint",
-					"error", err,
-				)
+	return r.fatal.Trip(reason, runtime.FatalTarget{
+		Noun:    "migration",
+		Tracker: &r.status,
+		Logger:  r.logger,
+		DropCheckpoint: func(ctx context.Context) error {
+			// checkpointTable is nil if the feed fails during early setup,
+			// before createCheckpointTable runs.
+			if r.checkpointTable == nil || r.db == nil {
+				return nil
 			}
-		}
-		r.cancel(status.FatalAbort(fmt.Errorf("migration aborted: fatal change feed condition (%s); see the preceding log lines for details", reason)))
+			return r.checkpointTbl().Drop(ctx)
+		},
+		Cancel: r.cancel,
 	})
-	return true
 }
 
 func (r *Runner) recordWorkflowError(err error) {
@@ -1448,8 +1426,8 @@ func (r *Runner) copyTables() []status.TableProgress {
 }
 
 // snapshot captures what Status and Progress report on, for the given state.
-func (r *Runner) snapshot(state status.State) *runstatus.Snapshot {
-	return &runstatus.Snapshot{
+func (r *Runner) snapshot(state status.State) *runtime.Snapshot {
+	return &runtime.Snapshot{
 		Noun:       "migration",
 		State:      state,
 		Tracker:    &r.status,
@@ -1460,9 +1438,9 @@ func (r *Runner) snapshot(state status.State) *runstatus.Snapshot {
 	}
 }
 
-// statusSource hands runstatus the runner's subsystems. It reads each one only
+// statusSource hands runtime the runner's subsystems. It reads each one only
 // when the state being reported on needs it, which is after setup has assigned
-// it (see runstatus.Source).
+// it (see runtime.Source).
 type statusSource struct{ r *Runner }
 
 func (s statusSource) Copier() copier.Copier          { return s.r.copier }
