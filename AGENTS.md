@@ -344,13 +344,17 @@ Spirit is designed to fail safely. When in doubt:
 
 GitHub Actions workflows (`.github/workflows/`):
 - **linter.yml** — runs `golangci-lint` v2.11.4 on Go 1.26 (push to main + PRs)
-- **mysql8-docker.yml** — integration tests against MySQL 8.0.45 with replication/TLS
-- **mysql8.0.28-docker.yml** — integration tests against MySQL 8.0.28
-- **mysql8.0.42-docker.yml** — integration tests against MySQL 8.0.42
-- **mysql84-docker.yml** — integration tests against MySQL 8.4
-- **mysql97-docker.yml** — integration tests against MySQL 9.7
-- **mysql8.0.45-singleversion-docker.yml** — runs the version-agnostic "single-version" suite (build tag `singleversion`) once, against MySQL 8.0.45. It selects tests with a `-run` regex defined in the `singleversion-test` service in `compose/compose.yml`, so a new `singleversion` test must either match that pattern by name or be added to it — `go test` exits 0 when `-run` matches nothing, so a mismatch silently skips the test.
-- **mysql-semisync-docker.yml** — integration tests against MySQL 8.0.45 with semi-sync replication and a delayed replica
+- **mysql8.0.28-docker.yml** — integration tests against MySQL 8.0.28 (Aurora 3.04 LTS) with GTIDs off. Aurora 3.04 reaches end of standard support on 2026-10-31; after the v0.18.0 release this runner moves to the next Aurora LTS
+- **mysql8.0.42-docker.yml** — integration tests against MySQL 8.0.42 (Aurora 3.10 LTS) with replication
+- **mysql8.0.46-docker.yml** — integration tests against MySQL 8.0.46, the latest 8.0 release, with replication
+- **mysql84-docker.yml** — integration tests against MySQL 8.4 with replication
+- **mysql97-docker.yml** — integration tests against MySQL 9.7 with replication
+- **mysql267-docker.yml** — integration tests against MySQL 26.7 with replication
+- **mysql84-singleversion-docker.yml** — runs the version-agnostic "single-version" suite (build tag `singleversion`) once, against MySQL 8.4. It selects tests with a `-run` regex defined in the `singleversion-test` service in `compose/compose.yml`, so a new `singleversion` test must either match that pattern by name or be added to it — `go test` exits 0 when `-run` matches nothing, so a mismatch silently skips the test.
+- **mysql-semisync-docker.yml** — integration tests against MySQL 8.4 with semi-sync replication and a delayed replica
+- **mysql-xa-docker.yml** — XA transaction tests against MySQL 8.4, on their own server (XA events are visible to every change stream on the server)
+
+Version-agnostic jobs (single-version, semi-sync, XA, build-and-run) run on MySQL 8.4, the default image in `compose/compose.yml`, `compose/semisync.yml` and `compose/replication-tls/replication-ci.yml`. A job that targets a specific version adds an overlay file (`8.0.28.yml`, `8.0.46.yml`, `26.7.yml`, ...). Non-Aurora MySQL 8.0 is end of life; 8.0 releases are tested because Aurora MySQL 3 is based on them.
 - **govulncheck.yml** — scans dependencies for known vulnerabilities
 - **buildandrun-docker.yml** — build and run smoke test
 - **release.yml** — release automation

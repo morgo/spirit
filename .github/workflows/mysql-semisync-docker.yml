@@ -1,4 +1,4 @@
-name: MySQL 8.0.45 (semi-sync, delayed replica) /w docker-compose
+name: MySQL 8.4 (semi-sync, delayed replica) /w docker-compose
 on:
   push:
     branches: [ main ]

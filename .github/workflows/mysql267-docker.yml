@@ -1,4 +1,4 @@
-name: MySQL 8.0.45 (with replicas) /w docker-compose
+name: MySQL 26.7 /w docker-compose
 on:
   push:
     branches: [ main ]
@@ -26,7 +26,7 @@ jobs:
 
       - name: Test
         if: steps.filter.outputs.code == 'true'
-        run: docker compose -f replication-ci.yml up mysql mysql_replica test --abort-on-container-exit
+        run: docker compose -f replication-ci.yml -f 26.7.yml up mysql mysql_replica test --abort-on-container-exit
         working-directory: compose/replication-tls
 
       - name: Skip — documentation-only change

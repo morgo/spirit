@@ -1,4 +1,4 @@
-name: MySQL 8.0.45 single-version suite /w docker-compose
+name: MySQL 8.4 single-version suite /w docker-compose
 on:
   push:
     branches: [ main ]
@@ -39,7 +39,7 @@ jobs:
 
       # Runs the version-agnostic "single-version" suite
       # (pkg/migration/{resume,singleversion}_test.go, behind
-      # `//go:build singleversion`) against the base 8.0.45 image. The
+      # `//go:build singleversion`) against the base 8.4 image. The
       # other version-matrix jobs omit the `singleversion` build tag and so skip
       # these files. See the singleversion-test service in compose/compose.yml
       # and the header of singleversion_test.go.

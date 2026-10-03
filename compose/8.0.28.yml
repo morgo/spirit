@@ -1,3 +1,6 @@
+# MySQL 8.0.28 is the base of Aurora MySQL 3.04 (LTS), whose standard support
+# ends on 2026-10-31. After the v0.18.0 release this overlay moves to the next
+# supported Aurora LTS (Aurora MySQL 3.10, MySQL 8.0.42).
 services:
   mysql:
     image: mysql:8.0.28

@@ -106,6 +106,16 @@ func TestReservedWordsLinter_ColumnName(t *testing.T) {
 			expectedWord:    "from",
 		},
 		{
+			// Reserved from MySQL 26.7 only: the list covers every supported version.
+			name: "reserved word QUALIFY as column name",
+			sql: `CREATE TABLE users (
+				id INT PRIMARY KEY,
+				` + "`qualify`" + ` VARCHAR(100)
+			)`,
+			expectViolation: true,
+			expectedWord:    "qualify",
+		},
+		{
 			name: "multiple reserved words as column names",
 			sql: `CREATE TABLE users (
 				id INT PRIMARY KEY,

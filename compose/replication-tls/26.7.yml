@@ -1,0 +1,8 @@
+services:
+  mysql:
+    image: mysql:26.7
+    ports: [ '2670:3306' ]
+
+  mysql_replica:
+    image: mysql:26.7
+    ports: [ '2671:3306' ]

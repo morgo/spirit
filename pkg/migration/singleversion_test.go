@@ -5,10 +5,10 @@
 // not depend on the MySQL server version, so there is no value in re-running
 // them against every MySQL version in the CI matrix. They are gated behind the
 // `singleversion` build tag and run in one dedicated CI workflow against MySQL
-// 8.0.45, twice — once with GTIDs enabled and once without, because the
+// 8.4, twice — once with GTIDs enabled and once without, because the
 // change-source coordinate scheme is auto-detected from the server
 // (change.NewAutoClient) and the resume/checkpoint tests should cover both
-// formats — see .github/workflows/mysql8.0.45-singleversion-docker.yml and the
+// formats — see .github/workflows/mysql84-singleversion-docker.yml and the
 // `singleversion-test` service in compose/compose.yml. Every other version job
 // runs without the tag and therefore excludes these files.
 //

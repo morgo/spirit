@@ -1,4 +1,4 @@
-name: MySQL 8.0.42 (Aurora LTS version) /w docker-compose
+name: MySQL 8.0.42 (Aurora 3.10 LTS version) /w docker-compose
 on:
   push:
     branches: [ main ]
