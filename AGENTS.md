@@ -167,7 +167,7 @@ pkg/
   fmt/        → Schema file formatter (canonicalize CREATE TABLE .sql files)
   throttler/  → Rate limiting interface (noop, mock, replica-lag based)
   status/     → State machine and progress reporting
-  runstatus/  → Status block, Progress report and fatal change-feed handler shared by the migration and move runners
+  runtime/    → Status block, Progress report and fatal change-feed handler shared by the migration and move runners
   metrics/    → Metric types for observability
   buildinfo/  → Build version and metadata
   utils/      → Shared helpers with no spirit dependencies (see "Shared helpers" below)
@@ -249,9 +249,9 @@ These three runners began as copy-paste forks and **drift silently** — a safet
 | Concern | Shared home | Used by |
 |---|---|---|
 | Status + checkpoint loops (`WatchTask`) and the `State` machine | `pkg/status` (`Task` interface: `Progress`/`Status`/`DumpCheckpoint`/`Cancel`) | migration, move, datasync |
-| The periodic `Status()` block, `Progress()` and its throttle status | `pkg/runstatus` (`Snapshot`, built per call; subsystems read lazily through `Source`) | migration, move (datasync has its own states) |
+| The periodic `Status()` block, `Progress()` and its throttle status | `pkg/runtime` (`Snapshot`, built per call; subsystems read lazily through `Source`) | migration, move (datasync has its own states) |
 | Which fatal change-feed reasons keep the checkpoint, and the operator message | `change.FatalReason.PreservesCheckpoint` / `Advice` | migration, move (datasync keeps its checkpoint) |
-| The fatal change-feed handler (`change.ClientConfig.CancelFunc`): the `>= CutOver` no-op guard, `ErrCleanup`, the checkpoint drop, the `status.FatalAbort` cause, all once | `pkg/runstatus` (`FatalGate.Trip`; the runner supplies its noun, checkpoint drop and cancel in `FatalTarget`) | migration, move (datasync records the cause and keeps its checkpoint: `recordFatal`) |
+| The fatal change-feed handler (`change.ClientConfig.CancelFunc`): the `>= CutOver` no-op guard, `ErrCleanup`, the checkpoint drop, the `status.FatalAbort` cause, all once | `pkg/runtime` (`FatalGate.Trip`; the runner supplies its noun, checkpoint drop and cancel in `FatalTarget`) | migration, move (datasync records the cause and keeps its checkpoint: `recordFatal`) |
 | Fitting the checksum's read bounds (start and ceiling) to `--max-connections` | `dbconn.ReadBoundsForPool` (the runner supplies its reserve and how many connections one reader holds on the busiest pool) | migration, move (datasync partitions its target pool in `Request.Fit`, below) |
 | Checkpoint table (one schema + create/drop/exists/write/read) | `pkg/checkpoint` (`Table` + `Mode`) | migration, move, datasync |
 | Sentinel cutover gate (`Create`/`Exists`/`Wait`) | `pkg/sentinel` | migration, move (datasync has no cutover) |

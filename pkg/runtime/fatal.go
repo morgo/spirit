@@ -1,4 +1,4 @@
-package runstatus
+package runtime
 
 import (
 	"context"

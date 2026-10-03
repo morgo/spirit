@@ -1,10 +1,13 @@
-// Package runstatus renders the periodic status block and the Progress report
+// Package runtime renders the periodic status block and the Progress report
 // shared by the finite runners (pkg/migration and pkg/move). Both runners walk
 // the same states with the same subsystems, so their reports are built here
 // from a Snapshot rather than from two copies of the same switch that drift
 // apart. For the same reason it holds FatalGate, the state transition both
 // runners make when their change feed fails.
-package runstatus
+//
+// The name matches the standard library's runtime package. A file that needs
+// both must import one under an alias.
+package runtime
 
 import (
 	"fmt"

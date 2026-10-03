@@ -24,7 +24,7 @@ import (
 	"github.com/block/spirit/pkg/dbconn/sqlescape"
 	"github.com/block/spirit/pkg/metrics"
 	"github.com/block/spirit/pkg/migration/check"
-	"github.com/block/spirit/pkg/runstatus"
+	"github.com/block/spirit/pkg/runtime"
 	"github.com/block/spirit/pkg/sentinel"
 	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/table"
@@ -138,7 +138,7 @@ type Runner struct {
 
 	// fatal aborts the run on the first fatal change-feed condition; see
 	// fatalError.
-	fatal runstatus.FatalGate
+	fatal runtime.FatalGate
 
 	// watchTaskWait blocks until the WatchTask goroutines (status/checkpoint
 	// dumpers) have exited. Set in startBackgroundRoutines and invoked from
@@ -1115,7 +1115,7 @@ func (r *Runner) flushUnderLoad() bool {
 // narrows it to the load signals (see checksum's loadOnlyThrottler — a read-only
 // snapshot pass cannot cause replica lag, so pausing it on lag would only hold
 // the snapshot open for longer). Progress().Throttle mirrors that split — see
-// runstatus.Snapshot.ThrottleStatus.
+// runtime.Snapshot.ThrottleStatus.
 func (r *Runner) setThrottlerOnPhases() {
 	t := r.currentThrottler()
 	r.copier.SetThrottler(t)
@@ -1373,10 +1373,10 @@ func (r *Runner) setup(ctx context.Context) error {
 // past cutover, where Spirit's own RENAME TABLE DDL is expected).
 //
 // The policy (cutover guard, checkpoint invalidation, abort cause) is shared
-// with move: see runstatus.FatalGate.Trip. fatalError is safe to call
+// with move: see runtime.FatalGate.Trip. fatalError is safe to call
 // concurrently.
 func (r *Runner) fatalError(reason change.FatalReason) bool {
-	return r.fatal.Trip(reason, runstatus.FatalTarget{
+	return r.fatal.Trip(reason, runtime.FatalTarget{
 		Noun:    "migration",
 		Tracker: &r.status,
 		Logger:  r.logger,
@@ -1426,8 +1426,8 @@ func (r *Runner) copyTables() []status.TableProgress {
 }
 
 // snapshot captures what Status and Progress report on, for the given state.
-func (r *Runner) snapshot(state status.State) *runstatus.Snapshot {
-	return &runstatus.Snapshot{
+func (r *Runner) snapshot(state status.State) *runtime.Snapshot {
+	return &runtime.Snapshot{
 		Noun:       "migration",
 		State:      state,
 		Tracker:    &r.status,
@@ -1438,9 +1438,9 @@ func (r *Runner) snapshot(state status.State) *runstatus.Snapshot {
 	}
 }
 
-// statusSource hands runstatus the runner's subsystems. It reads each one only
+// statusSource hands runtime the runner's subsystems. It reads each one only
 // when the state being reported on needs it, which is after setup has assigned
-// it (see runstatus.Source).
+// it (see runtime.Source).
 type statusSource struct{ r *Runner }
 
 func (s statusSource) Copier() copier.Copier          { return s.r.copier }
