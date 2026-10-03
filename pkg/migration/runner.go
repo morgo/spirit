@@ -136,14 +136,9 @@ type Runner struct {
 	// and fatalError may already be reading it from other goroutines.
 	cancelMu sync.Mutex
 
-	// fatalOnce makes fatalError idempotent. Without it a concurrent burst
-	// of fatal events from the binlog goroutine and the migration loop
-	// could double-drop the checkpoint and double-cancel the context. The
-	// individual operations underneath are idempotent, but routing
-	// everything through Once keeps the side-effect set small enough to
-	// reason about and avoids racing with Close() teardown of r.db and
-	// r.checkpointTable.
-	fatalOnce sync.Once
+	// fatal aborts the run on the first fatal change-feed condition; see
+	// fatalError.
+	fatal runstatus.FatalGate
 
 	// watchTaskWait blocks until the WatchTask goroutines (status/checkpoint
 	// dumpers) have exited. Set in startBackgroundRoutines and invoked from
@@ -1047,7 +1042,7 @@ func (r *Runner) autoscaleConfigs() (copier.AutoscaleConfig, checksum.AutoscaleC
 	// floor the ceiling back up to it (see readBoundsForPool). Under autoscaling
 	// it is instance-derived and has never been checked against the operator's
 	// pool.
-	if fitStart, fitCeiling := dbconn.ReadBoundsForPool(r.migration.Threads, maxRead, r.migration.MaxConnections, r.checksumPhaseReserve()); fitStart != r.migration.Threads || fitCeiling != maxRead {
+	if fitStart, fitCeiling := dbconn.ReadBoundsForPool(r.migration.Threads, maxRead, r.migration.MaxConnections, r.checksumPhaseReserve(), 1); fitStart != r.migration.Threads || fitCeiling != maxRead {
 		r.logger.Warn("read thread bounds do not fit the connection pool; capping them",
 			"threads", r.migration.Threads, "capped_threads", fitStart,
 			"read_ceiling", maxRead, "capped_read_ceiling", fitCeiling,
@@ -1377,41 +1372,24 @@ func (r *Runner) setup(ctx context.Context) error {
 // or false if it was ignored (e.g. because the migration is already
 // past cutover, where Spirit's own RENAME TABLE DDL is expected).
 //
-// The reason decides what happens to the checkpoint: a schema change
-// invalidates it (resuming against a changed table definition could corrupt
-// data), while a stream error preserves it — a dead binlog stream is exactly
-// the failure checkpoint resume exists to recover from, so a re-run picks up
-// the copy and replays the binlog from the checkpointed position.
-//
-// fatalError is safe to call concurrently. fatalOnce makes the
-// invalidate-and-cancel side effects idempotent and prevents racing
-// with Close() teardown of r.db / r.checkpointTable / r.cancelFunc.
+// The policy (cutover guard, checkpoint invalidation, abort cause) is shared
+// with move: see runstatus.FatalGate.Trip. fatalError is safe to call
+// concurrently.
 func (r *Runner) fatalError(reason change.FatalReason) bool {
-	if r.status.Get() >= status.CutOver {
-		return false
-	}
-	r.fatalOnce.Do(func() {
-		r.status.Set(status.ErrCleanup)
-		if advice := reason.Advice("migration"); advice != "" {
-			r.logger.Error(advice)
-		}
-		// Unless the reason leaves the checkpoint resumable, invalidate it, so
-		// we don't try to resume: the migration would otherwise be blocked from
-		// proceeding permanently, and letting it start again is the better
-		// choice. Use a background context since the migration context may
-		// already be cancelled. checkpointTable can still be nil if fatalError
-		// fires during early setup, before createCheckpointTable runs — skip
-		// the drop in that case.
-		if !reason.PreservesCheckpoint() && r.checkpointTable != nil && r.db != nil {
-			if err := r.checkpointTbl().Drop(context.Background()); err != nil {
-				r.logger.Error("could not remove checkpoint",
-					"error", err,
-				)
+	return r.fatal.Trip(reason, runstatus.FatalTarget{
+		Noun:    "migration",
+		Tracker: &r.status,
+		Logger:  r.logger,
+		DropCheckpoint: func(ctx context.Context) error {
+			// checkpointTable is nil if the feed fails during early setup,
+			// before createCheckpointTable runs.
+			if r.checkpointTable == nil || r.db == nil {
+				return nil
 			}
-		}
-		r.cancel(status.FatalAbort(fmt.Errorf("migration aborted: fatal change feed condition (%s); see the preceding log lines for details", reason)))
+			return r.checkpointTbl().Drop(ctx)
+		},
+		Cancel: r.cancel,
 	})
-	return true
 }
 
 func (r *Runner) recordWorkflowError(err error) {

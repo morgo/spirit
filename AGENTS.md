@@ -167,7 +167,7 @@ pkg/
   fmt/        → Schema file formatter (canonicalize CREATE TABLE .sql files)
   throttler/  → Rate limiting interface (noop, mock, replica-lag based)
   status/     → State machine and progress reporting
-  runstatus/  → Status block + Progress report shared by the migration and move runners
+  runstatus/  → Status block, Progress report and fatal change-feed handler shared by the migration and move runners
   metrics/    → Metric types for observability
   buildinfo/  → Build version and metadata
   utils/      → Shared helpers with no spirit dependencies (see "Shared helpers" below)
@@ -251,6 +251,8 @@ These three runners began as copy-paste forks and **drift silently** — a safet
 | Status + checkpoint loops (`WatchTask`) and the `State` machine | `pkg/status` (`Task` interface: `Progress`/`Status`/`DumpCheckpoint`/`Cancel`) | migration, move, datasync |
 | The periodic `Status()` block, `Progress()` and its throttle status | `pkg/runstatus` (`Snapshot`, built per call; subsystems read lazily through `Source`) | migration, move (datasync has its own states) |
 | Which fatal change-feed reasons keep the checkpoint, and the operator message | `change.FatalReason.PreservesCheckpoint` / `Advice` | migration, move (datasync keeps its checkpoint) |
+| The fatal change-feed handler (`change.ClientConfig.CancelFunc`): the `>= CutOver` no-op guard, `ErrCleanup`, the checkpoint drop, the `status.FatalAbort` cause, all once | `pkg/runstatus` (`FatalGate.Trip`; the runner supplies its noun, checkpoint drop and cancel in `FatalTarget`) | migration, move (datasync records the cause and keeps its checkpoint: `recordFatal`) |
+| Fitting the checksum's read bounds (start and ceiling) to `--max-connections` | `dbconn.ReadBoundsForPool` (the runner supplies its reserve and how many connections one reader holds on the busiest pool) | migration, move (datasync partitions its target pool in `Request.Fit`, below) |
 | Checkpoint table (one schema + create/drop/exists/write/read) | `pkg/checkpoint` (`Table` + `Mode`) | migration, move, datasync |
 | Sentinel cutover gate (`Create`/`Exists`/`Wait`) | `pkg/sentinel` | migration, move (datasync has no cutover) |
 | Lockless (optimistic) checksum, N sources × M targets | `pkg/checksum` `LocklessChecker` | move (always), datasync (always), migration (`--enable-experimental-lockless-checksum`) |
@@ -272,11 +274,11 @@ How the recently-unified pieces handle per-tool differences, as patterns to copy
 ### Not yet unified (live drift — touch with care)
 
 - **Aurora autoscaling — what `concurrency.Engage` does not cover.** Every runner builds one `AuroraSetup.Build` result per watched server and passes it to `Engage` (migration in `setupAutoscaling` before resume/fresh setup, move and datasync in `setupThrottling` → `setupAutoscaling`), so the signal they scale against is the one throttling them. The engage rule is one rule for all three: the flag is set, every target has a usable Aurora signal, and every target is at least `autoscale.MinVCPUs`; otherwise nothing changes (a non-Aurora target turns autoscaling off in migration too). Topology is parameterized, not forked: `concurrency.Target.Shards` (move's co-located schemas), `Request.Sources` (move's feeds) and `Request.Fit` (datasync's pool partition between checksum reads and repair writes). With several targets `Derive` sizes from the smallest and splits the client write budget across them; move scales every shard in lockstep on one composite signal (the busiest host). Bounds are derived once at startup (including resume), so a target instance resize needs a restart. Remaining differences — decide explicitly when you touch any of them:
-  - **Repair writes after copy.** Datasync runs `copier.StartWriteAutoscaler` for checksum repairs during its initial verification. Migration and move run no write controller after the copy, so repairs use the applier's start count.
-  - **Pool fitting.** Migration fits read bounds with `dbconn.ReadBoundsForPool`, move with `fitReadThreadsToPools` (handle reuse across sources/targets), datasync with `Request.Fit`. Each counts its own reserve.
+  - **Repair writes after copy.** Datasync runs `copier.StartWriteAutoscaler` for checksum repairs during its initial verification: its `mysqlRecopier` writes through an applier that stays started. Migration and move run no write controller after the copy, so repairs use the applier's start count. Porting it is not a one-liner: their `chunkRepairer` starts and stops the applier around every repair, so there is no long-lived worker pool for a controller to resize.
+  - **Pool fitting.** Migration and move fit read bounds with `dbconn.ReadBoundsForPool`; each counts its own reserve, and move passes how many connections a reader holds on a handle shared by a source and a target. Datasync fits only when autoscaling engages, with `Request.Fit`, which splits the target pool between verification reads and repair writes after reserving the whole flush.
   - Move's reverse window always uses the configured `--write-threads`; it gets no monitor and no autoscaling.
   - Datasync's target monitor stays open until `Close`; built-in feeds use `Runner.TargetUnderLoad` for flush narrowing, and injected feeds must wire that callback themselves. Do not confuse the applier's copy/repair workers with synchronous change-feed flush concurrency.
-- **`fatalError` / `Close` teardown** are similar but not identical between the three. The per-reason checkpoint policy and messages are shared (`change.FatalReason`); keep the run-all-steps + `errors.Join` teardown idiom and the `>= CutOver` no-op guard in `fatalError` consistent when you touch them.
+- **`Close` teardown** differs between the three because each owns different resources. The shared order is: cancel the run, wait for `watchTaskWait`, then run every close step unconditionally and `errors.Join` the errors. Keep that order when you touch one. Migration and move both stop the applier; datasync leaves it to the copier and its checksum, and does not own an injected applier.
 
 When you add a checkpoint field, add it to `pkg/checkpoint`'s schema — it is shared by all three. When you add a teardown step, a new lifecycle phase, or a safety gate, grep all three `runner.go` files and decide explicitly: port, or extract.
 

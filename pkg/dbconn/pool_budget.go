@@ -44,13 +44,16 @@ func ValidateMaxConnections(maxConnections, readers, reserve int) error {
 // fitting just the ceiling fails because consumers floor it back to the start
 // (see checksum.NewChecker and the copier's resolveReadCeiling). Snapshot
 // creation under one table lock is in SingleChecker.initConnPool.
-// The caller supplies its lifecycle-specific reserve. Unresolved connection
-// limits pass through; a small budget retains one reader so it can progress.
-func ReadBoundsForPool(start, ceiling, maxConnections, reserve int) (int, int) {
+// The caller supplies its lifecycle-specific reserve. holds is how many
+// connections one reader takes from the busiest pool at once: one for a
+// migration, more for a move whose source and target share a handle. Values
+// below one mean one. Unresolved connection limits pass through; a small budget
+// retains one reader so it can progress.
+func ReadBoundsForPool(start, ceiling, maxConnections, reserve, holds int) (int, int) {
 	if maxConnections <= 0 {
 		return start, ceiling
 	}
-	fit := max(1, maxConnections-reserve)
+	fit := max(1, (maxConnections-reserve)/max(1, holds))
 	return min(start, fit), min(ceiling, fit)
 }
 

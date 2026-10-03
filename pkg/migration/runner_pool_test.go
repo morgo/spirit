@@ -151,42 +151,51 @@ func TestReadBoundsForPool(t *testing.T) {
 	const reserve = minChecksumPhaseReserve
 
 	// Room to spare: the bounds are whatever was derived.
-	start, ceiling := dbconn.ReadBoundsForPool(16, 32, flags.DefaultMaxConnections, reserve)
+	start, ceiling := dbconn.ReadBoundsForPool(16, 32, flags.DefaultMaxConnections, reserve, 1)
 	require.Equal(t, 16, start)
 	require.Equal(t, 32, ceiling)
 
 	// Exactly enough, counting the reserve the checksum phase cannot run without.
-	start, ceiling = dbconn.ReadBoundsForPool(16, 32-reserve, 32, reserve)
+	start, ceiling = dbconn.ReadBoundsForPool(16, 32-reserve, 32, reserve, 1)
 	require.Equal(t, 16, start)
 	require.Equal(t, 32-reserve, ceiling)
 
 	// One short. The ceiling gives way, not the pool: the ceiling is a number
 	// spirit derived for itself, the pool is one the operator set.
-	_, ceiling = dbconn.ReadBoundsForPool(16, 32-reserve+1, 32, reserve)
+	_, ceiling = dbconn.ReadBoundsForPool(16, 32-reserve+1, 32, reserve, 1)
 	require.Equal(t, 32-reserve, ceiling)
 
 	// The start is fitted too. This is the case that used to survive the fit:
 	// a 96-vCPU instance derives (24, 48) from autoscale.ReadBounds, the
 	// operator's pool is 20, and both consumers floor the ceiling back up to the
 	// start — so lowering only the ceiling changed nothing.
-	start, ceiling = dbconn.ReadBoundsForPool(24, 48, 20, reserve)
+	start, ceiling = dbconn.ReadBoundsForPool(24, 48, 20, reserve, 1)
 	require.Equal(t, 20-reserve, start)
 	require.Equal(t, 20-reserve, ceiling)
 
 	// Never zero readers. A pool too small to honour the reserve still has to
 	// run: contending with the control plane beats not copying at all.
-	start, ceiling = dbconn.ReadBoundsForPool(24, 48, reserve, reserve)
+	start, ceiling = dbconn.ReadBoundsForPool(24, 48, reserve, reserve, 1)
 	require.Equal(t, 1, start)
 	require.Equal(t, 1, ceiling)
 
 	// No pool size resolved (a Runner built directly, bypassing
 	// normalizeOptions): there is nothing to fit to, so nothing is changed.
-	start, ceiling = dbconn.ReadBoundsForPool(24, 48, 0, reserve)
+	start, ceiling = dbconn.ReadBoundsForPool(24, 48, 0, reserve, 1)
 	require.Equal(t, 24, start)
 	require.Equal(t, 48, ceiling)
-	start, ceiling = dbconn.ReadBoundsForPool(24, 48, -1, reserve)
+	start, ceiling = dbconn.ReadBoundsForPool(24, 48, -1, reserve, 1)
 	require.Equal(t, 24, start)
 	require.Equal(t, 48, ceiling)
+
+	// A reader that holds two connections from one pool (move, with a source
+	// and a target on one handle) halves what the pool fits. Zero holds means one.
+	start, ceiling = dbconn.ReadBoundsForPool(24, 48, 20+reserve, reserve, 2)
+	require.Equal(t, 10, start)
+	require.Equal(t, 10, ceiling)
+	start, ceiling = dbconn.ReadBoundsForPool(24, 48, 20+reserve, reserve, 0)
+	require.Equal(t, 20, start)
+	require.Equal(t, 20, ceiling)
 }
 
 // TestReadBoundsSurviveTheirConsumers is the assertion the unit test above
@@ -212,7 +221,7 @@ func TestReadBoundsSurviveTheirConsumers(t *testing.T) {
 	for _, vCPUs := range []int{16, 32, 64, 96, 128} {
 		for _, maxConnections := range []int{8, 16, 20, 32, 64, flags.DefaultMaxConnections} {
 			readStart, readCeiling := autoscale.ReadBounds(vCPUs)
-			start, ceiling := dbconn.ReadBoundsForPool(readStart, readCeiling, maxConnections, reserve)
+			start, ceiling := dbconn.ReadBoundsForPool(readStart, readCeiling, maxConnections, reserve, 1)
 
 			// What checksum.NewChecker and copier.resolveReadCeiling resolve to.
 			effective := max(ceiling, start)

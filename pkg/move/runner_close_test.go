@@ -30,7 +30,7 @@ import (
 // under a burst of fatal events. After the first call the status sits at
 // ErrCleanup, which is numerically greater than CutOver, so the
 // early-return path swallows subsequent calls — but if a second caller
-// races the first past the status check, fatalOnce still prevents the
+// races the first past the status check, the FatalGate still prevents the
 // side effects from running twice.
 //
 // The test uses a minimal Runner constructed by hand: targets and
@@ -54,7 +54,7 @@ func TestFatalErrorIsIdempotent(t *testing.T) {
 	require.Equal(t, int32(1), cancelCalls.Load(), "cancel must not be re-invoked")
 }
 
-// TestFatalErrorConcurrentRace exercises the fatalOnce guard directly:
+// TestFatalErrorConcurrentRace exercises the FatalGate's once guard:
 // many goroutines call fatalError in parallel before any has finished
 // setting status, simulating N repl clients (one per source) hitting a
 // fatal stream error at the same time. The Once ensures cancelFunc fires
