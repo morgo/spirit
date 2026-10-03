@@ -432,7 +432,7 @@ func (r *Runner) Run(ctx context.Context) (retErr error) {
 	//   - Read workers, because the checksum pins one connection per transaction
 	//     for a whole phase — a ceiling the pool cannot hold blocks on checkout
 	//     with a table lock held. Migration.Validate rejects a pool that cannot
-	//     hold the configured count; readBoundsForPool handles the count
+	//     hold the configured count; dbconn.ReadBoundsForPool handles the count
 	//     autoscaling derives later.
 	//   - The drain, because its work expires. A flush batch queueing behind a
 	//     saturated copy is spending the binlog retention window, and running out
@@ -1039,9 +1039,9 @@ func (r *Runner) autoscaleConfigs() (copier.AutoscaleConfig, checksum.AutoscaleC
 	// Fit both read bounds to the pool. The start matters as much as the ceiling
 	// here: r.migration.Threads is what the checksum takes as its Concurrency and
 	// what the copier takes as its starting read-worker count, and both of them
-	// floor the ceiling back up to it (see readBoundsForPool). Under autoscaling
-	// it is instance-derived and has never been checked against the operator's
-	// pool.
+	// floor the ceiling back up to it (see dbconn.ReadBoundsForPool). Under
+	// autoscaling it is instance-derived and has never been checked against the
+	// operator's pool.
 	if fitStart, fitCeiling := dbconn.ReadBoundsForPool(r.migration.Threads, maxRead, r.migration.MaxConnections, r.checksumPhaseReserve(), 1); fitStart != r.migration.Threads || fitCeiling != maxRead {
 		r.logger.Warn("read thread bounds do not fit the connection pool; capping them",
 			"threads", r.migration.Threads, "capped_threads", fitStart,

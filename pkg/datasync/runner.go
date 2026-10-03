@@ -129,8 +129,8 @@ type Runner struct {
 	// fatalErr records a fatal source-side event (e.g. DDL on a synced
 	// table) that should surface as the Run error rather than a clean
 	// cancellation. Guarded by fatalMu. fatalOnce makes fatalError's
-	// record-and-cancel side effects idempotent (same pattern as
-	// migration.Runner.fatalOnce).
+	// record-and-cancel side effects idempotent (the same once guard as
+	// runtime.FatalGate, which migration and move use).
 	fatalMu   sync.Mutex
 	fatalErr  error
 	fatalOnce sync.Once

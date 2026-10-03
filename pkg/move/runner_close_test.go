@@ -236,14 +236,16 @@ func TestFatalErrorReasonCheckpointHandling(t *testing.T) {
 // every cleanup step runs even when an early one fails. Previously the
 // first failing step short-circuited the rest, leaking the remaining repl
 // clients' binlog reader goroutines and the target DB handles. The
-// chunker is rigged to fail Close(); the repl clients and target DBs must
-// still be closed, and the chunker's error must surface in the joined
-// result.
+// chunker is rigged to fail Close(); the repl clients, the applier and the
+// target DBs must still be closed, and both the chunker's and the applier's
+// errors must surface in the joined result.
 func TestCloseRunsAllClosersOnError(t *testing.T) {
 	chunkerErr := errors.New("chunker close failed")
 	mockChunker := table.NewMockChunker("t1", 100)
 	require.NoError(t, mockChunker.Open())
 	mockChunker.SetCloseError(chunkerErr)
+	stopErr := errors.New("applier stop failed")
+	appl := &applier.MockApplier{StopErr: stopErr}
 
 	repl1 := &change.MockSource{}
 	repl2 := &change.MockSource{}
@@ -256,6 +258,7 @@ func TestCloseRunsAllClosersOnError(t *testing.T) {
 	r := &Runner{
 		logger:      slog.Default(),
 		copyChunker: mockChunker,
+		applier:     appl,
 		sources: []sourceInfo{
 			{replClient: repl1},
 			{replClient: repl2},
@@ -268,6 +271,8 @@ func TestCloseRunsAllClosersOnError(t *testing.T) {
 
 	err = r.Close()
 	require.ErrorIs(t, err, chunkerErr, "the failing step's error must surface")
+	require.ErrorIs(t, err, stopErr, "the applier's Stop error must be joined too")
+	require.Equal(t, 1, appl.Stops(), "the applier must be stopped exactly once despite the chunker error")
 
 	require.Positive(t, repl1.Closes(), "repl client 1 must be closed despite the chunker error")
 	require.Positive(t, repl2.Closes(), "repl client 2 must be closed despite the chunker error")

@@ -210,8 +210,8 @@ func TestReadBoundsForPool(t *testing.T) {
 // undone one call later, silently, in the autoscaling regime the fit exists for.
 //
 // So this walks the real derivation — autoscale.ReadBounds for the instance,
-// readBoundsForPool for the pool, then the consumers' max() — and asserts the
-// composed result leaves the reserve intact.
+// dbconn.ReadBoundsForPool for the pool, then the consumers' max() — and
+// asserts the composed result leaves the reserve intact.
 func TestReadBoundsSurviveTheirConsumers(t *testing.T) {
 	const reserve = minChecksumPhaseReserve
 
