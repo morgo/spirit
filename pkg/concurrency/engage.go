@@ -1,7 +1,9 @@
 // Package concurrency is the autoscaling setup shared by the migrate, move and
 // sync runners: given the Aurora probe for every target server, Engage decides
 // whether autoscaling engages, derives the thread and flush bounds (Derive),
-// and overrides the configured thread counts when it does.
+// and overrides the configured thread counts when it does. On an instance too
+// small to engage it may instead select low-memory mode, which fixes every
+// pool at one worker and shrinks the copy chunks.
 //
 // The three runners used to each derive these with their own copy of the
 // rules. What stays with each runner is genuinely topology-specific: which
@@ -19,6 +21,7 @@ import (
 
 	"github.com/block/spirit/pkg/autoscale"
 	"github.com/block/spirit/pkg/copier"
+	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/flags"
 	"github.com/block/spirit/pkg/throttler"
 )
@@ -43,7 +46,8 @@ type Target struct {
 type Request struct {
 	// Targets holds one entry per distinct target server. Autoscaling engages
 	// only when every one supplies an Aurora load signal and is at least
-	// autoscale.MinVCPUs.
+	// autoscale.MinVCPUs. Low-memory mode is selected instead when any one
+	// confirmed as Aurora is a low-memory instance, whatever the others are.
 	Targets []Target
 	// Sources is how many change feeds fan their flushes out to the targets.
 	// Zero means one.
@@ -55,17 +59,29 @@ type Request struct {
 	// VCPUs reads a target's vCPU count. Nil means throttler.AuroraVCPUs; tests
 	// replace it because CI has no Aurora instance.
 	VCPUs func(context.Context, *sql.DB) (int, error)
+	// BufferPoolSize reads a target's buffer pool size in bytes. It is read
+	// only for a target at or below autoscale.LowMemoryMaxVCPUs. Nil means
+	// dbconn.BufferPoolSize; tests replace it alongside VCPUs.
+	BufferPoolSize func(context.Context, *sql.DB) (uint64, error)
 	// ClientCeiling bounds derived counts by this host's CPU. Zero means
 	// autoscale.ClientCeiling().
 	ClientCeiling int
 	Logger        *slog.Logger
 }
 
-// Plan is the outcome of Engage. When Engaged is false every other field is
-// zero: the configured thread counts stand, the controllers stay off, and the
-// change feed keeps the change package's flush defaults.
+// Plan is the outcome of Engage. When neither Engaged nor LowMemory is set
+// every other field is zero: the configured thread counts stand, the
+// controllers stay off, and the change feed keeps the change package's flush
+// defaults.
 type Plan struct {
 	Engaged bool
+	// LowMemory is set instead of Engaged when a target is a low-memory
+	// instance (autoscale.IsLowMemory). The controllers stay off; Engage has
+	// already set the flags' thread counts and chunk size, and
+	// FlushConcurrency holds the feed's width. FlushBatchSize stays zero, the
+	// change package's default. The thread bounds stay zero: callers size
+	// fixed pools from the flags, as they do for a disengaged plan.
+	LowMemory bool
 	// ReadStart and MaxReadThreads bound the read side: the copier's read
 	// workers and the checksum's workers.
 	ReadStart, MaxReadThreads int
@@ -179,6 +195,15 @@ func Derive(t Topology, clientCeiling int, redoAware, commitLatencyEnabled bool)
 // whether autoscaling engages for these targets and, when it does, overrides
 // flags.Threads and flags.WriteThreads with the plan's starting sizes.
 //
+// When any target is a low-memory instance (autoscale.IsLowMemory) Engage
+// selects low-memory mode instead: Threads and WriteThreads become
+// autoscale.LowMemoryThreads, TargetChunkSize is lowered to
+// autoscale.LowMemoryTargetChunkBytes, and the plan carries
+// autoscale.LowMemoryFlushConcurrency. Any one target is enough, because the
+// counts are shared by every target and the smallest must not run out of
+// memory. That holds even when another target is not Aurora or its probe
+// failed, which would otherwise disable autoscaling.
+//
 // Autoscaling engages only when the flag is set and every target supplies a
 // usable Aurora load signal and is at least autoscale.MinVCPUs; anything else
 // leaves the configured counts alone and returns a disengaged plan. All targets
@@ -190,7 +215,8 @@ func Derive(t Topology, clientCeiling int, redoAware, commitLatencyEnabled bool)
 // Bounds are derived once, at startup, so a target instance resize needs a
 // restart to be picked up.
 //
-// The only error is a failed vCPU read on a target already confirmed Aurora.
+// The only errors are a failed vCPU or buffer pool read on a target already
+// confirmed Aurora.
 func Engage(ctx context.Context, f *flags.Common, req Request) (Plan, error) {
 	logger := req.Logger
 	if logger == nil {
@@ -201,7 +227,7 @@ func Engage(ctx context.Context, f *flags.Common, req Request) (Plan, error) {
 		clientCeiling = autoscale.ClientCeiling()
 	}
 	plan, err := engage(ctx, f, req, clientCeiling, logger)
-	if err != nil || plan.Engaged {
+	if err != nil || plan.Engaged || plan.LowMemory {
 		return plan, err
 	}
 	// Configured counts are not overridden — an operator who names a number
@@ -225,8 +251,34 @@ func engage(ctx context.Context, f *flags.Common, req Request, clientCeiling int
 		logger.Info("autoscaling disabled: no target to read a load signal from; thread counts stay as configured")
 		return Plan{}, nil
 	}
+	// Low-memory mode is decided first, over the targets confirmed as Aurora
+	// only: it protects a small target from the configured counts, so another
+	// target that is not Aurora (or whose probe failed) must not stand in its
+	// way. vcpus[i] is zero for a target that is not confirmed Aurora.
+	readVCPUs := req.VCPUs
+	if readVCPUs == nil {
+		readVCPUs = throttler.AuroraVCPUs
+	}
+	vcpus := make([]int, len(req.Targets))
+	for i, target := range req.Targets {
+		if target.Aurora.ProbeErr != nil || len(target.Aurora.Throttlers) == 0 {
+			continue
+		}
+		n, err := readVCPUs(ctx, target.DB)
+		if err != nil {
+			if target.Name != "" {
+				return Plan{}, fmt.Errorf("target %s CPU capacity: %w", target.Name, err)
+			}
+			return Plan{}, fmt.Errorf("target CPU capacity: %w", err)
+		}
+		vcpus[i] = n
+	}
+	if plan, ok, err := lowMemory(ctx, f, req, vcpus, logger); err != nil || ok {
+		return plan, err
+	}
+
 	redoAware := false
-	topology := Topology{Sources: req.Sources}
+	topology := Topology{Sources: req.Sources, VCPUs: vcpus}
 	for _, target := range req.Targets {
 		log := logger
 		if target.Name != "" {
@@ -249,20 +301,6 @@ func engage(ctx context.Context, f *flags.Common, req Request, clientCeiling int
 		shards := max(1, target.Shards)
 		topology.Targets += shards
 		topology.ShardsPerHost = max(topology.ShardsPerHost, shards)
-	}
-	readVCPUs := req.VCPUs
-	if readVCPUs == nil {
-		readVCPUs = throttler.AuroraVCPUs
-	}
-	for _, target := range req.Targets {
-		vcpus, err := readVCPUs(ctx, target.DB)
-		if err != nil {
-			if target.Name != "" {
-				return Plan{}, fmt.Errorf("target %s CPU capacity: %w", target.Name, err)
-			}
-			return Plan{}, fmt.Errorf("target CPU capacity: %w", err)
-		}
-		topology.VCPUs = append(topology.VCPUs, vcpus)
 	}
 
 	commitLatencyEnabled := f.MaxCommitLatency > 0
@@ -308,4 +346,48 @@ func engage(ctx context.Context, f *flags.Common, req Request, clientCeiling int
 		"write_threads_per_target", plan.WriteStart, "max_write_threads_per_target", plan.MaxWriteThreads,
 		"flush_concurrency", plan.FlushConcurrency, "flush_batch_size", plan.FlushBatchSize)
 	return plan, nil
+}
+
+// lowMemory selects low-memory mode when any target, with vcpus[i] the vCPU
+// count of req.Targets[i] (zero for a target not confirmed as Aurora, which is
+// skipped), is a low-memory instance (autoscale.IsLowMemory).
+// When it does, it overrides the thread counts and lowers the chunk size in f.
+// The buffer pool is read only for a target small enough in vCPUs to qualify.
+func lowMemory(ctx context.Context, f *flags.Common, req Request, vcpus []int, logger *slog.Logger) (Plan, bool, error) {
+	readBufferPool := req.BufferPoolSize
+	if readBufferPool == nil {
+		readBufferPool = dbconn.BufferPoolSize
+	}
+	for i, target := range req.Targets {
+		if vcpus[i] == 0 || vcpus[i] > autoscale.LowMemoryMaxVCPUs {
+			continue
+		}
+		bufferPool, err := readBufferPool(ctx, target.DB)
+		if err != nil {
+			if target.Name != "" {
+				return Plan{}, false, fmt.Errorf("target %s memory capacity: %w", target.Name, err)
+			}
+			return Plan{}, false, fmt.Errorf("target memory capacity: %w", err)
+		}
+		if !autoscale.IsLowMemory(vcpus[i], bufferPool) {
+			continue
+		}
+		f.Threads = autoscale.LowMemoryThreads
+		f.WriteThreads = autoscale.LowMemoryThreads
+		if f.TargetChunkSize == 0 || f.TargetChunkSize > autoscale.LowMemoryTargetChunkBytes {
+			f.TargetChunkSize = autoscale.LowMemoryTargetChunkBytes
+		}
+		log := logger
+		if target.Name != "" {
+			log = logger.With("target", target.Name)
+		}
+		log.Info("low-memory mode engaged: the target's vCPUs and buffer pool are at or below the low-memory limits, so the pools run at one worker each with small chunks and do not scale; --threads, --write-threads and --target-chunk-size are overridden",
+			"vcpus", vcpus[i], "buffer_pool_bytes", bufferPool,
+			"max_vcpus", autoscale.LowMemoryMaxVCPUs, "max_buffer_pool_bytes", autoscale.LowMemoryMaxBufferPoolBytes,
+			"read_threads", f.Threads, "write_threads", f.WriteThreads,
+			"target_chunk_size", f.TargetChunkSize,
+			"flush_concurrency", autoscale.LowMemoryFlushConcurrency)
+		return Plan{LowMemory: true, FlushConcurrency: autoscale.LowMemoryFlushConcurrency}, true, nil
+	}
+	return Plan{}, false, nil
 }

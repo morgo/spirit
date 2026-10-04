@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"log/slog"
 	"testing"
 	"time"
@@ -298,4 +299,141 @@ func TestEngageVCPUError(t *testing.T) {
 		Logger:  slog.New(slog.DiscardHandler),
 	})
 	require.ErrorContains(t, err, "target tcp:db1:3306 CPU capacity: boom")
+}
+
+func bufferPool(n uint64) func(context.Context, *sql.DB) (uint64, error) {
+	return func(context.Context, *sql.DB) (uint64, error) { return n, nil }
+}
+
+const gib = 1024 * 1024 * 1024
+
+// A low-memory target fixes every pool at one worker, shrinks the copy chunks
+// and narrows the flush, without engaging the controllers.
+func TestEngageLowMemory(t *testing.T) {
+	f := &flags.Common{Threads: 4, WriteThreads: 4, TargetChunkSize: 16 * 1024 * 1024, EnableExperimentalAutoscaling: true}
+	plan, logs := engageForTest(t, f, Request{Targets: []Target{{Aurora: aurora(false)}}, VCPUs: vcpus(2), BufferPoolSize: bufferPool(gib)})
+	require.Equal(t, Plan{LowMemory: true, FlushConcurrency: autoscale.LowMemoryFlushConcurrency}, plan)
+	require.False(t, plan.Engaged)
+	require.Zero(t, plan.Copier(), "the controllers stay off")
+	require.Equal(t, 1, f.Threads)
+	require.Equal(t, 1, f.WriteThreads)
+	require.Equal(t, uint64(autoscale.LowMemoryTargetChunkBytes), f.TargetChunkSize)
+	require.Contains(t, logs, "low-memory mode engaged")
+	require.NotContains(t, logs, "instance is too small")
+
+	// A chunk size already below the low-memory budget is kept.
+	f = &flags.Common{TargetChunkSize: 64 * 1024, EnableExperimentalAutoscaling: true}
+	_, _ = engageForTest(t, f, Request{Targets: []Target{{Aurora: aurora(false)}}, VCPUs: vcpus(2), BufferPoolSize: bufferPool(gib)})
+	require.Equal(t, uint64(64*1024), f.TargetChunkSize)
+
+	// One low-memory target among several is enough: the counts are shared.
+	// Only the target small enough in vCPUs has its buffer pool read.
+	f = &flags.Common{Threads: 4, WriteThreads: 4, EnableExperimentalAutoscaling: true}
+	sizes := []int{16, 2}
+	var bufferPoolReads int
+	plan, logs = engageForTest(t, f, Request{
+		Targets: []Target{{Aurora: aurora(false), Name: "big"}, {Aurora: aurora(false), Name: "small"}},
+		VCPUs: func(context.Context, *sql.DB) (int, error) {
+			n := sizes[0]
+			sizes = sizes[1:]
+			return n, nil
+		},
+		BufferPoolSize: func(context.Context, *sql.DB) (uint64, error) {
+			bufferPoolReads++
+			return gib, nil
+		},
+	})
+	require.True(t, plan.LowMemory)
+	require.Equal(t, 1, bufferPoolReads)
+	require.Equal(t, 1, f.Threads)
+	require.Equal(t, 1, f.WriteThreads)
+	require.Contains(t, logs, "target=small")
+}
+
+// A low-memory Aurora target gets low-memory mode even when another target is
+// not Aurora or its probe failed, which disables autoscaling. Only confirmed
+// Aurora targets are probed for their size.
+func TestEngageLowMemoryMixedTargets(t *testing.T) {
+	for name, other := range map[string]throttler.AuroraResult{
+		"not aurora":   {},
+		"probe failed": {ProbeErr: errors.New("denied")},
+	} {
+		for _, smallFirst := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/small_first=%v", name, smallFirst), func(t *testing.T) {
+				targets := []Target{{Aurora: aurora(false), Name: "small"}, {Aurora: other, Name: "other"}}
+				if !smallFirst {
+					targets[0], targets[1] = targets[1], targets[0]
+				}
+				var vcpuReads int
+				f := &flags.Common{Threads: 4, WriteThreads: 4, EnableExperimentalAutoscaling: true}
+				plan, logs := engageForTest(t, f, Request{
+					Targets: targets,
+					VCPUs: func(context.Context, *sql.DB) (int, error) {
+						vcpuReads++
+						return 2, nil
+					},
+					BufferPoolSize: bufferPool(gib),
+				})
+				require.True(t, plan.LowMemory)
+				require.Equal(t, 1, vcpuReads, "only the Aurora target is probed")
+				require.Equal(t, 1, f.Threads)
+				require.Equal(t, 1, f.WriteThreads)
+				require.Contains(t, logs, "target=small")
+				require.NotContains(t, logs, "autoscaling disabled")
+			})
+		}
+	}
+}
+
+// Anything short of a low-memory target leaves low-memory mode off, and the
+// buffer pool is read only when the vCPUs qualify.
+func TestEngageNotLowMemory(t *testing.T) {
+	noRead := func(t *testing.T) func(context.Context, *sql.DB) (uint64, error) {
+		return func(context.Context, *sql.DB) (uint64, error) {
+			t.Error("buffer pool read for a target that cannot be low-memory")
+			return 0, nil
+		}
+	}
+	cases := map[string]struct {
+		flag       bool
+		targets    []Target
+		vcpus      int
+		bufferPool func(*testing.T) func(context.Context, *sql.DB) (uint64, error)
+		engaged    bool
+		log        string
+	}{
+		"flag off":     {false, []Target{{Aurora: aurora(false)}}, 2, noRead, false, ""},
+		"not aurora":   {true, []Target{{}}, 2, noRead, false, "every target must provide an Aurora load signal"},
+		"ample memory": {true, []Target{{Aurora: aurora(false)}}, 2, func(*testing.T) func(context.Context, *sql.DB) (uint64, error) { return bufferPool(11 * gib) }, false, "instance is too small"},
+		"over the limit": {true, []Target{{Aurora: aurora(false)}}, 2, func(*testing.T) func(context.Context, *sql.DB) (uint64, error) {
+			return bufferPool(autoscale.LowMemoryMaxBufferPoolBytes + 1)
+		}, false, "instance is too small"},
+		"large enough cpu": {true, []Target{{Aurora: aurora(false)}}, autoscale.MinVCPUs, noRead, true, "autoscaling engaged"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := &flags.Common{Threads: 3, WriteThreads: 5, TargetChunkSize: 16 * 1024 * 1024, EnableExperimentalAutoscaling: tc.flag}
+			plan, logs := engageForTest(t, f, Request{Targets: tc.targets, VCPUs: vcpus(tc.vcpus), BufferPoolSize: tc.bufferPool(t)})
+			require.False(t, plan.LowMemory)
+			require.Equal(t, tc.engaged, plan.Engaged)
+			require.Equal(t, uint64(16*1024*1024), f.TargetChunkSize)
+			if !tc.engaged {
+				require.Zero(t, plan)
+				require.Equal(t, 3, f.Threads)
+				require.Equal(t, 5, f.WriteThreads)
+			}
+			require.Contains(t, logs, tc.log)
+			require.NotContains(t, logs, "low-memory")
+		})
+	}
+}
+
+func TestEngageBufferPoolError(t *testing.T) {
+	_, err := Engage(t.Context(), &flags.Common{EnableExperimentalAutoscaling: true}, Request{
+		Targets:        []Target{{Aurora: aurora(false), Name: "tcp:db1:3306"}},
+		VCPUs:          vcpus(2),
+		BufferPoolSize: func(context.Context, *sql.DB) (uint64, error) { return 0, errors.New("boom") },
+		Logger:         slog.New(slog.DiscardHandler),
+	})
+	require.ErrorContains(t, err, "target tcp:db1:3306 memory capacity: boom")
 }

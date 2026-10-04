@@ -127,7 +127,36 @@ const (
 	// Past this point more concurrency would mean more rows in flight, which is
 	// the trade FlushBounds exists to avoid making.
 	MaxFlushConcurrency = FlushRowsInFlight / MinFlushBatchSize
+
+	// LowMemoryMaxVCPUs and LowMemoryMaxBufferPoolBytes define a low-memory
+	// instance (see IsLowMemory): at most 2 vCPUs and a buffer pool of at most
+	// 1.5 GiB, i.e. a burstable db.t4g.medium-class instance rather than a
+	// db.r6g.large, which has the same vCPUs and ~8x the memory. Such an
+	// instance is too small for the controllers (it is below MinVCPUs), and the
+	// configured defaults (4 readers, 4 writers, 16 MiB chunks, 8 concurrent
+	// flushes) were observed to run it out of memory.
+	LowMemoryMaxVCPUs           = 2
+	LowMemoryMaxBufferPoolBytes = 1536 * 1024 * 1024
+
+	// LowMemoryThreads is the read and the write thread count in low-memory
+	// mode, and LowMemoryFlushConcurrency the change feed's flush width: one
+	// statement in flight per pool.
+	LowMemoryThreads          = 1
+	LowMemoryFlushConcurrency = 1
+
+	// LowMemoryTargetChunkBytes is the copier's chunk byte budget in low-memory
+	// mode, a sixteenth of table.DefaultTargetChunkBytes. It equals the
+	// applier's per-statement budget (applier.MaxStatementSizeBytes), so a chunk
+	// is written as roughly one statement.
+	LowMemoryTargetChunkBytes = 1024 * 1024
 )
+
+// IsLowMemory reports whether an instance with the given vCPU count and
+// buffer pool size gets low-memory mode: both must be at or below the
+// LowMemory limits.
+func IsLowMemory(vCPUs int, bufferPoolBytes uint64) bool {
+	return vCPUs <= LowMemoryMaxVCPUs && bufferPoolBytes <= LowMemoryMaxBufferPoolBytes
+}
 
 // Tick is how often a controller should re-evaluate. Aligned with the
 // throttler poll interval — sampling faster than the signal updates just adds

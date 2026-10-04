@@ -57,7 +57,7 @@ type Common struct {
 	// TargetChunkSize is the in-memory byte budget the copier sizes each copy
 	// chunk against (the memory signal; see table.DefaultTargetChunkBytes and
 	// pkg/table/README.md). Zero means "use the default" (Normalize fills it in).
-	TargetChunkSize uint64 `name:"target-chunk-size" help:"In-memory byte budget per copy chunk (in bytes)" optional:"" default:"16777216"`
+	TargetChunkSize uint64 `name:"target-chunk-size" help:"In-memory byte budget per copy chunk (in bytes). Lowered to 1 MiB when --enable-experimental-autoscaling selects low-memory mode" optional:"" default:"16777216"`
 
 	// MaxCommitLatency throttles when a target's average commit latency exceeds
 	// this threshold. Auto-enabled only on Aurora targets; zero disables it.
@@ -71,7 +71,7 @@ type Common struct {
 	// takes over both thread counts: Threads and WriteThreads are replaced with
 	// instance-derived starting sizes, and each pool scales between bounds
 	// derived from the instance. See issue #831.
-	EnableExperimentalAutoscaling bool `name:"enable-experimental-autoscaling" help:"EXPERIMENTAL: size the copy, apply and checksum thread pools from the instance and scale them on throttler feedback. Overrides --threads and --write-threads. Requires an Aurora target" optional:"" default:"false"`
+	EnableExperimentalAutoscaling bool `name:"enable-experimental-autoscaling" help:"EXPERIMENTAL: size the copy, apply and checksum thread pools from the instance and scale them on throttler feedback. Overrides --threads and --write-threads. Requires an Aurora target. On a low-memory target (at most 2 vCPUs and a 1.5 GiB buffer pool) it instead runs every pool at one thread with 1 MiB chunks" optional:"" default:"false"`
 
 	// CheckpointMaxAge is the oldest checkpoint a run will resume from. Its
 	// age is the time since the checkpoint row was last written, i.e. how long

@@ -66,11 +66,12 @@ type Runner struct {
 	monitorDB                        *sql.DB
 	autoscale                        copier.AutoscaleConfig
 	flushConcurrency, flushBatchSize int
-	// buildAurora and auroraVCPUs are the Aurora probes setupThrottling
-	// runs. NewRunner sets them to the throttler package's; tests replace
-	// them, because CI has no Aurora to probe.
-	buildAurora func(context.Context, throttler.AuroraSetup) (throttler.AuroraResult, error)
-	auroraVCPUs func(context.Context, *sql.DB) (int, error)
+	// buildAurora, auroraVCPUs and bufferPoolSize are the instance probes
+	// setupThrottling runs. NewRunner sets them to the throttler and dbconn
+	// packages'; tests replace them, because CI has no Aurora to probe.
+	buildAurora    func(context.Context, throttler.AuroraSetup) (throttler.AuroraResult, error)
+	auroraVCPUs    func(context.Context, *sql.DB) (int, error)
+	bufferPoolSize func(context.Context, *sql.DB) (uint64, error)
 
 	sourceUUID string // server owning file:position checkpoints
 	sync       *Sync
@@ -196,6 +197,7 @@ func NewRunner(s *Sync) (*Runner, error) {
 		firstCleanPassCh: make(chan struct{}),
 		buildAurora:      buildAurora,
 		auroraVCPUs:      throttler.AuroraVCPUs,
+		bufferPoolSize:   dbconn.BufferPoolSize,
 	}
 	return r, nil
 }
@@ -919,14 +921,16 @@ func (r *Runner) openLoadSignal(ctx context.Context, result throttler.AuroraResu
 // the probe that built that signal.
 func (r *Runner) setupAutoscaling(ctx context.Context, result throttler.AuroraResult) error {
 	plan, err := concurrency.Engage(ctx, &r.sync.Common, concurrency.Request{
-		Targets: []concurrency.Target{{DB: r.target.DB, Aurora: result}},
-		Fit:     r.fitAutoscaleToPool,
-		VCPUs:   r.auroraVCPUs,
-		Logger:  r.logger,
+		Targets:        []concurrency.Target{{DB: r.target.DB, Aurora: result}},
+		Fit:            r.fitAutoscaleToPool,
+		VCPUs:          r.auroraVCPUs,
+		BufferPoolSize: r.bufferPoolSize,
+		Logger:         r.logger,
 	})
-	if err != nil || !plan.Engaged {
+	if err != nil || (!plan.Engaged && !plan.LowMemory) {
 		return err
 	}
+	// Low-memory mode sets only the flush shape: plan.Copier() is zero.
 	r.autoscale = plan.Copier()
 	r.flushConcurrency, r.flushBatchSize = plan.FlushConcurrency, plan.FlushBatchSize
 	return nil
