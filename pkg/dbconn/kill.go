@@ -47,6 +47,10 @@ var (
 	errBlockerLookupFailed = errors.New("could not list the sessions blocking the lock")
 )
 
+// innodbTrxFourByteBug explains error 3854 (ErrCannotConvertString) from the
+// blocker lookup, so an operator does not look for a fault in their own setup.
+const innodbTrxFourByteBug = "this is likely a MySQL bug: from MySQL 9.7, information_schema.innodb_trx cannot be read while any running statement's text holds a 4-byte character, such as an emoji (https://bugs.mysql.com/bug.php?id=121434)"
+
 // forceKillGracePeriod returns how long to wait before force-killing
 // transactions that are blocking our lock acquisition. It is 90% of the
 // configured lockWaitTimeout (in seconds), with a floor of 0.9 seconds
@@ -229,6 +233,9 @@ func killBlockers(ctx context.Context, db *sql.DB, tables []*table.TableInfo, lo
 		return nil, nil, ErrTableLockFound
 	}
 	pids, heavy, err := getLockingTransactions(ctx, db, tables, logger, ignorePIDs)
+	if errors.Is(err, &mysql.MySQLError{Number: parsermysql.ErrCannotConvertString}) {
+		return nil, nil, fmt.Errorf("%w: failed to get locking transactions: %s: %w", errBlockerLookupFailed, innodbTrxFourByteBug, err)
+	}
 	if err != nil {
 		return nil, nil, fmt.Errorf("%w: failed to get locking transactions: %w", errBlockerLookupFailed, err)
 	}

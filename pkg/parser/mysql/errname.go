@@ -947,6 +947,7 @@ var MySQLErrName = map[uint16]string{
 	ErrFunctionalIndexRowValueIsNotAllowed:                   "Expression of functional index '%s' cannot refer to a row value",
 	ErrDependentByFunctionalIndex:                            "Column '%s' has a functional index dependency and cannot be dropped or renamed",
 	ErrInvalidJSONType:                                       "Invalid JSON type in argument %d to function %s; an %s is required.",
+	ErrCannotConvertString:                                   "Cannot convert string '%.64s' from %s to %s",
 	ErrInvalidJsonValueForFuncIndex:                          "Invalid JSON value for CAST for functional index '%s'",
 	ErrJsonValueOutOfRangeForFuncIndex:                       "Out of range JSON value for CAST for functional index '%s'",
 	ErrFunctionalIndexDataIsTooLong:                          "Data too long for functional index '%s'",

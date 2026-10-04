@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/block/mysql"
+	parsermysql "github.com/block/spirit/pkg/parser/mysql"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
@@ -232,6 +233,37 @@ func TestCheckForceKillPrivilegesBesideAFourByteCharacterStatement(t *testing.T)
 	defer cancel()
 	statementDone := runFourByteCharacterStatement(t, ctx, db, "forcekill_probe_mb4", 3)
 	require.NoError(t, CheckForceKillPrivileges(ctx, db))
+	require.NoError(t, <-statementDone)
+}
+
+// From MySQL 9.7 the blocker lookup fails while a running statement holds a
+// 4-byte character. The error the kill logs must say that this is likely a
+// MySQL bug. It runs only from 9.7, where the statement it starts makes the
+// lookup fail every time, so other tests running beside it cannot change the
+// outcome.
+func TestBlockerLookupFailureNamesTheMySQLBug(t *testing.T) {
+	testutils.SkipBeforeMySQLVersion(t, "9.7.0", "earlier versions read innodb_trx beside a 4-byte character")
+	db, err := New(testutils.DSN(), NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	// MySQL fills innodb_trx only when a session holds a lock on the table, so
+	// the lookup fails only beside a blocker.
+	tt := testutils.NewTestTable(t, "lookup_bug_target", "CREATE TABLE lookup_bug_target (id INT PRIMARY KEY)")
+	blocker, err := tt.DB.BeginTx(ctx, nil)
+	require.NoError(t, err)
+	defer func() { _ = blocker.Rollback() }()
+	_, err = blocker.ExecContext(ctx, "SELECT * FROM lookup_bug_target")
+	require.NoError(t, err)
+	tables := []*table.TableInfo{{SchemaName: "test", TableName: "lookup_bug_target", QuotedTableName: "`lookup_bug_target`"}}
+	statementDone := runFourByteCharacterStatement(t, ctx, db, "lookup_bug_mb4", 3)
+	killed, err := killLockingTransactions(ctx, db, tables, slog.Default(), nil)
+	require.Empty(t, killed)
+	require.ErrorIs(t, err, errBlockerLookupFailed)
+	require.ErrorIs(t, err, &mysql.MySQLError{Number: parsermysql.ErrCannotConvertString})
+	require.ErrorContains(t, err, "this is likely a MySQL bug")
+	require.ErrorContains(t, err, "https://bugs.mysql.com/bug.php?id=121434")
 	require.NoError(t, <-statementDone)
 }
 
