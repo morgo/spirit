@@ -46,8 +46,8 @@ type Target struct {
 type Request struct {
 	// Targets holds one entry per distinct target server. Autoscaling engages
 	// only when every one supplies an Aurora load signal and is at least
-	// autoscale.MinVCPUs. Low-memory mode is selected instead when every one
-	// supplies a signal and any one is a low-memory instance.
+	// autoscale.MinVCPUs. Low-memory mode is selected instead when any one
+	// confirmed as Aurora is a low-memory instance, whatever the others are.
 	Targets []Target
 	// Sources is how many change feeds fan their flushes out to the targets.
 	// Zero means one.
@@ -201,7 +201,8 @@ func Derive(t Topology, clientCeiling int, redoAware, commitLatencyEnabled bool)
 // autoscale.LowMemoryTargetChunkBytes, and the plan carries
 // autoscale.LowMemoryFlushConcurrency. Any one target is enough, because the
 // counts are shared by every target and the smallest must not run out of
-// memory.
+// memory. That holds even when another target is not Aurora or its probe
+// failed, which would otherwise disable autoscaling.
 //
 // Autoscaling engages only when the flag is set and every target supplies a
 // usable Aurora load signal and is at least autoscale.MinVCPUs; anything else
@@ -250,8 +251,34 @@ func engage(ctx context.Context, f *flags.Common, req Request, clientCeiling int
 		logger.Info("autoscaling disabled: no target to read a load signal from; thread counts stay as configured")
 		return Plan{}, nil
 	}
+	// Low-memory mode is decided first, over the targets confirmed as Aurora
+	// only: it protects a small target from the configured counts, so another
+	// target that is not Aurora (or whose probe failed) must not stand in its
+	// way. vcpus[i] is zero for a target that is not confirmed Aurora.
+	readVCPUs := req.VCPUs
+	if readVCPUs == nil {
+		readVCPUs = throttler.AuroraVCPUs
+	}
+	vcpus := make([]int, len(req.Targets))
+	for i, target := range req.Targets {
+		if target.Aurora.ProbeErr != nil || len(target.Aurora.Throttlers) == 0 {
+			continue
+		}
+		n, err := readVCPUs(ctx, target.DB)
+		if err != nil {
+			if target.Name != "" {
+				return Plan{}, fmt.Errorf("target %s CPU capacity: %w", target.Name, err)
+			}
+			return Plan{}, fmt.Errorf("target CPU capacity: %w", err)
+		}
+		vcpus[i] = n
+	}
+	if plan, ok, err := lowMemory(ctx, f, req, vcpus, logger); err != nil || ok {
+		return plan, err
+	}
+
 	redoAware := false
-	topology := Topology{Sources: req.Sources}
+	topology := Topology{Sources: req.Sources, VCPUs: vcpus}
 	for _, target := range req.Targets {
 		log := logger
 		if target.Name != "" {
@@ -274,23 +301,6 @@ func engage(ctx context.Context, f *flags.Common, req Request, clientCeiling int
 		shards := max(1, target.Shards)
 		topology.Targets += shards
 		topology.ShardsPerHost = max(topology.ShardsPerHost, shards)
-	}
-	readVCPUs := req.VCPUs
-	if readVCPUs == nil {
-		readVCPUs = throttler.AuroraVCPUs
-	}
-	for _, target := range req.Targets {
-		vcpus, err := readVCPUs(ctx, target.DB)
-		if err != nil {
-			if target.Name != "" {
-				return Plan{}, fmt.Errorf("target %s CPU capacity: %w", target.Name, err)
-			}
-			return Plan{}, fmt.Errorf("target CPU capacity: %w", err)
-		}
-		topology.VCPUs = append(topology.VCPUs, vcpus)
-	}
-	if plan, ok, err := lowMemory(ctx, f, req, topology.VCPUs, logger); err != nil || ok {
-		return plan, err
 	}
 
 	commitLatencyEnabled := f.MaxCommitLatency > 0
@@ -339,7 +349,8 @@ func engage(ctx context.Context, f *flags.Common, req Request, clientCeiling int
 }
 
 // lowMemory selects low-memory mode when any target, with vcpus[i] the vCPU
-// count of req.Targets[i], is a low-memory instance (autoscale.IsLowMemory).
+// count of req.Targets[i] (zero for a target not confirmed as Aurora, which is
+// skipped), is a low-memory instance (autoscale.IsLowMemory).
 // When it does, it overrides the thread counts and lowers the chunk size in f.
 // The buffer pool is read only for a target small enough in vCPUs to qualify.
 func lowMemory(ctx context.Context, f *flags.Common, req Request, vcpus []int, logger *slog.Logger) (Plan, bool, error) {
@@ -348,7 +359,7 @@ func lowMemory(ctx context.Context, f *flags.Common, req Request, vcpus []int, l
 		readBufferPool = dbconn.BufferPoolSize
 	}
 	for i, target := range req.Targets {
-		if vcpus[i] > autoscale.LowMemoryMaxVCPUs {
+		if vcpus[i] == 0 || vcpus[i] > autoscale.LowMemoryMaxVCPUs {
 			continue
 		}
 		bufferPool, err := readBufferPool(ctx, target.DB)

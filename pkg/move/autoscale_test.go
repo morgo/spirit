@@ -158,7 +158,7 @@ func TestMoveSetupThrottling(t *testing.T) {
 
 // A low-memory target (a db.t4g.medium class instance, too small to autoscale)
 // runs the whole move at one reader, one writer and one flush, with small copy
-// chunks, whichever target it is.
+// chunks, even when the other target is not Aurora.
 func TestMoveLowMemory(t *testing.T) {
 	config, err := mysql.ParseDSN(testutils.DSN())
 	require.NoError(t, err)
@@ -168,8 +168,7 @@ func TestMoveLowMemory(t *testing.T) {
 	require.NoError(t, err)
 	r.targets = []applier.Target{{Config: config}, {Config: &other, KeyRange: "80-"}}
 	r.sources = []sourceInfo{{config: config}}
-	aurora := throttler.AuroraResult{Throttlers: []throttler.Throttler{&closeCountingThrottler{}}}
-	fakeAurora(r, 2, aurora, aurora)
+	fakeAurora(r, 2, throttler.AuroraResult{Throttlers: []throttler.Throttler{&closeCountingThrottler{}}}, throttler.AuroraResult{})
 	r.bufferPoolSize = func(context.Context, *sql.DB) (uint64, error) { return 1 << 30, nil }
 	t.Cleanup(func() { require.NoError(t, r.Close()) })
 
@@ -193,6 +192,9 @@ func TestMoveAutoscaleNeedsEveryTarget(t *testing.T) {
 		r, err := NewRunner(&Move{Common: flags.Common{Threads: 3, WriteThreads: 5, EnableExperimentalAutoscaling: true}})
 		require.NoError(t, err)
 		r.targets = []applier.Target{{Config: config}, {Config: config, KeyRange: "80-"}}
+		// The Aurora target is sized (for low-memory mode) even though the
+		// other target disables autoscaling.
+		r.auroraVCPUs = func(context.Context, *sql.DB) (int, error) { return 16, nil }
 		signal := &closeCountingThrottler{}
 		results := []throttler.AuroraResult{{Throttlers: []throttler.Throttler{signal}}, other}
 		require.NoError(t, r.applyAuroraResults(t.Context(), groups, results))

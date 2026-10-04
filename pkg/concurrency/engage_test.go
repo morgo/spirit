@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"log/slog"
 	"testing"
 	"time"
@@ -347,6 +348,41 @@ func TestEngageLowMemory(t *testing.T) {
 	require.Equal(t, 1, f.Threads)
 	require.Equal(t, 1, f.WriteThreads)
 	require.Contains(t, logs, "target=small")
+}
+
+// A low-memory Aurora target gets low-memory mode even when another target is
+// not Aurora or its probe failed, which disables autoscaling. Only confirmed
+// Aurora targets are probed for their size.
+func TestEngageLowMemoryMixedTargets(t *testing.T) {
+	for name, other := range map[string]throttler.AuroraResult{
+		"not aurora":   {},
+		"probe failed": {ProbeErr: errors.New("denied")},
+	} {
+		for _, smallFirst := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/small_first=%v", name, smallFirst), func(t *testing.T) {
+				targets := []Target{{Aurora: aurora(false), Name: "small"}, {Aurora: other, Name: "other"}}
+				if !smallFirst {
+					targets[0], targets[1] = targets[1], targets[0]
+				}
+				var vcpuReads int
+				f := &flags.Common{Threads: 4, WriteThreads: 4, EnableExperimentalAutoscaling: true}
+				plan, logs := engageForTest(t, f, Request{
+					Targets: targets,
+					VCPUs: func(context.Context, *sql.DB) (int, error) {
+						vcpuReads++
+						return 2, nil
+					},
+					BufferPoolSize: bufferPool(gib),
+				})
+				require.True(t, plan.LowMemory)
+				require.Equal(t, 1, vcpuReads, "only the Aurora target is probed")
+				require.Equal(t, 1, f.Threads)
+				require.Equal(t, 1, f.WriteThreads)
+				require.Contains(t, logs, "target=small")
+				require.NotContains(t, logs, "autoscaling disabled")
+			})
+		}
+	}
 }
 
 // Anything short of a low-memory target leaves low-memory mode off, and the
