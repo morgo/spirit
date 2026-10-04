@@ -100,6 +100,15 @@ func SetPoolSize(db *sql.DB, n int) {
 	}
 }
 
+// BufferPoolSize returns the server's @@innodb_buffer_pool_size in bytes.
+func BufferPoolSize(ctx context.Context, db *sql.DB) (uint64, error) {
+	var size uint64
+	if err := db.QueryRowContext(ctx, "SELECT @@innodb_buffer_pool_size").Scan(&size); err != nil {
+		return 0, fmt.Errorf("reading @@innodb_buffer_pool_size: %w", err)
+	}
+	return size, nil
+}
+
 var once sync.Once
 
 // IsRDSHost reports whether host is an Amazon RDS or Aurora endpoint.

@@ -19,6 +19,8 @@ The shape is "gentle in the normal regime, abrupt only in emergencies". The full
 
 `MinVCPUs` (4) is part of the law rather than of any phase: the signal's denominator is the instance vCPU count, so below it one thread is half or a third of the whole scale and no dead band is wide enough to rest in. Each runner enforces it once at setup by disabling autoscaling for the whole run: `migrate` checks the server it alters, `sync` its target, and `move` every target (one small target disables scaling for all of them).
 
+Below `MinVCPUs` there is one more case, **low-memory mode** (`IsLowMemory`): at most `LowMemoryMaxVCPUs` (2) vCPUs and at most `LowMemoryMaxBufferPoolBytes` (1.5 GiB) of buffer pool, i.e. a `db.t4g.medium`-class instance, where the configured defaults were observed to run the instance out of memory. `concurrency.Engage` then sets one read thread, one write thread and a `LowMemoryTargetChunkBytes` (1 MiB) copy chunk budget, and the plan carries a flush width of `LowMemoryFlushConcurrency` (1). No controller runs. In `move` one low-memory target is enough, since the counts are shared by every target. A 2-vCPU instance with a larger buffer pool (`db.r6g.large`) is not low-memory and keeps the configured counts.
+
 ## What the controllers share
 
 - **`Gate`** turns one tick's signals (`Inputs`) into a `Plan`. It owns the precedence between the zones, a caller-supplied veto, and the cooldown bookkeeping — the part most likely to drift if each phase kept its own copy, and the hardest to notice when it does. Precedence, highest first: `Halve`, then the veto, then `Shed`, `Grow`, and recovery inside the dead band.
