@@ -40,6 +40,7 @@ func TestForceKillAfterValidation(t *testing.T) {
 
 // Both consumers must honor the explicit delay rather than waiting 90% of 10s.
 func TestExplicitForceKillAfter(t *testing.T) {
+	testutils.SkipFromMySQLVersion(t, "9.7.0", blockerLookupFailsReason)
 	for _, operation := range []string{"ddl", "table-lock"} {
 		t.Run(operation, func(t *testing.T) {
 			tt := testutils.NewTestTable(t, "explicit_kill_after", "CREATE TABLE explicit_kill_after (id INT PRIMARY KEY)")

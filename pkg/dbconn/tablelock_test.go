@@ -135,6 +135,7 @@ func TestTableLockMultiple(t *testing.T) {
 }
 
 func TestTableLockFail(t *testing.T) {
+	testutils.SkipFromMySQLVersion(t, "9.7.0", blockerLookupFailsReason)
 	db, err := New(testutils.DSN(), testConfig())
 	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
@@ -386,6 +387,7 @@ func TestTableLockCloseDuringExecUnderLock(t *testing.T) {
 // cannot list the blockers until that statement ends, so it looks again while
 // LOCK TABLES waits, and the lock is acquired before its timeout.
 func TestTableLockKillsBesideAFourByteCharacterStatement(t *testing.T) {
+	testutils.SkipFromMySQLVersion(t, "9.7.0", blockerLookupFailsReason)
 	tt := testutils.NewTestTable(t, "tablelock_mb4", "CREATE TABLE tablelock_mb4 (id INT PRIMARY KEY)")
 	config := NewDBConfig()
 	config.LockWaitTimeout = 10

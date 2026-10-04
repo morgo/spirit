@@ -20,7 +20,17 @@ var (
 	TestKillLongRunningTransactionsTableBaseName = "TestKillLongRunningTransactions"
 )
 
+// blockerLookupFailsReason is why tests that force-kill against a live server
+// skip from MySQL 9.7.0: there every read of information_schema.innodb_trx
+// fails with error 3854 while any running statement's text holds a 4-byte
+// character (https://bugs.mysql.com/bug.php?id=121434). Other packages' tests
+// run such statements concurrently on the same server, so the blocker lookup
+// fails at random and the kill and retry counts these tests assert drift
+// (block/spirit#1427).
+const blockerLookupFailsReason = "information_schema.innodb_trx is unreadable while a running statement holds a 4-byte character"
+
 func TestKillLongRunningTransactions(t *testing.T) {
+	testutils.SkipFromMySQLVersion(t, "9.7.0", blockerLookupFailsReason)
 	logger := slog.Default()
 
 	dbConfig := NewDBConfig()
@@ -133,6 +143,7 @@ func TestKillLongRunningTransactions(t *testing.T) {
 // connection is required to create the restricted user and grant privileges
 // (the default test user lacks GRANT OPTION).
 func TestCheckForceKillPrivileges(t *testing.T) {
+	testutils.SkipFromMySQLVersion(t, "9.7.0", blockerLookupFailsReason)
 	config, err := mysql.ParseDSN(testutils.DSN())
 	require.NoError(t, err)
 	config.User = "root" // needs grant privilege
@@ -213,6 +224,7 @@ func TestCheckForceKillPrivileges(t *testing.T) {
 // some MySQL versions that fails while a statement holds a character utf8mb3
 // cannot store, so the check proves PROCESS without reading innodb_trx.
 func TestCheckForceKillPrivilegesBesideAFourByteCharacterStatement(t *testing.T) {
+	testutils.SkipFromMySQLVersion(t, "9.7.0", blockerLookupFailsReason)
 	db, err := New(testutils.DSN(), NewDBConfig())
 	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
@@ -258,6 +270,7 @@ func runFourByteCharacterStatement(t *testing.T, ctx context.Context, db *sql.DB
 // them while the role is active on the session, and not once it is inactive,
 // since only an active role's privileges let the session kill.
 func TestCheckForceKillPrivilegesThroughARole(t *testing.T) {
+	testutils.SkipFromMySQLVersion(t, "9.7.0", blockerLookupFailsReason)
 	config, err := mysql.ParseDSN(testutils.DSN())
 	require.NoError(t, err)
 	config.User = "root" // needs grant privilege

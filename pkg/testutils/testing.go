@@ -212,6 +212,22 @@ func SkipBeforeMySQLVersion(t *testing.T, minVersion, reason string) {
 	}
 }
 
+// SkipFromMySQLVersion skips the test when the server's version() is
+// fromVersion (e.g. "9.7.0") or newer, giving reason in the skip message. Use it
+// for behavior a newer server changed or gets wrong and that is not worth
+// special-casing, not to hide a failure a supported server should pass.
+func SkipFromMySQLVersion(t *testing.T, fromVersion, reason string) {
+	t.Helper()
+	db, err := sql.Open(driverName, DSN())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+	var version string
+	require.NoError(t, db.QueryRowContext(t.Context(), "SELECT version()").Scan(&version))
+	if compareMySQLVersions(version, fromVersion) >= 0 {
+		t.Skipf("skipping on MySQL %s (%s and later): %s", version, fromVersion, reason)
+	}
+}
+
 // compareMySQLVersions compares two dotted MySQL versions numerically, returning
 // -1, 0 or 1. Anything after the numeric part (8.0.28-log) is ignored, and a
 // missing component counts as 0.
