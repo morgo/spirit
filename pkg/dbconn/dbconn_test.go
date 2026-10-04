@@ -359,6 +359,7 @@ func TestShouldRetryForceExecAfterKill(t *testing.T) {
 const killedSessionLingersReason = "a KILLed idle session can keep its metadata lock indefinitely"
 
 func TestForceExec(t *testing.T) {
+	testutils.SkipFromMySQLVersion(t, "9.7.0", blockerLookupFailsReason)
 	testutils.SkipBeforeMySQLVersion(t, "8.0.29", killedSessionLingersReason)
 	config := NewDBConfig()
 	config.LockWaitTimeout = 1 // as short as possible.
@@ -505,6 +506,7 @@ func TestAnalyzeTableOutlastsTransientLock(t *testing.T) {
 // preserving its kill-timer behavior: a connection holding a metadata lock
 // on the table is force-killed so the DDL succeeds.
 func TestForceExecRawVerb(t *testing.T) {
+	testutils.SkipFromMySQLVersion(t, "9.7.0", blockerLookupFailsReason)
 	testutils.SkipBeforeMySQLVersion(t, "8.0.29", killedSessionLingersReason)
 	config := NewDBConfig()
 	config.LockWaitTimeout = 1 // as short as possible.

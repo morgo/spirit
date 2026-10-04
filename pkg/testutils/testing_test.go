@@ -1,11 +1,13 @@
 package testutils
 
 import (
+	"database/sql"
 	"math"
 	"os"
 	"strings"
 	"testing"
 
+	"github.com/block/spirit/pkg/utils"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -26,6 +28,37 @@ func TestCompareMySQLVersions(t *testing.T) {
 		{"8.0", "8.0.0", 0},
 	} {
 		assert.Equal(t, tc.want, compareMySQLVersions(tc.a, tc.b), "%s vs %s", tc.a, tc.b)
+	}
+}
+
+// The version skips run a test only on the side of the version they name, so
+// a gate that points the wrong way or is off by one at the boundary fails here
+// instead of passing as a quiet skip.
+func TestVersionSkipsPointTheRightWay(t *testing.T) {
+	db, err := sql.Open(driverName, DSN())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+	var version string
+	require.NoError(t, db.QueryRowContext(t.Context(), "SELECT version()").Scan(&version))
+	for _, tc := range []struct {
+		name    string
+		skip    func(t *testing.T, version, reason string)
+		version string
+		wantRun bool
+	}{
+		{"before newer", SkipBeforeMySQLVersion, "999.0.0", false},
+		{"before own", SkipBeforeMySQLVersion, version, true},
+		{"before older", SkipBeforeMySQLVersion, "0.0.1", true},
+		{"from newer", SkipFromMySQLVersion, "999.0.0", true},
+		{"from own", SkipFromMySQLVersion, version, false},
+		{"from older", SkipFromMySQLVersion, "0.0.1", false},
+	} {
+		ran := false
+		t.Run(tc.name, func(t *testing.T) {
+			tc.skip(t, tc.version, "probe")
+			ran = true
+		})
+		require.Equal(t, tc.wantRun, ran, "%s: server %s, version %s", tc.name, version, tc.version)
 	}
 }
 

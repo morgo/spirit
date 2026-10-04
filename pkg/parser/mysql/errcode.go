@@ -950,6 +950,7 @@ const (
 	ErrFunctionalIndexRowValueIsNotAllowed                   = 3800
 	ErrDependentByFunctionalIndex                            = 3837
 	ErrInvalidJSONType                                       = 3853
+	ErrCannotConvertString                                   = 3854
 	ErrInvalidJsonValueForFuncIndex                          = 3903 //nolint: revive
 	ErrJsonValueOutOfRangeForFuncIndex                       = 3904 //nolint: revive
 	ErrFunctionalIndexDataIsTooLong                          = 3907

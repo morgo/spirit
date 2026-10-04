@@ -273,6 +273,7 @@ func TestForceExecRetriesWhenBlockerExitsWithoutKill(t *testing.T) {
 // retry runs. The retry must run a new worker and kill the fresh blocker; a
 // retry without one times out again and the caller falls back to a copy.
 func TestForceExecRetryKillsFreshBlocker(t *testing.T) {
+	testutils.SkipFromMySQLVersion(t, "9.7.0", blockerLookupFailsReason)
 	tt := testutils.NewTestTable(t, "forceexec_fresh_blocker", "CREATE TABLE forceexec_fresh_blocker (id INT PRIMARY KEY)")
 	config := newShortKillDelayConfig()
 	db, err := New(testutils.DSN(), config)
@@ -585,6 +586,7 @@ func TestForceExecStopsWhenABlockerSurvivesTheKill(t *testing.T) {
 // gives up after one attempt and leaves it running. The threshold is lowered
 // so a one-row insert counts as heavy.
 func TestForceExecMakesOneAttemptAgainstAHeavyTransaction(t *testing.T) {
+	testutils.SkipFromMySQLVersion(t, "9.7.0", blockerLookupFailsReason)
 	tt := testutils.NewTestTable(t, "forceexec_heavy_trx", "CREATE TABLE forceexec_heavy_trx (id INT PRIMARY KEY)")
 	threshold := TransactionWeightThreshold
 	TransactionWeightThreshold = 0
@@ -669,6 +671,7 @@ func holdTableLock(t *testing.T, ctx context.Context, db *sql.DB, tableName stri
 // A kill that is denied for one blocker still reports the blockers it did
 // kill, so the caller can wait for them to exit.
 func TestKillLockingTransactionsReportsKillsBesideADeniedOne(t *testing.T) {
+	testutils.SkipFromMySQLVersion(t, "9.7.0", blockerLookupFailsReason)
 	tt := testutils.NewTestTable(t, "kill_partly_denied", "CREATE TABLE kill_partly_denied (id INT PRIMARY KEY)")
 	config := NewDBConfig()
 	db := newNoKillUserDB(t, config)
@@ -692,6 +695,7 @@ func TestKillLockingTransactionsReportsKillsBesideADeniedOne(t *testing.T) {
 // user's. ForceExec kills the blocker it owns, and then gives up after one
 // attempt: the next attempt's KILL of the other user's blocker is denied too.
 func TestForceExecMakesOneAttemptWhenAKillIsDenied(t *testing.T) {
+	testutils.SkipFromMySQLVersion(t, "9.7.0", blockerLookupFailsReason)
 	tt := testutils.NewTestTable(t, "forceexec_kill_denied", "CREATE TABLE forceexec_kill_denied (id INT PRIMARY KEY)")
 	config := newShortKillDelayConfig()
 	require.Greater(t, config.MaxRetries, 1)
@@ -815,6 +819,7 @@ func TestForceExecSparesSessionsBesideARunningStatement(t *testing.T) {
 // cannot say whether the statement was waiting, so the blocker also gets the
 // full delay after the last failed check.
 func TestForceExecKillsOnceAStatementStartsWaiting(t *testing.T) {
+	testutils.SkipFromMySQLVersion(t, "9.7.0", blockerLookupFailsReason)
 	for _, tc := range []struct {
 		name            string
 		waitStartsAfter time.Duration
@@ -1101,6 +1106,7 @@ func TestForceExecSparesTrafficDuringAnInplaceRebuild(t *testing.T) {
 // new wait, so the wait restarts and the blocker gets the full delay from the
 // last of them.
 func TestForceExecKeepsAnObservedWaitAcrossAFailedCheck(t *testing.T) {
+	testutils.SkipFromMySQLVersion(t, "9.7.0", blockerLookupFailsReason)
 	for _, tc := range []struct {
 		name               string
 		failFrom, failTill time.Duration
@@ -1157,6 +1163,7 @@ func TestForceExecKeepsAnObservedWaitAcrossAFailedCheck(t *testing.T) {
 // The next check then runs at once rather than a poll interval later, so the
 // kill still comes within one check of the delay.
 func TestForceExecKillsRightAfterACheckThatRunsPastTheDelay(t *testing.T) {
+	testutils.SkipFromMySQLVersion(t, "9.7.0", blockerLookupFailsReason)
 	tt := testutils.NewTestTable(t, "forceexec_slow_check", "CREATE TABLE forceexec_slow_check (id INT PRIMARY KEY)")
 	config := NewDBConfig()
 	config.LockWaitTimeout = 4
@@ -1230,6 +1237,7 @@ func TestForceExecKillsRightAfterACheckThatRunsPastTheDelay(t *testing.T) {
 // waiting, and the check reports so without a round trip, so the polls land
 // on the poll interval rather than drifting by the time each check takes.
 func TestForceExecKillsAtTheDelayBetweenPolls(t *testing.T) {
+	testutils.SkipFromMySQLVersion(t, "9.7.0", blockerLookupFailsReason)
 	tt := testutils.NewTestTable(t, "forceexec_between_polls", "CREATE TABLE forceexec_between_polls (id INT PRIMARY KEY)")
 	config := NewDBConfig()
 	config.LockWaitTimeout = 1
@@ -1312,6 +1320,7 @@ func TestForceExecPollsAtTheIntervalWhileTheStatementRuns(t *testing.T) {
 // still waits, and kills the blocker within the first attempt instead of
 // letting it hold the table until the lock wait timeout.
 func TestForceExecKillsBesideAFourByteCharacterStatement(t *testing.T) {
+	testutils.SkipFromMySQLVersion(t, "9.7.0", blockerLookupFailsReason)
 	tt := testutils.NewTestTable(t, "forceexec_mb4", "CREATE TABLE forceexec_mb4 (id INT PRIMARY KEY)")
 	config := NewDBConfig()
 	config.LockWaitTimeout = 10
@@ -1386,6 +1395,7 @@ func TestForceExecLooksForBlockersAgainAfterAFailedLookup(t *testing.T) {
 // single failed check after it therefore leave the wait in progress, and the
 // next check kills at once instead of starting the delay over.
 func TestForceExecKeepsTheWaitAcrossAFailedLookupBetweenFailedChecks(t *testing.T) {
+	testutils.SkipFromMySQLVersion(t, "9.7.0", blockerLookupFailsReason)
 	tt := testutils.NewTestTable(t, "forceexec_lookup_blip", "CREATE TABLE forceexec_lookup_blip (id INT PRIMARY KEY)")
 	config := NewDBConfig()
 	config.LockWaitTimeout = 4

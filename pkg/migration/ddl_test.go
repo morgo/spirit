@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/block/spirit/pkg/checkpoint"
-	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/dbconn/sqlescape"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
@@ -21,17 +20,7 @@ func TestForNonInstantBurn(t *testing.T) {
 	t.Parallel()
 
 	testutils.SkipBeforeMySQLVersion(t, "8.0.29", "total_row_versions was added in 8.0.29; earlier versions use INSTANT_COLS")
-
-	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
-	require.NoError(t, err)
-	defer utils.CloseAndLog(db)
-	var version string
-	require.NoError(t, db.QueryRowContext(t.Context(), `SELECT version()`).Scan(&version))
-	// Skip after MySQL 8 (total_row_versions limit was raised beyond 64 in 9.0).
-	// Compare the major version, not a "9." prefix: 26.7 follows 9.7.
-	if major, _, _ := strings.Cut(version, "."); major != "8" {
-		t.Skipf("Skipping this test for MySQL %s: total_row_versions limit was raised beyond 64", version)
-	}
+	testutils.SkipFromMySQLVersion(t, "9.0.0", "the total_row_versions limit was raised beyond 64")
 
 	tt := testutils.NewTestTable(t, "instantburn", `CREATE TABLE instantburn (
 		id int(11) NOT NULL AUTO_INCREMENT,
