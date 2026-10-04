@@ -119,7 +119,11 @@ cannot see is not reported and not refused.
 
 `--enable-experimental-autoscaling` enables target-aware concurrency control
 for Aurora targets with at least four vCPUs. Eligible targets override
-`--threads` and `--write-threads`; other targets retain those configured counts.
+`--threads` and `--write-threads`; other targets retain those configured counts,
+except a low-memory target (at most 2 vCPUs and at most a 1.5 GiB buffer pool),
+which runs in low-memory mode: 1 read thread, 1 write thread, 1 concurrent
+change-feed flush, a 1 MiB `--target-chunk-size`, and no scaling. See
+[migrate's low-memory mode](migrate.md#enable-experimental-autoscaling).
 The target's load and commit latency are sampled through a separate two-connection
 monitor pool. That monitoring, and the throttling it drives, runs without this
 flag too (see [max-commit-latency](#max-commit-latency)); the flag only adds

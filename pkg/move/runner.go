@@ -120,11 +120,12 @@ type Runner struct {
 	// Zero leaves the change package's defaults; autoscaling derives them
 	// from the targets (moveFlushBounds).
 	flushConcurrency, flushBatchSize int
-	// buildAurora and auroraVCPUs are the Aurora probes setupThrottling
-	// runs. NewRunner sets them to the throttler package's; tests replace
-	// them, because CI has no Aurora to probe.
-	buildAurora func(context.Context, throttler.AuroraSetup) (throttler.AuroraResult, error)
-	auroraVCPUs func(context.Context, *sql.DB) (int, error)
+	// buildAurora, auroraVCPUs and bufferPoolSize are the instance probes
+	// setupThrottling runs. NewRunner sets them to the throttler and dbconn
+	// packages'; tests replace them, because CI has no Aurora to probe.
+	buildAurora    func(context.Context, throttler.AuroraSetup) (throttler.AuroraResult, error)
+	auroraVCPUs    func(context.Context, *sql.DB) (int, error)
+	bufferPoolSize func(context.Context, *sql.DB) (uint64, error)
 
 	applier     applier.Applier
 	chunkerMu   sync.RWMutex // Publishes copyChunker to concurrent Progress callers.
@@ -213,6 +214,7 @@ func NewRunner(m *Move) (*Runner, error) {
 		metricsSink:         &metrics.NoopSink{},
 		buildAurora:         buildAurora,
 		auroraVCPUs:         throttler.AuroraVCPUs,
+		bufferPoolSize:      dbconn.BufferPoolSize,
 	}
 	return r, nil
 }
@@ -779,14 +781,16 @@ func (r *Runner) setupAutoscaling(ctx context.Context, groups []host.Group, resu
 		}
 	}
 	plan, err := concurrency.Engage(ctx, &r.move.Common, concurrency.Request{
-		Targets: targets,
-		Sources: len(r.sources),
-		VCPUs:   r.auroraVCPUs,
-		Logger:  r.logger,
+		Targets:        targets,
+		Sources:        len(r.sources),
+		VCPUs:          r.auroraVCPUs,
+		BufferPoolSize: r.bufferPoolSize,
+		Logger:         r.logger,
 	})
-	if err != nil || !plan.Engaged {
+	if err != nil || (!plan.Engaged && !plan.LowMemory) {
 		return err
 	}
+	// Low-memory mode sets only the flush shape: plan.Copier() is zero.
 	r.autoscale = plan.Copier()
 	r.flushConcurrency, r.flushBatchSize = plan.FlushConcurrency, plan.FlushBatchSize
 	return nil

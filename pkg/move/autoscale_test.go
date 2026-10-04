@@ -9,6 +9,7 @@ import (
 
 	"github.com/block/mysql"
 	"github.com/block/spirit/pkg/applier"
+	"github.com/block/spirit/pkg/autoscale"
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/flags"
 	"github.com/block/spirit/pkg/host"
@@ -153,6 +154,33 @@ func TestMoveSetupThrottling(t *testing.T) {
 	require.NoError(t, r.setupThrottling(t.Context()))
 	require.True(t, r.autoscale.Enabled)
 	require.Greater(t, r.autoscale.MaxThreads, r.autoscale.StartThreads)
+}
+
+// A low-memory target (a db.t4g.medium class instance, too small to autoscale)
+// runs the whole move at one reader, one writer and one flush, with small copy
+// chunks, whichever target it is.
+func TestMoveLowMemory(t *testing.T) {
+	config, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	other := *config
+	other.Addr = "other-host:3306"
+	r, err := NewRunner(&Move{Common: flags.Common{Threads: 3, WriteThreads: 5, EnableExperimentalAutoscaling: true}})
+	require.NoError(t, err)
+	r.targets = []applier.Target{{Config: config}, {Config: &other, KeyRange: "80-"}}
+	r.sources = []sourceInfo{{config: config}}
+	aurora := throttler.AuroraResult{Throttlers: []throttler.Throttler{&closeCountingThrottler{}}}
+	fakeAurora(r, 2, aurora, aurora)
+	r.bufferPoolSize = func(context.Context, *sql.DB) (uint64, error) { return 1 << 30, nil }
+	t.Cleanup(func() { require.NoError(t, r.Close()) })
+
+	require.NoError(t, r.setupThrottling(t.Context()))
+	require.False(t, r.autoscale.Enabled)
+	require.Equal(t, 1, r.move.Threads)
+	require.Equal(t, 1, r.move.WriteThreads)
+	require.Equal(t, uint64(autoscale.LowMemoryTargetChunkBytes), r.move.TargetChunkSize)
+	feed := r.replClientConfig(&r.sources[0])
+	require.Equal(t, autoscale.LowMemoryFlushConcurrency, feed.FlushConcurrency)
+	require.Zero(t, feed.BatchSize, "the change package's default batch size")
 }
 
 // A target whose probe failed or that is not Aurora keeps every other

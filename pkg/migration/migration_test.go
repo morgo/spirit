@@ -205,6 +205,50 @@ func TestE2EAutoscalingEngaged(t *testing.T) {
 	require.Equal(t, 5, count)
 }
 
+// TestE2EAutoscalingLowMemory runs a migration against a faked low-memory
+// Aurora target (2 vCPUs, 1 GiB buffer pool: a db.t4g.medium class instance).
+// The controllers stay off, and the copier, checksum and change feed run fixed
+// at one worker each with the low-memory chunk budget, replacing the
+// configured counts.
+func TestE2EAutoscalingLowMemory(t *testing.T) {
+	t.Parallel()
+	tt := testutils.NewTestTable(t, "t1autoscalelowmem", `CREATE TABLE t1autoscalelowmem (
+		id int(11) NOT NULL AUTO_INCREMENT,
+		name varchar(255) NOT NULL,
+		PRIMARY KEY (id)
+	)`)
+	tt.SeedRows(t, "INSERT INTO t1autoscalelowmem (name) SELECT 'a'", 1000)
+	r := NewTestRunner(t, "t1autoscalelowmem", "ENGINE=InnoDB", WithThreads(4), WithWriteThreads(4), WithAutoscaling())
+	r.buildAurora = func(context.Context, throttler.AuroraSetup) (throttler.AuroraResult, error) {
+		return throttler.AuroraResult{Throttlers: []throttler.Throttler{&throttler.Noop{}}}, nil
+	}
+	r.auroraVCPUs = func(context.Context, *sql.DB) (int, error) { return 2, nil }
+	var bufferPoolReads int
+	r.bufferPoolSize = func(context.Context, *sql.DB) (uint64, error) {
+		bufferPoolReads++
+		return 1 << 30, nil
+	}
+	require.NoError(t, r.Run(t.Context()))
+	defer utils.CloseAndLog(r)
+
+	require.Equal(t, 1, bufferPoolReads, "the runner's probe, not the local server's buffer pool, decides")
+
+	require.Equal(t, concurrency.Plan{LowMemory: true, FlushConcurrency: autoscale.LowMemoryFlushConcurrency}, r.autoscale)
+	require.Equal(t, 1, r.migration.Threads)
+	require.Equal(t, 1, r.migration.WriteThreads)
+	require.Equal(t, uint64(autoscale.LowMemoryTargetChunkBytes), r.migration.TargetChunkSize)
+	copierAutoscale, checksumAutoscale := r.autoscaleConfigs()
+	require.Equal(t, copier.AutoscaleConfig{StartThreads: 1, MaxThreads: 1, MaxReadThreads: 1}, copierAutoscale)
+	require.Equal(t, checksum.AutoscaleConfig{MaxThreads: 1}, checksumAutoscale)
+	feed := r.replClientConfig(r.autoscale.FlushConcurrency, r.autoscale.FlushBatchSize)
+	require.Equal(t, autoscale.LowMemoryFlushConcurrency, feed.FlushConcurrency)
+	require.Zero(t, feed.BatchSize, "the change package's default batch size")
+
+	var count int
+	require.NoError(t, tt.DB.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM t1autoscalelowmem").Scan(&count))
+	require.Equal(t, 1024, count)
+}
+
 func TestE2ENullAlterWithReplicas(t *testing.T) {
 	t.Parallel()
 	replicaDSN := os.Getenv("REPLICA_DSN")
