@@ -135,7 +135,6 @@ func TestTableLockMultiple(t *testing.T) {
 }
 
 func TestTableLockFail(t *testing.T) {
-	testutils.SkipFromMySQLVersion(t, "9.7.0", blockerLookupFailsReason)
 	db, err := New(testutils.DSN(), testConfig())
 	require.NoError(t, err)
 	defer utils.CloseAndLog(db)

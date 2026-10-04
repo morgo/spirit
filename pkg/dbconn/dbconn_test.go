@@ -552,7 +552,6 @@ func TestForceExecRawVerb(t *testing.T) {
 // %? specifier with no matching argument. The escape now happens before the
 // kill worker starts, so a bad format string can never fire the killer.
 func TestForceExecBadFormatString(t *testing.T) {
-	testutils.SkipFromMySQLVersion(t, "9.7.0", blockerLookupFailsReason)
 	config := NewDBConfig()
 	db, err := New(testutils.DSN(), config)
 	require.NoError(t, err)
