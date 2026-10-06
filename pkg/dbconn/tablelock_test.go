@@ -289,7 +289,7 @@ func TestTableLockCleanup(t *testing.T) {
 			case "discard_locked_session":
 				// Exercise the error-path discard on a live locked session:
 				// merely calling Conn.Close would leak this lock into the pool.
-				require.NoError(t, discardTableLockConn(lock.lockConn))
+				require.NoError(t, discardConn(lock.lockConn))
 			}
 			err = lock.Close(cleanupCtx)
 			if mode == "lost_connection" || mode == "cancel_inflight_query" || mode == "discard_locked_session" {

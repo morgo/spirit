@@ -634,6 +634,7 @@ func (r *Runner) Run(ctx context.Context) (retErr error) {
 	// failure is only logged.
 	cleanupCtx, cancelCleanup := context.WithTimeout(context.WithoutCancel(ctx), postCutoverCleanupTimeout)
 	defer cancelCleanup()
+	oldTablesDropped := !r.migration.SkipDropAfterCutover
 	if !r.migration.SkipDropAfterCutover {
 		for _, change := range r.changes {
 			if err := change.dropOldTable(ctx); err != nil {
@@ -643,6 +644,7 @@ func (r *Runner) Run(ctx context.Context) (retErr error) {
 					"table", change.oldTableName(),
 					"error", err,
 				)
+				oldTablesDropped = false
 			} else {
 				r.logger.Info("successfully dropped old table",
 					"table", change.oldTableName(),
@@ -651,6 +653,9 @@ func (r *Runner) Run(ctx context.Context) (retErr error) {
 		}
 	} else {
 		r.logger.Info("skipped dropping old table")
+	}
+	if r.migration.EnableExperimentalForeignKeys {
+		r.restoreForeignKeyNames(cleanupCtx, oldTablesDropped)
 	}
 	_, copiedChunks, _ := r.copyChunker.Progress()
 	r.logger.Info("apply complete",
@@ -732,6 +737,56 @@ func (r *Runner) postCopyPhase(ctx context.Context) error {
 	return r.checksum(ctx)
 }
 
+// copiesForeignKeys reports whether a table being altered has foreign keys
+// that its new table copies, which is only the case with
+// --enable-experimental-foreign-keys.
+func (r *Runner) copiesForeignKeys(ctx context.Context) (bool, error) {
+	if !r.migration.EnableExperimentalForeignKeys {
+		return false, nil
+	}
+	for _, change := range r.changes {
+		var found int
+		err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM information_schema.referential_constraints
+			WHERE constraint_schema = ? AND table_name = ?`, change.table.SchemaName, change.table.TableName).Scan(&found)
+		if err != nil {
+			return false, err
+		}
+		if found > 0 {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// restoreForeignKeyNames gives the foreign keys of each altered table back the
+// names the cutover could not (see restoreForeignKeyNames), once dropped says
+// the old tables that hold those names are gone. A failure only leaves a
+// foreign key under its copy's name, so it is logged rather than failing a
+// migration that has already succeeded.
+func (r *Runner) restoreForeignKeyNames(ctx context.Context, dropped bool) {
+	for _, change := range r.changes {
+		names, err := restoreForeignKeyNames(ctx, r.db, change.table.TableName, dropped)
+		switch {
+		case err != nil:
+			r.logger.Error("migration successful but could not rename foreign keys back from the names of their copies",
+				"table", change.table.TableName,
+				"error", err,
+			)
+		case len(names) == 0:
+		case !dropped:
+			r.logger.Warn("foreign keys keep the names of their copies, because the old table was not dropped and still holds the original names",
+				"table", change.table.TableName,
+				"foreign-keys", names,
+			)
+		default:
+			r.logger.Info("renamed foreign keys back from the names of their copies",
+				"table", change.table.TableName,
+				"foreign-keys", names,
+			)
+		}
+	}
+}
+
 // runChecks wraps around check.RunChecks and adds the context of this migration
 // We redundantly run checks, once per change.
 func (r *Runner) runChecks(ctx context.Context, scope check.ScopeFlag) error {
@@ -746,12 +801,13 @@ func (r *Runner) runChecks(ctx context.Context, scope check.ScopeFlag) error {
 			ReplicaMaxLag: r.migration.ReplicaMaxLag,
 			// For the pre-run checks we don't have a DB connection yet.
 			// Instead we check the credentials provided.
-			Host:                 r.migration.Host,
-			Username:             r.migration.Username,
-			Password:             *r.migration.Password,
-			TLSMode:              r.migration.TLSMode,
-			TLSCertificatePath:   r.migration.TLSCertificatePath,
-			SkipDropAfterCutover: r.migration.SkipDropAfterCutover,
+			Host:                    r.migration.Host,
+			Username:                r.migration.Username,
+			Password:                *r.migration.Password,
+			TLSMode:                 r.migration.TLSMode,
+			TLSCertificatePath:      r.migration.TLSCertificatePath,
+			SkipDropAfterCutover:    r.migration.SkipDropAfterCutover,
+			ExperimentalForeignKeys: r.migration.EnableExperimentalForeignKeys,
 		}, r.logger, scope); err != nil {
 			return err
 		}
@@ -811,13 +867,24 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context, resumePosi
 	//
 	// The same applier is handed to the copier, so the copy and the binlog
 	// replay share one write pipeline.
+	//
+	// With --enable-experimental-foreign-keys the new tables can have foreign
+	// keys, which the applier's writes must not check (see
+	// ApplierConfig.SkipForeignKeyChecks). The hint that turns the checks off
+	// is only used when a table has them, which the hasforeignkeys check only
+	// allows on MySQL 9.7 and later.
+	skipForeignKeyChecks, err := r.copiesForeignKeys(ctx)
+	if err != nil {
+		return err
+	}
 	appl, err := applier.New(
 		[]applier.Target{{DB: r.db}},
 		&applier.ApplierConfig{
-			Logger:      r.logger,
-			DBConfig:    r.dbConfig,
-			Threads:     r.migration.WriteThreads,
-			MetricsSink: r.metricsSink,
+			Logger:               r.logger,
+			DBConfig:             r.dbConfig,
+			Threads:              r.migration.WriteThreads,
+			MetricsSink:          r.metricsSink,
+			SkipForeignKeyChecks: skipForeignKeyChecks,
 		},
 	)
 	if err != nil {

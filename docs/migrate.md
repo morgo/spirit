@@ -19,6 +19,7 @@ spirit migrate --host mydb:3306 --username root --password secret \
 - [database](#database)
 - [defer-cutover](#defer-cutover)
 - [enable-experimental-autoscaling](#enable-experimental-autoscaling)
+- [enable-experimental-foreign-keys](#enable-experimental-foreign-keys)
 - [enable-experimental-lockless-checksum](#enable-experimental-lockless-checksum)
 - [force-kill-after](#force-kill-after)
 - [host](#host)
@@ -164,6 +165,34 @@ The first background pass starts one hour after continuous verification begins; 
 Once continuous verification starts, checksum resume progress is discarded. After an interruption, Spirit keeps its copy checkpoint but repeats the full initial checksum, even if background verification found no differences. Background walker positions are never treated as proof of completed verification.
 
 Before continuous verification starts, an interrupted *initial* checksum does resume from where it got to, under either algorithm. The persisted watermark covers only the prefix that was read on both sides and observed equal: a range that had to be repaired, or that was still unresolved, parks the watermark below itself so the resumed run re-verifies it.
+
+### enable-experimental-foreign-keys
+
+- Type: Boolean
+- Default value: `false`
+
+**Experimental.** Requires MySQL 9.7 or later.
+
+Use `--enable-experimental-foreign-keys` to alter a table that has foreign keys to other tables (a child table). Without the flag, Spirit refuses any table with foreign keys.
+
+Spirit copies changes from the binary log. Before MySQL 9.6, InnoDB applied foreign key cascades (`ON DELETE CASCADE`, `ON UPDATE CASCADE`, `SET NULL`) internally, and they were not written to the binary log. Spirit could not see them, so the new table would miss them. MySQL 9.6 moved foreign key enforcement to the SQL layer, which writes cascaded changes to the binary log as row events of the child table. Spirit requires 9.7 or later, and refuses the table when the server was started with `innodb_native_foreign_keys=ON`, which restores the old behavior.
+
+What the flag supports:
+
+- `ALTER`s of a child table. Spirit copies each foreign key to the new table and verifies, before the copy and again at cutover, that the new table has the same foreign keys as the original.
+- `DROP FOREIGN KEY` in the `ALTER`, and renaming a column a foreign key is on.
+
+What it still refuses:
+
+- A table that another table's foreign key references (a parent table), including a table that references itself. The cutover's `RENAME TABLE` would move the other table's foreign key to the old table.
+- `ADD FOREIGN KEY` (or a column with an inline `REFERENCES`). Spirit writes rows with `foreign_key_checks` off, so the existing rows would never be checked against a new foreign key.
+- `DROP CONSTRAINT` of a foreign key. Use `DROP FOREIGN KEY`.
+
+How it works:
+
+- Foreign key names are unique per schema, so the new table's copies are named `_<name>_new`, and a generated name (`<table>_ibfk_<n>`) becomes `_<table>_new_ibfk_<n>`. The cutover's `RENAME TABLE` restores generated names. Spirit renames the others back after it drops the old table. With [skip-drop-after-cutover](#skip-drop-after-cutover), the old table keeps the original names, so the table keeps the `_<name>_new` names, and Spirit logs a warning.
+- Rows are written with `foreign_key_checks` off (a `SET_VAR` hint on each `INSERT` and `REPLACE`). The rows come from a table that enforces the same foreign keys, but a copied row's parent can be deleted before the row is written, with the deletion of the row itself still to come from the binary log. The hint also avoids a shared lock on the parent row for each write.
+- An index that MySQL creates for a foreign key keeps its name, but can move to the end of the table's index list.
 
 ### enable-experimental-lockless-checksum
 

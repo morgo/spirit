@@ -73,7 +73,7 @@ func NewTableLock(ctx context.Context, db *sql.DB, tables []*table.TableInfo, co
 	defer func() {
 		if !acquired {
 			// A failed LOCK response may leave the server's lock state unknown.
-			_ = discardTableLockConn(conn)
+			_ = discardConn(conn)
 		}
 	}()
 	var pid int
@@ -230,7 +230,7 @@ func (s *TableLock) Close(ctx context.Context) error {
 	unlockCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), tableUnlockTimeout)
 	defer cancel()
 	if _, err := conn.ExecContext(unlockCtx, "UNLOCK TABLES"); err != nil {
-		return errors.Join(err, discardTableLockConn(conn))
+		return errors.Join(err, discardConn(conn))
 	}
 	err := conn.Close()
 	if err == nil {
@@ -241,7 +241,7 @@ func (s *TableLock) Close(ctx context.Context) error {
 
 // sql.Conn.Close alone returns the session to the pool. ErrBadConn through Raw
 // instructs database/sql to close the underlying connection instead.
-func discardTableLockConn(conn *sql.Conn) error {
+func discardConn(conn *sql.Conn) error {
 	err := conn.Raw(func(any) error { return driver.ErrBadConn })
 	if errors.Is(err, driver.ErrBadConn) || errors.Is(err, sql.ErrConnDone) {
 		err = nil

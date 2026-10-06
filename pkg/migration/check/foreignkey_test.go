@@ -176,3 +176,63 @@ func TestHasForeignKeyCrossSchema(t *testing.T) {
 	err = hasForeignKeysCheck(t.Context(), r, slog.Default())
 	require.NoError(t, err, "a same-named table in another schema has no foreign keys of its own")
 }
+
+func TestNewTableForeignKeysMatch(t *testing.T) {
+	parse := func(sql string) statement.Constraints {
+		ct, err := statement.ParseCreateTable(sql)
+		require.NoError(t, err)
+		return foreignKeyConstraints(ct)
+	}
+	source := parse(`CREATE TABLE child (id INT PRIMARY KEY, pid INT, pid2 INT,
+		CONSTRAINT fk_parent FOREIGN KEY (pid) REFERENCES parent (id) ON DELETE CASCADE,
+		CONSTRAINT child_ibfk_1 FOREIGN KEY (pid2) REFERENCES parent (id))`)
+	for _, test := range []struct {
+		name, alter, newTable, err string
+	}{
+		{"copied", "ALTER TABLE child ADD COLUMN c INT",
+			`CREATE TABLE _child_new (id INT PRIMARY KEY, pid INT, pid2 INT, c INT,
+				CONSTRAINT _fk_parent_new FOREIGN KEY (pid) REFERENCES parent (id) ON DELETE CASCADE,
+				CONSTRAINT _child_new_ibfk_1 FOREIGN KEY (pid2) REFERENCES parent (id))`, ""},
+		{"dropped", "ALTER TABLE child DROP FOREIGN KEY FK_PARENT",
+			`CREATE TABLE _child_new (id INT PRIMARY KEY, pid INT, pid2 INT,
+				CONSTRAINT _child_new_ibfk_1 FOREIGN KEY (pid2) REFERENCES parent (id))`, ""},
+		{"renamed column", "ALTER TABLE child RENAME COLUMN pid TO parent_id",
+			`CREATE TABLE _child_new (id INT PRIMARY KEY, parent_id INT, pid2 INT,
+				CONSTRAINT _fk_parent_new FOREIGN KEY (parent_id) REFERENCES parent (id) ON DELETE CASCADE,
+				CONSTRAINT _child_new_ibfk_1 FOREIGN KEY (pid2) REFERENCES parent (id))`, ""},
+		{"missing", "ALTER TABLE child ADD COLUMN c INT",
+			`CREATE TABLE _child_new (id INT PRIMARY KEY, pid INT, pid2 INT,
+				CONSTRAINT _child_new_ibfk_1 FOREIGN KEY (pid2) REFERENCES parent (id))`,
+			"foreign key fk_parent has no copy _fk_parent_new"},
+		{"different action", "ALTER TABLE child ADD COLUMN c INT",
+			`CREATE TABLE _child_new (id INT PRIMARY KEY, pid INT, pid2 INT,
+				CONSTRAINT _fk_parent_new FOREIGN KEY (pid) REFERENCES parent (id) ON DELETE SET NULL,
+				CONSTRAINT _child_new_ibfk_1 FOREIGN KEY (pid2) REFERENCES parent (id))`,
+			"foreign key fk_parent is"},
+		{"different parent", "ALTER TABLE child ADD COLUMN c INT",
+			`CREATE TABLE _child_new (id INT PRIMARY KEY, pid INT, pid2 INT,
+				CONSTRAINT _fk_parent_new FOREIGN KEY (pid) REFERENCES _parent_old (id) ON DELETE CASCADE,
+				CONSTRAINT _child_new_ibfk_1 FOREIGN KEY (pid2) REFERENCES parent (id))`,
+			"foreign key fk_parent is"},
+		{"extra", "ALTER TABLE child ADD COLUMN c INT",
+			`CREATE TABLE _child_new (id INT PRIMARY KEY, pid INT, pid2 INT,
+				CONSTRAINT _fk_parent_new FOREIGN KEY (pid) REFERENCES parent (id) ON DELETE CASCADE,
+				CONSTRAINT _child_new_ibfk_1 FOREIGN KEY (pid2) REFERENCES parent (id),
+				CONSTRAINT fk_other FOREIGN KEY (pid2) REFERENCES other (id))`,
+			"foreign key fk_other is not a copy of a foreign key of child"},
+		{"dropped but kept", "ALTER TABLE child DROP FOREIGN KEY fk_parent",
+			`CREATE TABLE _child_new (id INT PRIMARY KEY, pid INT, pid2 INT,
+				CONSTRAINT _fk_parent_new FOREIGN KEY (pid) REFERENCES parent (id) ON DELETE CASCADE,
+				CONSTRAINT _child_new_ibfk_1 FOREIGN KEY (pid2) REFERENCES parent (id))`,
+			"foreign key _fk_parent_new is not a copy of a foreign key of child"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := newTableForeignKeysMatch(statement.MustNew(test.alter)[0], "child", source, parse(test.newTable))
+			if test.err == "" {
+				require.NoError(t, err)
+			} else {
+				require.ErrorContains(t, err, test.err)
+			}
+		})
+	}
+}

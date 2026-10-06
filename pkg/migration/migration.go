@@ -48,6 +48,7 @@ type Migration struct {
 	flags.Cutover
 
 	EnableExperimentalLocklessChecksum bool `name:"enable-experimental-lockless-checksum" help:"EXPERIMENTAL: verify with optimistic reads and retries instead of checksum locks and long-lived snapshots. Cutover locking is unchanged." default:"false"`
+	EnableExperimentalForeignKeys      bool `name:"enable-experimental-foreign-keys" help:"EXPERIMENTAL: allow altering a table that has foreign keys. Requires MySQL 9.7 or later. Tables referenced by a foreign key are still refused, and the ALTER cannot add one." default:"false"`
 
 	ReplicaDSN           string        `name:"replica-dsn" help:"DSN(s) for replica(s) used for lag checking. Multiple replicas can be comma-separated; Spirit throttles on the slowest." optional:""`
 	ReplicaMaxLag        time.Duration `name:"replica-max-lag" help:"The maximum lag allowed on the replica before the migration throttles. If lag becomes unobservable (lag polling keeps failing) the migration pauses (fails closed) until polling recovers; remove --replica-dsn to proceed without lag protection." optional:"" default:"120s"`
