@@ -3,6 +3,7 @@ package applier
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/block/mysql"
 	"github.com/block/spirit/pkg/dbconn"
+	parsermysql "github.com/block/spirit/pkg/parser/mysql"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
@@ -1673,8 +1675,13 @@ func TestApplierSkipForeignKeyChecks(t *testing.T) {
 				require.NoError(t, applyErr)
 			} else {
 				// INSERT IGNORE downgrades the error to a warning, which the
-				// applier refuses rather than lose the row.
-				require.ErrorContains(t, applyErr, "unsafe warning 1452")
+				// applier refuses rather than lose the row. MySQL 8.0 reports
+				// it without the constraint (1216) to a user whose privileges
+				// on the parent are granted globally or as part of a schema,
+				// and with it (1452) otherwise; 8.4 and later always use 1452.
+				warning, ok := errors.AsType[*dbconn.UnsafeWarningError](applyErr)
+				require.True(t, ok, "%v", applyErr)
+				require.Contains(t, []uint16{parsermysql.ErrNoReferencedRow, parsermysql.ErrNoReferencedRow2}, warning.Warning.Number)
 			}
 			mu.Unlock()
 
