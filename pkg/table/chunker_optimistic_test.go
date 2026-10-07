@@ -394,7 +394,10 @@ func TestOptimisticResumeProgressAccounting(t *testing.T) {
 	// accumulates it -- NOT the absolute resume key (713192535, which produced
 	// the bogus ~53% before the fix).
 	require.Equal(t, uint64(713192535-682769913), rowsCopied)
-	require.Equal(t, uint64(1341021280), total)
+	// The total is measured the same way, as the distance a full copy
+	// travels from MinValue, so the percentage reaches 100 at the end of the
+	// copy instead of stopping at (MAX-MIN)/MAX.
+	require.Equal(t, uint64(1341021280-682769913), total)
 
 	// The reported percentage should be a few percent, nowhere near the ~53%
 	// the bug produced.
@@ -426,6 +429,142 @@ func newOptimisticChunker4Test(t *testing.T) (*TableInfo, *chunkerOptimistic) {
 		logger:            slog.Default(),
 	}
 	chunker.SetDynamicChunking(false)
+	return ti, chunker
+}
+
+// On a dense key, key-space distance is the copy's progress: every chunk
+// advances it by its width, and the total is the width of the key space.
+func TestOptimisticProgressOnADenseKeySpaceIsKeyDistance(t *testing.T) {
+	_, chunker := newOptimisticChunker4Test(t)
+	require.NoError(t, chunker.Open())
+
+	for range 3 {
+		chunk, err := chunker.Next()
+		require.NoError(t, err)
+		chunker.Feedback(chunk, time.Second, 137)
+	}
+
+	copied, chunks, total := chunker.Progress()
+	require.Equal(t, uint64(3*StartingChunkSize), copied)
+	require.Equal(t, uint64(3), chunks)
+	require.Equal(t, uint64(1000000-1), total)
+}
+
+// A key that jumps far ahead of its rows, such as one generated rather than
+// incremented, leaves most of the key space empty. Key-space distance would
+// pace that whole gap at the rate the copy moves through populated keys, so
+// the remaining work and the ETA come out orders of magnitude too large.
+// Progress reports the row estimate instead, the composite chunker's measure:
+// the rows the applier settled against the table's row estimate.
+func TestOptimisticProgressOnASparseKeySpaceIsInRows(t *testing.T) {
+	ti, chunker := newSparseOptimisticChunker4Test(t)
+	require.NoError(t, chunker.Open())
+
+	const settledPerChunk = 137
+	for range 3 {
+		chunk, err := chunker.Next()
+		require.NoError(t, err)
+		chunker.Feedback(chunk, time.Second, settledPerChunk)
+	}
+
+	copied, chunks, total := chunker.Progress()
+	require.Equal(t, uint64(3*settledPerChunk), copied)
+	require.Equal(t, chunker.RowsCopied(), copied, "progress and the settled count are one counter")
+	require.Equal(t, uint64(3), chunks)
+	require.Equal(t, uint64(1000000), total, "the total is the row estimate, not the key space")
+
+	// The unit is fixed when the chunker opens, so a row estimate refreshed
+	// mid-copy cannot switch it and leave a rate measured across two units.
+	ti.EstimatedRows = 1_000_000_000_000_000
+	copied, _, _ = chunker.Progress()
+	require.Equal(t, uint64(3*settledPerChunk), copied)
+}
+
+// The unit is decided when the chunker opens. A dense key whose maximum jumps
+// during the copy, such as an auto_increment moved by an explicit id, keeps
+// reporting key-space distance for the rest of the run, so the copy rate is
+// never measured across two units.
+func TestOptimisticProgressKeepsKeyDistanceWhenTheKeyJumpsMidCopy(t *testing.T) {
+	ti, chunker := newOptimisticChunker4Test(t)
+	require.NoError(t, chunker.Open())
+	chunk, err := chunker.Next()
+	require.NoError(t, err)
+	chunker.Feedback(chunk, time.Second, 137)
+
+	ti.maxValue = Datum{Val: int64(1_000_000_000_000_000), Tp: signedType}
+
+	copied, _, total := chunker.Progress()
+	require.Equal(t, uint64(StartingChunkSize), copied, "still key-space distance")
+	require.Equal(t, uint64(1_000_000_000_000_000-1), total)
+}
+
+// A key space up to five times wider than its row estimate keeps the exact
+// key-space measure: the gaps deletes leave, a row estimate that lags the
+// table and an auto_increment_increment of 2 all fall inside it. Only a wider
+// key space reports rows.
+func TestOptimisticProgressSwitchesToRowsOnlyPastFiveTimesTheRows(t *testing.T) {
+	for _, tc := range []struct {
+		maxValue int64
+		inRows   bool
+	}{
+		{maxValue: 2_000_001, inRows: false},
+		{maxValue: 5_000_001, inRows: false},
+		{maxValue: 6_000_001, inRows: true},
+	} {
+		ti, chunker := newOptimisticChunker4Test(t)
+		ti.maxValue = Datum{Val: tc.maxValue, Tp: signedType}
+		require.NoError(t, chunker.Open())
+		_, _, total := chunker.Progress()
+		if tc.inRows {
+			require.Equal(t, uint64(1000000), total, "max %d reports the row estimate", tc.maxValue)
+		} else {
+			require.Equal(t, uint64(tc.maxValue-1), total, "max %d reports key-space distance", tc.maxValue)
+		}
+	}
+}
+
+// A sparse key resumes its row count from the checkpoint, the way the
+// composite chunker does, so a resumed copy reports the rows of every run
+// that contributed to it rather than starting again from zero.
+func TestOptimisticSparseProgressResumesFromTheCheckpointedRows(t *testing.T) {
+	_, chunker := newSparseOptimisticChunker4Test(t)
+	require.NoError(t, chunker.Open())
+
+	const settledPerChunk = 500
+	for range 3 {
+		chunk, err := chunker.Next()
+		require.NoError(t, err)
+		chunker.Feedback(chunk, time.Second, settledPerChunk)
+	}
+	watermark, err := chunker.GetLowWatermark()
+	require.NoError(t, err)
+
+	_, resumed := newSparseOptimisticChunker4Test(t)
+	require.NoError(t, resumed.OpenAtWatermark(watermark))
+	copied, _, total := resumed.Progress()
+	require.Equal(t, uint64(3*settledPerChunk), copied)
+	require.Equal(t, uint64(1000000), total)
+}
+
+// Statistics refresh MinValue during a copy, for example after the oldest
+// rows are purged. rowsCopied keeps measuring from the minimum it opened at,
+// so the total does too, and the percentage does not jump.
+func TestOptimisticProgressTotalKeepsTheOriginItOpenedAt(t *testing.T) {
+	ti, chunker := newOptimisticChunker4Test(t)
+	require.NoError(t, chunker.Open())
+
+	ti.minValue = Datum{Val: int64(400000), Tp: signedType}
+
+	_, _, total := chunker.Progress()
+	require.Equal(t, uint64(1000000-1), total)
+}
+
+// newSparseOptimisticChunker4Test is newOptimisticChunker4Test with a key
+// space that reaches far beyond the table's rows.
+func newSparseOptimisticChunker4Test(t *testing.T) (*TableInfo, *chunkerOptimistic) {
+	t.Helper()
+	ti, chunker := newOptimisticChunker4Test(t)
+	ti.maxValue = Datum{Val: int64(1_000_000_000_000_000), Tp: signedType}
 	return ti, chunker
 }
 

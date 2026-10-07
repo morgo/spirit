@@ -22,7 +22,7 @@ During the reverse window, the check is narrower. When the window is entered (af
 * `EVENT`, to see events (new: not needed by `migrate`).
 * `SHOW_ROUTINE` on `*.*` (MySQL 8.0.20+), or `SELECT` on `*.*`, to see stored procedures and functions (new). `EXECUTE`, `ALTER ROUTINE` or `CREATE ROUTINE` on the schema also works.
 
-`SELECT` and `TRIGGER` on the schema are already required. Table-level grants do not count. When more than one database-level grant matches the schema, for example one on `app_1` and one on `app\_%`, MySQL applies only one of them, and `SHOW GRANTS` does not say which, so move requires the privilege on every matching grant. Grants through an active role, such as a default role, count. On RDS, `rds_superuser_role` with `activate_all_roles_on_login=ON` is active on every connection, so its `SELECT`, `TRIGGER` and `EVENT` on `*.*` count through the role; unlike for `CONNECTION_ADMIN` and `PROCESS`, the role's name alone is not accepted in place of these grants.
+`SELECT` and `TRIGGER` on the schema are already required. Table-level grants do not count. When more than one database-level grant matches the schema, for example one on `app_1` and one on `app\_%`, MySQL applies only one of them, and `SHOW GRANTS` does not say which, so move requires the privilege on every matching grant. Grants through an active role, such as a default role, count. On RDS, `rds_superuser_role` with `activate_all_roles_on_login=ON` is active on every connection, so its `SELECT`, `TRIGGER` and `EVENT` on `*.*` count through the role; the role's name alone is not accepted in place of these grants, nor in place of the force-kill privileges.
 
 The move is refused if a grant is missing. Every run of the check reads the grants again before it trusts an empty result, so a grant revoked during a move refuses the next check. The reverse window's check needs only the grants for the object types it looks for: `TRIGGER` and `EVENT`.
 
@@ -54,7 +54,7 @@ The target check runs before the copy and on resume, before move writes anything
 - [tls-ca](#tls-ca)
 - [tls-mode](#tls-mode)
 - [write-threads](#write-threads)
-- [enable-experimental-autoscaling](#enable-experimental-autoscaling)
+- [skip-autoscaling](#skip-autoscaling)
 
 ### checkpoint-max-age
 
@@ -91,7 +91,7 @@ copy rows → initial checksum → wait on sentinel (continuous checksum loop) �
 
 Both checksums are lockless: they take no table lock and hold no long-lived snapshot. Each chunk is read from every source and every target with ordinary reads and aggregated across them, and a chunk that does not match yet — the targets are still applying replicated changes — is re-read after a delay rather than treated as a difference. The initial checksum repairs a chunk that keeps mismatching after the change feeds are drained, and fails the move only if repeated passes keep finding one.
 
-The continuous checksum reuses the initial checksum's checker, so it runs at `--threads` (autoscaled when `--enable-experimental-autoscaling` is set). The first continuous-checksum iteration starts **one hour after the initial checksum completes**, so it does not re-read the tables straight after the pass that just verified them. Subsequent iterations run **at most once per hour**: after each pass finishes, Move waits one hour minus the duration of the just-finished pass before starting the next one (so passes that themselves take longer than an hour proceed immediately). The wait is interrupted immediately when the sentinel is dropped. It is enabled automatically whenever the sentinel is in effect — there is no separate flag.
+The continuous checksum reuses the initial checksum's checker, so it runs at `--threads`, or is autoscaled when autoscaling engages (see [skip-autoscaling](#skip-autoscaling)). The first continuous-checksum iteration starts **one hour after the initial checksum completes**, so it does not re-read the tables straight after the pass that just verified them. Subsequent iterations run **at most once per hour**: after each pass finishes, Move waits one hour minus the duration of the just-finished pass before starting the next one (so passes that themselves take longer than an hour proceed immediately). The wait is interrupted immediately when the sentinel is dropped. It is enabled automatically whenever the sentinel is in effect — there is no separate flag.
 
 The continuous checksum does not repair. If a chunk still differs after the change feeds have been drained, the move is aborted with a "permanent divergence" error that names the chunk. The checksum watermark is cleared when the sentinel wait starts, so re-running the move resumes from the checkpoint and the initial checksum re-verifies every chunk and repairs the one that diverged. The intent is "fail loud, investigate" — since the initial checksum already passed, any difference detected during the sentinel wait is unexpected. A chunk that mismatches only until the feeds catch up is lag, not a difference, and does not abort the move. Because the watermark is cleared unconditionally, a move restarted at any point during the sentinel wait re-runs the full initial checksum.
 
@@ -130,7 +130,7 @@ The `lock_wait_timeout` Spirit sets on its connections, bounding how long its DD
 - Type: Duration
 - Default value: `100ms`
 
-Throttles the copy when any Aurora target's average commit latency exceeds this threshold, as [migrate's max-commit-latency](migrate.md#max-commit-latency) does for its source. Every Aurora target is monitored whether or not [experimental autoscaling](#enable-experimental-autoscaling) is enabled, alongside the Aurora threads throttler, and any one overloaded target pauses the copy. Targets that are not Aurora, and targets whose Aurora probe fails (for example, `performance_schema` is not readable), are not monitored. A failed probe is logged at debug level only, as in `migrate`, unless autoscaling is enabled, which warns.
+Throttles the copy when any Aurora target's average commit latency exceeds this threshold, as [migrate's max-commit-latency](migrate.md#max-commit-latency) does for its source. Every Aurora target is monitored whether or not [autoscaling](#skip-autoscaling) is skipped, alongside the Aurora threads throttler, and any one overloaded target pauses the copy. Targets that are not Aurora, and targets whose Aurora probe fails (for example, `performance_schema` is not readable), are not monitored. A failed probe warns, as in `migrate`, unless `--skip-autoscaling` is set, in which case it is logged at debug level only.
 
 The default of `100ms` is intentionally a high upper bound, so it trims only the most extreme tail latencies. Setting `--max-commit-latency=0` disables it, as in `migrate`. That also removes the backstop autoscaling needs to grow write threads above their starting count while a target runs the redo-aware threads signal; in that combination the pools can shed threads but not grow. In the Go API the zero value is also "disabled", so a programmatic caller must set the field to keep the backstop.
 
@@ -239,18 +239,20 @@ The TLS mode applied to every source and target connection: `DISABLED`, `PREFERR
 
 How many concurrent write threads to use per target when inserting rows. This controls the fan-out parallelism of the buffered copier's write side.
 
-These counts are overridden when [experimental autoscaling](#enable-experimental-autoscaling) engages.
+These counts are overridden when [autoscaling](#skip-autoscaling) engages. Set `--skip-autoscaling` to keep them.
 
-### enable-experimental-autoscaling
+### skip-autoscaling
 
 - type: `bool`
 - default: `false`
 
-Derive copy, per-target write and checksum thread counts from Aurora target capacity and adjust them using load feedback:
+By default, move derives copy, per-target write and checksum thread counts from Aurora target capacity and adjusts them using load feedback. `--skip-autoscaling` turns this off, so the pools run fixed at [threads](#threads) and [write-threads](#write-threads), and low-memory mode (below) does not apply:
 
 ```sh
-spirit move --source-dsn=... --target-dsn=... --enable-experimental-autoscaling
+spirit move --source-dsn=... --target-dsn=... --skip-autoscaling
 ```
+
+The rest of this section describes the default (autoscaling) behavior.
 
 For sharded moves, all write pools scale together using the **busiest target host's** utilization. A busy host slows the whole move; idle hosts do not offset its load. This conservative policy also handles skewed shard traffic, though it can leave capacity unused on quieter hosts.
 
@@ -258,11 +260,11 @@ The gradual multi-throttler reports the maximum utilization across hosts: all ho
 
 As in migration, the copier owns throttling: it pauses before reading another chunk and its autoscaler adjusts the applier through `SetWriteWorkers`. Already-read and queued work continues draining. Moving throttler ownership into the applier is outside this change.
 
-If any Aurora target is a low-memory instance (at most 2 vCPUs and at most a 1.5 GiB buffer pool), the whole move runs in low-memory mode instead, whatever the other targets are: 1 read thread, 1 write thread per target, 1 concurrent change-feed flush per source, a 1 MiB [target-chunk-size](#target-chunk-size), and no scaling. See [migrate's low-memory mode](migrate.md#enable-experimental-autoscaling).
+If any Aurora target is a low-memory instance (at most 2 vCPUs and at most a 1.5 GiB buffer pool), the whole move runs in low-memory mode instead, whatever the other targets are: 1 read thread, 1 write thread per target, 1 concurrent change-feed flush per source, a 1 MiB [target-chunk-size](#target-chunk-size), and no scaling. See [migrate's low-memory mode](migrate.md#skip-autoscaling).
 
 Targets sharing a host share one Aurora monitor. Initial counts and ceilings use the smallest target host and divide its budget by the largest number of target shards sharing a host, with at least one worker per shard. The client CPU budget also limits growth. Host identity includes the connection transport and address (including port), independently of database and credentials. Use consistent direct endpoints: DNS aliases and proxies are not resolved to physical hosts.
 
-Every target host must be Aurora with at least four vCPUs. Non-Aurora hosts, small instances or failed Aurora probes retain the configured fixed thread counts, unless a target qualifies for low-memory mode (above), which takes precedence even when another target is not Aurora or its probe failed. Capacity-query and monitor-startup failures abort setup. Aurora monitoring uses thread utilization and the [max-commit-latency](#max-commit-latency) backstop; stale signals pause copying. That monitoring runs without this flag too; the flag only adds thread-count scaling on top of it. The initial and sentinel-wait checksums use the same load signal, and binlog draining narrows under load. Monitor connections are separate from the data pools.
+Every target host must be Aurora with at least four vCPUs. Non-Aurora hosts, small instances or failed Aurora probes retain the configured fixed thread counts, unless a target qualifies for low-memory mode (above), which takes precedence even when another target is not Aurora or its probe failed. Capacity-query and monitor-startup failures abort setup. Aurora monitoring uses thread utilization and the [max-commit-latency](#max-commit-latency) backstop; stale signals pause copying. That monitoring runs with `--skip-autoscaling` too; the flag only removes thread-count scaling. The initial and sentinel-wait checksums use the same load signal, and binlog draining narrows under load. Monitor connections are separate from the data pools.
 
 Each source's binlog flush is also sized from the targets, as `migrate` and `sync` size theirs: the smallest target's flush width, divided by the number of sources and by the largest number of target shards sharing a host (every flush fans out to every shard), and never narrower than the default of 8 concurrent statements (except in low-memory mode, where it is 1). The batch size shrinks as the width grows, so the rows each flush has in flight stay the same.
 

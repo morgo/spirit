@@ -234,7 +234,7 @@ func (c *buffered) Run(ctx context.Context) error {
 		return fmt.Errorf("failed to start applier: %w", err)
 	}
 
-	// Experimental: start the dual read/write autoscaler. It runs for the lifetime
+	// Start the dual read/write autoscaler. It runs for the lifetime
 	// of the copy and stops when ctx is cancelled (deferred above). It only
 	// engages when the applier supports dynamic scaling (MySQLApplier)
 	// AND the throttler provides a continuous load signal (GradualThrottler);
@@ -314,7 +314,7 @@ func (c *buffered) Run(ctx context.Context) error {
 	return err
 }
 
-// autoscalerIfEnabled returns the experimental dual read/write autoscaler to run
+// autoscalerIfEnabled returns the dual read/write autoscaler to run
 // for this copy, or nil when it should not engage: autoscaling disabled, an
 // applier without dynamic scaling, or a throttler without a
 // continuous load signal. Only GradualThrottler implementations (the Aurora
@@ -336,7 +336,7 @@ func (c *buffered) autoscalerIfEnabled() *autoScaler {
 			"write_threads", c.autoscale.StartThreads)
 		return nil
 	}
-	c.logger.Info("starting experimental autoscaler: write-thread scaling engaged",
+	c.logger.Info("starting autoscaler: write-thread scaling engaged",
 		"start", c.autoscale.StartThreads, "max", c.autoscale.MaxThreads,
 		"low_watermark", autoscale.LowWatermark, "high_watermark", autoscale.HighWatermark)
 	scaler.SetWriteWorkers(c.autoscale.StartThreads)
@@ -645,8 +645,9 @@ func (c *buffered) GetETAState() status.ETA {
 // estimateRowsPerSecondLoop feeds the copy rate with the rows the chunker
 // reports copied in each copyEstimateInterval. The chunker's Progress is the
 // source because the copier no longer counts rows itself; for the optimistic
-// chunker it is keyspace distance rather than rows, which is what the ETA is
-// paced on either way.
+// chunker on a dense key it is keyspace distance rather than rows, which is
+// what the ETA is paced on either way. The chunker fixes its unit when it
+// opens, so two readings a run takes are always in the same unit.
 func (c *buffered) estimateRowsPerSecondLoop(ctx context.Context) {
 	prevRowsCount, _, _ := c.chunker.Progress()
 	ticker := time.NewTicker(copyEstimateInterval)

@@ -69,7 +69,7 @@ When you consider that many migrations are best measured in _days_, this feature
 
 When Spirit detects that it is being run against an Aurora instance, it will automatically throttle itself based on signals from the target (`migrate` watches the server it alters; `move` and `sync` watch every Aurora target they write to): whether the number of running threads is too high for the number of vCPUs the instance has, or whether average commit latency has exceeded [max-commit-latency](docs/migrate.md#max-commit-latency). The threads signal prefers a redo-aware `performance_schema` count that excludes redo-log waiters, and falls back to `Threads_running` when Spirit does not have the grants to read it.
 
-When [enable-experimental-autoscaling](docs/migrate.md#enable-experimental-autoscaling) is set, the same signals drive continuous scaling rather than a binary stop. Spirit sizes the copy read, replication write and checksum thread pools from the instance, then grows or sheds them one thread at a time to hold utilization inside a target band. This helps you take advantage of off-peak windows and complete schema changes much faster, while backing off on its own when the primary workload picks up. Note that the flag takes over the thread counts: `--threads` and `--write-threads` are ignored when it engages.
+By default, the same signals also drive continuous scaling rather than only a binary stop. Spirit sizes the copy read, replication write and checksum thread pools from the instance, then grows or sheds them one thread at a time to hold utilization inside a target band. This helps you take advantage of off-peak windows and complete schema changes much faster, while backing off on its own when the primary workload picks up. Note that autoscaling takes over the thread counts: `--threads` and `--write-threads` are ignored when it engages. Pass [`--skip-autoscaling`](docs/migrate.md#skip-autoscaling) to disable it and use those counts.
 
 ## Atomic Multi-table changes
 
@@ -86,7 +86,7 @@ Our internal goal for Spirit is to be able to migrate a 10TiB table in under 5 d
 - If any replication throttler is used.
 - If the MySQL server becomes significantly CPU or IO bound (at this point, the migration might slow down a lot)
 
-For proof of how fast Spirit is, here is the final output from a 1.43 TiB `finch.xfers` table on an `r8g.8xlarge` Aurora instance using `--enable-experimental-autoscaling`, which sized the pools from the instance's 32 vCPUs (write threads `30 → 60`, read threads `8 → 16`):
+For proof of how fast Spirit is, here is the final output from a 1.43 TiB `finch.xfers` table on an `r8g.8xlarge` Aurora instance with autoscaling, which sized the pools from the instance's 32 vCPUs (write threads `30 → 60`, read threads `8 → 16`):
 
 ```
 2026/07/31 05:01:03 INFO apply complete instant-ddl=false inplace-ddl=false total-chunks=76593 copy-rows-time=5h55m44s checksum-time=39m34s total-time=6h35m54s
@@ -135,7 +135,7 @@ Spirit requires an account with these privileges:
 * Either `SUPER, REPLICATION SLAVE on *.*` or `REPLICATION CLIENT, REPLICATION SLAVE on *.*`.
 * The `RELOAD` privilege.
 * `CREATE TEMPORARY TABLES` on the schema, but only for a table with an `ENUM` or `SET` member that `information_schema` reports with a `?`. MySQL reports each member character outside `utf8mb3` as `?`, so Spirit reads the members MySQL stores through a temporary table, and refuses the table if it cannot.
-* `CONNECTION_ADMIN` (or `SUPER`) and `PROCESS` on `*.*`, and `SELECT` on `performance_schema.*` — required for the force-kill feature which is always enabled. This allows Spirit to kill long-running transactions that block metadata lock acquisition during checksum and cutover. To kill a session of an account that has `SYSTEM_USER`, Spirit's user needs `SYSTEM_USER` too.
+* `CONNECTION_ADMIN` (or `SUPER`) and `PROCESS` on `*.*`, and `SELECT` on `performance_schema.*` — required for the force-kill feature which is always enabled. This allows Spirit to kill long-running transactions that block metadata lock acquisition during checksum and cutover. To kill a session of an account that has `SYSTEM_USER`, Spirit's user needs `SYSTEM_USER` too. On RDS and Aurora MySQL, `EXECUTE` on the `mysql.rds_kill` procedure (on `*.*`, on `mysql.*`, or on the procedure) can replace `CONNECTION_ADMIN`: when `KILL` is denied, Spirit calls `mysql.rds_kill` instead. On Aurora MySQL 3, `rds_superuser_role` does not reliably include `CONNECTION_ADMIN`, so Spirit counts only the privileges `SHOW GRANTS` lists for an active role, not its name.
 
 `spirit move` also needs to see the events and stored routines it refuses to move. On each source schema it requires:
 

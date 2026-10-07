@@ -448,7 +448,7 @@ func (t *chunkerComposite) RowsCopied() uint64 {
 }
 
 func (t *chunkerComposite) Progress() (uint64, uint64, uint64) {
-	return t.rowsCopied.Load(), t.chunksCopied.Load(), atomic.LoadUint64(&t.Ti.EstimatedRows)
+	return progressInRowEstimate(t.rowsCopied.Load(), t.chunksCopied.Load(), t.Ti)
 }
 
 // KeyAboveHighWatermark checks if a key is above the high watermark (chunkPtr).

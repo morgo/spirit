@@ -16,7 +16,7 @@ In practice, throttlers haven't been used as extensively as originally envisione
 
 However, it remains available and maintained for community use, particularly for users running traditional MySQL replication topologies. We are open to contributions to throttler improvements, such as being able to throttle on multiple replicas at once ([issue #220](https://github.com/block/spirit/issues/220)).
 
-Two **Aurora-specific throttlers** were added later: an Aurora threads throttler ([#831](https://github.com/block/spirit/issues/831)) and a commit-latency throttler ([#468](https://github.com/block/spirit/issues/468)). On Aurora the threads throttler is **always enabled**, while commit-latency is enabled **by default** but gated on a positive `--max-commit-latency` (default `100ms`; set `--max-commit-latency=0` to disable it). These are the throttlers most Block migrations actually run, and they double as the continuous load signal that drives the copier's experimental write-thread autoscaler (see [`GradualThrottler`](#gradualthrottler-optional-extension) below).
+Two **Aurora-specific throttlers** were added later: an Aurora threads throttler ([#831](https://github.com/block/spirit/issues/831)) and a commit-latency throttler ([#468](https://github.com/block/spirit/issues/468)). On Aurora the threads throttler is **always enabled**, while commit-latency is enabled **by default** but gated on a positive `--max-commit-latency` (default `100ms`; set `--max-commit-latency=0` to disable it). These are the throttlers most Block migrations actually run, and they double as the continuous load signal that drives the copier's write-thread autoscaler (see [`GradualThrottler`](#gradualthrottler-optional-extension) below).
 
 ## Interface
 

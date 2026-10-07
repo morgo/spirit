@@ -185,8 +185,8 @@ func AuroraVCPUs(ctx context.Context, db *sql.DB) (int, error) {
 
 // ResolveMaxWriteThreads resolves the upper bound the write-thread autoscaler
 // may scale to: autoscale.Ceiling (start when scaling is off, 2 × start when on
-// — deliberately not configurable for now, to keep the experimental surface
-// small), plus one rule that is specific to the write side. See issue #831.
+// — deliberately not configurable, to keep the tuning surface small), plus
+// one rule that is specific to the write side. See issue #831.
 //
 // That rule: scaling above the starting value additionally requires the
 // commit-latency throttler when the redo-aware signal is in use. That signal

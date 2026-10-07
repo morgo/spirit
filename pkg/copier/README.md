@@ -62,7 +62,7 @@ type ChunkCopier interface {
 - **`Run(ctx)`**: Starts the copy process and blocks until completion or error. Spawns multiple worker goroutines based on the configured concurrency level.
 - **`GetETA()`**: Returns estimated time to completion as a human-readable string. Returns "TBD" during the initial warmup period (1 minute), "DUE" when >99.99% complete, or a duration like "2h30m15s".
 - **`GetETAState()`**: The same estimate as a `status.ETA{State, Duration}`, for callers that branch on whether an estimate exists yet. `GetETA()` is its `String()`.
-- **`CopyProgress()`**: Returns the copier's own progress as `status.CopyProgress{RowsCopied, RowsTotal}`. This is the measure the copier paces on: for the optimistic chunker it is keyspace distance against the auto_increment max, not a row count, so the runners report settled rows from the chunker instead (see `status.CopyFromTables`). `GetProgress()` is its rendered form, kept for interface compatibility; Spirit itself no longer calls it.
+- **`CopyProgress()`**: Returns the copier's own progress as `status.CopyProgress{RowsCopied, RowsTotal}`. This is the measure the copier paces on: for the optimistic chunker on a dense key it is keyspace distance against the auto_increment max, not a row count. On a key space more than five times wider than the row estimate, it is settled rows against the row estimate, the same measure the composite chunker reports. The runners report settled rows from the chunker on every key (see `status.CopyFromTables`). `GetProgress()` is its rendered form, kept for interface compatibility; Spirit itself no longer calls it.
 - **`ChunkSize()`**: Rows in the most recently claimed chunk, the `chunk-size=` field of the status log block. The chunker sizes chunks dynamically to hit the target byte budget, so this moves during a copy.
 - **`GetChunker()`**: Returns the underlying chunker for accessing detailed progress information.
 - **`SetThrottler(throttler)`**: Updates the throttler used to control copy rate.
@@ -95,7 +95,7 @@ type CopierConfig struct {
 - **`Applier`**: Writes rows to the target. Required (non-nil). The migration runner shares one applier between the copier and the replication client, so the copy and the binlog replay go through the same write pipeline.
 
 Note that chunk sizing is **not** configured here — it lives entirely in the chunker. Configure it via `table.ChunkerConfig` when you build the chunker: `TargetChunkBytes` for the copier's in-memory byte-budget signal, or `TargetChunkTime` (default `table.ChunkerDefaultTarget`) for the wall-clock signal the checksum uses.
-- **`Autoscale`** (`AutoscaleConfig`, default: disabled): configures the experimental write-thread autoscaler, enabled via `--enable-experimental-autoscaling`. When `Enabled`, it scales the applier's live write-worker count between `StartThreads` and `MaxThreads`, and its own read-worker count between `Concurrency` and `MaxReadThreads`, based on throttler utilization. Requires a dynamically-scalable applier. See [Autoscaling](#autoscaling-experimental) under Core Concepts.
+- **`Autoscale`** (`AutoscaleConfig`, default: disabled): configures the write-thread autoscaler. The runners set it when autoscaling engages (on Aurora, unless `--skip-autoscaling` is set). When `Enabled`, it scales the applier's live write-worker count between `StartThreads` and `MaxThreads`, and its own read-worker count between `Concurrency` and `MaxReadThreads`, based on throttler utilization. Requires a dynamically-scalable applier. See [Autoscaling](#autoscaling) under Core Concepts.
 
 ## Usage
 
@@ -173,7 +173,8 @@ for {
         return
     case <-ticker.C:
         // Settled rows against the row estimates, summed over the tables.
-        // CopyProgress() is the copier's own pacing measure, not a row count.
+        // CopyProgress() is the copier's own pacing measure, which on a dense
+        // auto_increment key is keyspace distance rather than a row count.
         progress := status.CopyFromTables(status.TablesFromChunker(copier.GetChunker()))
         eta := copier.GetETAState()
         fmt.Printf("Progress: %s, ETA: %s\n", progress, eta)
@@ -203,9 +204,9 @@ The copier uses goroutines for parallel chunk processing:
 - The applier has its own internal parallelism for writing
 - Callbacks notify readers when writes complete
 
-### Autoscaling (experimental)
+### Autoscaling
 
-When `AutoscaleConfig.Enabled` is set (the `--enable-experimental-autoscaling` flag), the copier runs a control loop that adjusts both of the pipeline's live worker pools — its own read workers (between `Concurrency` and `MaxReadThreads`, defaulting to 2× the start when the caller supplies none) and the applier's write workers (between `StartThreads` and `MaxThreads`) — based on a throttler's continuous **utilization** signal. It only engages when the throttler implements `throttler.GradualThrottler` (the Aurora throttlers do) and the applier implements the dynamic-scaling capability (both built-in appliers do); otherwise it is skipped.
+When `AutoscaleConfig.Enabled` is set (the runners set it when autoscaling engages; `--skip-autoscaling` disables it), the copier runs a control loop that adjusts both of the pipeline's live worker pools — its own read workers (between `Concurrency` and `MaxReadThreads`, defaulting to 2× the start when the caller supplies none) and the applier's write workers (between `StartThreads` and `MaxThreads`) — based on a throttler's continuous **utilization** signal. It only engages when the throttler implements `throttler.GradualThrottler` (the Aurora throttlers do) and the applier implements the dynamic-scaling capability (both built-in appliers do); otherwise it is skipped.
 
 Each tick (5s, aligned to the throttler poll) it reads utilization — `0` = idle, `1.0` = the point the hard-stop trips — and steers toward a dead band. Utilization alone cannot decide *which* pool to move — both pools feed the same signal — so the applier queue between them arbitrates: near-empty with ~zero queue wait reads as **read-starved**, near-full with waits at/above write time reads as **write-limited**, anything else is **balanced**. A state must persist two consecutive ticks before it arbitrates, so chunk-size transients don't flap the controller.
 
