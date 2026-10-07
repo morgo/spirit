@@ -43,9 +43,9 @@ const (
 type Common struct {
 	// Threads is the number of read workers: the copier's read side and the
 	// checksum's workers.
-	Threads int `name:"threads" help:"Number of concurrent threads for copy and checksum tasks. Ignored when --enable-experimental-autoscaling engages" optional:"" default:"4"`
+	Threads int `name:"threads" help:"Number of concurrent threads for copy and checksum tasks. Ignored when autoscaling engages (on Aurora, unless --skip-autoscaling is set)" optional:"" default:"4"`
 	// WriteThreads is the number of apply (write) workers, per target.
-	WriteThreads int `name:"write-threads" help:"Number of concurrent apply (write) threads per target. Ignored when --enable-experimental-autoscaling engages" optional:"" default:"4"`
+	WriteThreads int `name:"write-threads" help:"Number of concurrent apply (write) threads per target. Ignored when autoscaling engages (on Aurora, unless --skip-autoscaling is set)" optional:"" default:"4"`
 
 	// MaxConnections is the size of each connection pool spirit opens to a
 	// source or target server, set verbatim and never recomputed. Its
@@ -57,7 +57,7 @@ type Common struct {
 	// TargetChunkSize is the in-memory byte budget the copier sizes each copy
 	// chunk against (the memory signal; see table.DefaultTargetChunkBytes and
 	// pkg/table/README.md). Zero means "use the default" (Normalize fills it in).
-	TargetChunkSize uint64 `name:"target-chunk-size" help:"In-memory byte budget per copy chunk (in bytes). Lowered to 1 MiB when --enable-experimental-autoscaling selects low-memory mode" optional:"" default:"16777216"`
+	TargetChunkSize uint64 `name:"target-chunk-size" help:"In-memory byte budget per copy chunk (in bytes). Lowered to 1 MiB in low-memory mode (a small Aurora target, unless --skip-autoscaling is set)" optional:"" default:"16777216"`
 
 	// MaxCommitLatency throttles when a target's average commit latency exceeds
 	// this threshold. Auto-enabled only on Aurora targets; zero disables it.
@@ -66,12 +66,13 @@ type Common struct {
 	// throttler.ResolveMaxWriteThreads).
 	MaxCommitLatency time.Duration `name:"max-commit-latency" help:"Throttle when average commit latency exceeds this threshold (currently only auto-enabled on Aurora)" optional:"" default:"100ms"`
 
-	// EnableExperimentalAutoscaling turns on dynamic thread scaling driven by
-	// the targets' Aurora load signal. When it engages (concurrency.Engage) it
-	// takes over both thread counts: Threads and WriteThreads are replaced with
-	// instance-derived starting sizes, and each pool scales between bounds
-	// derived from the instance. See issue #831.
-	EnableExperimentalAutoscaling bool `name:"enable-experimental-autoscaling" help:"EXPERIMENTAL: size the copy, apply and checksum thread pools from the instance and scale them on throttler feedback. Overrides --threads and --write-threads. Requires an Aurora target. On a low-memory target (at most 2 vCPUs and a 1.5 GiB buffer pool) it instead runs every pool at one thread with 1 MiB chunks" optional:"" default:"false"`
+	// SkipAutoscaling turns off dynamic thread scaling driven by the targets'
+	// Aurora load signal, which is on by default. When autoscaling engages
+	// (concurrency.Engage) it takes over both thread counts: Threads and
+	// WriteThreads are replaced with instance-derived starting sizes, and each
+	// pool scales between bounds derived from the instance. It only engages on
+	// Aurora; on other servers this flag has no effect. See issue #831.
+	SkipAutoscaling bool `name:"skip-autoscaling" help:"Do not size the copy, apply and checksum thread pools from the instance or scale them on throttler feedback, and use --threads and --write-threads instead. Autoscaling only engages on Aurora, so this flag has no effect elsewhere. It also disables low-memory mode (one thread per pool and 1 MiB chunks on a target with at most 2 vCPUs and a 1.5 GiB buffer pool)" optional:"" default:"false"`
 
 	// CheckpointMaxAge is the oldest checkpoint a run will resume from. Its
 	// age is the time since the checkpoint row was last written, i.e. how long
@@ -147,7 +148,7 @@ func (c *Common) Normalize() {
 
 // WarnZeroWriteThreads warns when WriteThreads is zero, before Normalize
 // replaces it with the default. In migrate and move a zero used to mean
-// "auto-size from the instance", so anyone who adopted that opt-in would
+// "auto-size from the instance", so anyone who relied on that would
 // otherwise see their apply pool quietly drop from the instance vCPU count to
 // the default. Sync always treated zero as the default, so it does not call
 // this. (Kong's default is non-zero, so a literal 0 was either passed
@@ -159,7 +160,7 @@ func (c *Common) WarnZeroWriteThreads(logger *slog.Logger) {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	logger.Warn("--write-threads 0 no longer means auto-size; using the default. Pass --enable-experimental-autoscaling for instance-derived thread counts",
+	logger.Warn("--write-threads 0 no longer means auto-size; using the default. On Aurora, thread counts are derived from the instance unless --skip-autoscaling is set",
 		"write_threads", DefaultWriteThreads)
 }
 

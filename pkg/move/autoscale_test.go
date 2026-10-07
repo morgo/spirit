@@ -23,7 +23,7 @@ func TestMoveAutoscaleNonAurora(t *testing.T) {
 	tt := testutils.NewTestTable(t, "move_autoscale_probe", "CREATE TABLE move_autoscale_probe (id INT PRIMARY KEY)")
 	config, err := mysql.ParseDSN(testutils.DSN())
 	require.NoError(t, err)
-	r, err := NewRunner(&Move{Common: flags.Common{Threads: 3, WriteThreads: 5, EnableExperimentalAutoscaling: true}})
+	r, err := NewRunner(&Move{Common: flags.Common{Threads: 3, WriteThreads: 5}})
 	require.NoError(t, err)
 	r.dbConfig = dbconn.NewDBConfig()
 	r.targets = []applier.Target{{DB: tt.DB, Config: config}}
@@ -80,9 +80,9 @@ func (c *closeCountingThrottler) Close() error { c.closes++; return nil }
 
 // The Aurora load throttlers pace the copy whether or not autoscaling is
 // enabled, matching migration. Before this, move built them only when
-// autoscaling engaged, so a move on Aurora without the flag ran unthrottled.
+// autoscaling engaged, so a move on Aurora without autoscaling ran unthrottled.
 func TestMoveThrottlesWithoutAutoscaling(t *testing.T) {
-	r, err := NewRunner(&Move{Common: flags.Common{Threads: 3, WriteThreads: 5}})
+	r, err := NewRunner(&Move{Common: flags.Common{Threads: 3, WriteThreads: 5, SkipAutoscaling: true}})
 	require.NoError(t, err)
 	signal := &closeCountingThrottler{}
 	groups := []host.Group{{Indices: []int{0}}}
@@ -126,8 +126,8 @@ func TestMoveSetupThrottling(t *testing.T) {
 		return throttler.AuroraResult{Throttlers: []throttler.Throttler{&closeCountingThrottler{}}, RedoAware: redoAware}
 	}
 
-	// Without the flag, every Aurora target still throttles the move.
-	r := newRunner(t, &Move{Common: flags.Common{Threads: 3, WriteThreads: 5, MaxCommitLatency: 100 * time.Millisecond}}, aurora(false), aurora(false))
+	// With --skip-autoscaling, every Aurora target still throttles the move.
+	r := newRunner(t, &Move{Common: flags.Common{Threads: 3, WriteThreads: 5, MaxCommitLatency: 100 * time.Millisecond, SkipAutoscaling: true}}, aurora(false), aurora(false))
 	require.NoError(t, r.setupThrottling(t.Context()))
 	require.True(t, r.throttler.Get().IsThrottled())
 	require.False(t, r.autoscale.Enabled)
@@ -135,10 +135,10 @@ func TestMoveSetupThrottling(t *testing.T) {
 	require.Equal(t, 5, r.move.WriteThreads)
 	require.Zero(t, r.replClientConfig(&r.sources[0]).FlushConcurrency)
 
-	// With it, one redo-aware target and no commit-latency throttler hold
+	// By default, one redo-aware target and no commit-latency throttler hold
 	// write threads at their start, whichever target is redo-aware.
 	for _, results := range [][]throttler.AuroraResult{{aurora(true), aurora(false)}, {aurora(false), aurora(true)}} {
-		r = newRunner(t, &Move{Common: flags.Common{EnableExperimentalAutoscaling: true}}, results...)
+		r = newRunner(t, &Move{Common: flags.Common{}}, results...)
 		require.NoError(t, r.setupThrottling(t.Context()))
 		require.True(t, r.autoscale.Enabled)
 		require.Equal(t, r.autoscale.StartThreads, r.autoscale.MaxThreads)
@@ -150,7 +150,7 @@ func TestMoveSetupThrottling(t *testing.T) {
 	}
 
 	// With no redo-aware target, write threads may grow.
-	r = newRunner(t, &Move{Common: flags.Common{EnableExperimentalAutoscaling: true}}, aurora(false), aurora(false))
+	r = newRunner(t, &Move{Common: flags.Common{}}, aurora(false), aurora(false))
 	require.NoError(t, r.setupThrottling(t.Context()))
 	require.True(t, r.autoscale.Enabled)
 	require.Greater(t, r.autoscale.MaxThreads, r.autoscale.StartThreads)
@@ -164,7 +164,7 @@ func TestMoveLowMemory(t *testing.T) {
 	require.NoError(t, err)
 	other := *config
 	other.Addr = "other-host:3306"
-	r, err := NewRunner(&Move{Common: flags.Common{Threads: 3, WriteThreads: 5, EnableExperimentalAutoscaling: true}})
+	r, err := NewRunner(&Move{Common: flags.Common{Threads: 3, WriteThreads: 5}})
 	require.NoError(t, err)
 	r.targets = []applier.Target{{Config: config}, {Config: &other, KeyRange: "80-"}}
 	r.sources = []sourceInfo{{config: config}}
@@ -189,7 +189,7 @@ func TestMoveAutoscaleNeedsEveryTarget(t *testing.T) {
 	require.NoError(t, err)
 	groups := []host.Group{{Indices: []int{0}}, {Indices: []int{1}}}
 	for _, other := range []throttler.AuroraResult{{}, {ProbeErr: errors.New("probe failed")}} {
-		r, err := NewRunner(&Move{Common: flags.Common{Threads: 3, WriteThreads: 5, EnableExperimentalAutoscaling: true}})
+		r, err := NewRunner(&Move{Common: flags.Common{Threads: 3, WriteThreads: 5}})
 		require.NoError(t, err)
 		r.targets = []applier.Target{{Config: config}, {Config: config, KeyRange: "80-"}}
 		// The Aurora target is sized (for low-memory mode) even though the

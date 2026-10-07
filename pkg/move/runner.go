@@ -768,7 +768,7 @@ func (r *Runner) applyAuroraResults(ctx context.Context, groups []host.Group, re
 // scaling across targets (#1212), which Engage derives from the host groups.
 func (r *Runner) setupAutoscaling(ctx context.Context, groups []host.Group, results []throttler.AuroraResult) error {
 	var targets []concurrency.Target
-	if r.move.EnableExperimentalAutoscaling {
+	if !r.move.SkipAutoscaling {
 		for i, group := range groups {
 			target := r.targets[group.Indices[0]]
 			targets = append(targets, concurrency.Target{

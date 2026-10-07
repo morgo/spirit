@@ -198,12 +198,12 @@ func WithMaxConnections(n int) RunnerOption {
 	}
 }
 
-// WithAutoscaling enables the experimental thread autoscaler. Note that it only
-// engages against an Aurora target, and when it does it overrides both Threads
-// and WriteThreads (see setupCopierCheckerAndReplClient).
-func WithAutoscaling() RunnerOption {
+// WithSkipAutoscaling disables the thread autoscaler, which is on by default.
+// It only engages against an Aurora target, and when it does it overrides both
+// Threads and WriteThreads (see setupCopierCheckerAndReplClient).
+func WithSkipAutoscaling() RunnerOption {
 	return func(m *Migration) {
-		m.EnableExperimentalAutoscaling = true
+		m.SkipAutoscaling = true
 	}
 }
 

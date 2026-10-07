@@ -78,18 +78,18 @@ type CopierConfig struct {
 	// for the replication client; construction is shared so that both paths
 	// use the same applier.
 	Applier applier.Applier
-	// Autoscale configures experimental dynamic write-thread scaling. When
-	// disabled (the default) the copier behaves exactly as before. See
+	// Autoscale configures dynamic write-thread scaling. When disabled (the
+	// zero value) the copier runs fixed pools. See
 	// AutoscaleConfig and issue #831.
 	Autoscale AutoscaleConfig
 }
 
-// AutoscaleConfig controls the experimental write-thread autoscaler driven by
+// AutoscaleConfig controls the write-thread autoscaler driven by
 // throttler utilization. It only applies when the Applier implements the
 // dynamic-scaling capability (both built-in appliers).
 type AutoscaleConfig struct {
-	// Enabled gates the whole feature (the --enable-experimental-autoscaling
-	// flag). Off by default.
+	// Enabled gates the whole feature. Off in the zero value; the runners set
+	// it when autoscaling engages (on Aurora, unless --skip-autoscaling is set).
 	Enabled bool
 	// StartThreads is the resolved write-thread count the applier was started
 	// at; the controller scales from here.
