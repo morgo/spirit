@@ -165,14 +165,14 @@ an accepted optimization and silent data loss.
 
 The checksum package contains two implementations:
 
-1. **SingleChecker** - Compares two tables on the same MySQL server (the default for schema changes)
-2. **LocklessChecker** - An optimistic verifier using ordinary reads and retries. It compares one or more sources against one or more targets, aggregating each chunk across all of them, so it also serves moves (N sources routed onto M targets) and `spirit sync` (a target on another server). One checker serves both halves of the contract over the same pass loop: `Run` returns once a pass has verified the whole table, and `RunContinuous` keeps passing in the background. Used by `spirit move`, `spirit sync`, and experimental lockless migrations.
+1. **SingleChecker** - Compares two tables on the same MySQL server. Used by schema changes only with `--legacy-checksum`
+2. **LocklessChecker** - An optimistic verifier using ordinary reads and retries. It compares one or more sources against one or more targets, aggregating each chunk across all of them, so it also serves moves (N sources routed onto M targets) and `spirit sync` (a target on another server). One checker serves both halves of the contract over the same pass loop: `Run` returns once a pass has verified the whole table, and `RunContinuous` keeps passing in the background. Used by `spirit move`, `spirit sync`, and (by default) `spirit migrate`.
 
 `SingleChecker` takes a brief table lock to establish a consistent `REPEATABLE READ` snapshot; `LocklessChecker` deliberately does not (see [Lockless checksum](#lockless-checksum) below).
 
 ### Direction: lockless replaces single
 
-We intend to replace `SingleChecker` with `LocklessChecker`, making lockless the only checksum. Move and sync already use only lockless. Migration still defaults to `SingleChecker`, with lockless behind `--enable-experimental-lockless-checksum`, until lockless has enough production evidence to become the default for migrations as well.
+We intend to replace `SingleChecker` with `LocklessChecker`, making lockless the only checksum. Move and sync already use only lockless. Migration defaults to lockless too, and keeps `SingleChecker` behind `--legacy-checksum` as a fallback until it is removed.
 
 The code is arranged so that removing `SingleChecker` is mostly deletion:
 
@@ -293,7 +293,7 @@ and cut-over is entirely uncovered.
 
 **One snapshot per segment, not per pass.** Holding a `REPEATABLE READ` view
 open pins undo, so `YieldTimeout` (24h by default, and
-`--checksum-yield-timeout` lets an operator set it much lower) caps how long
+`--legacy-checksum-yield-timeout` lets an operator set it much lower) caps how long
 one snapshot may live. When it fires, `runChecksumWithYield` takes the
 chunker's low watermark, reopens there, and loops back into `runChecksum` —
 which takes a **new** table lock and a **new** transaction pool. So a pass
@@ -466,7 +466,7 @@ chunk read; a snapshot pass does it per segment — rarely, rather than never.
 | Temporally blind to | anything after the segment's `T0`, and — across a segment boundary — a row that migrates into an already-read range | anything after each chunk's last read, and a row that migrates between two chunk reads (see [above](#cross-chunk-sampling-a-different-shape-of-coverage)) |
 | Cross-server / N sources | not supported by `SingleChecker`; achievable with locks, at a cost that scales with the topology (see below) | native — each chunk is read from every source and target and aggregated |
 | Implementation | simple | substantially more complex |
-| Used by | `spirit migrate` (default) | `spirit move`, `spirit sync`, `spirit migrate --enable-experimental-lockless-checksum` |
+| Used by | `spirit migrate --legacy-checksum` | `spirit move`, `spirit sync`, `spirit migrate` (default) |
 
 None of those rows is a claim about the digest. Both checkers compare a 32-bit
 `CRC32` aggregated with `BIT_XOR`, plus a row count, so "equal" means *equal
@@ -583,7 +583,9 @@ which the backlog signal already pulls by itself when autoscaling is enabled
 
 And a non-converging table ends as an error rather than an unbounded wait:
 the finite gate stops after `MaxPasses` (10) with
-`ErrVerificationUnresolved`.
+`ErrVerificationUnresolved`. When more than one pass ran and every pass
+repaired at least one range, the error also wraps `ErrDifferencesExhausted`:
+the repairs cannot close the divergence, so a retry would fail the same way.
 
 ### Prior art, and what is new here
 
@@ -667,18 +669,17 @@ difficulty: the hotter the row, the sooner its verdict arrives.
 
 ### Which to use
 
-Today: the defaults. `spirit migrate` uses `SingleChecker`; `spirit move` and
-`spirit sync` use `LocklessChecker` because no snapshot checker spans servers
-today — not because a cross-server snapshot is impossible, but because its cost
-scales with the topology (see [What each one
-proves](#what-each-one-proves)). `--enable-experimental-lockless-checksum` opts
-a migration into lockless.
+Today: the defaults. `spirit migrate`, `spirit move` and `spirit sync` all use
+`LocklessChecker`. Move and sync have no alternative, because no snapshot
+checker spans servers today — not because a cross-server snapshot is
+impossible, but because its cost scales with the topology (see [What each one
+proves](#what-each-one-proves)). `--legacy-checksum` selects `SingleChecker` for
+a migration, as a fallback.
 
 The intended end state is lockless everywhere and `SingleChecker` deleted
 (see [Direction: lockless replaces single](#direction-lockless-replaces-single)).
-What is missing is not code but evidence: the snapshot checker has years of
-production migrations behind it, and lockless needs enough of the same before
-it becomes the default for `migrate` too. Both are kept until then.
+The snapshot checker has years of production migrations behind it, which is
+why it is kept as a fallback for `migrate` until lockless has the same.
 
 ## Compared with other consistency checks
 
@@ -1268,4 +1269,4 @@ When a chunk's source CRC is stable across the retry window but the target still
 
 Before either policy acts, the change feed is drained and the chunk re-read, so a target that was merely behind on applying buffered changes is not mistaken for a diverged one. On a confirmed divergence the checker logs a line per differing row (mismatched, missing on the target, missing on the source), the same diagnostic the snapshot checker emits.
 
-Continuous passes are paced by `LocklessMinPassInterval` so a small table is not re-checksummed back-to-back; the finite gate paces by `RetryDelay` instead, because a cut-over is waiting on the answer. `MaxPasses` bounds the finite gate: a range that never converges returns `ErrVerificationUnresolved` instead of keeping the caller in an endless re-walk with no error and no end. `FirstCleanPass` exposes a channel that closes the first time a pass completes with every chunk read-verified equal and zero recopies — the signal that the target is known consistent.
+Continuous passes are paced by `LocklessMinPassInterval` so a small table is not re-checksummed back-to-back; the finite gate paces by `RetryDelay` instead, because a cut-over is waiting on the answer. `MaxPasses` bounds the finite gate: a range that never converges returns `ErrVerificationUnresolved` (wrapping `ErrDifferencesExhausted` too when every pass repaired) instead of keeping the caller in an endless re-walk with no error and no end. `FirstCleanPass` exposes a channel that closes the first time a pass completes with every chunk read-verified equal and zero recopies — the signal that the target is known consistent.

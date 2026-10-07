@@ -14,14 +14,14 @@ spirit migrate --host mydb:3306 --username root --password secret \
 ## Configuration
 
 - [checkpoint-max-age](#checkpoint-max-age)
-- [checksum-yield-timeout](#checksum-yield-timeout)
 - [conf](#conf)
 - [database](#database)
 - [defer-cutover](#defer-cutover)
 - [enable-experimental-autoscaling](#enable-experimental-autoscaling)
-- [enable-experimental-lockless-checksum](#enable-experimental-lockless-checksum)
 - [force-kill-after](#force-kill-after)
 - [host](#host)
+- [legacy-checksum](#legacy-checksum)
+- [legacy-checksum-yield-timeout](#legacy-checksum-yield-timeout)
 - [lock-wait-timeout](#lock-wait-timeout)
 - [max-commit-latency](#max-commit-latency)
 - [max-connections](#max-connections)
@@ -72,33 +72,6 @@ Operationally, this means:
 Resume requires the statement text to match the checkpoint exactly. Versions that still had `--table` and `--alter` stored the statement they composed from that pair (``ALTER TABLE `t` <alter>``, with the table name back-quoted), so a migration started on such a version will **not** resume once you upgrade: the mismatch is treated as definitive and Spirit starts a fresh copy, discarding the checkpoint and the `_new` table.
 
 Drain any in-flight migrations before upgrading past the release that removed those flags.
-
-### checksum-yield-timeout
-
-- Type: Duration
-- Default value: `24h`
-
-The maximum duration for a single checksum pass before Spirit yields to release long-running `REPEATABLE READ` transactions. This helps control InnoDB History List Length (HLL) growth on large tables where the checksum phase can take many hours or even days.
-
-During the checksum, Spirit holds open `REPEATABLE READ` transactions to get a consistent snapshot of the source and target tables. These long-running read views prevent InnoDB from purging old row versions, causing the history list length to grow. On busy systems this can degrade performance for all workloads.
-
-When the yield timeout fires, Spirit:
-
-1. Closes the current transactions (releasing the read views)
-2. Records the current checksum progress (low watermark)
-3. Re-acquires a table lock and creates fresh `REPEATABLE READ` transactions
-4. Resumes checksumming from where it left off
-
-The checksum will complete correctly regardless of how many yields occur. However, each yield requires re-acquiring a table lock, which has the same impact as the initial checksum lock acquisition — it may conflict with running transactions, and Spirit may kill blocking transactions to acquire the lock (see [lock-wait-timeout](#lock-wait-timeout)).
-
-For most migrations the default of `24h` is appropriate. You may want to lower this value if your system is sensitive to HLL growth (e.g. many concurrent writers generating undo log entries).
-
-```bash
-# Yield every 4 hours to limit HLL growth
-spirit migrate --checksum-yield-timeout=4h \
-       --host mydb:3306 --database mydb \
-       --statement "ALTER TABLE large_table ADD INDEX idx_foo (foo)"
-```
 
 ### conf
 
@@ -157,74 +130,13 @@ Spirit uses the same configured checker in two phases:
 copy rows → initial checksum → wait on sentinel (continuous verification) → cutover
 ```
 
-By default both phases use the snapshot checker, including its brief setup locks, repair-and-reverify policy, configured thread count, throttling, and autoscaling. With [`--enable-experimental-lockless-checksum`](#enable-experimental-lockless-checksum), both phases use optimistic reads with hot-range splitting and bounded retries. Repair policy is the same either way: a confirmed stable divergence is repaired from the source and re-verified on a later pass, and a range that never verifies clean fails the migration rather than cutting over. Background lockless passes may defer changing ranges; the initial gate must verify a complete clean pass.
+By default both phases use the [lockless checksum](#lockless-checksum): optimistic reads with hot-range splitting and bounded retries, the configured thread count, throttling, and autoscaling. With [`--legacy-checksum`](#legacy-checksum), both phases use the legacy snapshot checksum, including its brief setup locks. Repair policy is the same either way: a confirmed stable divergence is repaired from the source and re-verified on a later pass, and a range that never verifies clean fails the migration rather than cutting over. Background lockless passes may defer changing ranges; the initial gate must verify a complete clean pass.
 
 The first background pass starts one hour after continuous verification begins; subsequent passes start at least one hour apart. Replication continues flushing between passes. Continuous verification runs automatically whenever a sentinel causes Spirit to wait. While a pass is active, the status block includes checksum progress and reports load throttling. Interval waits are not reported as throttled.
 
 Once continuous verification starts, checksum resume progress is discarded. After an interruption, Spirit keeps its copy checkpoint but repeats the full initial checksum, even if background verification found no differences. Background walker positions are never treated as proof of completed verification.
 
 Before continuous verification starts, an interrupted *initial* checksum does resume from where it got to, under either algorithm. The persisted watermark covers only the prefix that was read on both sides and observed equal: a range that had to be repaired, or that was still unresolved, parks the watermark below itself so the resumed run re-verifies it.
-
-### enable-experimental-lockless-checksum
-
-- Type: Boolean
-- Default value: `false`
-
-**Experimental.**
-
-Use `--enable-experimental-lockless-checksum` to use lockless verification for both the initial
-checksum and continuous sentinel checks, with optimistic source/shadow-table reads and bounded retries. This
-experimental mode takes no checksum setup lock (`FTWRL` or table lock) and opens
-no long-lived `REPEATABLE READ` snapshots. It uses the same column mappings as
-the normal checksum, including renamed columns, and supports checksum load
-throttling and experimental autoscaling.
-
-```bash
-spirit migrate --enable-experimental-lockless-checksum \
-       --host mydb:3306 --database mydb \
-       --statement "ALTER TABLE users ADD COLUMN email VARCHAR(255)"
-```
-
-Cutover still requires a complete clean pass. Hot ranges are split. Small unresolved ranges then use a finite per-row
-snapshot drain: read target keys first, freeze source PK/CRC32 images once, and
-retry target reads until each frozen image has matched and every observed
-target-only key is absent. Later inserts do not expand the frozen work set, so
-an append-heavy tail can converge.
-
-Each side is limited to 128 rows, with a combined 64 KiB key-data budget;
-oversized ranges stay on normal splitting/retries. Snapshot reads have a
-30-second timeout per capture or target-check call, not for the entire drain.
-Snapshot retries use the ordinary retry delay and bounded
-hot-attempt count, then defer without authorizing cutover. Unresolved ranges
-are revisited in another pass. Completing a scan or
-deferring a hot range does not authorize cutover. As with the default checker,
-a stable divergence found by the initial checksum is repaired from the source and
-re-verified on a later pass, while one found by the continuous checksum during
-the sentinel wait aborts the migration. The initial checksum gives up after 10
-passes without a clean one and fails the migration; resuming with the default
-checker is the fallback.
-
-Rows that are updated continuously are verified against the change stream
-rather than by reading the source again. A range that keeps changing is
-*settled* one row at a time: Spirit waits for the row's next change event,
-applies it to the shadow table, and compares the shadow row to that event's
-row image. The more often a row is written, the sooner its next event arrives.
-A row is deferred to the next pass instead when, for example, no change arrives
-within the range's 5-second settling budget, it is written again before the
-shadow row can be read, or the buffered changes cannot be fully applied. See
-[Continuously updated hot rows](../pkg/checksum/README.md#continuously-updated-hot-rows)
-for the full list.
-
-This is optimistic verification, not a comparison at one common source/target
-snapshot. Use it to evaluate the experimental algorithm before adopting it
-broadly. The final replication drain and cutover locking are unchanged.
-
-Initial checksum progress is checkpointed and resumed the same way as with the
-default checker, including when resuming a checkpoint created by the default
-checker. `--checksum-yield-timeout` applies only to the default snapshot
-checksum; the experimental gate is bounded by its 10-pass limit instead. The status line's `deferred` count
-covers only the current pass, not the lifetime of the run; use the timestamped
-hot-range and pass-completion logs to investigate repeated deferrals.
 
 ### force-kill-after
 
@@ -239,7 +151,7 @@ spirit migrate --lock-wait-timeout=10s --force-kill-after=5s \
        --statement "ALTER TABLE users ADD COLUMN email VARCHAR(255)"
 ```
 
-Here MySQL still waits up to 10 seconds for each metadata lock, but Spirit starts killing blockers after 5 seconds. The delay applies to both the native DDL path and the table locks used for checksum and cutover. Which connections are eligible to be killed does not change; see [lock-wait-timeout](#lock-wait-timeout) for the selection rules.
+Here MySQL still waits up to 10 seconds for each metadata lock, but Spirit starts killing blockers after 5 seconds. The delay applies to both the native DDL path and the table locks used for cutover (and for the checksum with [`--legacy-checksum`](#legacy-checksum)). Which connections are eligible to be killed does not change; see [lock-wait-timeout](#lock-wait-timeout) for the selection rules.
 
 An explicit value must be positive and less than the `lock_wait_timeout` that MySQL receives, which is truncated to whole seconds. Spirit rejects the value at startup otherwise.
 
@@ -253,12 +165,117 @@ Killing a connection is asynchronous, so the extra time is not a guarantee that 
 
 The host (and optional port) to use when connecting to MySQL. If no port is provided, 3306 is used.
 
+### legacy-checksum
+
+- Type: Boolean
+- Default value: `false`
+
+By default Spirit verifies with the **lockless checksum**, for both the initial
+checksum and continuous sentinel checks. Use `--legacy-checksum` to verify with
+the **legacy snapshot checksum** instead, which was the default in earlier
+versions.
+
+```bash
+spirit migrate --legacy-checksum \
+       --host mydb:3306 --database mydb \
+       --statement "ALTER TABLE users ADD COLUMN email VARCHAR(255)"
+```
+
+Both checkers use the same column mappings (including renamed columns), the
+same repair policy, the same checkpoint and resume, checksum load throttling and
+experimental autoscaling. Cutover locking is the same for both. They differ in
+how they read:
+
+| | Lockless (default) | Legacy (`--legacy-checksum`) |
+| --- | --- | --- |
+| Setup lock | None | A brief table lock (`LOCK TABLES`) at the start of each pass, yield and retry |
+| Reads | Optimistic reads with bounded retries | One consistent `REPEATABLE READ` snapshot per pass segment |
+| InnoDB history list | No growth | Grows while the snapshot is open; bounded by [`--legacy-checksum-yield-timeout`](#legacy-checksum-yield-timeout) |
+| Hot rows | Split, then settled against the change stream (below) | Compared at one snapshot, so concurrent writes do not matter |
+
+#### Lockless checksum
+
+The lockless checksum reads the source and shadow tables with ordinary reads
+and bounded retries. It takes no checksum setup lock (`FTWRL` or table lock)
+and opens no long-lived `REPEATABLE READ` snapshots.
+
+Cutover still requires a complete clean pass. Hot ranges are split. Small unresolved ranges then use a finite per-row
+snapshot drain: read target keys first, freeze source PK/CRC32 images once, and
+retry target reads until each frozen image has matched and every observed
+target-only key is absent. Later inserts do not expand the frozen work set, so
+an append-heavy tail can converge.
+
+Each side is limited to 128 rows, with a combined 64 KiB key-data budget;
+oversized ranges stay on normal splitting/retries. Snapshot reads have a
+30-second timeout per capture or target-check call, not for the entire drain.
+Snapshot retries use the ordinary retry delay and bounded
+hot-attempt count, then defer without authorizing cutover. Unresolved ranges
+are revisited in another pass. Completing a scan or
+deferring a hot range does not authorize cutover. As with the legacy checksum,
+a stable divergence found by the initial checksum is repaired from the source and
+re-verified on a later pass, while one found by the continuous checksum during
+the sentinel wait aborts the migration. The initial checksum gives up after 10
+passes without a clean one and fails the migration; resuming with
+[`--legacy-checksum`](#legacy-checksum) is the fallback.
+
+Rows that are updated continuously are verified against the change stream
+rather than by reading the source again. A range that keeps changing is
+*settled* one row at a time: Spirit waits for the row's next change event,
+applies it to the shadow table, and compares the shadow row to that event's
+row image. The more often a row is written, the sooner its next event arrives.
+A row is deferred to the next pass instead when, for example, no change arrives
+within the range's 5-second settling budget, it is written again before the
+shadow row can be read, or the buffered changes cannot be fully applied. See
+[Continuously updated hot rows](../pkg/checksum/README.md#continuously-updated-hot-rows)
+for the full list.
+
+This is optimistic verification, not a comparison at one common source/target
+snapshot. The final replication drain and cutover locking are the same as with
+the legacy checksum.
+
+Initial checksum progress is checkpointed and resumed the same way as with the
+legacy checksum, including when resuming a checkpoint created by the legacy
+checksum. [`--legacy-checksum-yield-timeout`](#legacy-checksum-yield-timeout)
+applies only to the legacy checksum; the lockless gate is bounded by its
+10-pass limit instead. The status line's `deferred` count
+covers only the current pass, not the lifetime of the run; use the timestamped
+hot-range and pass-completion logs to investigate repeated deferrals.
+
+### legacy-checksum-yield-timeout
+
+- Type: Duration
+- Default value: `24h`
+
+Applies only with [`--legacy-checksum`](#legacy-checksum). The default lockless checksum holds no snapshot, so it has nothing to yield and ignores this flag.
+
+The maximum duration for a single legacy checksum pass before Spirit yields to release long-running `REPEATABLE READ` transactions. This helps control InnoDB History List Length (HLL) growth on large tables where the checksum phase can take many hours or even days.
+
+During the legacy checksum, Spirit holds open `REPEATABLE READ` transactions to get a consistent snapshot of the source and target tables. These long-running read views prevent InnoDB from purging old row versions, causing the history list length to grow. On busy systems this can degrade performance for all workloads.
+
+When the yield timeout fires, Spirit:
+
+1. Closes the current transactions (releasing the read views)
+2. Records the current checksum progress (low watermark)
+3. Re-acquires a table lock and creates fresh `REPEATABLE READ` transactions
+4. Resumes checksumming from where it left off
+
+The checksum will complete correctly regardless of how many yields occur. However, each yield requires re-acquiring a table lock, which has the same impact as the initial checksum lock acquisition — it may conflict with running transactions, and Spirit may kill blocking transactions to acquire the lock (see [lock-wait-timeout](#lock-wait-timeout)).
+
+For most migrations the default of `24h` is appropriate. You may want to lower this value if your system is sensitive to HLL growth (e.g. many concurrent writers generating undo log entries).
+
+```bash
+# Yield every 4 hours to limit HLL growth
+spirit migrate --legacy-checksum --legacy-checksum-yield-timeout=4h \
+       --host mydb:3306 --database mydb \
+       --statement "ALTER TABLE large_table ADD INDEX idx_foo (foo)"
+```
+
 ### lock-wait-timeout
 
 - Type: Duration
 - Default value: `30s`
 
-Spirit requires an exclusive metadata lock for cutover and checksum operations. The MySQL default for waiting for a metadata lock is 1 year(!), which means that if there are any long running transactions holding a shared lock on the table that prevent the exclusive lock from being acquired, new lock requests will effectively queue forever behind Spirit's exclusive lock request. To prevent Spirit causing such outages, Spirit sets the `lock_wait_timeout` to 30s by default.
+Spirit requires an exclusive metadata lock for cutover (and for checksum operations with [`--legacy-checksum`](#legacy-checksum)). The MySQL default for waiting for a metadata lock is 1 year(!), which means that if there are any long running transactions holding a shared lock on the table that prevent the exclusive lock from being acquired, new lock requests will effectively queue forever behind Spirit's exclusive lock request. To prevent Spirit causing such outages, Spirit sets the `lock_wait_timeout` to 30s by default.
 
 At 90% of the `lock-wait-timeout` (i.e. after 27 seconds with the default of 30 seconds), Spirit will also start killing connections that are blocking the lock acquisition. Use [force-kill-after](#force-kill-after) to set this delay independently of the timeout. It does this in a semi-intelligent way:
 
@@ -397,13 +414,13 @@ This flag is **ignored** when [enable-experimental-autoscaling](#enable-experime
 - **the applier's write workers**, [write-threads](#write-threads) of them, or up to twice that under [autoscaling](#enable-experimental-autoscaling).
 - **the change feed's drain**, `8` concurrent `REPLACE` batches by default and up to `32` under autoscaling. A periodic flush overlaps the copy, so these really do add rather than borrow.
 - **the control plane**, `2 + one per changed table`: the checkpoint `INSERT`, the replication-flush poll, and the per-table statistics updater.
-- **the checksum's off-pool queries**, a fixed `2`: repairing a mismatched chunk, and the chunker's `LIMIT 1 OFFSET n` boundary prefetch. Both are serialized, so one connection each. The checksum's `REPEATABLE READ` transaction pool is separate, and every one of its transactions pins a connection for the whole phase, so there is no incidental slack for these two to borrow.
+- **the checksum's off-pool queries**, a fixed `2`: repairing a mismatched chunk, and the chunker's `LIMIT 1 OFFSET n` boundary prefetch. Both are serialized, so one connection each. With [`--legacy-checksum`](#legacy-checksum) the checksum's `REPEATABLE READ` transaction pool is separate, and every one of its transactions pins a connection for the whole phase, so there is no incidental slack for these two to borrow.
 
 Added up, those can exceed `max-connections` on a large instance under autoscaling. For the copier and the applier that is expected and harmless: they queue on connection checkout instead of each being guaranteed one, which costs throughput and nothing else — a worker waiting on checkout is a worker that will eventually run, and the work it was going to do is still there when it does.
 
 Two of them are not like that, and both are protected:
 
-- **Read workers**, because the checksum pins a connection per transaction for a whole phase. Bounds the pool cannot hold would block on checkout with a table lock held, so `threads` is validated against the pool at startup and any ceiling derived later is fitted to it.
+- **Read workers**, because the legacy checksum pins a connection per transaction for a whole phase. Bounds the pool cannot hold would block on checkout with a table lock held, so `threads` is validated against the pool at startup and any ceiling derived later is fitted to it. The same validation applies with the default lockless checksum.
 - **The drain**, because its work expires. A flush batch queueing behind a saturated copy is spending the binlog retention window, and running out of that window ends the migration rather than slowing it. The drain therefore keeps a reserved connection through the checksum instead of contending for one.
 
 Throttler polling is not counted: it runs on a dedicated monitoring pool.
@@ -479,7 +496,7 @@ That trade is what makes it safe to go past the previous fixed width of 8. A flu
 
 The two shapes are deliberately different. Write threads spend most of their life parked on a redo-log flush, so a count above the vCPU count is not oversubscription; it is what keeps the log busy, and it is why the redo-aware signal excludes those waiters. A read thread scanning a table that is already in the buffer pool is pure CPU, so the same count really does compete with the application for cores — oversubscribing readers is how a checksum ends up degrading the workload it was supposed to be invisible to. The read side therefore starts at about a quarter of the instance and earns its way up through the utilization band.
 
-Its ceiling is a share of the instance rather than a multiple of its starting size, and stops at half the box, because for the checksum the ceiling is not a hypothesis — it is a cost paid up front. Every snapshot transaction must take its read view at the same instant, so the entire pool is created serially while the brief table lock is held, whether or not scaling ever reaches it (see [checksum scaling](#checksum-scaling)). Half the instance is the most that is worth holding a cutover-class lock to reserve.
+Its ceiling is a share of the instance rather than a multiple of its starting size, and stops at half the box, because for the legacy checksum the ceiling is not a hypothesis — it is a cost paid up front. Every snapshot transaction must take its read view at the same instant, so the entire pool is created serially while the brief table lock is held, whether or not scaling ever reaches it (see [checksum scaling](#checksum-scaling)). Half the instance is the most that is worth holding a cutover-class lock to reserve.
 
 Every count above — starting sizes and ceilings both — is capped by the CPU available to **spirit itself**, at 16 threads per core (`GOMAXPROCS`, so a container CPU limit is respected). The table assumes spirit has enough CPU to drive the target; where it does not, the derived counts are reduced and a warning names both numbers.
 
@@ -503,11 +520,11 @@ If a signal stops updating mid-migration (for example the monitoring connection 
 
 #### Checksum scaling
 
-The checksum phase is scaled by the same flag but on different signals, because it is read-only and holds a `REPEATABLE READ` snapshot rather than write transactions. Three behaviors are worth separating:
+The checksum phase is scaled by the same flag but on different signals, because it is read-only rather than running write transactions. Three behaviors are worth separating:
 
 - **Pausing under load is not opt-in.** The checksum calls the throttler before dispatching each chunk, flag or no flag. Chunks already in flight are never abandoned — an aborted chunk is wasted I/O that has to be redone from the same watermark — so the checksum stops *dispatching* rather than cancelling work.
 
-  It pauses on **load** signals only. Replica lag deliberately does not pause a checksum: the phase reads inside a `REPEATABLE READ` snapshot and writes nothing to the binlog, so it cannot be the cause of the lag and pausing it cannot reduce the lag — while the pause extends the pass, holding the snapshot open and retaining undo that the purge thread cannot advance past. (The lag throttler also fails closed when it cannot poll the replica, so an unreachable replica would otherwise stall the checksum until its yield timeout with the snapshot still held.) Load signals come from the Aurora throttlers, so on a non-Aurora server there is no load signal and the checksum is not paced by the throttler at all. Chunk *repairs* do write, and are deliberately left unpaced too — they are rare and small, and blocking one costs the same snapshot hold.
+  It pauses on **load** signals only. Replica lag deliberately does not pause a checksum: the phase writes nothing to the binlog, so it cannot be the cause of the lag and pausing it cannot reduce the lag — while the pause extends the pass. With [`--legacy-checksum`](#legacy-checksum) a longer pass also holds the `REPEATABLE READ` snapshot open, retaining undo that the purge thread cannot advance past. (The lag throttler also fails closed when it cannot poll the replica, so an unreachable replica would otherwise stall the checksum, and a legacy checksum until its yield timeout with the snapshot still held.) Load signals come from the Aurora throttlers, so on a non-Aurora server there is no load signal and the checksum is not paced by the throttler at all. Chunk *repairs* do write, and are deliberately left unpaced too — they are rare and small, and blocking one extends the pass the same way.
 - **Shedding** happens only when the flag engages (an Aurora target with at least 4 vCPUs). The signal is the change feed's post-flush residual: the feed flushes concurrently with the checksum, and if the residual is growing across flushes then the checksum's reads are winning a race against writes that have to finish (an unbounded backlog can outrun binlog retention and block cut-over). A worker is shed per flush that agrees, with hysteresis in both directions.
 - **Growth** happens under the same condition, since it uses the same utilization band as the copy phase — and that band comes from the Aurora throttlers. On stock MySQL the flag has no effect: autoscaling does not engage, so the checksum runs fixed at the configured [threads](#threads), the same as `spirit move` and `spirit sync`.
 
@@ -515,7 +532,7 @@ Without the flag the checksum has the hard stop and nothing else: it never moves
 
 As with the copy phase, a signal that stops updating does not keep being acted on. If the change feed's flushes stop completing — they error, or one takes minutes — the checksum's thread count is frozen where it is (a warning is logged, and another line when flushes resume). It is frozen rather than reduced: a stalled flush says the signal stopped, not which direction it was heading.
 
-One structural constraint shapes this: the checksum's snapshot transaction pool **cannot grow** once the brief table lock is released, because every transaction must take its read view at the same instant. It is therefore provisioned up front at whatever ceiling scaling could actually reach: `ceil(vCPUs / 2)` where the flag engages on Aurora, and plain [threads](#threads) everywhere else — both without the flag, and with the flag on a target where it cannot engage (non-Aurora, or under 4 vCPUs). It reuses the read-side connection budget, since the copier's readers have finished by the time the checksum runs. An idle pooled transaction costs one connection and no extra history retention, so over-provisioning is cheap in resources. What it is not cheap in is lock time: the transactions are started serially under the table lock, so the ceiling directly lengthens that window. This is the reason the read-side ceiling is half the instance rather than all of it.
+One structural constraint shapes the legacy checksum (the lockless checksum has no transaction pool and can resize mid-pass): its snapshot transaction pool **cannot grow** once the brief table lock is released, because every transaction must take its read view at the same instant. It is therefore provisioned up front at whatever ceiling scaling could actually reach: `ceil(vCPUs / 2)` where the flag engages on Aurora, and plain [threads](#threads) everywhere else — both without the flag, and with the flag on a target where it cannot engage (non-Aurora, or under 4 vCPUs). It reuses the read-side connection budget, since the copier's readers have finished by the time the checksum runs. An idle pooled transaction costs one connection and no extra history retention, so over-provisioning is cheap in resources. What it is not cheap in is lock time: the transactions are started serially under the table lock, so the ceiling directly lengthens that window. This is the reason the read-side ceiling is half the instance rather than all of it.
 
 Chunk sizing is separate from worker count: the checksum's chunks are sized by the dynamic chunker against a fixed 5s time budget (`table.ChunkerDefaultTarget`, not a flag — and not the copier's [`--target-chunk-size`](#target-chunk-size) byte budget), and scaling only changes how many are in flight at once.
 
@@ -543,7 +560,7 @@ So the worst case on the target is `max-connections + 2`.
 Values that cannot work are rejected at startup rather than discovered mid-migration:
 
 - **At least `5`**, which the cutover needs for its `LOCK TABLES` connection, its `RENAME TABLE` connection and the flush threads. This is also the one case where Spirit will exceed a configured pool size: a `CutOver` handed a smaller pool raises it to `5`, because the alternative is a cutover that cannot run.
-- **At least `threads + 6`**, because the checksum's read transactions each pin a connection for the whole phase whether or not a worker has one checked out. The `6` is what has to keep running alongside them: `2` for the checksum's own chunk repair and boundary prefetch, `3` for the control plane on a single-table migration, and `1` for the drain. A pool that only just fits the transactions is not a slow checksum — it is a checksum during which the drain cannot check out a connection at all.
+- **At least `threads + 6`**, because the checksum's readers each need a connection — with [`--legacy-checksum`](#legacy-checksum), each read transaction pins one for the whole phase whether or not a worker has one checked out. The `6` is what has to keep running alongside them: `2` for the checksum's own chunk repair and boundary prefetch, `3` for the control plane on a single-table migration, and `1` for the drain. A pool that only just fits the transactions is not a slow checksum — it is a checksum during which the drain cannot check out a connection at all.
 
 Both are hard stops rather than slow paths: below them a migration does not run slower, it stalls holding a table lock or an open read view.
 

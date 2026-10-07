@@ -863,20 +863,20 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context, resumePosi
 	// downstream — the repair policy, the resume watermark, pacing, the pool
 	// reserve, the status block, cutover — is written once against the Checker
 	// contract and does not ask which one it got.
-	if r.migration.EnableExperimentalLocklessChecksum {
-		r.logger.Warn("experimental lockless checksum enabled; verification uses optimistic reads, cutover locking is unchanged")
+	if r.migration.LegacyChecksum {
+		r.logger.Info("legacy checksum enabled; verification uses checksum table locks and REPEATABLE READ snapshots")
 	}
 	// Repair policy is not configured: both checkers repair in Run (the initial
 	// checksum) and report in RunContinuous (the sentinel wait).
 	r.checker, err = checksum.NewChecker([]*sql.DB{r.db}, r.checksumChunker, []change.Source{r.replClient}, &checksum.CheckerConfig{
-		Lockless:        r.migration.EnableExperimentalLocklessChecksum,
+		Lockless:        !r.migration.LegacyChecksum,
 		Watermark:       checksumWatermark,
 		Concurrency:     r.migration.Threads,
 		TargetChunkTime: table.ChunkerDefaultTarget,
 		DBConfig:        r.dbConfig,
 		Logger:          r.logger,
 		MaxRetries:      3,
-		YieldTimeout:    r.migration.ChecksumYieldTimeout,
+		YieldTimeout:    r.migration.LegacyChecksumYieldTimeout,
 		MetricsSink:     r.metricsSink,
 		// Repairing a mismatched chunk writes through the same applier the copy
 		// and binlog-apply phases use, so a repair inherits the configured write

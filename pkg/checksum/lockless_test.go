@@ -1402,6 +1402,8 @@ func TestRunUntilCleanHonoursMaxPasses(t *testing.T) {
 	require.ErrorIs(t, err, ErrVerificationUnresolved)
 	require.NotErrorIs(t, err, ErrPermanentDivergence,
 		"nothing is proven about an unresolved range; that is a different verdict from divergence")
+	require.NotErrorIs(t, err, ErrDifferencesExhausted,
+		"no pass found a difference, so a retry is not known to fail the same way")
 	require.NoError(t, ctx.Err(), "it must terminate on the pass budget, not on the deadline")
 	require.Equal(t, uint64(3), c.Stats().PassesCompleted, "exactly MaxPasses passes run")
 	require.True(t, c.Stats().FirstCleanPassAt.IsZero())
@@ -1629,6 +1631,46 @@ func (c *watermarkChunker) Reset() error {
 	c.done = map[*table.Chunk]bool{}
 	c.mu.Unlock()
 	return c.testChunker.Reset()
+}
+
+// A chunk that diverges again after every repair is a divergence the repairs
+// cannot close (a lossy ALTER), so the pass budget's error also carries
+// ErrDifferencesExhausted. One repairing pass is not enough to say so: the
+// repair may have closed it.
+func TestRunUntilCleanRepeatedRepairsAreDifferencesExhausted(t *testing.T) {
+	for _, tc := range []struct {
+		maxPasses int
+		exhausted bool
+	}{{1, false}, {3, true}} {
+		t.Run(fmt.Sprintf("max_passes=%d", tc.maxPasses), func(t *testing.T) {
+			cfg := fastConfig()
+			cfg.Concurrency = 1
+			cfg.minPassInterval = time.Millisecond
+			cfg.MaxPasses = tc.maxPasses
+			chunker := newWatermarkChunker(3)
+			recopier := &fakeRecopier{}
+			bad := chunker.chunks[0]
+			c := newTestChecker(t, chunker, cfg,
+				func(_ context.Context, chunk *table.Chunk, _ int) (int64, int64, uint64, error) {
+					if chunk == bad {
+						return 1, 2, 10, nil // the repair never closes it
+					}
+					return 1, 1, 10, nil
+				})
+			c.recopier = recopier
+
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			defer cancel()
+			err := c.RunUntilClean(ctx)
+			require.ErrorIs(t, err, ErrVerificationUnresolved)
+			if tc.exhausted {
+				require.ErrorIs(t, err, ErrDifferencesExhausted)
+			} else {
+				require.NotErrorIs(t, err, ErrDifferencesExhausted)
+			}
+			require.Equal(t, tc.maxPasses, recopier.callCount(), "one repair per pass")
+		})
+	}
 }
 
 // A chunk the checker repaired is not verified evidence. The repair happened

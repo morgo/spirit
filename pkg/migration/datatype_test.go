@@ -210,19 +210,31 @@ func TestWideningConversions(t *testing.T) {
 // succeeds.
 func TestTemporalPrecisionNarrowing(t *testing.T) {
 	t.Parallel()
-	t.Run("lossy", func(t *testing.T) {
-		t.Parallel()
-		testutils.NewTestTable(t, "tsnarrowlossy", `CREATE TABLE tsnarrowlossy (
-			id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
-			ts TIMESTAMP(6) NOT NULL
-		)`)
-		testutils.RunSQL(t, "INSERT INTO tsnarrowlossy (ts) VALUES ('2026-01-01 10:00:00'), ('2026-01-01 10:00:00.999999')")
+	// Both checkers must fail it the same way.
+	for _, tc := range []struct {
+		name   string
+		table  string
+		legacy bool
+	}{
+		{"lossy", "tsnarrowlossy", false},
+		{"lossy_legacy", "tsnarrowlossylegacy", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tbl := tc.table
+			testutils.NewTestTable(t, tbl, `CREATE TABLE `+tbl+` (
+				id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+				ts TIMESTAMP(6) NOT NULL
+			)`)
+			testutils.RunSQL(t, "INSERT INTO "+tbl+" (ts) VALUES ('2026-01-01 10:00:00'), ('2026-01-01 10:00:00.999999')")
 
-		m := NewTestRunner(t, "tsnarrowlossy", "MODIFY COLUMN ts TIMESTAMP NOT NULL")
-		err := m.Run(t.Context())
-		require.ErrorIs(t, err, checksum.ErrDifferencesExhausted)
-		require.NoError(t, m.Close())
-	})
+			m := NewTestRunner(t, tbl, "MODIFY COLUMN ts TIMESTAMP NOT NULL",
+				func(m *Migration) { m.LegacyChecksum = tc.legacy })
+			err := m.Run(t.Context())
+			require.ErrorIs(t, err, checksum.ErrDifferencesExhausted)
+			require.NoError(t, m.Close())
+		})
+	}
 	t.Run("no_fraction", func(t *testing.T) {
 		t.Parallel()
 		testutils.NewTestTable(t, "tsnarrowclean", `CREATE TABLE tsnarrowclean (
