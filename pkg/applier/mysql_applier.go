@@ -36,9 +36,6 @@ type MySQLApplier struct {
 	dbConfig    *dbconn.DBConfig
 	logger      *slog.Logger
 	metricsSink metrics.Sink // nil disables the stats emitter
-	// writeHint is the optimizer hint comment put after INSERT and REPLACE,
-	// or empty. See ApplierConfig.SkipForeignKeyChecks.
-	writeHint string
 
 	// unsharded is true when there is exactly one target and it covers the
 	// whole key space. Every row then belongs to shards[0], so routing is
@@ -194,17 +191,12 @@ func New(targets []Target, cfg *ApplierConfig) (*MySQLApplier, error) {
 			"parsed", shard.keyRange.String())
 	}
 
-	var writeHint string
-	if cfg.SkipForeignKeyChecks {
-		writeHint = "/*+ SET_VAR(foreign_key_checks=0) */ "
-	}
 	return &MySQLApplier{
 		shards:      shards,
 		targets:     targets,
 		dbConfig:    cfg.DBConfig,
 		logger:      cfg.Logger,
 		metricsSink: cfg.MetricsSink,
-		writeHint:   writeHint,
 		unsharded:   len(shards) == 1 && shards[0].keyRange.coversAll(),
 		pendingWork: make(map[int64]*pendingWork),
 	}, nil
@@ -717,8 +709,7 @@ func (a *MySQLApplier) writeChunklet(ctx context.Context, shard *shardTarget, ch
 	// Build the INSERT statement — target columns, with renames applied.
 	// Note: We use just the table name, not the fully qualified name, because
 	// the database connection (shard.writeDB) already determines which database to write to
-	query := fmt.Sprintf("INSERT %sIGNORE INTO %s (%s) VALUES %s",
-		a.writeHint,
+	query := fmt.Sprintf("INSERT IGNORE INTO %s (%s) VALUES %s",
 		mapping.TargetTable().QuotedTableName,
 		targetColumnList,
 		strings.Join(valuesClauses, ", "),
@@ -1161,8 +1152,7 @@ func (a *MySQLApplier) UpsertRows(ctx context.Context, mapping *table.ColumnMapp
 			// eventual-consistency implications. Just the table name here —
 			// the per-shard DB connection already determines which database
 			// to write to.
-			upsertStmt := fmt.Sprintf("REPLACE %sINTO %s (%s) VALUES %s",
-				a.writeHint,
+			upsertStmt := fmt.Sprintf("REPLACE INTO %s (%s) VALUES %s",
 				mapping.TargetTable().QuotedTableName,
 				columnList,
 				strings.Join(valuesClauses, ", "),

@@ -3,8 +3,6 @@ package applier
 import (
 	"context"
 	"database/sql"
-	"errors"
-	"fmt"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -13,11 +11,9 @@ import (
 
 	"github.com/block/mysql"
 	"github.com/block/spirit/pkg/dbconn"
-	parsermysql "github.com/block/spirit/pkg/parser/mysql"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -1634,67 +1630,4 @@ func TestUnderLockSharedConnection(t *testing.T) {
 	}
 	require.NoError(t, rows.Err())
 	require.Equal(t, []int64{2, 3, 4}, ids)
-}
-
-// TestApplierSkipForeignKeyChecks writes a row whose parent does not exist,
-// through both write paths: the copy's INSERT IGNORE and the change feed's
-// REPLACE. Both fail unless the checks are skipped.
-func TestApplierSkipForeignKeyChecks(t *testing.T) {
-	dbName, db := testutils.CreateUniqueTestDatabase(t)
-	testutils.RunSQLInDatabase(t, dbName, `CREATE TABLE parent (id INT PRIMARY KEY)`)
-	testutils.RunSQLInDatabase(t, dbName, `CREATE TABLE child (id INT PRIMARY KEY, pid INT,
-		FOREIGN KEY (pid) REFERENCES parent (id))`)
-	target, err := mysql.ParseDSN(testutils.DSNForDatabase(dbName))
-	require.NoError(t, err)
-	child := table.NewTableInfo(db, dbName, "child")
-	require.NoError(t, child.SetInfo(t.Context()))
-	mapping := table.NewColumnMapping(child, child, nil)
-
-	for _, skip := range []bool{false, true} {
-		t.Run(fmt.Sprintf("skip=%v", skip), func(t *testing.T) {
-			testutils.RunSQLInDatabase(t, dbName, "DELETE FROM child")
-			cfg := NewApplierDefaultConfig()
-			cfg.SkipForeignKeyChecks = skip
-			a, err := New([]Target{{DB: db, Config: target, KeyRange: "0"}}, cfg)
-			require.NoError(t, err)
-			require.NoError(t, a.Start(t.Context()))
-			t.Cleanup(func() { assert.NoError(t, a.Stop()) })
-
-			var applyErr error
-			var mu sync.Mutex
-			// The callback gets the write's error; Apply and Wait do not.
-			chunk := &table.Chunk{Table: child, NewTable: child, ColumnMapping: mapping}
-			require.NoError(t, a.Apply(t.Context(), chunk, [][]any{{int64(1), int64(100)}}, func(_ int64, err error) {
-				mu.Lock()
-				defer mu.Unlock()
-				applyErr = err
-			}))
-			require.NoError(t, a.Wait(t.Context()))
-			mu.Lock()
-			if skip {
-				require.NoError(t, applyErr)
-			} else {
-				// INSERT IGNORE downgrades the error to a warning, which the
-				// applier refuses rather than lose the row. MySQL 8.0 reports
-				// it without the constraint (1216) to a user whose privileges
-				// on the parent are granted globally or as part of a schema,
-				// and with it (1452) otherwise; 8.4 and later always use 1452.
-				warning, ok := errors.AsType[*dbconn.UnsafeWarningError](applyErr)
-				require.True(t, ok, "%v", applyErr)
-				require.Contains(t, []uint16{parsermysql.ErrNoReferencedRow, parsermysql.ErrNoReferencedRow2}, warning.Warning.Number)
-			}
-			mu.Unlock()
-
-			_, err = a.UpsertRows(t.Context(), mapping, []LogicalRow{{RowImage: []any{int64(2), int64(200)}}}, nil)
-			var count int
-			require.NoError(t, db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM child").Scan(&count))
-			if skip {
-				require.NoError(t, err)
-				require.Equal(t, 2, count)
-			} else {
-				require.ErrorContains(t, err, "a foreign key constraint fails")
-				require.Zero(t, count)
-			}
-		})
-	}
 }

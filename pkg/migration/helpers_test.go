@@ -280,6 +280,13 @@ func WithSkipDropAfterCutover() RunnerOption {
 	}
 }
 
+// WithForceKillAfter sets --force-kill-after.
+func WithForceKillAfter(d time.Duration) RunnerOption {
+	return func(m *Migration) {
+		m.ForceKillAfter = d
+	}
+}
+
 // WithExperimentalForeignKeys sets --enable-experimental-foreign-keys.
 func WithExperimentalForeignKeys() RunnerOption {
 	return func(m *Migration) {

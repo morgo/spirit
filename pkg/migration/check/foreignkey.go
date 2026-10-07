@@ -34,7 +34,9 @@ func init() {
 	// they cannot, and are not acted on once the cutover starts. An inbound
 	// foreign key added during the migration would follow the cutover
 	// RENAME to the _old table, and an outbound one would be dropped by it.
-	// After setup it checks the foreign keys copied to the new table.
+	// After setup and before the cutover it checks that the new table has no
+	// foreign keys, and under the cutover lock that the ones the cutover
+	// added to it match the table's.
 	registerCheck("hasforeignkeys", hasForeignKeysCheck, ScopePreflight|ScopePostSetup|ScopeCutover|ScopeCutoverLocked)
 }
 
@@ -115,12 +117,19 @@ func hasForeignKeysCheck(ctx context.Context, r Resources, logger *slog.Logger) 
 	if err != nil {
 		return err
 	}
-	if err := newTableForeignKeysMatch(r.Statement, r.Table.TableName, foreignKeys, foreignKeyConstraints(newTable)); err != nil {
-		if duringMigration {
-			return refuse(fmt.Errorf("the foreign keys of %s no longer match those of %s, so the cutover would change them: a foreign key may have been created or changed during the migration: %w",
-				r.NewTable.TableName, r.Table.TableName, err))
+	// The new table only has foreign keys under the cutover lock, which adds
+	// them after the final flush. Before that, a foreign key on it would hold
+	// the application's changes to the parent tables to the copy's rows.
+	if r.scope&ScopeCutoverLocked == 0 {
+		if copies := foreignKeyConstraints(newTable); len(copies) > 0 {
+			return refuse(fmt.Errorf("the new table %s has foreign key %s: the migration only adds the foreign keys of %s to it under the cutover lock",
+				r.NewTable.TableName, copies[0].Name, r.Table.TableName))
 		}
-		return refuse(fmt.Errorf("the foreign keys of %s do not match those of %s: %w", r.NewTable.TableName, r.Table.TableName, err))
+		return nil
+	}
+	if err := newTableForeignKeysMatch(r.Statement, r.Table.TableName, foreignKeys, foreignKeyConstraints(newTable)); err != nil {
+		return refuse(fmt.Errorf("the foreign keys added to %s under the cutover lock do not match those of %s, so the cutover would change them: %w",
+			r.NewTable.TableName, r.Table.TableName, err))
 	}
 	return nil
 }
@@ -281,9 +290,9 @@ func anyRow(ctx context.Context, db *sql.DB, query string, args ...any) (bool, e
 // 8.0 parses and ignores an inline REFERENCES, but MySQL 9.0 creates a foreign
 // key for it, so it is refused on every version.
 //
-// It is refused with --enable-experimental-foreign-keys too: the copy writes
-// rows to the new table with foreign key checks off, so a foreign key added to
-// it would never be checked against the rows already in the table.
+// It is refused with --enable-experimental-foreign-keys too: the cutover adds
+// the table's foreign keys to the new table without checking its rows, which
+// is only safe for foreign keys the rows already hold.
 func addForeignKeyCheck(ctx context.Context, r Resources, logger *slog.Logger) error {
 	alterStmt, ok := (*r.Statement.StmtNode).(*ast.AlterTableStmt)
 	if !ok {

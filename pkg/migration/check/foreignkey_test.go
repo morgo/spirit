@@ -210,6 +210,16 @@ func TestNewTableForeignKeysMatch(t *testing.T) {
 				CONSTRAINT _fk_parent_new FOREIGN KEY (pid) REFERENCES parent (id) ON DELETE SET NULL,
 				CONSTRAINT _child_new_ibfk_1 FOREIGN KEY (pid2) REFERENCES parent (id))`,
 			"foreign key fk_parent is"},
+		{"different on update", "ALTER TABLE child ADD COLUMN c INT",
+			`CREATE TABLE _child_new (id INT PRIMARY KEY, pid INT, pid2 INT,
+				CONSTRAINT _fk_parent_new FOREIGN KEY (pid) REFERENCES parent (id) ON DELETE CASCADE ON UPDATE CASCADE,
+				CONSTRAINT _child_new_ibfk_1 FOREIGN KEY (pid2) REFERENCES parent (id))`,
+			"foreign key fk_parent is"},
+		{"different referenced schema", "ALTER TABLE child ADD COLUMN c INT",
+			`CREATE TABLE _child_new (id INT PRIMARY KEY, pid INT, pid2 INT,
+				CONSTRAINT _fk_parent_new FOREIGN KEY (pid) REFERENCES other_schema.parent (id) ON DELETE CASCADE,
+				CONSTRAINT _child_new_ibfk_1 FOREIGN KEY (pid2) REFERENCES parent (id))`,
+			"foreign key fk_parent is"},
 		{"different parent", "ALTER TABLE child ADD COLUMN c INT",
 			`CREATE TABLE _child_new (id INT PRIMARY KEY, pid INT, pid2 INT,
 				CONSTRAINT _fk_parent_new FOREIGN KEY (pid) REFERENCES _parent_old (id) ON DELETE CASCADE,
@@ -273,4 +283,44 @@ func TestForeignKeySupportInEveryScope(t *testing.T) {
 		}
 		require.ErrorContains(t, hasForeignKeysCheck(t.Context(), r, slog.Default()), "require MySQL 9.7 or later", "scope %v", scope)
 	}
+}
+
+// TestNewTableForeignKeysOnlyUnderCutoverLock checks that the new table may
+// only have foreign keys under the cutover lock, which adds them: before that,
+// one would hold the application's changes to the parent table to the copy's
+// rows.
+func TestNewTableForeignKeysOnlyUnderCutoverLock(t *testing.T) {
+	testutils.SkipBeforeMySQLVersion(t, MinForeignKeyVersion, "foreign keys are only supported from MySQL 9.7")
+	db, err := sql.Open("block-mysql", testutils.DSN())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+	drop := "DROP TABLE IF EXISTS _fkonly_child_new, fkonly_child, fkonly_parent"
+	testutils.RunSQL(t, drop)
+	t.Cleanup(func() { testutils.RunSQL(t, drop) })
+	testutils.RunSQL(t, "CREATE TABLE fkonly_parent (id INT PRIMARY KEY)")
+	testutils.RunSQL(t, "CREATE TABLE fkonly_child (id INT PRIMARY KEY, pid INT, CONSTRAINT fk_only FOREIGN KEY (pid) REFERENCES fkonly_parent (id))")
+	testutils.RunSQL(t, "CREATE TABLE _fkonly_child_new LIKE fkonly_child")
+	resources := func(scope ScopeFlag) Resources {
+		return Resources{
+			DB:                      db,
+			Table:                   &table.TableInfo{SchemaName: "test", TableName: "fkonly_child"},
+			NewTable:                &table.TableInfo{SchemaName: "test", TableName: "_fkonly_child_new"},
+			Statement:               statement.MustNew("ALTER TABLE fkonly_child ENGINE=InnoDB")[0],
+			ExperimentalForeignKeys: true,
+			scope:                   scope,
+		}
+	}
+	// No foreign keys on the new table: right until the cutover lock.
+	for _, scope := range []ScopeFlag{ScopePostSetup, ScopeCutover} {
+		require.NoError(t, hasForeignKeysCheck(t.Context(), resources(scope), slog.Default()), "scope %v", scope)
+	}
+	require.ErrorContains(t, hasForeignKeysCheck(t.Context(), resources(ScopeCutoverLocked), slog.Default()), "has no copy _fk_only_new")
+
+	testutils.RunSQL(t, "ALTER TABLE _fkonly_child_new ADD CONSTRAINT _fk_only_new FOREIGN KEY (pid) REFERENCES fkonly_parent (id)")
+	for _, scope := range []ScopeFlag{ScopePostSetup, ScopeCutover} {
+		err := hasForeignKeysCheck(t.Context(), resources(scope), slog.Default())
+		require.ErrorIs(t, err, ErrRefused, "scope %v", scope)
+		require.ErrorContains(t, err, "only adds the foreign keys", "scope %v", scope)
+	}
+	require.NoError(t, hasForeignKeysCheck(t.Context(), resources(ScopeCutoverLocked), slog.Default()))
 }

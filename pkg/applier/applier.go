@@ -193,19 +193,6 @@ type ApplierConfig struct {
 	// Stats() snapshot as gauges (see pkg/metrics applier_* names). Nil
 	// disables emission entirely — no goroutine is started.
 	MetricsSink metrics.Sink
-	// SkipForeignKeyChecks writes rows without checking the target's foreign
-	// keys, for a target that has them. The rows come from a table that
-	// enforces the same foreign keys, so they hold once every change is
-	// applied, but not necessarily at each write: a copied row's parent can be
-	// deleted before the row is written, with the deletion of the row itself
-	// still to come from the change feed. With the checks on, a write of such
-	// a row fails (INSERT IGNORE downgrades the error to warning 1452, which
-	// the applier treats as unsafe), and every write takes a shared lock on its
-	// parent row. The checks are turned
-	// off with a SET_VAR hint on each INSERT and REPLACE, verified against
-	// MySQL 8.0 and 9.7. DELETEs are left alone: deleting a row only checks the
-	// foreign keys of other tables that reference the target.
-	SkipForeignKeyChecks bool
 }
 
 // NewApplierDefaultConfig returns a default config for the applier.

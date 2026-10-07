@@ -3,16 +3,22 @@ package migration
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"reflect"
 	"slices"
 	"strings"
 
+	"github.com/block/mysql"
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/dbconn/sqlescape"
+	"github.com/block/spirit/pkg/migration/check"
+	"github.com/block/spirit/pkg/parser/ast"
 	"github.com/block/spirit/pkg/parser/format"
+	parsermysql "github.com/block/spirit/pkg/parser/mysql"
 	"github.com/block/spirit/pkg/statement"
+	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/utils"
 )
 
@@ -21,60 +27,317 @@ import (
 // check.MinForeignKeyVersion). A table that other tables' foreign keys
 // reference is still refused, by the hasforeignkeys check.
 //
-// CREATE TABLE .. LIKE does not copy foreign keys, so copyForeignKeys adds them
-// to the _new table. Their names are unique per schema, so the copies are named
-// by utils.NewForeignKeyName. The cutover's RENAME TABLE gives a generated name
-// (<table>_ibfk_<n>) back to its copy; restoreForeignKeyNames renames the
-// others back once the original table has been dropped.
+// The _new table has no foreign keys while the rows are copied. MySQL checks a
+// change to a parent table against every child table, so a foreign key on the
+// _new table would hold the application to the copy's rows as well as the
+// table's: with ON DELETE RESTRICT (the default) it could not delete a parent
+// row that a copied child row still references, even after deleting the child
+// row, until the change feed applied that delete to the copy.
+//
+// Setup does add the foreign keys to the empty _new table, so that MySQL
+// checks the ALTER against them as a native ALTER would be checked: a column
+// type change a foreign key cannot take, a dropped index one needs, a renamed
+// column. It then drops them again, keeping their indexes.
+//
+// The cutover adds them back with the table lock held, after the final flush,
+// without checking the rows (foreignKeyCutover.addToNewTables): the rows are a
+// copy of the table's, which hold the same foreign keys. Foreign key names are
+// unique per schema, so the copies are named by utils.NewForeignKeyName. After
+// the RENAME, still under the lock, the foreign keys of the _old table are
+// dropped and the copies take their names back (foreignKeyCutover.settle).
+
+// foreignKeyCutover puts the foreign keys of the tables being altered on their
+// new tables during the cutover, and settles their names after it.
+type foreignKeyCutover struct {
+	db       *sql.DB
+	dbConfig *dbconn.DBConfig
+	logger   *slog.Logger
+	tables   []*foreignKeyTable
+	// settled is set once the cutover has given the copies their names back.
+	settled bool
+}
+
+// foreignKeyTable is a table being altered, as foreignKeyCutover needs it.
+type foreignKeyTable struct {
+	stmt         *statement.AbstractStatement
+	table        *table.TableInfo
+	newTable     *table.TableInfo
+	oldTableName string
+}
+
+// execFunc runs one DDL statement.
+type execFunc func(ctx context.Context, stmt string) error
+
+// underLock runs statements on the locking session, with foreign key checks
+// off.
+func underLock(lock *dbconn.TableLock) execFunc {
+	return func(ctx context.Context, stmt string) error {
+		return lock.ExecUnderLockWithoutForeignKeyChecks(ctx, stmt)
+	}
+}
+
+// referenced returns the tables the foreign keys of the tables being altered
+// reference. The cutover lock waits for the sessions that hold them, and the
+// force-kill covers them (see dbconn.NewTableLockReferencing).
+func (f *foreignKeyCutover) referenced(ctx context.Context) ([]*table.TableInfo, error) {
+	var tables []*table.TableInfo
+	for _, t := range f.tables {
+		parents, err := referencedTables(ctx, f.db, t.table)
+		if err != nil {
+			return nil, err
+		}
+		for _, p := range parents {
+			if !slices.ContainsFunc(tables, func(o *table.TableInfo) bool {
+				return o.SchemaName == p.SchemaName && o.TableName == p.TableName
+			}) {
+				tables = append(tables, p)
+			}
+		}
+	}
+	return tables, nil
+}
+
+// addToNewTables adds the foreign keys of each table being altered to its new
+// table, as utils.NewForeignKeyName names them, except those the ALTER drops.
+// It must run with the table lock held and after the final flush: the foreign
+// keys are read from the table as it is then, and added without checking the
+// rows. With the checks off MySQL adds a foreign key as a metadata change; it
+// only builds an index when the table has none it can use, and setup kept the
+// one each foreign key had. A changed index list is refused rather than
+// trusted.
+func (f *foreignKeyCutover) addToNewTables(ctx context.Context, lock *dbconn.TableLock) error {
+	exec := underLock(lock)
+	for _, t := range f.tables {
+		// A failed attempt can leave its copies behind.
+		if _, err := dropForeignKeys(ctx, f.db, t.newTable.TableName, exec); err != nil {
+			return err
+		}
+		source, err := tableDefinition(ctx, f.db, t.table.TableName)
+		if err != nil {
+			return err
+		}
+		clauses, err := foreignKeyCopies(source, t.table.TableName, t.oldTableName, t.stmt)
+		if err != nil {
+			return fmt.Errorf("%w: %w", check.ErrRefused, err)
+		}
+		if len(clauses) == 0 {
+			continue
+		}
+		before, err := tableDefinition(ctx, f.db, t.newTable.TableName)
+		if err != nil {
+			return err
+		}
+		if err := exec(ctx, sqlescape.MustEscapeSQL("ALTER TABLE %n %r, ALGORITHM=INPLACE, LOCK=NONE",
+			t.newTable.TableName, sqlescape.RawSQL(strings.Join(clauses, ", ")))); err != nil {
+			return fmt.Errorf("could not add the foreign keys of %s to %s: %w", t.table.TableName, t.newTable.TableName, err)
+		}
+		after, err := tableDefinition(ctx, f.db, t.newTable.TableName)
+		if err != nil {
+			return err
+		}
+		if !sameIndexes(before, after) {
+			return fmt.Errorf("%w: adding the foreign keys of %s to %s changed the indexes of %s", check.ErrRefused, t.table.TableName, t.newTable.TableName, t.newTable.TableName)
+		}
+		f.logger.Info("added foreign keys to the new table", "table", t.newTable.TableName, "foreign-keys", len(clauses))
+	}
+	return nil
+}
+
+// removeFromNewTables drops every foreign key of the new tables. A new table
+// that no longer exists, because the cutover renamed it, has none to drop.
+func (f *foreignKeyCutover) removeFromNewTables(ctx context.Context, exec execFunc) error {
+	var errs []error
+	for _, t := range f.tables {
+		if _, err := dropForeignKeys(ctx, f.db, t.newTable.TableName, exec); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// settle runs after the cutover's RENAME TABLE: it drops the foreign keys of
+// each old table, which hold the original names and would keep checking the
+// parent tables' changes against rows that are no longer written to, and then
+// gives each table's foreign keys those names back. dropExec runs the DROPs,
+// restoreExec the renames, which must run with foreign key checks off.
+func (f *foreignKeyCutover) settle(ctx context.Context, dropExec, restoreExec execFunc) error {
+	for _, t := range f.tables {
+		dropped, err := dropForeignKeys(ctx, f.db, t.oldTableName, dropExec)
+		if err != nil {
+			return err
+		}
+		names, err := restoreForeignKeyNames(ctx, f.db, t.table.TableName, restoreExec)
+		if err != nil {
+			return err
+		}
+		if dropped > 0 || len(names) > 0 {
+			f.logger.Info("moved the foreign keys' names from the old table to the new one",
+				"table", t.table.TableName,
+				"old-table", t.oldTableName,
+				"renamed-from", names,
+			)
+		}
+	}
+	f.settled = true
+	return nil
+}
+
+// settleAfterUnlock settles the names when the cutover could not do it under
+// the lock, with connections from the pool. The migration has succeeded by
+// then, so a failure is logged rather than returned.
+func (f *foreignKeyCutover) settleAfterUnlock(ctx context.Context) {
+	dropExec := func(ctx context.Context, stmt string) error {
+		return f.forceExec(ctx, stmt)
+	}
+	restoreExec := func(ctx context.Context, stmt string) error {
+		return dbconn.ExecWithoutForeignKeyChecks(ctx, f.db, "%r", sqlescape.RawSQL(stmt))
+	}
+	if err := f.settle(ctx, dropExec, restoreExec); err != nil {
+		f.logger.Error("migration successful but the foreign keys of the old table could not be dropped, or the new table's foreign keys could not be given their names back: drop the old table's foreign keys and rename the new table's by hand",
+			"error", err,
+		)
+	}
+}
+
+// removeAfterFailure drops the foreign keys a failed cutover may have left on
+// the new tables, with connections from the pool. A failure is logged: the
+// next run's setup drops them too.
+func (f *foreignKeyCutover) removeAfterFailure(ctx context.Context) {
+	if err := f.removeFromNewTables(ctx, f.forceExec); err != nil {
+		f.logger.Error("could not drop the foreign keys of the new table after a failed cutover: until they are dropped, changes to the parent tables are checked against the new table too",
+			"error", err,
+		)
+	}
+}
+
+// forceExec runs stmt on a connection from the pool, killing the sessions
+// that block it on the new and old tables or a referenced table.
+func (f *foreignKeyCutover) forceExec(ctx context.Context, stmt string) error {
+	tables, err := f.referenced(ctx)
+	if err != nil {
+		return err
+	}
+	for _, t := range f.tables {
+		tables = append(tables, t.newTable, table.NewTableInfo(f.db, t.table.SchemaName, t.oldTableName))
+	}
+	return dbconn.ForceExec(ctx, f.db, tables, f.dbConfig, f.logger, "%r", sqlescape.RawSQL(stmt))
+}
+
+// referencedTables returns the tables the foreign keys of tbl reference.
+func referencedTables(ctx context.Context, db *sql.DB, tbl *table.TableInfo) ([]*table.TableInfo, error) {
+	def, err := tableDefinition(ctx, db, tbl.TableName)
+	if err != nil {
+		return nil, err
+	}
+	var tables []*table.TableInfo
+	for _, fk := range def.GetConstraints() {
+		if fk.Type != "FOREIGN KEY" || fk.References == nil {
+			continue
+		}
+		schema := fk.References.Schema
+		if schema == "" {
+			schema = tbl.SchemaName
+		}
+		tables = append(tables, table.NewTableInfo(db, schema, fk.References.Table))
+	}
+	return tables, nil
+}
 
 // copyForeignKeys adds the foreign keys of table sourceName to its new table
-// newName, under the names utils.NewForeignKeyName gives them. oldName is the
-// name the cutover renames the source table to, which also renames its
-// generated foreign keys.
+// newName, under the names utils.NewForeignKeyName gives them, so the ALTER
+// that setup applies next is checked against them. The new table is empty, so
+// the checks cost nothing: leaving them on keeps MySQL validating the
+// definitions. oldName is the name the cutover renames the source table to.
 //
 // Adding a named foreign key replaces the index MySQL created for the original
 // one with an index named after the constraint. The indexes are renamed back
 // afterwards, so the new table's indexes are the source table's.
-func copyForeignKeys(ctx context.Context, db *sql.DB, logger *slog.Logger, sourceName, newName, oldName string) error {
+func copyForeignKeys(ctx context.Context, db *sql.DB, logger *slog.Logger, exec execFunc, sourceName, newName, oldName string) error {
 	source, err := tableDefinition(ctx, db, sourceName)
 	if err != nil {
 		return err
+	}
+	clauses, err := foreignKeyCopies(source, sourceName, oldName, nil)
+	if err != nil {
+		return err
+	}
+	if len(clauses) == 0 {
+		return nil
+	}
+	if err := exec(ctx, sqlescape.MustEscapeSQL("ALTER TABLE %n %r", newName, sqlescape.RawSQL(strings.Join(clauses, ", ")))); err != nil {
+		return fmt.Errorf("could not copy the foreign keys of %s to %s: %w", sourceName, newName, err)
+	}
+	logger.Info("copied foreign keys to the new table to check the ALTER against them", "table", newName, "foreign-keys", len(clauses))
+	return restoreIndexNames(ctx, db, exec, source, newName)
+}
+
+// foreignKeyCopies returns an ADD clause for the copy of each foreign key of
+// source, the definition of table tableName, named by utils.NewForeignKeyName.
+// With stmt, the foreign keys it drops are left out and the columns it renames
+// are renamed.
+func foreignKeyCopies(source *statement.CreateTable, tableName, oldName string, stmt *statement.AbstractStatement) ([]string, error) {
+	var dropped []string
+	renames := make(map[string]string)
+	if stmt != nil {
+		dropped = stmt.ForeignKeysDropped()
+		for from, to := range stmt.ColumnRenameMap() {
+			renames[strings.ToLower(from)] = to
+		}
 	}
 	var clauses []string
 	for _, fk := range source.GetConstraints() {
 		if fk.Type != "FOREIGN KEY" {
 			continue
 		}
-		name := utils.NewForeignKeyName(sourceName, fk.Name)
-		for _, n := range []string{name, utils.RenamedForeignKeyName(fk.Name, sourceName, oldName)} {
+		if slices.ContainsFunc(dropped, func(name string) bool { return strings.EqualFold(name, fk.Name) }) {
+			continue
+		}
+		name := utils.NewForeignKeyName(tableName, fk.Name)
+		for _, n := range []string{name, utils.RenamedForeignKeyName(fk.Name, tableName, oldName)} {
 			if len(n) > utils.MaxTableNameLength {
-				return fmt.Errorf("foreign key %s of table %s cannot be copied: the migration would have to name it %s, which is longer than MySQL's %d character limit",
-					fk.Name, sourceName, n, utils.MaxTableNameLength)
+				return nil, fmt.Errorf("foreign key %s of table %s cannot be copied: the migration would have to name it %s, which is longer than MySQL's %d character limit",
+					fk.Name, tableName, n, utils.MaxTableNameLength)
 			}
 		}
-		clause, err := restoreForeignKey(fk, name)
+		clause, err := restoreForeignKey(fk, name, renames)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		clauses = append(clauses, "ADD "+clause)
 	}
+	return clauses, nil
+}
+
+// dropForeignKeys drops every foreign key of tableName and returns how many it
+// dropped. A table that does not exist has none.
+func dropForeignKeys(ctx context.Context, db *sql.DB, tableName string, exec execFunc) (int, error) {
+	def, err := tableDefinition(ctx, db, tableName)
+	if errors.Is(err, &mysql.MySQLError{Number: parsermysql.ErrNoSuchTable}) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	var clauses []string
+	for _, fk := range def.GetConstraints() {
+		if fk.Type == "FOREIGN KEY" {
+			clauses = append(clauses, sqlescape.MustEscapeSQL("DROP FOREIGN KEY %n", fk.Name))
+		}
+	}
 	if len(clauses) == 0 {
-		return nil
+		return 0, nil
 	}
-	// The new table is empty, so the checks cost nothing here. Leaving them on
-	// keeps MySQL validating the definitions, as it does for the user's ALTER
-	// that follows.
-	if err := dbconn.Exec(ctx, db, "ALTER TABLE %n %r", newName, sqlescape.RawSQL(strings.Join(clauses, ", "))); err != nil {
-		return fmt.Errorf("could not copy the foreign keys of %s to %s: %w", sourceName, newName, err)
+	if err := exec(ctx, sqlescape.MustEscapeSQL("ALTER TABLE %n %r, ALGORITHM=INPLACE, LOCK=NONE",
+		tableName, sqlescape.RawSQL(strings.Join(clauses, ", ")))); err != nil {
+		return 0, fmt.Errorf("could not drop the foreign keys of %s: %w", tableName, err)
 	}
-	logger.Info("copied foreign keys to the new table", "table", newName, "foreign-keys", len(clauses))
-	return restoreIndexNames(ctx, db, source, newName)
+	return len(clauses), nil
 }
 
 // restoreIndexNames renames each index of newName that copyForeignKeys
 // replaced back to the name it has on source: an index source does not have,
 // on the same columns as an index of source that newName no longer has.
-func restoreIndexNames(ctx context.Context, db *sql.DB, source *statement.CreateTable, newName string) error {
+func restoreIndexNames(ctx context.Context, db *sql.DB, exec execFunc, source *statement.CreateTable, newName string) error {
 	newTable, err := tableDefinition(ctx, db, newName)
 	if err != nil {
 		return err
@@ -98,7 +361,21 @@ func restoreIndexNames(ctx context.Context, db *sql.DB, source *statement.Create
 	if len(clauses) == 0 {
 		return nil
 	}
-	return dbconn.Exec(ctx, db, "ALTER TABLE %n %r", newName, sqlescape.RawSQL(strings.Join(clauses, ", ")))
+	return exec(ctx, sqlescape.MustEscapeSQL("ALTER TABLE %n %r", newName, sqlescape.RawSQL(strings.Join(clauses, ", "))))
+}
+
+// sameIndexes reports whether a and b have the same indexes, by name, type
+// and columns.
+func sameIndexes(a, b *statement.CreateTable) bool {
+	ia, ib := slices.Clone(a.GetIndexes()), slices.Clone(b.GetIndexes())
+	byName := func(x, y statement.Index) int {
+		return strings.Compare(strings.ToLower(x.Name), strings.ToLower(y.Name))
+	}
+	slices.SortFunc(ia, byName)
+	slices.SortFunc(ib, byName)
+	return slices.EqualFunc(ia, ib, func(x, y statement.Index) bool {
+		return strings.EqualFold(x.Name, y.Name) && x.Type == y.Type && reflect.DeepEqual(x.ColumnList, y.ColumnList)
+	})
 }
 
 // foreignKeyRenames maps the lower-cased name of each foreign key of table
@@ -119,25 +396,19 @@ func foreignKeyRenames(ctx context.Context, db *sql.DB, tableName string) (map[s
 
 // restoreForeignKeyNames renames the foreign keys of tableName, which the
 // cutover has just put in place, back to the names of the foreign keys they
-// copy. It must only run once the original table has been dropped, as that
-// still holds the names.
+// copy. The old table must no longer hold those names.
 //
-// The names to restore are read off the table rather than remembered from
-// setup, so a migration resumed before its cutover restores them too. Only the
-// run that did the cutover calls it: a run that stops between the cutover and
-// the rename leaves the copies' names, and the next run cannot tell them from
-// foreign keys a user named _<name>_new. Every foreign key of the
+// The names to restore are read off the table. Every foreign key of the
 // table is a copy (the ALTER cannot add one), so a name of the form _<name>_new
 // is the copy of <name>; one with the table's generated prefix was renamed by
 // the cutover already, and one with the new table's generated prefix should
 // have been.
 //
-// The checks are off for the ALTER, so it drops and re-adds each foreign key
-// as a metadata change rather than copying the table, without checking the
-// rows: the same foreign key held them a moment earlier, under the other name.
-// It returns the names it renamed from. With apply false, it only returns the
-// names it would rename from.
-func restoreForeignKeyNames(ctx context.Context, db *sql.DB, tableName string, apply bool) ([]string, error) {
+// exec must run with foreign key checks off, so the ALTER drops and re-adds
+// each foreign key as a metadata change rather than copying the table, without
+// checking the rows: the same foreign key held them a moment earlier, under
+// the other name. It returns the names it renamed from.
+func restoreForeignKeyNames(ctx context.Context, db *sql.DB, tableName string, exec execFunc) ([]string, error) {
 	def, err := tableDefinition(ctx, db, tableName)
 	if err != nil {
 		return nil, err
@@ -159,31 +430,44 @@ func restoreForeignKeyNames(ctx context.Context, db *sql.DB, tableName string, a
 			}
 			original = name
 		}
-		clause, err := restoreForeignKey(fk, original)
+		clause, err := restoreForeignKey(fk, original, nil)
 		if err != nil {
 			return nil, err
 		}
 		clauses = append(clauses, sqlescape.MustEscapeSQL("DROP FOREIGN KEY %n", fk.Name), "ADD "+clause)
 		names = append(names, fk.Name)
 	}
-	if len(clauses) == 0 || !apply {
-		return names, nil
+	if len(clauses) == 0 {
+		return nil, nil
 	}
-	if err := dbconn.ExecWithoutForeignKeyChecks(ctx, db, "ALTER TABLE %n %r, ALGORITHM=INPLACE, LOCK=NONE",
-		tableName, sqlescape.RawSQL(strings.Join(clauses, ", "))); err != nil {
+	if err := exec(ctx, sqlescape.MustEscapeSQL("ALTER TABLE %n %r, ALGORITHM=INPLACE, LOCK=NONE",
+		tableName, sqlescape.RawSQL(strings.Join(clauses, ", ")))); err != nil {
 		return nil, err
 	}
 	return names, nil
 }
 
 // restoreForeignKey returns the definition of foreign key fk, as an ALTER
-// TABLE .. ADD takes it, named name.
-func restoreForeignKey(fk statement.Constraint, name string) (string, error) {
+// TABLE .. ADD takes it, named name, with its columns renamed through renames
+// (lower-cased old name to new name).
+func restoreForeignKey(fk statement.Constraint, name string, renames map[string]string) (string, error) {
 	if fk.Raw == nil {
 		return "", fmt.Errorf("foreign key %s has no parsed definition", fk.Name)
 	}
 	raw := *fk.Raw
 	raw.Name = name
+	raw.Keys = make([]*ast.IndexPartSpecification, len(fk.Raw.Keys))
+	for i, key := range fk.Raw.Keys {
+		k := *key
+		if k.Column != nil {
+			if to, ok := renames[k.Column.Name.L]; ok {
+				col := *k.Column
+				col.Name = ast.NewCIStr(to)
+				k.Column = &col
+			}
+		}
+		raw.Keys[i] = &k
+	}
 	var sb strings.Builder
 	if err := raw.Restore(format.NewRestoreCtx(format.DefaultRestoreFlags, &sb)); err != nil {
 		return "", fmt.Errorf("could not restore foreign key %s: %w", fk.Name, err)

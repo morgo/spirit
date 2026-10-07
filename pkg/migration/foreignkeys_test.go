@@ -1,12 +1,16 @@
 package migration
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/block/spirit/pkg/dbconn"
+	"github.com/block/spirit/pkg/dbconn/sqlescape"
 	"github.com/block/spirit/pkg/migration/check"
 	"github.com/block/spirit/pkg/sentinel"
 	"github.com/block/spirit/pkg/statement"
@@ -202,24 +206,137 @@ func TestForeignKeysAlter(t *testing.T) {
 	})
 }
 
-// TestForeignKeysSkipDropAfterCutover keeps the old table, which keeps the
-// name of the named foreign key, so its copy cannot be renamed back. The
-// generated name is renamed by the cutover itself.
+// TestForeignKeysSkipDropAfterCutover keeps the old table. The cutover drops
+// its foreign keys, so the parent table's changes are no longer checked
+// against it, and gives the table's foreign keys their names back.
 func TestForeignKeysSkipDropAfterCutover(t *testing.T) {
 	t.Parallel()
 	dbName, db := foreignKeyFixture(t)
+	before := foreignKeysAndIndexes(parsedCreateTable(t, db, "child"))
 	m := NewTestRunner(t, "child", copyAlter,
 		WithDBName(dbName), WithExperimentalForeignKeys(), WithSkipDropAfterCutover())
 	require.NoError(t, m.Run(t.Context()))
 	require.NoError(t, m.Close())
-	assert.Equal(t, []string{
-		"CONSTRAINT _fk_child_parent_new FOREIGN KEY (pid) REFERENCES parent (id) ON DELETE CASCADE ON UPDATE CASCADE",
-		"CONSTRAINT child_ibfk_1 FOREIGN KEY (pid2) REFERENCES parent (id) ON DELETE SET NULL ON UPDATE CASCADE",
-		"INDEX explicit_pad (pad)",
-		"INDEX fk_child_parent (pid)",
-		"INDEX pid2 (pid2)",
-		"PRIMARY KEY PRIMARY (id)",
-	}, foreignKeysAndIndexes(parsedCreateTable(t, db, "child")))
+	assert.Equal(t, before, foreignKeysAndIndexes(parsedCreateTable(t, db, "child")))
+	oldName := oldTableName(t, db, "child")
+	assert.Empty(t, foreignKeyNames(t, db, oldName))
+	// The old table keeps its rows and indexes.
+	assert.Equal(t, 900, countRows(t, db, "SELECT COUNT(*) FROM "+oldName))
+}
+
+// restrictFixture creates, in a database of its own, a parent table and a
+// child table whose foreign key to it restricts deletes (the default).
+func restrictFixture(t *testing.T) (string, *sql.DB) {
+	t.Helper()
+	testutils.SkipBeforeMySQLVersion(t, check.MinForeignKeyVersion, "changes made by foreign key cascades are only in the binary log from MySQL 9.6")
+	dbName, db := testutils.CreateUniqueTestDatabase(t)
+	testutils.RunSQLInDatabase(t, dbName, `CREATE TABLE parent (id INT NOT NULL PRIMARY KEY)`)
+	testutils.RunSQLInDatabase(t, dbName, `CREATE TABLE child (
+		id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+		pid INT NOT NULL,
+		CONSTRAINT fk_restrict FOREIGN KEY (pid) REFERENCES parent (id)
+	)`)
+	testutils.RunSQLInDatabase(t, dbName, `INSERT INTO parent (id)
+		WITH RECURSIVE seq (n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 100) SELECT n FROM seq`)
+	testutils.RunSQLInDatabase(t, dbName, `INSERT INTO child (pid)
+		WITH RECURSIVE seq (n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 900) SELECT n % 100 + 1 FROM seq`)
+	return dbName, db
+}
+
+// deleteParent deletes parent row id after its child rows, as an application
+// that honors a restricting foreign key does.
+func deleteParent(t *testing.T, db *sql.DB, id int) {
+	t.Helper()
+	_, err := db.ExecContext(t.Context(), "DELETE FROM child WHERE pid = ?", id)
+	require.NoError(t, err)
+	_, err = db.ExecContext(t.Context(), "DELETE FROM parent WHERE id = ?", id)
+	require.NoError(t, err)
+}
+
+// TestForeignKeysParentDeleteDuringCopy deletes parent rows, after their child
+// rows, while the migration waits on the sentinel: the change feed has not
+// necessarily applied the child deletes to the new table yet. The new table
+// must not hold the parent rows in place.
+func TestForeignKeysParentDeleteDuringCopy(t *testing.T) {
+	t.Parallel()
+	dbName, db := restrictFixture(t)
+	before := foreignKeysAndIndexes(parsedCreateTable(t, db, "child"))
+	m := NewTestRunner(t, "child", copyAlter,
+		WithDBName(dbName), WithDeferCutOver(), WithExperimentalForeignKeys())
+	running := startTestRun(t, m.Run, m.Close)
+	waitForStatus(t, m, status.WaitingOnSentinelTable, running)
+	assert.Empty(t, foreignKeyNames(t, db, "_child_new"))
+	for id := 1; id <= 10; id++ {
+		deleteParent(t, db, id)
+	}
+	testutils.RunSQLInDatabase(t, dbName, "DROP TABLE "+sentinel.TableName)
+	require.NoError(t, running.wait(t))
+
+	assert.Equal(t, before, foreignKeysAndIndexes(parsedCreateTable(t, db, "child")))
+	assert.Equal(t, 810, countRows(t, db, "SELECT COUNT(*) FROM child"))
+	_, err := db.ExecContext(t.Context(), "DELETE FROM parent WHERE id = 11")
+	require.ErrorContains(t, err, "a foreign key constraint fails", "the foreign key is enforced after the cutover")
+}
+
+// TestForeignKeysParentDeleteAfterSkipDrop deletes parent rows, after their
+// child rows, once a migration that kept the old table has finished. The old
+// table's copies of the child rows must not hold the parent rows in place.
+func TestForeignKeysParentDeleteAfterSkipDrop(t *testing.T) {
+	t.Parallel()
+	dbName, db := restrictFixture(t)
+	m := NewTestRunner(t, "child", copyAlter,
+		WithDBName(dbName), WithExperimentalForeignKeys(), WithSkipDropAfterCutover())
+	require.NoError(t, m.Run(t.Context()))
+	require.NoError(t, m.Close())
+	assert.Equal(t, []string{"fk_restrict"}, foreignKeyNames(t, db, "child"))
+	deleteParent(t, db, 1)
+	assert.Equal(t, 9, countRows(t, db, "SELECT COUNT(*) FROM "+oldTableName(t, db, "child")+" WHERE pid = 1"))
+}
+
+// TestForeignKeysCutoverKillsParentReader holds a transaction open that has
+// read the parent table. Adding the foreign keys to the new table and the
+// RENAME under the cutover lock both wait for it, so the cutover's force-kill
+// must cover the parent table.
+func TestForeignKeysCutoverKillsParentReader(t *testing.T) {
+	t.Parallel()
+	dbName, db := restrictFixture(t)
+	m := NewTestRunner(t, "child", copyAlter,
+		WithDBName(dbName), WithDeferCutOver(), WithExperimentalForeignKeys(), WithForceKillAfter(time.Second))
+	running := startTestRun(t, m.Run, m.Close)
+	waitForStatus(t, m, status.WaitingOnSentinelTable, running)
+	reader, err := db.BeginTx(t.Context(), nil)
+	require.NoError(t, err)
+	defer func() { _ = reader.Rollback() }()
+	_, err = reader.ExecContext(t.Context(), "SELECT * FROM parent")
+	require.NoError(t, err)
+	testutils.RunSQLInDatabase(t, dbName, "DROP TABLE "+sentinel.TableName)
+	require.NoError(t, running.wait(t))
+	_, err = reader.ExecContext(t.Context(), "SELECT 1")
+	require.Error(t, err, "the transaction on the parent table must have been killed")
+	assert.Equal(t, []string{"fk_restrict"}, foreignKeyNames(t, db, "child"))
+}
+
+// oldTableName returns the name of the old table a migration of tableName
+// kept: it has a timestamp in it.
+func oldTableName(t *testing.T, db *sql.DB, tableName string) string {
+	t.Helper()
+	var name string
+	require.NoError(t, db.QueryRowContext(t.Context(), `SELECT table_name FROM information_schema.tables
+		WHERE table_schema = DATABASE() AND table_name LIKE ?`, `\_`+tableName+`\_old%`).Scan(&name))
+	return name
+}
+
+// foreignKeyNames returns the names of the foreign keys of tableName, sorted.
+func foreignKeyNames(t *testing.T, db *sql.DB, tableName string) []string {
+	t.Helper()
+	var names []string
+	for _, c := range parsedCreateTable(t, db, tableName).GetConstraints() {
+		if c.Type == "FOREIGN KEY" {
+			names = append(names, c.Name)
+		}
+	}
+	slices.Sort(names)
+	return names
 }
 
 // TestForeignKeysRefused covers what experimental support still refuses.
@@ -275,8 +392,8 @@ func TestForeignKeysRequireMySQL97(t *testing.T) {
 	require.NoError(t, m.Close())
 }
 
-// TestForeignKeysResume resumes a migration whose new table already has the
-// copied foreign keys, and cascades into it before and after the resume.
+// TestForeignKeysResume resumes a migration, and cascades into the table
+// before and after the resume.
 func TestForeignKeysResume(t *testing.T) {
 	t.Parallel()
 	dbName, db := foreignKeyFixture(t)
@@ -308,32 +425,44 @@ func TestForeignKeysResume(t *testing.T) {
 }
 
 // TestRestoreForeignKeyNamesFromTable renames the foreign keys back from the
-// names on the table alone, after a cutover that kept the old table: the names
-// are read off the table, not remembered from setup. Nothing calls this outside
-// the run that did the cutover; see docs/migrate.md for a run that stops
-// before it.
+// names on the table alone, as a run whose cutover could not settle them under
+// the lock does: the names are read off the table, not remembered from setup.
 func TestRestoreForeignKeyNamesFromTable(t *testing.T) {
 	t.Parallel()
 	dbName, db := foreignKeyFixture(t)
 	before := foreignKeysAndIndexes(parsedCreateTable(t, db, "child"))
-	m := NewTestRunner(t, "child", copyAlter,
-		WithDBName(dbName), WithExperimentalForeignKeys(), WithSkipDropAfterCutover())
-	require.NoError(t, m.Run(t.Context()))
-	require.NoError(t, m.Close())
-	var oldName string
-	require.NoError(t, db.QueryRowContext(t.Context(), `SELECT table_name FROM information_schema.tables
-		WHERE table_schema = DATABASE() AND table_name LIKE '\_child\_old%'`).Scan(&oldName))
-	testutils.RunSQLInDatabase(t, dbName, "DROP TABLE "+oldName)
-
-	names, err := restoreForeignKeyNames(t.Context(), db, "child", false)
+	// The copies' names, as the cutover's RENAME leaves them: it gives a
+	// generated name back by itself.
+	exec := func(ctx context.Context, stmt string) error {
+		return dbconn.ExecWithoutForeignKeyChecks(ctx, db, "%r", sqlescape.RawSQL(stmt))
+	}
+	fk := parsedCreateTable(t, db, "child").GetConstraints()
+	i := slices.IndexFunc(fk, func(c statement.Constraint) bool { return c.Name == "fk_child_parent" })
+	require.GreaterOrEqual(t, i, 0)
+	clause, err := restoreForeignKey(fk[i], "_fk_child_parent_new", nil)
 	require.NoError(t, err)
-	require.Equal(t, []string{"_fk_child_parent_new"}, names)
-	names, err = restoreForeignKeyNames(t.Context(), db, "child", true)
+	require.NoError(t, exec(t.Context(), "ALTER TABLE child DROP FOREIGN KEY fk_child_parent, ADD "+clause))
+	testutils.RunSQLInDatabase(t, dbName, "ALTER TABLE child RENAME INDEX _fk_child_parent_new TO fk_child_parent")
+
+	names, err := restoreForeignKeyNames(t.Context(), db, "child", exec)
 	require.NoError(t, err)
 	require.Equal(t, []string{"_fk_child_parent_new"}, names)
 	assert.Equal(t, before, foreignKeysAndIndexes(parsedCreateTable(t, db, "child")))
 
-	names, err = restoreForeignKeyNames(t.Context(), db, "child", true)
+	names, err = restoreForeignKeyNames(t.Context(), db, "child", exec)
 	require.NoError(t, err)
 	require.Empty(t, names)
+}
+
+// TestRestoreForeignKeyRenamesColumns checks that the copy of a foreign key
+// added at the cutover is on the columns the ALTER renamed.
+func TestRestoreForeignKeyRenamesColumns(t *testing.T) {
+	ct, err := statement.ParseCreateTable(`CREATE TABLE child (id INT PRIMARY KEY, pid INT, other INT,
+		CONSTRAINT fk FOREIGN KEY (pid, other) REFERENCES parent (id, pid) ON DELETE CASCADE)`)
+	require.NoError(t, err)
+	clause, err := restoreForeignKey(ct.GetConstraints()[0], "_fk_new", map[string]string{"pid": "parent_id"})
+	require.NoError(t, err)
+	assert.Equal(t, "CONSTRAINT `_fk_new` FOREIGN KEY (`parent_id`, `other`) REFERENCES `parent`(`id`, `pid`) ON DELETE CASCADE", clause)
+	// The parsed definition is left alone.
+	assert.Equal(t, "pid", ct.GetConstraints()[0].Raw.Keys[0].Column.Name.O)
 }
