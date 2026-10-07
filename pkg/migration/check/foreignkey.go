@@ -95,10 +95,15 @@ func hasForeignKeysCheck(ctx context.Context, r Resources, logger *slog.Logger) 
 		return err
 	}
 	foreignKeys := foreignKeyConstraints(source)
-	if len(foreignKeys) > 0 && r.scope&ScopePreflight != 0 {
+	if len(foreignKeys) > 0 {
+		// Checked in every scope, not only at preflight: a foreign key created
+		// after preflight is copied to the new table too, and the server must
+		// support it as much as one that was there from the start.
 		if err := foreignKeySupport(ctx, r.DB); err != nil {
 			return err
 		}
+	}
+	if len(foreignKeys) > 0 && r.scope&ScopePreflight != 0 {
 		if err := foreignKeyStatementSupport(r.Statement, foreignKeys); err != nil {
 			return err
 		}
@@ -209,9 +214,14 @@ func foreignKeysEqual(a, b statement.Constraint, renames map[string]string) bool
 			return false
 		}
 	}
+	// Schema and table names are compared exactly: with lower_case_table_names=0
+	// they are case-sensitive, so parent and Parent can be different tables.
+	// Both definitions come from SHOW CREATE TABLE on the same server, in the
+	// same schema, so a copy renders its reference the same way. Column names
+	// are case-insensitive in MySQL.
 	ra, rb := a.References, b.References
-	return strings.EqualFold(ra.Schema, rb.Schema) &&
-		strings.EqualFold(ra.Table, rb.Table) &&
+	return ra.Schema == rb.Schema &&
+		ra.Table == rb.Table &&
 		slices.EqualFunc(ra.Columns, rb.Columns, strings.EqualFold) &&
 		equalOption(ra.OnDelete, rb.OnDelete) &&
 		equalOption(ra.OnUpdate, rb.OnUpdate)

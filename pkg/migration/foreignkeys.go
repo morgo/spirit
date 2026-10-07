@@ -123,7 +123,10 @@ func foreignKeyRenames(ctx context.Context, db *sql.DB, tableName string) (map[s
 // still holds the names.
 //
 // The names to restore are read off the table rather than remembered from
-// setup, so a resumed migration restores them too. Every foreign key of the
+// setup, so a migration resumed before its cutover restores them too. Only the
+// run that did the cutover calls it: a run that stops between the cutover and
+// the rename leaves the copies' names, and the next run cannot tell them from
+// foreign keys a user named _<name>_new. Every foreign key of the
 // table is a copy (the ALTER cannot add one), so a name of the form _<name>_new
 // is the copy of <name>; one with the table's generated prefix was renamed by
 // the cutover already, and one with the new table's generated prefix should

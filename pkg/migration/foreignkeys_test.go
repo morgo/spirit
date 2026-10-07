@@ -307,10 +307,12 @@ func TestForeignKeysResume(t *testing.T) {
 	assert.Zero(t, countRows(t, db, "SELECT COUNT(*) FROM child WHERE pid2 <= 20"))
 }
 
-// TestRestoreForeignKeyNamesAfterCrash renames the foreign keys back when the
-// migration stopped between the cutover and the rename, as from a crash: the
-// names to restore are read off the table, not remembered.
-func TestRestoreForeignKeyNamesAfterCrash(t *testing.T) {
+// TestRestoreForeignKeyNamesFromTable renames the foreign keys back from the
+// names on the table alone, after a cutover that kept the old table: the names
+// are read off the table, not remembered from setup. Nothing calls this outside
+// the run that did the cutover; see docs/migrate.md for a run that stops
+// before it.
+func TestRestoreForeignKeyNamesFromTable(t *testing.T) {
 	t.Parallel()
 	dbName, db := foreignKeyFixture(t)
 	before := foreignKeysAndIndexes(parsedCreateTable(t, db, "child"))

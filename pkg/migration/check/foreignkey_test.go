@@ -9,6 +9,7 @@ import (
 	"github.com/block/spirit/pkg/statement"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
+	"github.com/block/spirit/pkg/utils"
 	"github.com/stretchr/testify/require"
 )
 
@@ -214,6 +215,15 @@ func TestNewTableForeignKeysMatch(t *testing.T) {
 				CONSTRAINT _fk_parent_new FOREIGN KEY (pid) REFERENCES _parent_old (id) ON DELETE CASCADE,
 				CONSTRAINT _child_new_ibfk_1 FOREIGN KEY (pid2) REFERENCES parent (id))`,
 			"foreign key fk_parent is"},
+		{"differently cased parent", "ALTER TABLE child ADD COLUMN c INT",
+			`CREATE TABLE _child_new (id INT PRIMARY KEY, pid INT, pid2 INT,
+				CONSTRAINT _fk_parent_new FOREIGN KEY (pid) REFERENCES Parent (id) ON DELETE CASCADE,
+				CONSTRAINT _child_new_ibfk_1 FOREIGN KEY (pid2) REFERENCES parent (id))`,
+			"foreign key fk_parent is"},
+		{"differently cased column", "ALTER TABLE child ADD COLUMN c INT",
+			`CREATE TABLE _child_new (id INT PRIMARY KEY, PID INT, pid2 INT,
+				CONSTRAINT _fk_parent_new FOREIGN KEY (PID) REFERENCES parent (ID) ON DELETE CASCADE,
+				CONSTRAINT _child_new_ibfk_1 FOREIGN KEY (pid2) REFERENCES parent (id))`, ""},
 		{"extra", "ALTER TABLE child ADD COLUMN c INT",
 			`CREATE TABLE _child_new (id INT PRIMARY KEY, pid INT, pid2 INT,
 				CONSTRAINT _fk_parent_new FOREIGN KEY (pid) REFERENCES parent (id) ON DELETE CASCADE,
@@ -234,5 +244,33 @@ func TestNewTableForeignKeysMatch(t *testing.T) {
 				require.ErrorContains(t, err, test.err)
 			}
 		})
+	}
+}
+
+// TestForeignKeySupportInEveryScope checks the server for a table with foreign
+// keys in every scope the check runs in, not only at preflight: one created
+// after preflight is copied to the new table too.
+func TestForeignKeySupportInEveryScope(t *testing.T) {
+	db, err := sql.Open("block-mysql", testutils.DSN())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+	var version string
+	require.NoError(t, db.QueryRowContext(t.Context(), "SELECT VERSION()").Scan(&version))
+	if utils.CompareMySQLVersions(version, MinForeignKeyVersion) >= 0 {
+		t.Skipf("MySQL %s supports foreign keys", version)
+	}
+	testutils.RunSQL(t, "DROP TABLE IF EXISTS fkscope_child, fkscope_parent")
+	testutils.RunSQL(t, "CREATE TABLE fkscope_parent (id INT PRIMARY KEY)")
+	testutils.RunSQL(t, "CREATE TABLE fkscope_child (id INT PRIMARY KEY, pid INT, FOREIGN KEY (pid) REFERENCES fkscope_parent (id))")
+	t.Cleanup(func() { testutils.RunSQL(t, "DROP TABLE IF EXISTS fkscope_child, fkscope_parent") })
+	for _, scope := range []ScopeFlag{ScopePreflight, ScopePostSetup, ScopeCutover, ScopeCutoverLocked} {
+		r := Resources{
+			DB:                      db,
+			Table:                   &table.TableInfo{SchemaName: "test", TableName: "fkscope_child"},
+			Statement:               statement.MustNew("ALTER TABLE fkscope_child ENGINE=InnoDB")[0],
+			ExperimentalForeignKeys: true,
+			scope:                   scope,
+		}
+		require.ErrorContains(t, hasForeignKeysCheck(t.Context(), r, slog.Default()), "require MySQL 9.7 or later", "scope %v", scope)
 	}
 }

@@ -190,7 +190,15 @@ What it still refuses:
 
 How it works:
 
-- Foreign key names are unique per schema, so the new table's copies are named `_<name>_new`, and a generated name (`<table>_ibfk_<n>`) becomes `_<table>_new_ibfk_<n>`. The cutover's `RENAME TABLE` restores generated names. Spirit renames the others back after it drops the old table. With [skip-drop-after-cutover](#skip-drop-after-cutover), the old table keeps the original names, so the table keeps the `_<name>_new` names, and Spirit logs a warning.
+- Foreign key names are unique per schema, so the new table's copies are named `_<name>_new`, and a generated name (`<table>_ibfk_<n>`) becomes `_<table>_new_ibfk_<n>`. The cutover's `RENAME TABLE` restores generated names. Spirit renames the others back after it drops the old table. With [skip-drop-after-cutover](#skip-drop-after-cutover), the old table keeps the original names, so the table keeps the `_<name>_new` names, and Spirit logs a warning. The table also keeps them if Spirit stops between the cutover and the rename, for example when it is killed. A later run does not rename them, because it cannot tell them apart from foreign keys you named `_<name>_new`. The foreign keys are enforced under either name. To rename one yourself once the old table is dropped, drop it and add it back under the original name in one `ALTER` with the checks off, which MySQL applies in place without checking the rows:
+
+  ```sql
+  SET SESSION foreign_key_checks = 0;
+  ALTER TABLE child DROP FOREIGN KEY _fk_child_parent_new,
+    ADD CONSTRAINT fk_child_parent FOREIGN KEY (parent_id) REFERENCES parent (id) ON DELETE CASCADE,
+    ALGORITHM=INPLACE, LOCK=NONE;
+  SET SESSION foreign_key_checks = 1;
+  ```
 - Rows are written with `foreign_key_checks` off (a `SET_VAR` hint on each `INSERT` and `REPLACE`). The rows come from a table that enforces the same foreign keys, but a copied row's parent can be deleted before the row is written, with the deletion of the row itself still to come from the binary log. The hint also avoids a shared lock on the parent row for each write.
 - An index that MySQL creates for a foreign key keeps its name, but can move to the end of the table's index list.
 
