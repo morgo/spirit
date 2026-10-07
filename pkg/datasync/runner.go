@@ -858,14 +858,14 @@ func (r *Runner) setupThrottling(ctx context.Context) error {
 	if injected := r.sync.Applier; injected != nil {
 		a, ok := injected.(*applier.MySQLApplier)
 		if !ok || len(a.GetTargets()) != 1 || a.GetTargets()[0].DB != r.target.DB {
-			if r.sync.EnableExperimentalAutoscaling {
+			if !r.sync.SkipAutoscaling {
 				r.logger.Warn("sync autoscaling disabled: injected applier must use the monitored single target")
 			}
 			return nil
 		}
 	}
 	if r.target.Config == nil {
-		if r.sync.EnableExperimentalAutoscaling {
+		if !r.sync.SkipAutoscaling {
 			r.logger.Warn("sync autoscaling disabled: target connection config unavailable")
 		}
 		return nil

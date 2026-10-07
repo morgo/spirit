@@ -204,7 +204,7 @@ func TestEngageDisabled(t *testing.T) {
 		vcpus   int
 		log     string
 	}{
-		"flag off":      {false, []Target{{Aurora: aurora(false)}}, 16, ""},
+		"skipped":       {false, []Target{{Aurora: aurora(false)}}, 16, ""},
 		"no targets":    {true, nil, 16, "no target"},
 		"probe failed":  {true, []Target{{Aurora: aurora(false)}, {Aurora: throttler.AuroraResult{ProbeErr: errors.New("denied")}}}, 16, "could not determine whether the target is Aurora"},
 		"not aurora":    {true, []Target{{Aurora: aurora(false)}, {}}, 16, "every target must provide an Aurora load signal"},
@@ -213,7 +213,7 @@ func TestEngageDisabled(t *testing.T) {
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			f := &flags.Common{Threads: 3, WriteThreads: 5, EnableExperimentalAutoscaling: tc.flag}
+			f := &flags.Common{Threads: 3, WriteThreads: 5, SkipAutoscaling: !tc.flag}
 			req := Request{Targets: tc.targets, VCPUs: vcpus(tc.vcpus)}
 			if name == "pool too tiny" {
 				req.Fit = func(p Plan) (Plan, bool) { return p, false }
@@ -229,7 +229,7 @@ func TestEngageDisabled(t *testing.T) {
 }
 
 func TestEngageOverridesThreadCounts(t *testing.T) {
-	f := &flags.Common{Threads: 3, WriteThreads: 5, EnableExperimentalAutoscaling: true, MaxCommitLatency: 100 * time.Millisecond}
+	f := &flags.Common{Threads: 3, WriteThreads: 5, MaxCommitLatency: 100 * time.Millisecond}
 	plan, logs := engageForTest(t, f, Request{Targets: []Target{{Aurora: aurora(false)}}, VCPUs: vcpus(16)})
 	require.True(t, plan.Engaged)
 	want, _ := Derive(single(16), 1024, false, true)
@@ -244,17 +244,17 @@ func TestEngageOverridesThreadCounts(t *testing.T) {
 // target's write threads at their start, whichever target it is.
 func TestEngageRedoAwareAnyTarget(t *testing.T) {
 	for _, targets := range [][]Target{{{Aurora: aurora(true)}, {Aurora: aurora(false)}}, {{Aurora: aurora(false)}, {Aurora: aurora(true)}}} {
-		plan, _ := engageForTest(t, &flags.Common{EnableExperimentalAutoscaling: true}, Request{Targets: targets, VCPUs: vcpus(16)})
+		plan, _ := engageForTest(t, &flags.Common{}, Request{Targets: targets, VCPUs: vcpus(16)})
 		require.True(t, plan.Engaged)
 		require.Equal(t, plan.WriteStart, plan.MaxWriteThreads)
 	}
-	plan, _ := engageForTest(t, &flags.Common{EnableExperimentalAutoscaling: true}, Request{Targets: []Target{{Aurora: aurora(false)}, {Aurora: aurora(false)}}, VCPUs: vcpus(16)})
+	plan, _ := engageForTest(t, &flags.Common{}, Request{Targets: []Target{{Aurora: aurora(false)}, {Aurora: aurora(false)}}, VCPUs: vcpus(16)})
 	require.Greater(t, plan.MaxWriteThreads, plan.WriteStart)
 }
 
 // Shards and sources reach the derivation.
 func TestEngageTopology(t *testing.T) {
-	plan, _ := engageForTest(t, &flags.Common{EnableExperimentalAutoscaling: true}, Request{
+	plan, _ := engageForTest(t, &flags.Common{}, Request{
 		Targets: []Target{{Aurora: aurora(false), Shards: 2}, {Aurora: aurora(false)}},
 		Sources: 2,
 		VCPUs:   vcpus(64),
@@ -264,7 +264,7 @@ func TestEngageTopology(t *testing.T) {
 }
 
 func TestEngageFit(t *testing.T) {
-	f := &flags.Common{EnableExperimentalAutoscaling: true}
+	f := &flags.Common{}
 	plan, _ := engageForTest(t, f, Request{
 		Targets: []Target{{Aurora: aurora(false)}},
 		VCPUs:   vcpus(64),
@@ -279,7 +279,7 @@ func TestEngageFit(t *testing.T) {
 
 func TestEngageClientCeilingWarnings(t *testing.T) {
 	// A derived count the host cannot run is capped, and said so.
-	f := &flags.Common{EnableExperimentalAutoscaling: true}
+	f := &flags.Common{}
 	plan, logs := engageForTest(t, f, Request{Targets: []Target{{Aurora: aurora(false)}}, VCPUs: vcpus(96), ClientCeiling: 16})
 	require.True(t, plan.Engaged)
 	require.LessOrEqual(t, plan.WriteStart, 16)
@@ -293,7 +293,7 @@ func TestEngageClientCeilingWarnings(t *testing.T) {
 }
 
 func TestEngageVCPUError(t *testing.T) {
-	_, err := Engage(t.Context(), &flags.Common{EnableExperimentalAutoscaling: true}, Request{
+	_, err := Engage(t.Context(), &flags.Common{}, Request{
 		Targets: []Target{{Aurora: aurora(false), Name: "tcp:db1:3306"}},
 		VCPUs:   func(context.Context, *sql.DB) (int, error) { return 0, errors.New("boom") },
 		Logger:  slog.New(slog.DiscardHandler),
@@ -310,7 +310,7 @@ const gib = 1024 * 1024 * 1024
 // A low-memory target fixes every pool at one worker, shrinks the copy chunks
 // and narrows the flush, without engaging the controllers.
 func TestEngageLowMemory(t *testing.T) {
-	f := &flags.Common{Threads: 4, WriteThreads: 4, TargetChunkSize: 16 * 1024 * 1024, EnableExperimentalAutoscaling: true}
+	f := &flags.Common{Threads: 4, WriteThreads: 4, TargetChunkSize: 16 * 1024 * 1024}
 	plan, logs := engageForTest(t, f, Request{Targets: []Target{{Aurora: aurora(false)}}, VCPUs: vcpus(2), BufferPoolSize: bufferPool(gib)})
 	require.Equal(t, Plan{LowMemory: true, FlushConcurrency: autoscale.LowMemoryFlushConcurrency}, plan)
 	require.False(t, plan.Engaged)
@@ -322,13 +322,13 @@ func TestEngageLowMemory(t *testing.T) {
 	require.NotContains(t, logs, "instance is too small")
 
 	// A chunk size already below the low-memory budget is kept.
-	f = &flags.Common{TargetChunkSize: 64 * 1024, EnableExperimentalAutoscaling: true}
+	f = &flags.Common{TargetChunkSize: 64 * 1024}
 	_, _ = engageForTest(t, f, Request{Targets: []Target{{Aurora: aurora(false)}}, VCPUs: vcpus(2), BufferPoolSize: bufferPool(gib)})
 	require.Equal(t, uint64(64*1024), f.TargetChunkSize)
 
 	// One low-memory target among several is enough: the counts are shared.
 	// Only the target small enough in vCPUs has its buffer pool read.
-	f = &flags.Common{Threads: 4, WriteThreads: 4, EnableExperimentalAutoscaling: true}
+	f = &flags.Common{Threads: 4, WriteThreads: 4}
 	sizes := []int{16, 2}
 	var bufferPoolReads int
 	plan, logs = engageForTest(t, f, Request{
@@ -365,7 +365,7 @@ func TestEngageLowMemoryMixedTargets(t *testing.T) {
 					targets[0], targets[1] = targets[1], targets[0]
 				}
 				var vcpuReads int
-				f := &flags.Common{Threads: 4, WriteThreads: 4, EnableExperimentalAutoscaling: true}
+				f := &flags.Common{Threads: 4, WriteThreads: 4}
 				plan, logs := engageForTest(t, f, Request{
 					Targets: targets,
 					VCPUs: func(context.Context, *sql.DB) (int, error) {
@@ -402,7 +402,7 @@ func TestEngageNotLowMemory(t *testing.T) {
 		engaged    bool
 		log        string
 	}{
-		"flag off":     {false, []Target{{Aurora: aurora(false)}}, 2, noRead, false, ""},
+		"skipped":      {false, []Target{{Aurora: aurora(false)}}, 2, noRead, false, ""},
 		"not aurora":   {true, []Target{{}}, 2, noRead, false, "every target must provide an Aurora load signal"},
 		"ample memory": {true, []Target{{Aurora: aurora(false)}}, 2, func(*testing.T) func(context.Context, *sql.DB) (uint64, error) { return bufferPool(11 * gib) }, false, "instance is too small"},
 		"over the limit": {true, []Target{{Aurora: aurora(false)}}, 2, func(*testing.T) func(context.Context, *sql.DB) (uint64, error) {
@@ -412,7 +412,7 @@ func TestEngageNotLowMemory(t *testing.T) {
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			f := &flags.Common{Threads: 3, WriteThreads: 5, TargetChunkSize: 16 * 1024 * 1024, EnableExperimentalAutoscaling: tc.flag}
+			f := &flags.Common{Threads: 3, WriteThreads: 5, TargetChunkSize: 16 * 1024 * 1024, SkipAutoscaling: !tc.flag}
 			plan, logs := engageForTest(t, f, Request{Targets: tc.targets, VCPUs: vcpus(tc.vcpus), BufferPoolSize: tc.bufferPool(t)})
 			require.False(t, plan.LowMemory)
 			require.Equal(t, tc.engaged, plan.Engaged)
@@ -429,7 +429,7 @@ func TestEngageNotLowMemory(t *testing.T) {
 }
 
 func TestEngageBufferPoolError(t *testing.T) {
-	_, err := Engage(t.Context(), &flags.Common{EnableExperimentalAutoscaling: true}, Request{
+	_, err := Engage(t.Context(), &flags.Common{}, Request{
 		Targets:        []Target{{Aurora: aurora(false), Name: "tcp:db1:3306"}},
 		VCPUs:          vcpus(2),
 		BufferPoolSize: func(context.Context, *sql.DB) (uint64, error) { return 0, errors.New("boom") },

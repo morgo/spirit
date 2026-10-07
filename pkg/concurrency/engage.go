@@ -202,9 +202,10 @@ func Derive(t Topology, clientCeiling int, redoAware, commitLatencyEnabled bool)
 // autoscale.LowMemoryFlushConcurrency. Any one target is enough, because the
 // counts are shared by every target and the smallest must not run out of
 // memory. That holds even when another target is not Aurora or its probe
-// failed, which would otherwise disable autoscaling.
+// failed, which would otherwise disable autoscaling. SkipAutoscaling turns off
+// both: Engage returns a zero plan and changes nothing.
 //
-// Autoscaling engages only when the flag is set and every target supplies a
+// Otherwise autoscaling engages only when every target supplies a
 // usable Aurora load signal and is at least autoscale.MinVCPUs; anything else
 // leaves the configured counts alone and returns a disengaged plan. All targets
 // or none, because the controllers scale every target in lockstep on one
@@ -244,7 +245,7 @@ func Engage(ctx context.Context, f *flags.Common, req Request) (Plan, error) {
 }
 
 func engage(ctx context.Context, f *flags.Common, req Request, clientCeiling int, logger *slog.Logger) (Plan, error) {
-	if !f.EnableExperimentalAutoscaling {
+	if f.SkipAutoscaling {
 		return Plan{}, nil
 	}
 	if len(req.Targets) == 0 {

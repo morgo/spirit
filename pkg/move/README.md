@@ -26,9 +26,9 @@ When a `ShardingProvider` is configured, each source table is annotated with a s
 
 ### Autoscaling
 
-Every move monitors its Aurora targets, whether or not autoscaling is enabled. `pkg/host` groups target connections independently of schema and credentials; the same groups drive index restoration and Aurora monitor ownership. One monitor per host feeds a maximum-utilization multi-throttler, which pauses the copy and narrows binlog flushes when any target is overloaded.
+Every move monitors its Aurora targets, whether or not autoscaling is skipped. `pkg/host` groups target connections independently of schema and credentials; the same groups drive index restoration and Aurora monitor ownership. One monitor per host feeds a maximum-utilization multi-throttler, which pauses the copy and narrows binlog flushes when any target is overloaded.
 
-`EnableExperimentalAutoscaling` adds conservative host-aware thread scaling on top of that signal, for both single-target and sharded moves. The copier resizes every shard's write pool together, and both checksums consume the same signal. Bounds account for targets sharing a host and the client CPU budget. See [the flag documentation](../../docs/move.md#enable-experimental-autoscaling) for eligibility, fallback and limitations.
+Unless `SkipAutoscaling` is set, move adds conservative host-aware thread scaling on top of that signal, for both single-target and sharded moves. The copier resizes every shard's write pool together, and both checksums consume the same signal. Bounds account for targets sharing a host and the client CPU budget. See [the flag documentation](../../docs/move.md#skip-autoscaling) for eligibility, fallback and limitations.
 
 ### Deferred Secondary Indexes
 

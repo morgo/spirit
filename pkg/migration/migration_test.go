@@ -126,8 +126,8 @@ func TestE2ENullAlter1Row(t *testing.T) {
 	require.NoError(t, m.Run())
 }
 
-// TestE2EAutoscalingEnabled runs a full migration with the experimental
-// write-thread autoscaler turned on. The local (non-Aurora) target supplies no
+// TestE2EAutoscalingEnabled runs a full migration with the thread autoscaler
+// at its default (on). The local (non-Aurora) target supplies no
 // Aurora load signal, so this exercises the disengaged path end-to-end:
 // concurrency.Engage declines (and logs why), the configured thread counts
 // stand, and the migration completes correctly (goleak in TestMain catches
@@ -142,7 +142,7 @@ func TestE2EAutoscalingEnabled(t *testing.T) {
 	)`)
 	testutils.RunSQL(t, `INSERT INTO t1autoscale (name) VALUES ('a'), ('b'), ('c'), ('d'), ('e')`)
 	m := NewTestMigration(t, WithStatement("ALTER TABLE t1autoscale ENGINE=InnoDB"),
-		WithWriteThreads(2), WithAutoscaling())
+		WithWriteThreads(2))
 	require.NoError(t, m.Run())
 
 	var count int
@@ -167,7 +167,7 @@ func TestE2EAutoscalingEngaged(t *testing.T) {
 		PRIMARY KEY (id)
 	)`)
 	testutils.RunSQL(t, `INSERT INTO t1autoscaleon (name) VALUES ('a'), ('b'), ('c'), ('d'), ('e')`)
-	r := NewTestRunner(t, "t1autoscaleon", "ENGINE=InnoDB", WithThreads(1), WithWriteThreads(1), WithAutoscaling())
+	r := NewTestRunner(t, "t1autoscaleon", "ENGINE=InnoDB", WithThreads(1), WithWriteThreads(1))
 	var builds int
 	r.buildAurora = func(context.Context, throttler.AuroraSetup) (throttler.AuroraResult, error) {
 		builds++
@@ -218,7 +218,7 @@ func TestE2EAutoscalingLowMemory(t *testing.T) {
 		PRIMARY KEY (id)
 	)`)
 	tt.SeedRows(t, "INSERT INTO t1autoscalelowmem (name) SELECT 'a'", 1000)
-	r := NewTestRunner(t, "t1autoscalelowmem", "ENGINE=InnoDB", WithThreads(4), WithWriteThreads(4), WithAutoscaling())
+	r := NewTestRunner(t, "t1autoscalelowmem", "ENGINE=InnoDB", WithThreads(4), WithWriteThreads(4))
 	r.buildAurora = func(context.Context, throttler.AuroraSetup) (throttler.AuroraResult, error) {
 		return throttler.AuroraResult{Throttlers: []throttler.Throttler{&throttler.Noop{}}}, nil
 	}
@@ -247,6 +247,48 @@ func TestE2EAutoscalingLowMemory(t *testing.T) {
 	var count int
 	require.NoError(t, tt.DB.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM t1autoscalelowmem").Scan(&count))
 	require.Equal(t, 1024, count)
+}
+
+// TestE2ESkipAutoscaling runs a migration with --skip-autoscaling against a
+// faked Aurora target that would otherwise engage autoscaling (16 vCPUs) and
+// one that would otherwise select low-memory mode (2 vCPUs, 1 GiB buffer
+// pool). Neither engages: the plan stays zero and the configured thread counts
+// and chunk size are kept.
+func TestE2ESkipAutoscaling(t *testing.T) {
+	t.Parallel()
+	for name, vcpus := range map[string]int{"autoscale": 16, "lowmem": 2} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			tbl := "t1skipautoscale" + name
+			tt := testutils.NewTestTable(t, tbl, `CREATE TABLE `+tbl+` (
+				id int(11) NOT NULL AUTO_INCREMENT,
+				name varchar(255) NOT NULL,
+				PRIMARY KEY (id)
+			)`)
+			testutils.RunSQL(t, `INSERT INTO `+tbl+` (name) VALUES ('a'), ('b'), ('c'), ('d'), ('e')`)
+			r := NewTestRunner(t, tbl, "ENGINE=InnoDB", WithThreads(3), WithWriteThreads(5), WithSkipAutoscaling())
+			r.buildAurora = func(context.Context, throttler.AuroraSetup) (throttler.AuroraResult, error) {
+				return throttler.AuroraResult{Throttlers: []throttler.Throttler{&throttler.Noop{}}, RedoAware: true}, nil
+			}
+			r.auroraVCPUs = func(context.Context, *sql.DB) (int, error) { return vcpus, nil }
+			r.bufferPoolSize = func(context.Context, *sql.DB) (uint64, error) { return 1 << 30, nil }
+			targetChunkSize := r.migration.TargetChunkSize
+			require.NoError(t, r.Run(t.Context()))
+			defer utils.CloseAndLog(r)
+
+			require.Zero(t, r.autoscale)
+			require.Equal(t, 3, r.migration.Threads)
+			require.Equal(t, 5, r.migration.WriteThreads)
+			require.Equal(t, targetChunkSize, r.migration.TargetChunkSize)
+			copierAutoscale, checksumAutoscale := r.autoscaleConfigs()
+			require.False(t, copierAutoscale.Enabled)
+			require.False(t, checksumAutoscale.Enabled)
+
+			var count int
+			require.NoError(t, tt.DB.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM "+tbl).Scan(&count))
+			require.Equal(t, 5, count)
+		})
+	}
 }
 
 func TestE2ENullAlterWithReplicas(t *testing.T) {
