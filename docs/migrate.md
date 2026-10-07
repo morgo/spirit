@@ -391,7 +391,7 @@ There are some restrictions to `--statement`:
 
 The in-memory byte budget the copier sizes each copy chunk against. This is a _byte_ target, not a time target: the copier reads full rows into memory and estimates each chunk's size from the values it read (their length once rendered as SQL, which approximates their size in memory), and its measured chunk time is a poor sizing signal (it includes the wait behind the write queue, which inflates under load independently of chunk size). Bytes-per-row is a stable property of the data, so a byte budget keeps chunks convergent under load and large enough to engage InnoDB/Aurora read-ahead.
 
-The chunker adjusts the row count per chunk so that the estimated size of each chunk trends toward this budget, using a 90th-percentile servo over the last 10 chunks (with a `100,000`-row ceiling and a `10`-row floor). The default of 16 MiB is roughly 1024 16KB InnoDB pages per chunk; most users should not need to change it. Low-memory mode (see [skip-autoscaling](#skip-autoscaling)) lowers it to 1 MiB.
+The chunker adjusts the row count per chunk so that the estimated size of each chunk trends toward this budget, using a 90th-percentile servo over the last 10 chunks (with a `100,000`-row ceiling and a `10`-row floor). The default of 16 MiB is roughly 1024 16KB InnoDB pages per chunk; most users should not need to change it. Small-instance mode (see [skip-autoscaling](#skip-autoscaling)) lowers it to 1 MiB.
 
 ### threads
 
@@ -406,7 +406,7 @@ Spirit uses `threads` to set the parallelism of:
 
 The write side of the copy — the applier's write workers — is controlled separately by [write-threads](#write-threads).
 
-This flag is **ignored** when [autoscaling](#skip-autoscaling) engages (on Aurora, unless `--skip-autoscaling` is set): the autoscaler sizes both pools from the instance instead.
+This flag is **replaced** on Aurora unless `--skip-autoscaling` is set (see [skip-autoscaling](#skip-autoscaling)): with 4 or more vCPUs the autoscaler sizes both pools from the instance, and with fewer, small-instance mode sets it to 1.
 
 `threads` does not size the connection pool. The pool is [max-connections](#max-connections) and nothing else, and everything below shares it concurrently:
 
@@ -427,7 +427,7 @@ Throttler polling is not counted: it runs on a dedicated monitoring pool.
 
 You may want to wrap `threads` in automation and set it to a percentage of the cores of your database server. For example, if you have a 32-core machine you may choose to set this to `8`. Approximately 25% is a good starting point, making sure you always leave plenty of free cores for regular database operations. If your migration is IO bound and/or your IO latency is high (such as Aurora) you may even go higher than 25%.
 
-On Aurora, Spirit scales the read, write and checksum threads dynamically by default, driven by throttler feedback (see [skip-autoscaling](#skip-autoscaling)). On other servers, and with `--skip-autoscaling`, Spirit does not adjust the number of threads while running, but it does support automatically resuming from a checkpoint if it is killed. This means that if you find that you've misjudged the number of threads, you can simply kill the Spirit process and start it again with different values.
+On Aurora with 4 or more vCPUs, Spirit scales the read, write and checksum threads dynamically by default, driven by throttler feedback; below 4 vCPUs it fixes them at 1 (see [skip-autoscaling](#skip-autoscaling)). On other servers, and with `--skip-autoscaling`, Spirit does not adjust the number of threads while running, but it does support automatically resuming from a checkpoint if it is killed. This means that if you find that you've misjudged the number of threads, you can simply kill the Spirit process and start it again with different values.
 
 One piece of pacing does not depend on autoscaling: the checksum phase waits on the throttler before dispatching a chunk, with or without it. It reacts to *load* signals only — see [checksum scaling](#checksum-scaling) for why replica lag deliberately does not pause a checksum. What autoscaling adds is movement of the checksum's own worker count.
 
@@ -440,14 +440,22 @@ Sets the parallelism of the **applier's write workers** — the pool that lands 
 
 Replication (binlog) apply parallelism is **not** controlled by this flag. Buffered replication changes for tables with a memory-comparable primary key are drained with up to `8` applier batches in flight (a flush snapshot holds one image per key, so batches are disjoint and commute); other drains — non-memory-comparable keys post-copy, and the final under-lock flush at cutover — apply serially. The concurrency is a library-level setting (`ClientConfig.FlushConcurrency`) with no CLI flag today; raising `write-threads` does not speed up binlog catch-up.
 
-This flag is **ignored** when [autoscaling](#skip-autoscaling) engages: the autoscaler sizes the write pool from the instance (vCPU count minus 2) and treats that as its starting point.
+This flag is **replaced** on Aurora unless `--skip-autoscaling` is set (see [skip-autoscaling](#skip-autoscaling)): with 4 or more vCPUs the autoscaler sizes the write pool from the instance (vCPU count minus 2) and treats that as its starting point, and with fewer, small-instance mode sets it to 1.
 
 ### skip-autoscaling
 
 - Type: Boolean
 - Default value: `false`
 
-Disables autoscaling. Autoscaling is on by default and engages only on Aurora (see the conditions at the end of this section), so on any other server this flag has no effect. With `--skip-autoscaling`, the copy, checksum and apply pools run fixed at [threads](#threads) and [write-threads](#write-threads) for the whole run, and low-memory mode (below) does not apply.
+Disables autoscaling. Autoscaling is on by default. On Aurora, Spirit chooses the thread counts from the instance size, and [threads](#threads) and [write-threads](#write-threads) are replaced:
+
+| Target | Thread counts |
+| --- | --- |
+| Aurora, 4 or more vCPUs | **Autoscaling**: derived from the instance and adjusted on throttler feedback (described below). |
+| Aurora, fewer than 4 vCPUs | **Small-instance mode**: 1 read thread, 1 write thread, 1 MiB chunks, nothing scales (described below). |
+| Not Aurora, or `--skip-autoscaling` | Fixed at [threads](#threads) and [write-threads](#write-threads) for the whole run. |
+
+On a server that is not Aurora this flag has no effect. Three Aurora cases fall back to the configured counts, each with a logged reason: the Aurora probe failed (for example an under-granted user), `spirit move` has a target that is not Aurora, or the connection pool ([max-connections](#max-connections)) cannot hold the derived bounds (`spirit sync` only). A target below 4 vCPUs selects small-instance mode even then.
 
 When autoscaling engages, Spirit dynamically adjusts the number of copy read threads, the number of applier write threads, and the number of checksum threads, based on feedback from the throttlers. The copy phase is described first; see [checksum scaling](#checksum-scaling) below for how the checksum differs. Each throttler reports a continuous *utilization* signal (0 = idle, 1.0 = the point at which it would hard-stop the copy); the controller takes the highest signal across all throttlers and steers the thread counts to keep it in a comfortable band. Because both pools contribute to the same signal, utilization alone cannot tell which side to move — the buffer queue between the readers and the writers arbitrates: a near-empty queue that writers drain instantly means the read side is the limiting (or, under load, the responsible) pool; a near-full queue where chunks wait as long as they take to write means the write side is.
 
@@ -463,7 +471,7 @@ The band has hysteresis, so where it settles depends on which side it approaches
 | Instance | vCPUs | Apply (write) | Copy read / checksum | Change-feed flush |
 | --- | --- | --- | --- | --- |
 | `db.t4g.medium` | 2 | 1 † | 1 † | 1 × 1000 † |
-| `db.r6g.large` | 2 | \* | \* | 8 × 1000 |
+| `db.r6g.large` | 2 | 1 † | 1 † | 1 × 1000 † |
 | `db.r6g.xlarge` | 4 | 2 → 4 | 2 → 2 | 8 × 1000 |
 | `db.r6g.2xlarge` | 8 | 6 → 12 | 2 → 4 | 8 × 1000 |
 | `db.r6g.4xlarge` | 16 | 14 → 28 | 4 → 8 | 14 × 571 |
@@ -473,11 +481,9 @@ The band has hysteresis, so where it settles depends on which side it approaches
 | `db.r8g.24xlarge` | 96 | 94 → 188 | 24 → 48 | 32 × 250 |
 | `db.r8g.48xlarge` | 192 | 190 → 380 | 48 → 96 | 32 × 250 |
 
-\* Below 4 vCPUs autoscaling does not engage at all: the two thread counts stay exactly as you configured them via [threads](#threads) and [write-threads](#write-threads) — see the bottom of this section. The flush shape is not a flag, so it is not "as configured" in the same sense; it simply stays at the change feed's own default of `8 × 1000`, which is also what every non-Aurora target and every derived concurrency at or below 8 gets.
+† Small-instance mode: fixed counts, no scaling, and 1 MiB copy chunks. See below.
 
-† Low-memory mode: fixed counts, no scaling, and 1 MiB copy chunks. See below.
-
-**Low-memory mode.** A target with at most 2 vCPUs **and** an `innodb_buffer_pool_size` of at most 1.5 GiB (a `db.t4g.medium`-class instance) gets low-memory mode instead of the configured counts, because the defaults (4 readers, 4 writers, 16 MiB chunks, 8 concurrent change-feed flushes) can run such an instance out of memory. In low-memory mode the copy and the checksum use 1 read thread, the applier uses 1 write thread, the change feed flushes 1 statement at a time (`1 × 1000`), and [target-chunk-size](#target-chunk-size) is lowered to 1 MiB (a smaller configured value is kept). Nothing scales: the controllers stay off, as on any instance below 4 vCPUs. It overrides [threads](#threads), [write-threads](#write-threads) and [target-chunk-size](#target-chunk-size), is logged once at startup, and applies only when the target is Aurora and `--skip-autoscaling` is not set. A 2-vCPU instance with a larger buffer pool (for example `db.r6g.large`) keeps the configured counts.
+**Small-instance mode.** An Aurora target with fewer than 4 vCPUs gets small-instance mode. Two reasons: the smallest instances (`db.t4g.medium`) were observed to run out of memory at the defaults (4 readers, 4 writers, 16 MiB chunks, 8 concurrent change-feed flushes), and below 4 vCPUs one thread is too large a share of the instance for the controllers to steer. In small-instance mode the copy and the checksum use 1 read thread, the applier uses 1 write thread, the change feed flushes 1 statement at a time (`1 × 1000`), and [target-chunk-size](#target-chunk-size) is lowered to 1 MiB (a smaller configured value is kept). Nothing scales. The change feed drains serially, one 1000-row statement at a time, so on a write-heavy table the binlog backlog can grow faster than it drains and outrun binlog retention. For a write-heavy table on a 2-vCPU instance with ample memory (for example `db.r6g.large`), use `--skip-autoscaling` to keep the configured counts and the default drain (`8 × 1000`). It overrides [threads](#threads), [write-threads](#write-threads) and [target-chunk-size](#target-chunk-size) and is logged once at startup; replacing a non-default [threads](#threads) or [write-threads](#write-threads) logs a warning. Set `--skip-autoscaling` to keep the configured values instead.
 
 For a size not listed: write threads start at `vCPUs - 2` (minimum 1) and may reach twice that; read threads start at `ceil((vCPUs - 2) / 4)` (minimum 2) and may reach `ceil(vCPUs / 2)`. `vCPUs` is read from `@@innodb_buffer_pool_instances`, and the resolved counts are logged once at startup. The lower bound is always 1 — the controller may shed below the starting value. Note `xlarge`, the smallest size that engages: its read bounds meet at 2, so the read side can shed but not grow there.
 
@@ -514,11 +520,11 @@ When budgeting proxy or server connection limits, use `max-connections` and do n
 
 One consequence to be aware of: on a well-provisioned target where the writers always keep pace, the queue is drained the instant chunks arrive — which is exactly what "read-limited" looks like — so the read pool tends to ramp well above its starting size early in the copy. That ramp is additive (one thread per ~15s), so on a large instance the read side takes a few minutes to reach its ceiling; overall load remains governed by the utilization band and, ultimately, the hard-stop throttle.
 
-The signal comes from the Aurora throttlers — the threads signal and commit-latency (see [max-commit-latency](#max-commit-latency)) — which are auto-enabled on Aurora. The threads signal compares a running-thread count against the instance vCPU count: by default it uses a **redo-aware** count from `performance_schema` that excludes threads parked on redo-log flush (letting the copy oversubscribe the redo log for more throughput), and falls back to the server's plain `Threads_running` count when the account lacks the extra `performance_schema` grants. commit-latency complements it by watching storage saturation directly — and in redo-aware mode it is also the backstop that permits scaling *above* the starting value, since the redo-aware count deliberately ignores the redo-log waiters that oversubscription would produce (so with `--max-commit-latency=0` the pool can shed but not grow). Replica lag ([replica-dsn](#replica-dsn)) deliberately contributes **no** continuous signal: lag is a budget, not a load gauge, and steering on it would park replicas well behind. Replicas remain protected by the hard-stop throttle only. If no continuous signal is available at all (for example a non-Aurora target), autoscaling does not engage: the reason is logged and both pools run fixed at [threads](#threads) and [write-threads](#write-threads). A failed Aurora probe (for example an under-granted user) warns; a target that is simply not Aurora logs at info level. On Aurora instances with fewer than 4 vCPUs autoscaling also does not engage (with a warning): a single thread there is too large a share of total capacity for gradual scaling to mean anything, and a fixed pool behaves better. The exception is a low-memory instance, which gets low-memory mode's fixed counts instead of the configured ones (see above). In short, the flags are only overridden when the controller can actually steer, or when low-memory mode replaces them with fixed counts to keep a small instance from running out of memory.
+The signal comes from the Aurora throttlers — the threads signal and commit-latency (see [max-commit-latency](#max-commit-latency)) — which are auto-enabled on Aurora. The threads signal compares a running-thread count against the instance vCPU count: by default it uses a **redo-aware** count from `performance_schema` that excludes threads parked on redo-log flush (letting the copy oversubscribe the redo log for more throughput), and falls back to the server's plain `Threads_running` count when the account lacks the extra `performance_schema` grants. commit-latency complements it by watching storage saturation directly — and in redo-aware mode it is also the backstop that permits scaling *above* the starting value, since the redo-aware count deliberately ignores the redo-log waiters that oversubscription would produce (so with `--max-commit-latency=0` the pool can shed but not grow). Replica lag ([replica-dsn](#replica-dsn)) deliberately contributes **no** continuous signal: lag is a budget, not a load gauge, and steering on it would park replicas well behind. Replicas remain protected by the hard-stop throttle only. If no continuous signal is available at all (for example a non-Aurora target), autoscaling does not engage: the reason is logged and both pools run fixed at [threads](#threads) and [write-threads](#write-threads). A failed Aurora probe (for example an under-granted user) warns; a target that is simply not Aurora logs at info level. Aurora instances with fewer than 4 vCPUs get small-instance mode instead (see above).
 
 If a signal stops updating mid-migration (for example the monitoring connection is partitioned, or grants are revoked), the controller does not keep scaling on the frozen value: after ~15 seconds without a successful sample the signal reports a neutral utilization inside the hold band, freezing the thread counts in place (a warning is logged). Scaling resumes automatically when sampling recovers.
 
-`spirit move` and `spirit sync` use the same flag and the same derivation. With several targets, every target must qualify, the bounds come from the smallest one, and targets that share a server share its budget; see [move's skip-autoscaling](move.md#skip-autoscaling).
+`spirit move` and `spirit sync` use the same flag and the same derivation. With several targets, every target must qualify, one target below 4 vCPUs puts the whole run in small-instance mode, the bounds come from the smallest one, and targets that share a server share its budget; see [move's skip-autoscaling](move.md#skip-autoscaling).
 
 #### Checksum scaling
 

@@ -43,8 +43,9 @@ func TestNewClientDefaultConfigServerIDIsFresh(t *testing.T) {
 // TestResolveFlushShape pins both drain knobs' 0-means-default handling.
 // Both are set together by the migration runner from autoscale.FlushBounds,
 // and both are left zero by every other caller — so the zero case is the one
-// that matters most: it is what a non-Aurora target, a too-small instance, and
-// every out-of-tree change.Source get.
+// that matters most: it is what a run without autoscaling (non-Aurora, or
+// --skip-autoscaling) and every out-of-tree change.Source get. Small-instance
+// mode sets the concurrency to 1 and leaves the batch size zero.
 func TestResolveFlushShape(t *testing.T) {
 	cfg := NewClientDefaultConfig()
 	require.Zero(t, cfg.FlushConcurrency, "left zero so the client applies the default")

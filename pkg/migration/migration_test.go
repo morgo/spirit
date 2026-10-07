@@ -205,58 +205,50 @@ func TestE2EAutoscalingEngaged(t *testing.T) {
 	require.Equal(t, 5, count)
 }
 
-// TestE2EAutoscalingLowMemory runs a migration against a faked low-memory
-// Aurora target (2 vCPUs, 1 GiB buffer pool: a db.t4g.medium class instance).
+// TestE2EAutoscalingSmallInstance runs a migration against a faked Aurora target
+// below autoscale.MinVCPUs (2 vCPUs: a db.t4g.medium or db.r6g.large).
 // The controllers stay off, and the copier, checksum and change feed run fixed
-// at one worker each with the low-memory chunk budget, replacing the
+// at one worker each with the small-instance chunk budget, replacing the
 // configured counts.
-func TestE2EAutoscalingLowMemory(t *testing.T) {
+func TestE2EAutoscalingSmallInstance(t *testing.T) {
 	t.Parallel()
-	tt := testutils.NewTestTable(t, "t1autoscalelowmem", `CREATE TABLE t1autoscalelowmem (
+	tt := testutils.NewTestTable(t, "t1autoscalesmallinst", `CREATE TABLE t1autoscalesmallinst (
 		id int(11) NOT NULL AUTO_INCREMENT,
 		name varchar(255) NOT NULL,
 		PRIMARY KEY (id)
 	)`)
-	tt.SeedRows(t, "INSERT INTO t1autoscalelowmem (name) SELECT 'a'", 1000)
-	r := NewTestRunner(t, "t1autoscalelowmem", "ENGINE=InnoDB", WithThreads(4), WithWriteThreads(4))
+	tt.SeedRows(t, "INSERT INTO t1autoscalesmallinst (name) SELECT 'a'", 1000)
+	r := NewTestRunner(t, "t1autoscalesmallinst", "ENGINE=InnoDB", WithThreads(4), WithWriteThreads(4))
 	r.buildAurora = func(context.Context, throttler.AuroraSetup) (throttler.AuroraResult, error) {
 		return throttler.AuroraResult{Throttlers: []throttler.Throttler{&throttler.Noop{}}}, nil
 	}
 	r.auroraVCPUs = func(context.Context, *sql.DB) (int, error) { return 2, nil }
-	var bufferPoolReads int
-	r.bufferPoolSize = func(context.Context, *sql.DB) (uint64, error) {
-		bufferPoolReads++
-		return 1 << 30, nil
-	}
 	require.NoError(t, r.Run(t.Context()))
 	defer utils.CloseAndLog(r)
 
-	require.Equal(t, 1, bufferPoolReads, "the runner's probe, not the local server's buffer pool, decides")
-
-	require.Equal(t, concurrency.Plan{LowMemory: true, FlushConcurrency: autoscale.LowMemoryFlushConcurrency}, r.autoscale)
+	require.Equal(t, concurrency.Plan{SmallInstance: true, FlushConcurrency: autoscale.SmallInstanceFlushConcurrency}, r.autoscale)
 	require.Equal(t, 1, r.migration.Threads)
 	require.Equal(t, 1, r.migration.WriteThreads)
-	require.Equal(t, uint64(autoscale.LowMemoryTargetChunkBytes), r.migration.TargetChunkSize)
+	require.Equal(t, uint64(autoscale.SmallInstanceTargetChunkBytes), r.migration.TargetChunkSize)
 	copierAutoscale, checksumAutoscale := r.autoscaleConfigs()
 	require.Equal(t, copier.AutoscaleConfig{StartThreads: 1, MaxThreads: 1, MaxReadThreads: 1}, copierAutoscale)
 	require.Equal(t, checksum.AutoscaleConfig{MaxThreads: 1}, checksumAutoscale)
 	feed := r.replClientConfig(r.autoscale.FlushConcurrency, r.autoscale.FlushBatchSize)
-	require.Equal(t, autoscale.LowMemoryFlushConcurrency, feed.FlushConcurrency)
+	require.Equal(t, autoscale.SmallInstanceFlushConcurrency, feed.FlushConcurrency)
 	require.Zero(t, feed.BatchSize, "the change package's default batch size")
 
 	var count int
-	require.NoError(t, tt.DB.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM t1autoscalelowmem").Scan(&count))
+	require.NoError(t, tt.DB.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM t1autoscalesmallinst").Scan(&count))
 	require.Equal(t, 1024, count)
 }
 
 // TestE2ESkipAutoscaling runs a migration with --skip-autoscaling against a
 // faked Aurora target that would otherwise engage autoscaling (16 vCPUs) and
-// one that would otherwise select low-memory mode (2 vCPUs, 1 GiB buffer
-// pool). Neither engages: the plan stays zero and the configured thread counts
+// one that would otherwise select small-instance mode (2 vCPUs). Neither engages: the plan stays zero and the configured thread counts
 // and chunk size are kept.
 func TestE2ESkipAutoscaling(t *testing.T) {
 	t.Parallel()
-	for name, vcpus := range map[string]int{"autoscale": 16, "lowmem": 2} {
+	for name, vcpus := range map[string]int{"autoscale": 16, "smallinst": 2} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			tbl := "t1skipautoscale" + name
@@ -271,7 +263,6 @@ func TestE2ESkipAutoscaling(t *testing.T) {
 				return throttler.AuroraResult{Throttlers: []throttler.Throttler{&throttler.Noop{}}, RedoAware: true}, nil
 			}
 			r.auroraVCPUs = func(context.Context, *sql.DB) (int, error) { return vcpus, nil }
-			r.bufferPoolSize = func(context.Context, *sql.DB) (uint64, error) { return 1 << 30, nil }
 			targetChunkSize := r.migration.TargetChunkSize
 			require.NoError(t, r.Run(t.Context()))
 			defer utils.CloseAndLog(r)
