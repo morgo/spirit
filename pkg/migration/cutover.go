@@ -366,6 +366,14 @@ func (c *CutOver) executeRenameUnderLock(ctx context.Context, tablesToLock []*ta
 	}
 	var referenced []*table.TableInfo
 	if foreignKeys != nil {
+		// Before the lock: the probe finds out whether adding the foreign
+		// keys under it would build an index.
+		if err := foreignKeys.probe(ctx); err != nil {
+			if errors.Is(err, check.ErrRefused) {
+				return fmt.Errorf("%w: %w", errCutoverRefused, err)
+			}
+			return err
+		}
 		var err error
 		if referenced, err = foreignKeys.referenced(ctx); err != nil {
 			return err

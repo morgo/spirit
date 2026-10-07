@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"slices"
 	"strings"
 	"testing"
@@ -15,6 +16,7 @@ import (
 	"github.com/block/spirit/pkg/sentinel"
 	"github.com/block/spirit/pkg/statement"
 	"github.com/block/spirit/pkg/status"
+	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
 	"github.com/stretchr/testify/assert"
@@ -446,7 +448,7 @@ func TestRestoreForeignKeyNamesFromTable(t *testing.T) {
 	fk := parsedCreateTable(t, db, "child").GetConstraints()
 	i := slices.IndexFunc(fk, func(c statement.Constraint) bool { return c.Name == "fk_child_parent" })
 	require.GreaterOrEqual(t, i, 0)
-	clause, err := restoreForeignKey(fk[i], "_fk_child_parent_new", nil)
+	clause, err := restoreForeignKey(fk[i], "_fk_child_parent_new", nil, "")
 	require.NoError(t, err)
 	require.NoError(t, exec(t.Context(), "ALTER TABLE child DROP FOREIGN KEY fk_child_parent, ADD "+clause))
 	testutils.RunSQLInDatabase(t, dbName, "ALTER TABLE child RENAME INDEX _fk_child_parent_new TO fk_child_parent")
@@ -467,9 +469,94 @@ func TestRestoreForeignKeyRenamesColumns(t *testing.T) {
 	ct, err := statement.ParseCreateTable(`CREATE TABLE child (id INT PRIMARY KEY, pid INT, other INT,
 		CONSTRAINT fk FOREIGN KEY (pid, other) REFERENCES parent (id, pid) ON DELETE CASCADE)`)
 	require.NoError(t, err)
-	clause, err := restoreForeignKey(ct.GetConstraints()[0], "_fk_new", map[string]string{"pid": "parent_id"})
+	clause, err := restoreForeignKey(ct.GetConstraints()[0], "_fk_new", map[string]string{"pid": "parent_id"}, "")
 	require.NoError(t, err)
 	assert.Equal(t, "CONSTRAINT `_fk_new` FOREIGN KEY (`parent_id`, `other`) REFERENCES `parent`(`id`, `pid`) ON DELETE CASCADE", clause)
 	// The parsed definition is left alone.
 	assert.Equal(t, "pid", ct.GetConstraints()[0].Raw.Keys[0].Column.Name.O)
+}
+
+// probeFixture returns the restrict fixture with a new child table created
+// by newChildSQL and seeded from child, and a foreignKeyCutover for it.
+func probeFixture(t *testing.T, newChildSQL string) (string, *sql.DB, *foreignKeyCutover) {
+	t.Helper()
+	dbName, db := restrictFixture(t)
+	testutils.RunSQLInDatabase(t, dbName, newChildSQL)
+	testutils.RunSQLInDatabase(t, dbName, "INSERT INTO _child_new SELECT * FROM child")
+	return dbName, db, &foreignKeyCutover{db: db, dbConfig: dbconn.NewDBConfig(), logger: slog.Default(), tables: []*foreignKeyTable{{
+		stmt:         statement.MustNew("ALTER TABLE child " + copyAlter)[0],
+		table:        table.NewTableInfo(db, dbName, "child"),
+		newTable:     table.NewTableInfo(db, dbName, "_child_new"),
+		oldTableName: "_child_old",
+	}}}
+}
+
+// lockForCutover takes the cutover's table lock for f's single table.
+func lockForCutover(t *testing.T, f *foreignKeyCutover) *dbconn.TableLock {
+	t.Helper()
+	referenced, err := f.referenced(t.Context())
+	require.NoError(t, err)
+	lock, err := dbconn.NewTableLockReferencing(t.Context(), f.db,
+		[]*table.TableInfo{f.tables[0].table, f.tables[0].newTable}, referenced, f.dbConfig, f.logger)
+	require.NoError(t, err)
+	t.Cleanup(func() { utils.CloseAndLogWithContext(context.Background(), lock) })
+	return lock
+}
+
+// requireNoProbeTables checks that a probe dropped its tables.
+func requireNoProbeTables(t *testing.T, db *sql.DB, dbName string) {
+	t.Helper()
+	var count int
+	require.NoError(t, db.QueryRowContext(t.Context(),
+		"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = ? AND table_name IN (?, ?)",
+		dbName, utils.ForeignKeyProbeTableName("child"), utils.ForeignKeyProbeParentName("child", 0)).Scan(&count))
+	require.Zero(t, count)
+}
+
+// TestForeignKeysCutoverRefusesIndexBuild checks that the cutover refuses to
+// add a foreign key the new table has no index for, before it takes the table
+// lock, rather than let MySQL build one with the lock held, and leaves the new
+// table as it was.
+func TestForeignKeysCutoverRefusesIndexBuild(t *testing.T) {
+	t.Parallel()
+	// As if the index had gone missing from the new table since setup.
+	dbName, db, f := probeFixture(t, "CREATE TABLE _child_new (id INT NOT NULL AUTO_INCREMENT PRIMARY KEY, pid INT NOT NULL)")
+	before := foreignKeysAndIndexes(parsedCreateTable(t, db, "_child_new"))
+
+	err := f.probe(t.Context())
+	require.ErrorIs(t, err, check.ErrRefused)
+	require.ErrorContains(t, err, "MySQL would build an index")
+	assert.Nil(t, f.tables[0].probed)
+	requireNoProbeTables(t, db, dbName)
+	assert.Equal(t, before, foreignKeysAndIndexes(parsedCreateTable(t, db, "_child_new")))
+
+	// Under the lock, foreign keys that were not probed are refused too.
+	err = f.addToNewTables(t.Context(), lockForCutover(t, f))
+	require.ErrorIs(t, err, check.ErrRefused)
+	require.ErrorContains(t, err, "changed after they were probed")
+	assert.Equal(t, before, foreignKeysAndIndexes(parsedCreateTable(t, db, "_child_new")))
+}
+
+// TestForeignKeysCutoverRefusesChangeAfterProbe checks that the cutover
+// refuses to add the foreign keys to a new table whose definition changed
+// after the probe, and adds them when it did not.
+func TestForeignKeysCutoverRefusesChangeAfterProbe(t *testing.T) {
+	t.Parallel()
+	dbName, db, f := probeFixture(t, "CREATE TABLE _child_new (id INT NOT NULL AUTO_INCREMENT PRIMARY KEY, pid INT NOT NULL, KEY fk_restrict (pid))")
+	require.NoError(t, f.probe(t.Context()))
+	require.NotNil(t, f.tables[0].probed)
+	requireNoProbeTables(t, db, dbName)
+
+	testutils.RunSQLInDatabase(t, dbName, "ALTER TABLE _child_new ADD KEY extra (id, pid)")
+	lock := lockForCutover(t, f)
+	err := f.addToNewTables(t.Context(), lock)
+	require.ErrorIs(t, err, check.ErrRefused)
+	require.ErrorContains(t, err, "changed after its foreign keys were probed")
+	require.NoError(t, lock.Close(t.Context()))
+
+	require.NoError(t, f.probe(t.Context()))
+	require.NoError(t, f.addToNewTables(t.Context(), lockForCutover(t, f)))
+	after := foreignKeysAndIndexes(parsedCreateTable(t, db, "_child_new"))
+	assert.Len(t, after, 4) // the foreign key and the three indexes
+	assert.Contains(t, after, "CONSTRAINT _fk_restrict_new FOREIGN KEY (pid) REFERENCES parent (id)")
 }
