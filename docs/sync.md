@@ -118,11 +118,12 @@ cannot see is not reported and not refused.
 ## Autoscaling
 
 On an Aurora target, sync chooses the thread counts from the instance size
-and ignores `--threads` and `--write-threads`: with at least four vCPUs it
+and replaces `--threads` and `--write-threads`: with at least four vCPUs it
 autoscales them; with fewer it runs in small-instance mode: 1 read thread, 1 write
 thread, 1 concurrent change-feed flush, a 1 MiB `--target-chunk-size`, and no
 scaling. See [migrate's small-instance mode](migrate.md#skip-autoscaling). A
-non-Aurora target, or `--skip-autoscaling`, keeps the configured counts.
+non-Aurora target, `--skip-autoscaling`, a failed Aurora probe, or a
+connection pool too small for the derived bounds keeps the configured counts.
 The target's load and commit latency are sampled through a separate two-connection
 monitor pool. That monitoring, and the throttling it drives, runs with
 `--skip-autoscaling` too (see [max-commit-latency](#max-commit-latency)); the
@@ -201,6 +202,8 @@ users should not need to change it.
 
 How many chunks to copy in parallel from the source during the initial copy.
 
+Replaced on an Aurora target, by autoscaling or, below 4 vCPUs, by small-instance mode. Set `--skip-autoscaling` to keep it.
+
 ### write-threads
 
 - Type: Integer
@@ -208,7 +211,7 @@ How many chunks to copy in parallel from the source during the initial copy.
 
 How many concurrent write threads to use on the target.
 
-These counts are overridden when [autoscaling](#autoscaling) engages.
+These counts are replaced on an Aurora target, by autoscaling or, below 4 vCPUs, by small-instance mode. Set `--skip-autoscaling` to keep them.
 
 ### flush-interval
 

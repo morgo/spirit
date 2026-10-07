@@ -332,6 +332,13 @@ func TestEngageSmallInstance(t *testing.T) {
 	require.Equal(t, 1, f.Threads)
 	require.Contains(t, logs, "level=WARN msg=\"small-instance mode replaces the configured --threads/--write-threads")
 
+	// A non-default --write-threads alone warns too: it is the likelier load
+	// cap on a production writer.
+	f = &flags.Common{Threads: flags.DefaultThreads, WriteThreads: 8}
+	_, logs = engageForTest(t, f, Request{Targets: []Target{{Aurora: aurora(false)}}, VCPUs: vcpus(2)})
+	require.Equal(t, 1, f.WriteThreads)
+	require.Contains(t, logs, "level=WARN msg=\"small-instance mode replaces the configured --threads/--write-threads")
+
 	// One small target among several is enough: the counts are shared.
 	f = &flags.Common{Threads: 4, WriteThreads: 4}
 	sizes := []int{16, 2}

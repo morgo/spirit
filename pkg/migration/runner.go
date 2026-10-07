@@ -1021,8 +1021,8 @@ func (r *Runner) replClientConfig(flushConcurrency, flushBatchSize int) *change.
 	cfg.CancelFunc = r.fatalError
 	cfg.DBConfig = r.dbConfig
 	// Zero for either of these means the change package's own default, which is
-	// what a non-Aurora or too-small instance gets. Small-instance mode sets only
-	// the concurrency.
+	// what a run without autoscaling gets (non-Aurora, or --skip-autoscaling).
+	// Small-instance mode sets only the concurrency, to 1.
 	cfg.FlushConcurrency = flushConcurrency
 	cfg.BatchSize = flushBatchSize
 	cfg.UnderLoad = r.flushUnderLoad

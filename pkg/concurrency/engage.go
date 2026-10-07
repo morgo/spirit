@@ -4,7 +4,9 @@
 // and overrides the configured thread counts when it does. On an instance too
 // small to scale it selects small-instance mode instead, which fixes every pool at
 // one worker and shrinks the copy chunks. Either way, on Aurora the thread
-// counts come from the instance, not from --threads and --write-threads.
+// counts come from the instance, not from --threads and --write-threads,
+// except where autoscaling falls back (a failed probe, a non-Aurora sibling
+// target, or a pool Fit refuses).
 //
 // The three runners used to each derive these with their own copy of the
 // rules. What stays with each runner is genuinely topology-specific: which

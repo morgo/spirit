@@ -43,9 +43,9 @@ const (
 type Common struct {
 	// Threads is the number of read workers: the copier's read side and the
 	// checksum's workers.
-	Threads int `name:"threads" help:"Number of concurrent threads for copy and checksum tasks. Ignored when autoscaling engages (on Aurora, unless --skip-autoscaling is set)" optional:"" default:"4"`
+	Threads int `name:"threads" help:"Number of concurrent threads for copy and checksum tasks. Replaced on Aurora (by autoscaling, or by small-instance mode below 4 vCPUs) unless --skip-autoscaling is set" optional:"" default:"4"`
 	// WriteThreads is the number of apply (write) workers, per target.
-	WriteThreads int `name:"write-threads" help:"Number of concurrent apply (write) threads per target. Ignored when autoscaling engages (on Aurora, unless --skip-autoscaling is set)" optional:"" default:"4"`
+	WriteThreads int `name:"write-threads" help:"Number of concurrent apply (write) threads per target. Replaced on Aurora (by autoscaling, or by small-instance mode below 4 vCPUs) unless --skip-autoscaling is set" optional:"" default:"4"`
 
 	// MaxConnections is the size of each connection pool spirit opens to a
 	// source or target server, set verbatim and never recomputed. Its

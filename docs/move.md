@@ -218,6 +218,8 @@ The failure is therefore immediate, but it still arrives later than it needs to:
 
 How many chunks to copy in parallel from the source.
 
+Replaced on Aurora targets, by autoscaling or, below 4 vCPUs, by small-instance mode. Set `--skip-autoscaling` to keep it.
+
 ### tls-ca
 
 - Type: String
@@ -239,7 +241,7 @@ The TLS mode applied to every source and target connection: `DISABLED`, `PREFERR
 
 How many concurrent write threads to use per target when inserting rows. This controls the fan-out parallelism of the buffered copier's write side.
 
-These counts are overridden when [autoscaling](#skip-autoscaling) engages. Set `--skip-autoscaling` to keep them.
+These counts are replaced on Aurora targets, by autoscaling or, below 4 vCPUs, by small-instance mode. Set `--skip-autoscaling` to keep them.
 
 ### skip-autoscaling
 
