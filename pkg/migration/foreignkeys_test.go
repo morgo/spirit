@@ -243,14 +243,21 @@ func restrictFixture(t *testing.T) (string, *sql.DB) {
 	return dbName, db
 }
 
-// deleteParent deletes parent row id after its child rows, as an application
-// that honors a restricting foreign key does.
+// deleteParent deletes parent row id after its child rows, in one
+// transaction, as an application that honors a restricting foreign key does.
+// The child deletes only reach the binary log at commit, so a copy of the
+// child table that the change feed maintains still has the rows when the
+// parent delete is checked.
 func deleteParent(t *testing.T, db *sql.DB, id int) {
 	t.Helper()
-	_, err := db.ExecContext(t.Context(), "DELETE FROM child WHERE pid = ?", id)
+	trx, err := db.BeginTx(t.Context(), nil)
 	require.NoError(t, err)
-	_, err = db.ExecContext(t.Context(), "DELETE FROM parent WHERE id = ?", id)
+	defer func() { _ = trx.Rollback() }()
+	_, err = trx.ExecContext(t.Context(), "DELETE FROM child WHERE pid = ?", id)
 	require.NoError(t, err)
+	_, err = trx.ExecContext(t.Context(), "DELETE FROM parent WHERE id = ?", id)
+	require.NoError(t, err)
+	require.NoError(t, trx.Commit())
 }
 
 // TestForeignKeysParentDeleteDuringCopy deletes parent rows, after their child
