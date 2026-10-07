@@ -71,12 +71,11 @@ type Runner struct {
 	// autoscale is the outcome of concurrency.Engage. Zero (not Engaged)
 	// unless autoscaling was requested and the target qualified.
 	autoscale concurrency.Plan
-	// buildAurora, auroraVCPUs and bufferPoolSize are the instance probes
-	// setupAutoscaling runs. NewRunner sets them to the throttler and dbconn
-	// packages'; tests replace them, because CI has no Aurora to probe.
-	buildAurora    func(context.Context, throttler.AuroraSetup) (throttler.AuroraResult, error)
-	auroraVCPUs    func(context.Context, *sql.DB) (int, error)
-	bufferPoolSize func(context.Context, *sql.DB) (uint64, error)
+	// buildAurora and auroraVCPUs are the instance probes setupAutoscaling runs.
+	// NewRunner sets them to the throttler package's; tests replace them,
+	// because CI has no Aurora to probe.
+	buildAurora func(context.Context, throttler.AuroraSetup) (throttler.AuroraResult, error)
+	auroraVCPUs func(context.Context, *sql.DB) (int, error)
 
 	// Changes enccapsulates all changes
 	// With a stmt, alter, table, newTable.
@@ -169,8 +168,7 @@ func NewRunner(m *Migration) (*Runner, error) {
 		buildAurora: func(ctx context.Context, setup throttler.AuroraSetup) (throttler.AuroraResult, error) {
 			return setup.Build(ctx)
 		},
-		auroraVCPUs:    throttler.AuroraVCPUs,
-		bufferPoolSize: dbconn.BufferPoolSize,
+		auroraVCPUs: throttler.AuroraVCPUs,
 	}
 	for _, change := range changes {
 		change.runner = runner // link back.
@@ -1023,8 +1021,8 @@ func (r *Runner) replClientConfig(flushConcurrency, flushBatchSize int) *change.
 	cfg.CancelFunc = r.fatalError
 	cfg.DBConfig = r.dbConfig
 	// Zero for either of these means the change package's own default, which is
-	// what a non-Aurora or too-small instance gets. Low-memory mode sets only
-	// the concurrency.
+	// what a run without autoscaling gets (non-Aurora, or --skip-autoscaling).
+	// Small-instance mode sets only the concurrency, to 1.
 	cfg.FlushConcurrency = flushConcurrency
 	cfg.BatchSize = flushBatchSize
 	cfg.UnderLoad = r.flushUnderLoad
@@ -1108,10 +1106,9 @@ func (r *Runner) setupAutoscaling(ctx context.Context) error {
 		r.monitorDB = result.MonitorDB
 	}
 	plan, err := concurrency.Engage(ctx, &r.migration.Common, concurrency.Request{
-		Targets:        []concurrency.Target{{DB: r.db, Aurora: r.aurora}},
-		VCPUs:          r.auroraVCPUs,
-		BufferPoolSize: r.bufferPoolSize,
-		Logger:         r.logger,
+		Targets: []concurrency.Target{{DB: r.db, Aurora: r.aurora}},
+		VCPUs:   r.auroraVCPUs,
+		Logger:  r.logger,
 	})
 	if err != nil {
 		return err

@@ -503,18 +503,3 @@ func TestNewAddsDSNTimeoutToDeadline(t *testing.T) {
 	require.GreaterOrEqual(t, elapsed, dsnTimeout+timeout, "the DSN timeout= was not added to the handshake budget")
 	require.Less(t, elapsed, 10*time.Second)
 }
-
-// BufferPoolSize reports the server's buffer pool, the value low-memory mode
-// gates on, not some other InnoDB sizing variable. Reading
-// @@innodb_buffer_pool_instances (the vCPU proxy on Aurora) by mistake would
-// put every 2-vCPU instance into low-memory mode.
-func TestBufferPoolSize(t *testing.T) {
-	db, err := New(testutils.DSN(), NewDBConfig())
-	require.NoError(t, err)
-	defer utils.CloseAndLog(db)
-	var want uint64
-	require.NoError(t, db.QueryRowContext(t.Context(), "SELECT VARIABLE_VALUE FROM performance_schema.global_variables WHERE VARIABLE_NAME = 'innodb_buffer_pool_size'").Scan(&want))
-	got, err := BufferPoolSize(t.Context(), db)
-	require.NoError(t, err)
-	require.Equal(t, want, got)
-}

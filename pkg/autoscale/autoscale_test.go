@@ -367,21 +367,16 @@ func TestClientCeiling(t *testing.T) {
 		"24 cores should clear even the 48xlarge derivation, growth included")
 }
 
-func TestIsLowMemory(t *testing.T) {
-	const gib = 1024 * 1024 * 1024
+func TestIsSmallInstance(t *testing.T) {
 	for _, tc := range []struct {
-		vcpus      int
-		bufferPool uint64
-		want       bool
+		vcpus int
+		want  bool
 	}{
-		{2, gib, true},                         // db.t4g.medium class
-		{1, gib, true},                         // a buffer pool under 1 GiB may report one instance
-		{2, LowMemoryMaxBufferPoolBytes, true}, // both limits are inclusive
-		{2, LowMemoryMaxBufferPoolBytes + 1, false},
-		{2, 11 * gib, false}, // db.r6g.large: same vCPUs, ample memory
-		{4, gib, false},      // large enough for the controllers
+		{1, true},  // a buffer pool under 1 GiB may report one instance
+		{2, true},  // db.t4g.medium and db.r6g.large alike
+		{3, true},  // no Aurora size, but still too small for the controllers
+		{4, false}, // db.r6g.xlarge: the smallest size the controllers engage on
 	} {
-		assert.Equalf(t, tc.want, IsLowMemory(tc.vcpus, tc.bufferPool), "vcpus=%d buffer_pool=%d", tc.vcpus, tc.bufferPool)
+		assert.Equalf(t, tc.want, IsSmallInstance(tc.vcpus), "vcpus=%d", tc.vcpus)
 	}
-	assert.Less(t, LowMemoryMaxVCPUs, MinVCPUs, "a low-memory instance must never be one the controllers engage on")
 }
