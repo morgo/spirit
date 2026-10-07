@@ -2,7 +2,7 @@
 
 The `autoscale` package holds the primitives shared by Spirit's phase-level thread-count controllers. Two phases currently scale their worker pools at runtime — the copier's read/write pools ([issue #831](https://github.com/block/spirit/issues/831)) and the checksum's reader pool ([#1087](https://github.com/block/spirit/pull/1087)) — and both apply the same control law to different pools. Defining that law once means the two cannot silently drift apart. The same holds across commands: `migrate`, `move` and `sync` all size and scale their pools with these primitives.
 
-Autoscaling is experimental and opt-in via `--enable-experimental-autoscaling`. Without it no controller runs and every pool keeps its configured size. A few pieces are used either way: both checksum checkers gate their workers through `Limiter` at a fixed limit, and `Tick` paces the applier's stats emitter.
+Autoscaling is on by default and engages only on Aurora; `--skip-autoscaling` turns it off. When it is off or does not engage, no controller runs and every pool keeps its configured size. A few pieces are used either way: both checksum checkers gate their workers through `Limiter` at a fixed limit, and `Tick` paces the applier's stats emitter.
 
 ## The zone law
 
@@ -35,7 +35,7 @@ Below `MinVCPUs` there is one more case, **low-memory mode** (`IsLowMemory`): at
 
   Unlike `Ceiling`, the read ceiling is a share of the instance rather than a multiple of the start. That is because of the checksum: its snapshot transactions must all take their read view at one instant, so the entire pool is created serially under the table lock whether or not scaling reaches it. The ceiling is spent up front, in lock time, which is why it stops at half the box. (For most real instance sizes — any multiple of 4 above `MinVCPUs` — the two formulas happen to agree, but they are not the same rule and should not be collapsed.)
 
-  Both bounds come from the instance rather than from `--threads`. When autoscaling engages, every runner ignores `--threads` and `--write-threads` entirely: a controller told to find the right size should not also be told where to stop, and those flags are usually left at their defaults. [docs/migrate.md](../../docs/migrate.md#enable-experimental-autoscaling) has the sizing worked out per instance type.
+  Both bounds come from the instance rather than from `--threads`. When autoscaling engages, every runner ignores `--threads` and `--write-threads` entirely: a controller told to find the right size should not also be told where to stop, and those flags are usually left at their defaults. [docs/migrate.md](../../docs/migrate.md#skip-autoscaling) has the sizing worked out per instance type.
 
   `move` sizes from its *smallest* target and divides the read and write starts and ceilings by the most target shards sharing one host, since those schemas share one instance. Every runner fits the read bounds to its `--max-connections` pool, and `sync` also splits that pool between checksum reads and repair writes.
 
@@ -71,4 +71,4 @@ Everything genuinely phase-specific: how big a step is, which pool it lands on, 
 - [pkg/throttler](../throttler/README.md) — the source of the continuous signal (`GradualThrottler`) and of the binary hard-stop underneath all of this
 - [pkg/copier](../copier/README.md) — the write/read autoscaler and the law's derivation
 - [pkg/checksum](../checksum/README.md) — the checksum controller and its backlog veto
-- [docs/migrate.md](../../docs/migrate.md), [docs/move.md](../../docs/move.md#enable-experimental-autoscaling), [docs/sync.md](../../docs/sync.md#autoscaling) — operator-facing documentation for `--enable-experimental-autoscaling`
+- [docs/migrate.md](../../docs/migrate.md), [docs/move.md](../../docs/move.md#skip-autoscaling), [docs/sync.md](../../docs/sync.md#autoscaling) — operator-facing documentation for autoscaling and `--skip-autoscaling`

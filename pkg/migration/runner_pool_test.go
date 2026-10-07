@@ -31,7 +31,7 @@ func TestControlPlaneConns(t *testing.T) {
 
 // TestAutoscalingLeavesThreadFlagsAloneWhenItCannotEngage is the other half of
 // "autoscaling owns the thread counts": it only owns them when it can actually
-// steer. Asking for autoscaling against a target with no continuous load signal
+// steer. Autoscaling (the default) against a target with no continuous load signal
 // (any non-Aurora server, which is what the test suite runs against) must leave
 // --threads and --write-threads exactly as configured, because the pools will
 // run fixed at those values for the whole migration.
@@ -48,7 +48,7 @@ func TestAutoscalingLeavesThreadFlagsAloneWhenItCannotEngage(t *testing.T) {
 	// would be unmistakable.
 	const threads, writeThreads = 3, 5
 	m := NewTestRunner(t, "autoscale_flags", "ENGINE=InnoDB",
-		WithAutoscaling(), WithThreads(threads), WithWriteThreads(writeThreads))
+		WithThreads(threads), WithWriteThreads(writeThreads))
 	require.NoError(t, m.Run(t.Context()))
 	t.Cleanup(func() { require.NoError(t, m.Close()) })
 

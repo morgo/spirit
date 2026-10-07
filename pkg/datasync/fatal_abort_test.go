@@ -72,7 +72,7 @@ func TestSyncFatalAbortDuringCopy(t *testing.T) {
 			runner, err := NewRunner(&Sync{
 				SourceDSN: src.FormatDSN(),
 				TargetDSN: dst.FormatDSN(),
-				Common:    flags.Common{Threads: 1, WriteThreads: 1},
+				Common:    flags.Common{Threads: 1, WriteThreads: 1, SkipAutoscaling: true},
 			})
 			require.NoError(t, err)
 			fakeAurora(runner, 8, throttler.AuroraResult{Throttlers: []throttler.Throttler{throttler.NewStallingMock(0)}})

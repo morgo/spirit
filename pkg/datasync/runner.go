@@ -858,16 +858,12 @@ func (r *Runner) setupThrottling(ctx context.Context) error {
 	if injected := r.sync.Applier; injected != nil {
 		a, ok := injected.(*applier.MySQLApplier)
 		if !ok || len(a.GetTargets()) != 1 || a.GetTargets()[0].DB != r.target.DB {
-			if r.sync.EnableExperimentalAutoscaling {
-				r.logger.Warn("sync autoscaling disabled: injected applier must use the monitored single target")
-			}
+			r.logger.Info("sync Aurora throttling and autoscaling disabled: injected applier must use the monitored single target")
 			return nil
 		}
 	}
 	if r.target.Config == nil {
-		if r.sync.EnableExperimentalAutoscaling {
-			r.logger.Warn("sync autoscaling disabled: target connection config unavailable")
-		}
+		r.logger.Info("sync Aurora throttling and autoscaling disabled: target connection config unavailable")
 		return nil
 	}
 	result, err := r.buildAurora(ctx, throttler.AuroraSetup{

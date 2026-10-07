@@ -26,7 +26,10 @@ import (
 func TestSyncAutoscaleDisabled(t *testing.T) {
 	r, err := NewRunner(&Sync{Common: flags.Common{Threads: 3, WriteThreads: 5}})
 	require.NoError(t, err)
+	var logs bytes.Buffer
+	r.SetLogger(slog.New(slog.NewTextHandler(&logs, nil)))
 	require.NoError(t, r.setupThrottling(t.Context())) // No target config: nothing to probe.
+	require.Contains(t, logs.String(), "level=INFO msg=\"sync Aurora throttling and autoscaling disabled: target connection config unavailable\"")
 	require.False(t, r.TargetUnderLoad())
 	require.False(t, r.autoscale.Enabled)
 	require.Equal(t, 3, r.sync.Threads)
@@ -37,7 +40,7 @@ func TestSyncAutoscaleNonAurora(t *testing.T) {
 	tt := testutils.NewTestTable(t, "sync_autoscale_probe", "CREATE TABLE sync_autoscale_probe (id INT PRIMARY KEY)")
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	require.NoError(t, err)
-	r, err := NewRunner(&Sync{Common: flags.Common{Threads: 3, WriteThreads: 5, EnableExperimentalAutoscaling: true}})
+	r, err := NewRunner(&Sync{Common: flags.Common{Threads: 3, WriteThreads: 5}})
 	require.NoError(t, err)
 	r.target = applier.Target{DB: tt.DB, Config: cfg}
 	require.NoError(t, r.setupThrottling(t.Context()))
@@ -79,7 +82,7 @@ func TestSyncTargetLoadAndProgress(t *testing.T) {
 }
 
 func TestSyncAutoscaleUnsupportedApplier(t *testing.T) {
-	r, err := NewRunner(&Sync{Common: flags.Common{EnableExperimentalAutoscaling: true}, Applier: &applier.MockApplier{}})
+	r, err := NewRunner(&Sync{Common: flags.Common{}, Applier: &applier.MockApplier{}})
 	require.NoError(t, err)
 	require.NoError(t, r.setupThrottling(context.Background()))
 	require.False(t, r.autoscale.Enabled)
@@ -97,7 +100,7 @@ func (s *syncOwnedSignal) Close() error               { s.closes++; return nil }
 func TestSyncAutoscaleMonitorOwnership(t *testing.T) {
 	for _, fail := range []bool{false, true} {
 		t.Run(fmt.Sprint(fail), func(t *testing.T) {
-			r, err := NewRunner(&Sync{Common: flags.Common{Threads: 3, WriteThreads: 5, EnableExperimentalAutoscaling: true}})
+			r, err := NewRunner(&Sync{Common: flags.Common{Threads: 3, WriteThreads: 5}})
 			require.NoError(t, err)
 			r.auroraVCPUs = func(context.Context, *sql.DB) (int, error) { return 16, nil }
 			monitor, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
@@ -170,7 +173,7 @@ func TestSyncAutoscaleInjectedApplierResume(t *testing.T) {
 func TestInjectedApplierMustUseMonitoredTarget(t *testing.T) {
 	a, err := applier.New([]applier.Target{{DB: &sql.DB{}}}, applier.NewApplierDefaultConfig())
 	require.NoError(t, err)
-	r, err := NewRunner(&Sync{Common: flags.Common{Threads: 3, WriteThreads: 5, EnableExperimentalAutoscaling: true}, Applier: a})
+	r, err := NewRunner(&Sync{Common: flags.Common{Threads: 3, WriteThreads: 5}, Applier: a})
 	require.NoError(t, err)
 	var logs bytes.Buffer
 	r.SetLogger(slog.New(slog.NewTextHandler(&logs, nil)))
@@ -183,7 +186,7 @@ func TestInjectedApplierMustUseMonitoredTarget(t *testing.T) {
 	r.target = applier.Target{DB: db, Config: cfg}
 	require.NoError(t, r.setupThrottling(t.Context()))
 	require.False(t, r.autoscale.Enabled)
-	require.Contains(t, logs.String(), "injected applier must use the monitored single target")
+	require.Contains(t, logs.String(), "level=INFO msg=\"sync Aurora throttling and autoscaling disabled: injected applier must use the monitored single target\"")
 }
 
 func TestAutoscalingPreservesCallerConfig(t *testing.T) {
@@ -240,9 +243,9 @@ func TestSyncSharedTargetBudget(t *testing.T) {
 
 // The Aurora load throttlers pace the sync whether or not autoscaling is
 // enabled, matching migration. Before this, sync built them only when
-// autoscaling engaged, so a sync onto Aurora without the flag ran unthrottled.
+// autoscaling engaged, so a sync onto Aurora without autoscaling ran unthrottled.
 func TestSyncThrottlesWithoutAutoscaling(t *testing.T) {
-	r, err := NewRunner(&Sync{Common: flags.Common{Threads: 3, WriteThreads: 5}})
+	r, err := NewRunner(&Sync{Common: flags.Common{Threads: 3, WriteThreads: 5, SkipAutoscaling: true}})
 	require.NoError(t, err)
 	signal := &syncOwnedSignal{syncTestLoad: syncTestLoad{loaded: true}}
 	require.NoError(t, r.applyAuroraResult(t.Context(), throttler.AuroraResult{Throttlers: []throttler.Throttler{signal}}))
@@ -278,9 +281,9 @@ func TestSyncSetupThrottling(t *testing.T) {
 		return r
 	}
 
-	// Without the flag, an Aurora target still throttles the sync, and the
+	// With --skip-autoscaling, an Aurora target still throttles the sync, and the
 	// feed narrows its flush on the same signal.
-	r := newRunner(t, &Sync{Common: flags.Common{Threads: 3, WriteThreads: 5, MaxCommitLatency: 100 * time.Millisecond}}, false)
+	r := newRunner(t, &Sync{Common: flags.Common{Threads: 3, WriteThreads: 5, MaxCommitLatency: 100 * time.Millisecond, SkipAutoscaling: true}}, false)
 	require.NoError(t, r.setupThrottling(t.Context()))
 	require.True(t, r.currentLoadSignal().IsThrottled())
 	require.True(t, r.replClientConfig().UnderLoad())
@@ -289,9 +292,9 @@ func TestSyncSetupThrottling(t *testing.T) {
 	require.Equal(t, 5, r.sync.WriteThreads)
 	require.Zero(t, r.replClientConfig().FlushConcurrency)
 
-	// With it, a redo-aware target and no commit-latency throttler hold
+	// By default, a redo-aware target and no commit-latency throttler hold
 	// write threads at their start.
-	r = newRunner(t, &Sync{Common: flags.Common{EnableExperimentalAutoscaling: true, MaxConnections: 1000}}, true)
+	r = newRunner(t, &Sync{Common: flags.Common{MaxConnections: 1000}}, true)
 	require.NoError(t, r.setupThrottling(t.Context()))
 	require.True(t, r.autoscale.Enabled)
 	require.Equal(t, r.autoscale.StartThreads, r.autoscale.MaxThreads)
@@ -301,7 +304,7 @@ func TestSyncSetupThrottling(t *testing.T) {
 	require.Equal(t, r.flushBatchSize, feed.BatchSize)
 
 	// With the commit-latency backstop, they may grow.
-	r = newRunner(t, &Sync{Common: flags.Common{EnableExperimentalAutoscaling: true, MaxConnections: 1000, MaxCommitLatency: 100 * time.Millisecond}}, true)
+	r = newRunner(t, &Sync{Common: flags.Common{MaxConnections: 1000, MaxCommitLatency: 100 * time.Millisecond}}, true)
 	require.NoError(t, r.setupThrottling(t.Context()))
 	require.True(t, r.autoscale.Enabled)
 	require.Greater(t, r.autoscale.MaxThreads, r.autoscale.StartThreads)
@@ -313,7 +316,7 @@ func TestSyncSetupThrottling(t *testing.T) {
 func TestSyncLowMemory(t *testing.T) {
 	config, err := mysql.ParseDSN(testutils.DSN())
 	require.NoError(t, err)
-	r, err := NewRunner(&Sync{Common: flags.Common{Threads: 3, WriteThreads: 5, EnableExperimentalAutoscaling: true}})
+	r, err := NewRunner(&Sync{Common: flags.Common{Threads: 3, WriteThreads: 5}})
 	require.NoError(t, err)
 	r.target = applier.Target{Config: config}
 	r.source = sourceInfo{config: config}
@@ -334,7 +337,7 @@ func TestSyncLowMemory(t *testing.T) {
 // A probe that failed disables autoscaling, with a warning, and leaves the
 // configured counts; it never engages scaling against a signal it lacks.
 func TestSyncAutoscaleProbeFailure(t *testing.T) {
-	r, err := NewRunner(&Sync{Common: flags.Common{Threads: 3, WriteThreads: 5, EnableExperimentalAutoscaling: true}})
+	r, err := NewRunner(&Sync{Common: flags.Common{Threads: 3, WriteThreads: 5}})
 	require.NoError(t, err)
 	var logs bytes.Buffer
 	r.SetLogger(slog.New(slog.NewTextHandler(&logs, nil)))

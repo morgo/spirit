@@ -95,7 +95,7 @@ type CopierConfig struct {
 - **`Applier`**: Writes rows to the target. Required (non-nil). The migration runner shares one applier between the copier and the replication client, so the copy and the binlog replay go through the same write pipeline.
 
 Note that chunk sizing is **not** configured here — it lives entirely in the chunker. Configure it via `table.ChunkerConfig` when you build the chunker: `TargetChunkBytes` for the copier's in-memory byte-budget signal, or `TargetChunkTime` (default `table.ChunkerDefaultTarget`) for the wall-clock signal the checksum uses.
-- **`Autoscale`** (`AutoscaleConfig`, default: disabled): configures the experimental write-thread autoscaler, enabled via `--enable-experimental-autoscaling`. When `Enabled`, it scales the applier's live write-worker count between `StartThreads` and `MaxThreads`, and its own read-worker count between `Concurrency` and `MaxReadThreads`, based on throttler utilization. Requires a dynamically-scalable applier. See [Autoscaling](#autoscaling-experimental) under Core Concepts.
+- **`Autoscale`** (`AutoscaleConfig`, default: disabled): configures the write-thread autoscaler. The runners set it when autoscaling engages (on Aurora, unless `--skip-autoscaling` is set). When `Enabled`, it scales the applier's live write-worker count between `StartThreads` and `MaxThreads`, and its own read-worker count between `Concurrency` and `MaxReadThreads`, based on throttler utilization. Requires a dynamically-scalable applier. See [Autoscaling](#autoscaling) under Core Concepts.
 
 ## Usage
 
@@ -204,9 +204,9 @@ The copier uses goroutines for parallel chunk processing:
 - The applier has its own internal parallelism for writing
 - Callbacks notify readers when writes complete
 
-### Autoscaling (experimental)
+### Autoscaling
 
-When `AutoscaleConfig.Enabled` is set (the `--enable-experimental-autoscaling` flag), the copier runs a control loop that adjusts both of the pipeline's live worker pools — its own read workers (between `Concurrency` and `MaxReadThreads`, defaulting to 2× the start when the caller supplies none) and the applier's write workers (between `StartThreads` and `MaxThreads`) — based on a throttler's continuous **utilization** signal. It only engages when the throttler implements `throttler.GradualThrottler` (the Aurora throttlers do) and the applier implements the dynamic-scaling capability (both built-in appliers do); otherwise it is skipped.
+When `AutoscaleConfig.Enabled` is set (the runners set it when autoscaling engages; `--skip-autoscaling` disables it), the copier runs a control loop that adjusts both of the pipeline's live worker pools — its own read workers (between `Concurrency` and `MaxReadThreads`, defaulting to 2× the start when the caller supplies none) and the applier's write workers (between `StartThreads` and `MaxThreads`) — based on a throttler's continuous **utilization** signal. It only engages when the throttler implements `throttler.GradualThrottler` (the Aurora throttlers do) and the applier implements the dynamic-scaling capability (both built-in appliers do); otherwise it is skipped.
 
 Each tick (5s, aligned to the throttler poll) it reads utilization — `0` = idle, `1.0` = the point the hard-stop trips — and steers toward a dead band. Utilization alone cannot decide *which* pool to move — both pools feed the same signal — so the applier queue between them arbitrates: near-empty with ~zero queue wait reads as **read-starved**, near-full with waits at/above write time reads as **write-limited**, anything else is **balanced**. A state must persist two consecutive ticks before it arbitrates, so chunk-size transients don't flap the controller.
 

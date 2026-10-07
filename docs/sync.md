@@ -117,17 +117,18 @@ cannot see is not reported and not refused.
 
 ## Autoscaling
 
-`--enable-experimental-autoscaling` enables target-aware concurrency control
-for Aurora targets with at least four vCPUs. Eligible targets override
+Sync enables target-aware concurrency control by default for Aurora targets
+with at least four vCPUs; `--skip-autoscaling` turns it off (including
+low-memory mode, below). Eligible targets override
 `--threads` and `--write-threads`; other targets retain those configured counts,
 except a low-memory target (at most 2 vCPUs and at most a 1.5 GiB buffer pool),
 which runs in low-memory mode: 1 read thread, 1 write thread, 1 concurrent
 change-feed flush, a 1 MiB `--target-chunk-size`, and no scaling. See
-[migrate's low-memory mode](migrate.md#enable-experimental-autoscaling).
+[migrate's low-memory mode](migrate.md#skip-autoscaling).
 The target's load and commit latency are sampled through a separate two-connection
-monitor pool. That monitoring, and the throttling it drives, runs without this
-flag too (see [max-commit-latency](#max-commit-latency)); the flag only adds
-thread-count scaling on top of it. Source load is not measured.
+monitor pool. That monitoring, and the throttling it drives, runs with
+`--skip-autoscaling` too (see [max-commit-latency](#max-commit-latency)); the
+flag only removes thread-count scaling. Source load is not measured.
 
 During the initial copy, the shared copier controller adjusts read and write
 workers using target load and the applier queue. After copying, the continuous
