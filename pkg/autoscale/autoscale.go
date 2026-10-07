@@ -64,9 +64,9 @@ const (
 	// indefinitely (issue #831). At 4+ vCPUs the worst-case per-thread step (0.25)
 	// fits inside the dead band.
 	//
-	// The migration runner enforces it once, at setup, by disabling autoscaling
-	// for the whole migration; the controllers themselves never see a small
-	// instance.
+	// Each runner enforces it once, at setup: an instance below it gets
+	// small-instance mode (IsSmallInstance) for the whole run instead of the
+	// controllers, so the controllers themselves never see a small instance.
 	MinVCPUs = 4
 
 	// VCPUReserve is how many vCPUs a pool sized from the instance leaves free,
@@ -128,34 +128,27 @@ const (
 	// the trade FlushBounds exists to avoid making.
 	MaxFlushConcurrency = FlushRowsInFlight / MinFlushBatchSize
 
-	// LowMemoryMaxVCPUs and LowMemoryMaxBufferPoolBytes define a low-memory
-	// instance (see IsLowMemory): at most 2 vCPUs and a buffer pool of at most
-	// 1.5 GiB, i.e. a burstable db.t4g.medium-class instance rather than a
-	// db.r6g.large, which has the same vCPUs and ~8x the memory. Such an
-	// instance is too small for the controllers (it is below MinVCPUs), and the
-	// configured defaults (4 readers, 4 writers, 16 MiB chunks, 8 concurrent
-	// flushes) were observed to run it out of memory.
-	LowMemoryMaxVCPUs           = 2
-	LowMemoryMaxBufferPoolBytes = 1536 * 1024 * 1024
+	// SmallInstanceThreads is the read and the write thread count in
+	// small-instance mode, and SmallInstanceFlushConcurrency the change feed's
+	// flush width: one statement in flight per pool.
+	SmallInstanceThreads          = 1
+	SmallInstanceFlushConcurrency = 1
 
-	// LowMemoryThreads is the read and the write thread count in low-memory
-	// mode, and LowMemoryFlushConcurrency the change feed's flush width: one
-	// statement in flight per pool.
-	LowMemoryThreads          = 1
-	LowMemoryFlushConcurrency = 1
-
-	// LowMemoryTargetChunkBytes is the copier's chunk byte budget in low-memory
-	// mode, a sixteenth of table.DefaultTargetChunkBytes. It equals the
+	// SmallInstanceTargetChunkBytes is the copier's chunk byte budget in
+	// small-instance mode, a sixteenth of table.DefaultTargetChunkBytes. It equals the
 	// applier's per-statement budget (applier.MaxStatementSizeBytes), so a chunk
 	// is written as roughly one statement.
-	LowMemoryTargetChunkBytes = 1024 * 1024
+	SmallInstanceTargetChunkBytes = 1024 * 1024
 )
 
-// IsLowMemory reports whether an instance with the given vCPU count and
-// buffer pool size gets low-memory mode: both must be at or below the
-// LowMemory limits.
-func IsLowMemory(vCPUs int, bufferPoolBytes uint64) bool {
-	return vCPUs <= LowMemoryMaxVCPUs && bufferPoolBytes <= LowMemoryMaxBufferPoolBytes
+// IsSmallInstance reports whether an instance with the given vCPU count gets
+// small-instance mode instead of the controllers: it is below MinVCPUs. The
+// smallest Aurora instances (db.t4g.medium) were observed to run out of memory
+// at the configured defaults (4 readers, 4 writers, 16 MiB chunks, 8
+// concurrent flushes), and every instance this small is one the controllers
+// cannot steer, so all of them take the same fixed shape.
+func IsSmallInstance(vCPUs int) bool {
+	return vCPUs < MinVCPUs
 }
 
 // Tick is how often a controller should re-evaluate. Aligned with the

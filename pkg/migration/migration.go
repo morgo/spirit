@@ -47,15 +47,15 @@ type Migration struct {
 	flags.Common
 	flags.Cutover
 
-	EnableExperimentalLocklessChecksum bool `name:"enable-experimental-lockless-checksum" help:"EXPERIMENTAL: verify with optimistic reads and retries instead of checksum locks and long-lived snapshots. Cutover locking is unchanged." default:"false"`
-	EnableExperimentalForeignKeys      bool `name:"enable-experimental-foreign-keys" help:"EXPERIMENTAL: allow altering a table that has foreign keys. Requires MySQL 9.7 or later. Tables referenced by a foreign key are still refused, and the ALTER cannot add one." default:"false"`
+	EnableExperimentalForeignKeys bool `name:"enable-experimental-foreign-keys" help:"EXPERIMENTAL: allow altering a table that has foreign keys. Requires MySQL 9.7 or later. Tables referenced by a foreign key are still refused, and the ALTER cannot add one." default:"false"`
+	LegacyChecksum                bool `name:"legacy-checksum" help:"Verify with the legacy snapshot checksum (checksum table locks and long-lived REPEATABLE READ snapshots) instead of the default lockless checksum. Cutover locking is unchanged." default:"false"`
 
 	ReplicaDSN           string        `name:"replica-dsn" help:"DSN(s) for replica(s) used for lag checking. Multiple replicas can be comma-separated; Spirit throttles on the slowest." optional:""`
 	ReplicaMaxLag        time.Duration `name:"replica-max-lag" help:"The maximum lag allowed on the replica before the migration throttles. If lag becomes unobservable (lag polling keeps failing) the migration pauses (fails closed) until polling recovers; remove --replica-dsn to proceed without lag protection." optional:"" default:"120s"`
 	SkipDropAfterCutover bool          `name:"skip-drop-after-cutover" help:"Keep old table after completing cutover" optional:"" default:"false"`
 	Statement            string        `name:"statement" help:"The SQL statement to run" required:""`
 
-	ChecksumYieldTimeout time.Duration `name:"checksum-yield-timeout" help:"Maximum duration for a single checksum pass before yielding to release long-running REPEATABLE READ transactions (reduces InnoDB HLL growth)" optional:"" default:"24h"`
+	LegacyChecksumYieldTimeout time.Duration `name:"legacy-checksum-yield-timeout" help:"With --legacy-checksum: maximum duration for a single checksum pass before yielding to release long-running REPEATABLE READ transactions (reduces InnoDB HLL growth). Ignored by the default lockless checksum." optional:"" default:"24h"`
 
 	// useTestCutover is a test-only cutover
 	useTestCutover bool
@@ -115,8 +115,8 @@ func (m *Migration) normalizeOptions() (stmts []*statement.AbstractStatement, er
 	if m.ReplicaMaxLag == 0 {
 		m.ReplicaMaxLag = 120 * time.Second
 	}
-	if m.ChecksumYieldTimeout == 0 {
-		m.ChecksumYieldTimeout = checksum.DefaultYieldTimeout
+	if m.LegacyChecksumYieldTimeout == 0 {
+		m.LegacyChecksumYieldTimeout = checksum.DefaultYieldTimeout
 	}
 
 	if err := m.normalizeConnectionOptions(); err != nil {

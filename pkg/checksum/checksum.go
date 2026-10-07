@@ -28,6 +28,11 @@ import (
 	"github.com/block/spirit/pkg/throttler"
 )
 
+// differencesExhaustedGuidance tells the operator what to check when a
+// checksum ends with ErrDifferencesExhausted. Both checkers append it, so the
+// message does not depend on which one ran.
+const differencesExhaustedGuidance = "The data does not survive the schema change unmodified: check the ALTER for a conversion MySQL applies without a warning, such as adding a UNIQUE index to non-unique data or reducing a DATETIME/TIMESTAMP's fractional-second precision on rows that have one. If the ALTER is not lossy, this indicates either a manual modification to the _new table outside of Spirit, or a bug in Spirit; please report the latter @ github.com/block/spirit"
+
 var (
 	// ErrDifferencesExhausted is returned by Run when every attempt completed
 	// but kept finding row differences. The table is diverging in a way the

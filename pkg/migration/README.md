@@ -219,22 +219,22 @@ To add a check, create `pkg/migration/check/<name>.go` with an `init()` that cal
 
 ## Verification
 
-The initial checksum is the correctness gate for cutover. There are two checkers, both built by `checksum.NewChecker`. The `--enable-experimental-lockless-checksum` flag chooses between them:
+The initial checksum is the correctness gate for cutover. There are two checkers, both built by `checksum.NewChecker`. The `--legacy-checksum` flag chooses between them:
 
-| | Default (`SingleChecker`) | `--enable-experimental-lockless-checksum` (`LocklessChecker`) |
+| | Default (`LocklessChecker`) | `--legacy-checksum` (`SingleChecker`) |
 |---|---|---|
-| Consistency | Compares source and `_new` at one consistent point, using `REPEATABLE READ` snapshots opened under a table lock | Optimistic `READ COMMITTED` reads with retries; hot ranges are split |
-| Locks | Briefly takes `LOCK TABLES <table> WRITE, _<table>_new WRITE` to open the snapshots. This is repeated on each yield, retry and continuous pass | No table lock, no long-lived snapshot |
-| Long-running snapshots | Yields every `--checksum-yield-timeout` (default 24h) to limit undo-log (history list) growth | None |
-| Hot rows | Compared at one snapshot, so concurrent writes do not matter | A row that keeps changing is settled against the change stream: Spirit waits for its next change and compares `_new` to that event's row image. See [Continuously updated hot rows](../checksum/README.md#continuously-updated-hot-rows) |
+| Consistency | Optimistic `READ COMMITTED` reads with retries; hot ranges are split | Compares source and `_new` at one consistent point, using `REPEATABLE READ` snapshots opened under a table lock |
+| Locks | No table lock, no long-lived snapshot | Briefly takes `LOCK TABLES <table> WRITE, _<table>_new WRITE` to open the snapshots. This is repeated on each yield, retry and continuous pass |
+| Long-running snapshots | None | Yields every `--legacy-checksum-yield-timeout` (default 24h) to limit undo-log (history list) growth |
+| Hot rows | A row that keeps changing is settled against the change stream: Spirit waits for its next change and compares `_new` to that event's row image. See [Continuously updated hot rows](../checksum/README.md#continuously-updated-hot-rows) | Compared at one snapshot, so concurrent writes do not matter |
 
 The rest is the same for both:
 
-- **Repair.** The initial checksum repairs a chunk with a confirmed mismatch: it deletes the range from `_new`, reads it from the source, rewrites it through the applier, then verifies it again. The default checker allows 3 attempts. The lockless checker gives up after 10 passes without a clean pass (`ErrVerificationUnresolved`). In both cases the migration fails rather than cutting over.
+- **Repair.** The initial checksum repairs a chunk with a confirmed mismatch: it deletes the range from `_new`, reads it from the source, rewrites it through the applier, then verifies it again. The lockless checker gives up after 10 passes without a clean pass (`ErrVerificationUnresolved`). The legacy checker allows 3 attempts. In both cases the migration fails rather than cutting over. When every attempt or pass found differences again after a repair (for example a UNIQUE index added to non-unique data), both report `ErrDifferencesExhausted`, so a caller can tell a retry would fail the same way.
 - **Continuous checksum.** It runs only during the sentinel wait, never repairs, and aborts the migration on a confirmed divergence.
 - **Resume.** The checksum watermark is saved in the checkpoint until the sentinel wait starts, so a run interrupted during the initial checksum continues it where it stopped. The sentinel wait discards the watermark, so a run interrupted during the wait repeats the whole initial checksum. The continuous checksum's progress is never saved.
 
-The lockless checker is intended to replace the default checker. Until it becomes the default, the default checker's table lock is one of the metadata locks listed in the next section. See [pkg/checksum/README.md](../checksum/README.md) for both algorithms in detail.
+The lockless checker is intended to replace the legacy checker entirely; `--legacy-checksum` is kept as a fallback until then. With `--legacy-checksum`, the legacy checker's table lock is one of the metadata locks listed in the next section. See [pkg/checksum/README.md](../checksum/README.md) for both algorithms in detail.
 
 ## What parts of the process are locking?
 
@@ -254,7 +254,7 @@ When we describe Spirit as a "non-blocking schema change tool", that is a bit of
 | When | Lock | Applies |
 |------|------|---------|
 | INSTANT/INPLACE attempt | Exclusive MDL taken by MySQL's `ALTER TABLE` | Single-table `ALTER`s only |
-| Start of the initial checksum, and each yield, retry and continuous pass | `LOCK TABLES ... WRITE` on the source and `_new` | Default checker only. The lockless checker takes none |
+| Start of the initial checksum, and each yield, retry and continuous pass | `LOCK TABLES ... WRITE` on the source and `_new` | `--legacy-checksum` only. The default lockless checker takes none |
 | Cutover | `LOCK TABLES ... WRITE` on every source and `_new`, held for the final flush and the `RENAME` | Always |
 
 ### What causes metadata lock problems? (hint: it's not Spirit)

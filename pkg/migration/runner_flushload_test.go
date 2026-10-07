@@ -90,8 +90,8 @@ func TestReplClientConfigCarriesTheLoadSignal(t *testing.T) {
 	require.NotNil(t, cfg.CancelFunc, "the feed must be able to abort the migration it is feeding")
 
 	// Zero is passed through as zero rather than being resolved here: the
-	// change package reads it as "use my default", which is what a non-Aurora
-	// or too-small instance gets. Resolving it in the runner instead would make
+	// change package reads it as "use my default", which is what a run
+	// without autoscaling gets (non-Aurora, or --skip-autoscaling). Resolving it in the runner instead would make
 	// a serial drain (negative) and an unset one (zero) indistinguishable
 	// downstream. See change.ClientConfig.resolveFlushConcurrency.
 	zero := r.replClientConfig(0, 0)

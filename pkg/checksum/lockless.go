@@ -125,7 +125,9 @@ import (
 // a divergence proven, so this is deliberately distinct from
 // ErrPermanentDivergence. It is the optimistic counterpart of
 // ErrDifferencesExhausted: a bound that makes the run terminate instead of
-// re-walking the table forever. Settling (lockless_settle.go) resolves most hot
+// re-walking the table forever. When the budget spans more than one pass and
+// every pass repaired at least one range, the divergence reproduced after each
+// repair, and the error wraps ErrDifferencesExhausted as well. Settling (lockless_settle.go) resolves most hot
 // rows before they get that far; what reaches this bound is a range that could
 // not even be settled — see "Continuously updated hot rows" in the package
 // README for the cases where that happens.
@@ -789,6 +791,11 @@ func (c *LocklessChecker) runPasses(ctx context.Context, untilClean bool, minPas
 	}
 
 	var lastPassStart time.Time
+	// everyPassRepaired stays true while each completed pass has needed at
+	// least one repair. If the pass budget runs out after more than one pass
+	// with it still true, every pass after a repair found differences again,
+	// which is what ErrDifferencesExhausted means.
+	everyPassRepaired := true
 	for passNum := uint64(1); ; passNum++ {
 		if passNum > 1 {
 			// Pace passes: wait until passInterval has elapsed since the
@@ -865,6 +872,9 @@ func (c *LocklessChecker) runPasses(ctx context.Context, untilClean bool, minPas
 		if recopies == 0 && deferredHot == 0 {
 			c.signalFirstCleanPass()
 		}
+		if recopies == 0 {
+			everyPassRepaired = false
+		}
 		if recopies > 0 {
 			c.cfg.Logger.Info("lockless checksum: pass contained recopies; repaired chunks will be re-verified next pass",
 				"pass_number", passNum,
@@ -899,6 +909,16 @@ func (c *LocklessChecker) runPasses(ctx context.Context, untilClean bool, minPas
 		// end, which reads to an operator as a migration that has simply
 		// stopped making progress.
 		if untilClean && c.cfg.MaxPasses > 0 && passNum >= uint64(c.cfg.MaxPasses) {
+			if everyPassRepaired && passNum > 1 {
+				// Every pass found differences and repaired them, and the next
+				// pass found differences again: the repairs cannot close the
+				// divergence (a lossy ALTER, such as a UNIQUE index added to
+				// non-unique data). Wrap ErrDifferencesExhausted too, so a
+				// caller deciding whether to retry sees the same signal it
+				// gets from SingleChecker.
+				return fmt.Errorf("%w: %w: %d passes, each repaired at least one range, last had %d repaired and %d unresolved range(s). %s",
+					ErrVerificationUnresolved, ErrDifferencesExhausted, passNum, recopies, deferredHot, differencesExhaustedGuidance)
+			}
 			return fmt.Errorf("%w: %d passes, last had %d repaired and %d unresolved range(s)",
 				ErrVerificationUnresolved, passNum, recopies, deferredHot)
 		}
@@ -1882,6 +1902,7 @@ func (c *LocklessChecker) Stats() LocklessCheckerStats {
 		WalkerStalls:                  c.walkerStalls.Load(),
 		MismatchesDetected:            c.mismatchesDetected.Load(),
 		PermanentFailures:             c.permanentFailures.Load(),
+		ConfirmedDifferences:          c.confirmedDifferences.Load(),
 		FirstCleanPassAt:              firstAt,
 		NextPassAt:                    nextAt,
 	}
