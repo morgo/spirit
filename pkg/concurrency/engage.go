@@ -339,6 +339,15 @@ func engage(ctx context.Context, f *flags.Common, req Request, clientCeiling int
 	// capped the checksum at 8 workers on a 24xlarge no matter how much
 	// headroom the signal reported. A controller that is told to find the
 	// right size should not also be told where to stop.
+	//
+	// A count other than the default was most likely set on purpose, often as
+	// a load cap on a production writer, so say loudly that it is replaced.
+	if explicitThreads(f.Threads, flags.DefaultThreads) || explicitThreads(f.WriteThreads, flags.DefaultWriteThreads) {
+		logger.Warn("autoscaling replaces the configured --threads/--write-threads with counts derived from the targets; pass --skip-autoscaling to keep them",
+			"threads", f.Threads, "write_threads", f.WriteThreads,
+			"read_threads", plan.ReadStart, "max_read_threads", plan.MaxReadThreads,
+			"write_threads_per_target", plan.WriteStart, "max_write_threads_per_target", plan.MaxWriteThreads)
+	}
 	f.Threads = plan.ReadStart
 	f.WriteThreads = plan.WriteStart
 	logger.Info("autoscaling engaged: thread counts are derived from the targets; --threads and --write-threads are ignored",
@@ -347,6 +356,12 @@ func engage(ctx context.Context, f *flags.Common, req Request, clientCeiling int
 		"write_threads_per_target", plan.WriteStart, "max_write_threads_per_target", plan.MaxWriteThreads,
 		"flush_concurrency", plan.FlushConcurrency, "flush_batch_size", plan.FlushBatchSize)
 	return plan, nil
+}
+
+// explicitThreads reports whether a thread count differs from its default.
+// Zero is the programmatic "use the default" (flags.Common.Normalize).
+func explicitThreads(n, def int) bool {
+	return n != 0 && n != def
 }
 
 // lowMemory selects low-memory mode when any target, with vcpus[i] the vCPU

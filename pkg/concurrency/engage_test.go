@@ -437,3 +437,33 @@ func TestEngageBufferPoolError(t *testing.T) {
 	})
 	require.ErrorContains(t, err, "target tcp:db1:3306 memory capacity: boom")
 }
+
+// Autoscaling owns the thread counts once it engages, but replacing a count
+// that differs from the default (most likely a deliberate load cap) warns.
+func TestEngageWarnsWhenReplacingConfiguredThreads(t *testing.T) {
+	const warning = "level=WARN msg=\"autoscaling replaces the configured --threads/--write-threads"
+	cases := map[string]struct {
+		threads, writeThreads int
+		warns                 bool
+	}{
+		"defaults":          {flags.DefaultThreads, flags.DefaultWriteThreads, false},
+		"programmatic zero": {0, 0, false},
+		"threads set":       {2, flags.DefaultWriteThreads, true},
+		"write threads set": {flags.DefaultThreads, 2, true},
+		"both set":          {2, 2, true},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := &flags.Common{Threads: tc.threads, WriteThreads: tc.writeThreads, MaxCommitLatency: 100 * time.Millisecond}
+			plan, logs := engageForTest(t, f, Request{Targets: []Target{{Aurora: aurora(false)}}, VCPUs: vcpus(64)})
+			require.True(t, plan.Engaged)
+			require.Equal(t, plan.ReadStart, f.Threads, "autoscaling still owns the counts")
+			require.Equal(t, plan.WriteStart, f.WriteThreads)
+			if tc.warns {
+				require.Contains(t, logs, warning)
+			} else {
+				require.NotContains(t, logs, warning)
+			}
+		})
+	}
+}
