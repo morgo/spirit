@@ -30,7 +30,8 @@ func RenamedForeignKeyName(name, from, to string) string {
 // A name MySQL renames along with its table (see RenamedForeignKeyName) is
 // given the _new table's prefix instead, which the cutover's RENAME TABLE turns
 // back into the original name. Any other name becomes _<name>_new, which the
-// migration renames back once the original table has been dropped.
+// cutover renames back under its table lock, once it has dropped the foreign
+// keys of the old table.
 func NewForeignKeyName(tableName, name string) string {
 	if renamed := RenamedForeignKeyName(name, tableName, NewTableName(tableName)); renamed != name {
 		return renamed

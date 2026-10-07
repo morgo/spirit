@@ -10,6 +10,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/block/mysql"
+	"github.com/block/spirit/pkg/applier"
+	"github.com/block/spirit/pkg/change"
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/dbconn/sqlescape"
 	"github.com/block/spirit/pkg/migration/check"
@@ -559,4 +562,87 @@ func TestForeignKeysCutoverRefusesChangeAfterProbe(t *testing.T) {
 	after := foreignKeysAndIndexes(parsedCreateTable(t, db, "_child_new"))
 	assert.Len(t, after, 4) // the foreign key and the three indexes
 	assert.Contains(t, after, "CONSTRAINT _fk_restrict_new FOREIGN KEY (pid) REFERENCES parent (id)")
+}
+
+// TestForeignKeysResumeAfterFailedCutoverAttempt checks that a run resumes
+// from its checkpoint after a cutover attempt that added the foreign keys and
+// then failed. The attempt's ALTERs of _child_new are in the binary log after
+// the checkpoint, and must not be read as a change to the tables the run
+// copies.
+func TestForeignKeysResumeAfterFailedCutoverAttempt(t *testing.T) {
+	t.Parallel()
+	dbName, db := restrictFixture(t)
+	// More rows than WithCopyStalledAfterChunks(2) copies.
+	for range 3 {
+		testutils.RunSQLInDatabase(t, dbName, "INSERT INTO child (pid) SELECT pid FROM child")
+	}
+	m := NewTestRunner(t, "child", copyAlter, WithDBName(dbName), WithExperimentalForeignKeys(),
+		WithThreads(1), WithCopyStalledAfterChunks(2))
+	runUntilCheckpointThenCancel(t, m)
+
+	// What a failed cutover attempt writes: it adds the foreign keys under the
+	// lock, then drops them again before it unlocks.
+	exec := func(ctx context.Context, stmt string) error {
+		return dbconn.ExecWithoutForeignKeyChecks(ctx, db, "%r", sqlescape.RawSQL(stmt))
+	}
+	require.NoError(t, exec(t.Context(), "ALTER TABLE _child_new ADD CONSTRAINT _fk_restrict_new FOREIGN KEY (pid) REFERENCES parent (id), ALGORITHM=INPLACE, LOCK=NONE"))
+	require.NoError(t, exec(t.Context(), "ALTER TABLE _child_new DROP FOREIGN KEY _fk_restrict_new, ALGORITHM=INPLACE, LOCK=NONE"))
+
+	m = NewTestRunner(t, "child", copyAlter, WithDBName(dbName), WithExperimentalForeignKeys())
+	require.NoError(t, m.Run(t.Context()))
+	assert.True(t, m.usedResumeFromCheckpoint.Load())
+	require.NoError(t, m.Close())
+	assert.Equal(t, []string{"fk_restrict"}, foreignKeyNames(t, db, "child"))
+}
+
+// TestCutOverFailedAttemptRemovesForeignKeys checks that a cutover attempt
+// that fails after adding the foreign keys to the new table takes them off
+// again before it unlocks: until a later attempt succeeds, they would hold
+// the application's parent deletes to the new table's rows. It calls the
+// cutover directly, so the runner's cleanup after the last attempt cannot
+// hide a regression.
+func TestCutOverFailedAttemptRemovesForeignKeys(t *testing.T) {
+	t.Parallel()
+	testutils.SkipBeforeMySQLVersion(t, check.MinForeignKeyVersion, "changes made by foreign key cascades are only in the binary log from MySQL 9.6")
+	dbName, _ := testutils.CreateUniqueTestDatabase(t)
+	testutils.RunSQLInDatabase(t, dbName, "CREATE TABLE parent (id INT NOT NULL PRIMARY KEY)")
+	testutils.RunSQLInDatabase(t, dbName, `CREATE TABLE child (id INT NOT NULL PRIMARY KEY, pid INT NOT NULL, KEY pid (pid),
+		CONSTRAINT fk_c FOREIGN KEY (pid) REFERENCES parent (id))`)
+	testutils.RunSQLInDatabase(t, dbName, "CREATE TABLE _child_new LIKE child") // LIKE does not copy foreign keys
+	testutils.RunSQLInDatabase(t, dbName, "INSERT INTO parent VALUES (1), (2)")
+	testutils.RunSQLInDatabase(t, dbName, "INSERT INTO child VALUES (1, 1), (2, 2)")
+	testutils.RunSQLInDatabase(t, dbName, "INSERT INTO _child_new SELECT * FROM child")
+
+	cfg, err := mysql.ParseDSN(testutils.DSNForDatabase(dbName))
+	require.NoError(t, err)
+	dbConfig := dbconn.NewDBConfig()
+	db, err := dbconn.New(testutils.DSNForDatabase(dbName), dbConfig)
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+	tbl := table.NewTableInfo(db, dbName, "child")
+	require.NoError(t, tbl.SetInfo(t.Context()))
+	newTbl := table.NewTableInfo(db, dbName, "_child_new")
+	feed := change.NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), change.NewClientDefaultConfig())
+	defer feed.Close()
+	chunker, err := table.NewChunker(tbl, table.ChunkerConfig{NewTable: newTbl})
+	require.NoError(t, err)
+	require.NoError(t, feed.AddSubscription(tbl, newTbl, chunker))
+	require.NoError(t, feed.Start(t.Context()))
+
+	cutover, err := NewCutOver(db, []*cutoverConfig{{table: tbl, newTable: newTbl, oldTableName: "_child_old"}}, feed, dbConfig, slog.Default())
+	require.NoError(t, err)
+	cutover.foreignKeys = &foreignKeyCutover{db: db, dbConfig: dbConfig, logger: slog.Default(),
+		tables: []*foreignKeyTable{{table: tbl, newTable: newTbl, oldTableName: "_child_old"}}}
+	var added []string
+	cutover.checksUnderLock = func(context.Context) error {
+		added = foreignKeyNames(t, db, "_child_new")
+		return fmt.Errorf("%w: injected", check.ErrRefused)
+	}
+	require.ErrorIs(t, cutover.Run(t.Context()), errCutoverRefused)
+	require.Equal(t, []string{"_fk_c_new"}, added, "the attempt adds the foreign keys under the lock")
+	require.Empty(t, foreignKeyNames(t, db, "_child_new"), "and takes them off before it unlocks")
+
+	// The application deletes a parent's child, then the parent, in one
+	// transaction.
+	deleteParent(t, db, 1)
 }
