@@ -26,7 +26,10 @@ import (
 func TestSyncAutoscaleDisabled(t *testing.T) {
 	r, err := NewRunner(&Sync{Common: flags.Common{Threads: 3, WriteThreads: 5}})
 	require.NoError(t, err)
+	var logs bytes.Buffer
+	r.SetLogger(slog.New(slog.NewTextHandler(&logs, nil)))
 	require.NoError(t, r.setupThrottling(t.Context())) // No target config: nothing to probe.
+	require.Contains(t, logs.String(), "level=INFO msg=\"sync Aurora throttling and autoscaling disabled: target connection config unavailable\"")
 	require.False(t, r.TargetUnderLoad())
 	require.False(t, r.autoscale.Enabled)
 	require.Equal(t, 3, r.sync.Threads)
@@ -183,7 +186,7 @@ func TestInjectedApplierMustUseMonitoredTarget(t *testing.T) {
 	r.target = applier.Target{DB: db, Config: cfg}
 	require.NoError(t, r.setupThrottling(t.Context()))
 	require.False(t, r.autoscale.Enabled)
-	require.Contains(t, logs.String(), "injected applier must use the monitored single target")
+	require.Contains(t, logs.String(), "level=INFO msg=\"sync Aurora throttling and autoscaling disabled: injected applier must use the monitored single target\"")
 }
 
 func TestAutoscalingPreservesCallerConfig(t *testing.T) {
