@@ -246,7 +246,7 @@ These counts are overridden when [autoscaling](#skip-autoscaling) engages. Set `
 - type: `bool`
 - default: `false`
 
-By default, move derives copy, per-target write and checksum thread counts from Aurora target capacity and adjusts them using load feedback. `--skip-autoscaling` turns this off, so the pools run fixed at [threads](#threads) and [write-threads](#write-threads), and low-memory mode (below) does not apply:
+By default, move derives copy, per-target write and checksum thread counts from Aurora target capacity and adjusts them using load feedback. `--skip-autoscaling` turns this off, so the pools run fixed at [threads](#threads) and [write-threads](#write-threads), and small-instance mode (below) does not apply:
 
 ```sh
 spirit move --source-dsn=... --target-dsn=... --skip-autoscaling
@@ -260,13 +260,13 @@ The gradual multi-throttler reports the maximum utilization across hosts: all ho
 
 As in migration, the copier owns throttling: it pauses before reading another chunk and its autoscaler adjusts the applier through `SetWriteWorkers`. Already-read and queued work continues draining. Moving throttler ownership into the applier is outside this change.
 
-If any Aurora target is a low-memory instance (at most 2 vCPUs and at most a 1.5 GiB buffer pool), the whole move runs in low-memory mode instead, whatever the other targets are: 1 read thread, 1 write thread per target, 1 concurrent change-feed flush per source, a 1 MiB [target-chunk-size](#target-chunk-size), and no scaling. See [migrate's low-memory mode](migrate.md#skip-autoscaling).
+If any Aurora target has fewer than 4 vCPUs, the whole move runs in small-instance mode instead, whatever the other targets are: 1 read thread, 1 write thread per target, 1 concurrent change-feed flush per source, a 1 MiB [target-chunk-size](#target-chunk-size), and no scaling. See [migrate's small-instance mode](migrate.md#skip-autoscaling).
 
 Targets sharing a host share one Aurora monitor. Initial counts and ceilings use the smallest target host and divide its budget by the largest number of target shards sharing a host, with at least one worker per shard. The client CPU budget also limits growth. Host identity includes the connection transport and address (including port), independently of database and credentials. Use consistent direct endpoints: DNS aliases and proxies are not resolved to physical hosts.
 
-Every target host must be Aurora with at least four vCPUs. Non-Aurora hosts, small instances or failed Aurora probes retain the configured fixed thread counts, unless a target qualifies for low-memory mode (above), which takes precedence even when another target is not Aurora or its probe failed. Capacity-query and monitor-startup failures abort setup. Aurora monitoring uses thread utilization and the [max-commit-latency](#max-commit-latency) backstop; stale signals pause copying. That monitoring runs with `--skip-autoscaling` too; the flag only removes thread-count scaling. The initial and sentinel-wait checksums use the same load signal, and binlog draining narrows under load. Monitor connections are separate from the data pools.
+Autoscaling engages only when every target host is Aurora (with at least four vCPUs; a smaller one selects small-instance mode, above). A non-Aurora host or a failed Aurora probe keeps the configured fixed thread counts, unless another target selects small-instance mode, which takes precedence. Capacity-query and monitor-startup failures abort setup. Aurora monitoring uses thread utilization and the [max-commit-latency](#max-commit-latency) backstop; stale signals pause copying. That monitoring runs with `--skip-autoscaling` too; the flag only removes thread-count scaling. The initial and sentinel-wait checksums use the same load signal, and binlog draining narrows under load. Monitor connections are separate from the data pools.
 
-Each source's binlog flush is also sized from the targets, as `migrate` and `sync` size theirs: the smallest target's flush width, divided by the number of sources and by the largest number of target shards sharing a host (every flush fans out to every shard), and never narrower than the default of 8 concurrent statements (except in low-memory mode, where it is 1). The batch size shrinks as the width grows, so the rows each flush has in flight stay the same.
+Each source's binlog flush is also sized from the targets, as `migrate` and `sync` size theirs: the smallest target's flush width, divided by the number of sources and by the largest number of target shards sharing a host (every flush fans out to every shard), and never narrower than the default of 8 concurrent statements (except in small-instance mode, where it is 1). The batch size shrinks as the width grows, so the rows each flush has in flight stay the same.
 
 This flag is experimental, as it is for `migrate`. It applies to forward copying and checksums; the reverse window does not acquire new monitors for its write destinations.
 

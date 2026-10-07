@@ -310,10 +310,10 @@ func TestSyncSetupThrottling(t *testing.T) {
 	require.Greater(t, r.autoscale.MaxThreads, r.autoscale.StartThreads)
 }
 
-// A low-memory target (a db.t4g.medium class instance, too small to autoscale)
+// A target below autoscale.MinVCPUs (2 vCPUs, too small to autoscale)
 // runs the sync at one reader, one writer and one flush, with small copy
 // chunks.
-func TestSyncLowMemory(t *testing.T) {
+func TestSyncSmallInstance(t *testing.T) {
 	config, err := mysql.ParseDSN(testutils.DSN())
 	require.NoError(t, err)
 	r, err := NewRunner(&Sync{Common: flags.Common{Threads: 3, WriteThreads: 5}})
@@ -321,16 +321,15 @@ func TestSyncLowMemory(t *testing.T) {
 	r.target = applier.Target{Config: config}
 	r.source = sourceInfo{config: config}
 	fakeAurora(r, 2, throttler.AuroraResult{Throttlers: []throttler.Throttler{&syncOwnedSignal{}}})
-	r.bufferPoolSize = func(context.Context, *sql.DB) (uint64, error) { return 1 << 30, nil }
 	t.Cleanup(func() { require.NoError(t, r.Close()) })
 
 	require.NoError(t, r.setupThrottling(t.Context()))
 	require.False(t, r.autoscale.Enabled)
 	require.Equal(t, 1, r.sync.Threads)
 	require.Equal(t, 1, r.sync.WriteThreads)
-	require.Equal(t, uint64(autoscale.LowMemoryTargetChunkBytes), r.sync.TargetChunkSize)
+	require.Equal(t, uint64(autoscale.SmallInstanceTargetChunkBytes), r.sync.TargetChunkSize)
 	feed := r.replClientConfig()
-	require.Equal(t, autoscale.LowMemoryFlushConcurrency, feed.FlushConcurrency)
+	require.Equal(t, autoscale.SmallInstanceFlushConcurrency, feed.FlushConcurrency)
 	require.Zero(t, feed.BatchSize, "the change package's default batch size")
 }
 

@@ -57,7 +57,7 @@ type Common struct {
 	// TargetChunkSize is the in-memory byte budget the copier sizes each copy
 	// chunk against (the memory signal; see table.DefaultTargetChunkBytes and
 	// pkg/table/README.md). Zero means "use the default" (Normalize fills it in).
-	TargetChunkSize uint64 `name:"target-chunk-size" help:"In-memory byte budget per copy chunk (in bytes). Lowered to 1 MiB in low-memory mode (a small Aurora target, unless --skip-autoscaling is set)" optional:"" default:"16777216"`
+	TargetChunkSize uint64 `name:"target-chunk-size" help:"In-memory byte budget per copy chunk (in bytes). Lowered to 1 MiB in small-instance mode (a small Aurora target, unless --skip-autoscaling is set)" optional:"" default:"16777216"`
 
 	// MaxCommitLatency throttles when a target's average commit latency exceeds
 	// this threshold. Auto-enabled only on Aurora targets; zero disables it.
@@ -70,9 +70,11 @@ type Common struct {
 	// Aurora load signal, which is on by default. When autoscaling engages
 	// (concurrency.Engage) it takes over both thread counts: Threads and
 	// WriteThreads are replaced with instance-derived starting sizes, and each
-	// pool scales between bounds derived from the instance. It only engages on
-	// Aurora; on other servers this flag has no effect. See issue #831.
-	SkipAutoscaling bool `name:"skip-autoscaling" help:"Do not size the copy, apply and checksum thread pools from the instance or scale them on throttler feedback, and use --threads and --write-threads instead. Autoscaling only engages on Aurora, so this flag has no effect elsewhere. It also disables low-memory mode (one thread per pool and 1 MiB chunks on a target with at most 2 vCPUs and a 1.5 GiB buffer pool)" optional:"" default:"false"`
+	// pool scales between bounds derived from the instance. An Aurora target
+	// below autoscale.MinVCPUs gets small-instance mode instead, which also
+	// replaces both counts. It only engages on Aurora; on other servers this
+	// flag has no effect. See issue #831.
+	SkipAutoscaling bool `name:"skip-autoscaling" help:"Do not size the copy, apply and checksum thread pools from the instance or scale them on throttler feedback, and use --threads and --write-threads instead. Autoscaling only engages on Aurora, so this flag has no effect elsewhere. It also disables small-instance mode (one thread per pool and 1 MiB chunks on an Aurora target with fewer than 4 vCPUs)" optional:"" default:"false"`
 
 	// CheckpointMaxAge is the oldest checkpoint a run will resume from. Its
 	// age is the time since the checkpoint row was last written, i.e. how long
