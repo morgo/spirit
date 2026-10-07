@@ -18,10 +18,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// This file pins the behavioural differences between the default snapshot
-// checker (SingleChecker) and the experimental lockless checker when both are
+// This file pins the behavioural differences between the legacy snapshot
+// checker (SingleChecker) and the default lockless checker when both are
 // built the way pkg/migration builds them. Anything asserted here is a
-// difference an operator would see if they turned the experimental flag on, so
+// difference an operator would see if they turned --legacy-checksum on, so
 // each case is either parity (both implementations behave the same) or a
 // documented gap.
 
@@ -81,8 +81,8 @@ func (f *parityFixture) start(t *testing.T, name string) {
 }
 
 // checker builds the checker the migration runner would build: an Applier is
-// always supplied (pkg/migration passes it unconditionally), and `lockless` selects the experimental algorithm exactly
-// as Migration.EnableExperimentalLocklessChecksum does.
+// always supplied (pkg/migration passes it unconditionally), and `lockless` selects the algorithm exactly
+// as !Migration.LegacyChecksum does.
 func (f *parityFixture) checker(t *testing.T, lockless bool, opts ...func(*CheckerConfig)) Checker {
 	t.Helper()
 	config := NewCheckerDefaultConfig()
@@ -231,12 +231,10 @@ func TestParityContinuousDivergenceSurvivesCancel(t *testing.T) {
 }
 
 // TestParityLossyAlter: adding a UNIQUE index over non-unique data must fail
-// under both algorithms. The sentinel differs (ErrDifferencesExhausted vs
-// ErrVerificationUnresolved — repairs are on, so the lockless gate keeps
-// repairing and re-reading the chunk until MaxPasses is spent rather than
-// declaring the divergence permanent) but pkg/migration wraps either with the
-// same "likely a UNIQUE index on non-unique data" guidance, so the
-// operator-visible outcome is at parity.
+// under both algorithms with ErrDifferencesExhausted, the signal a caller uses
+// to decide not to retry. Repairs are on, so the lockless gate keeps repairing
+// and re-reading the chunk until MaxPasses is spent; because every pass
+// repaired, its ErrVerificationUnresolved also wraps ErrDifferencesExhausted.
 func TestParityLossyAlter(t *testing.T) {
 	for _, lockless := range []bool{false, true} {
 		t.Run(fmt.Sprintf("lockless=%v", lockless), func(t *testing.T) {
@@ -264,9 +262,8 @@ func TestParityLossyAlter(t *testing.T) {
 				// than condemned; INSERT IGNORE cannot close the gap, so the
 				// pass budget is what ends it.
 				require.ErrorIs(t, err, ErrVerificationUnresolved)
-			} else {
-				require.ErrorIs(t, err, ErrDifferencesExhausted)
 			}
+			require.ErrorIs(t, err, ErrDifferencesExhausted)
 		})
 	}
 }

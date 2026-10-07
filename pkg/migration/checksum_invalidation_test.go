@@ -190,7 +190,7 @@ func TestContinuousChecksumAbortsThenResumeRepairs(t *testing.T) {
 			)`)
 			tt.SeedRows(t, "INSERT INTO cont_chk_abort (val) SELECT 'a'", 1000)
 			t.Cleanup(func() { testutils.RunSQL(t, "DROP TABLE IF EXISTS "+sentinel.TableName) })
-			withChecker := func(m *Migration) { m.EnableExperimentalLocklessChecksum = lockless }
+			withChecker := func(m *Migration) { m.LegacyChecksum = !lockless }
 
 			m := NewTestRunner(t, tableName, "ENGINE=InnoDB",
 				WithThreads(1),

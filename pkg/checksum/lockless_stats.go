@@ -118,6 +118,13 @@ type LocklessCheckerStats struct {
 	// event; this counter is bumped immediately before the error returns.
 	PermanentFailures uint64
 
+	// ConfirmedDifferences is the count of divergences that survived a drain
+	// of every feed (or were settled against the change stream), each of which
+	// was repaired or reported. Unlike MismatchesDetected it excludes apply
+	// lag that reconciled on retry, and it is never reset, so it covers every
+	// run of this checker.
+	ConfirmedDifferences uint64
+
 	// FirstCleanPassAt is the wall-clock time at which the first clean
 	// pass completed (zero before that).
 	FirstCleanPassAt time.Time

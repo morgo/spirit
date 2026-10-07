@@ -12,18 +12,18 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestExperimentalLocklessMigration(t *testing.T) {
+// Lockless is the default checker; --legacy-checksum is the only way to get
+// the snapshot checker.
+func TestLocklessMigration(t *testing.T) {
 	for _, alter := range []string{"ENGINE=InnoDB", "CHANGE COLUMN value renamed BIGINT NOT NULL"} {
 		t.Run(alter, func(t *testing.T) {
 			tt := testutils.NewTestTable(t, "lockless_migration", "CREATE TABLE lockless_migration (id INT AUTO_INCREMENT PRIMARY KEY, value INT NOT NULL)")
 			tt.SeedRows(t, "INSERT INTO lockless_migration (value) SELECT 42", 1000)
-			r := NewTestRunner(t, "lockless_migration", alter, func(m *Migration) {
-				m.EnableExperimentalLocklessChecksum = true
-			})
+			r := NewTestRunner(t, "lockless_migration", alter)
 			defer func() { require.NoError(t, r.Close()) }()
 			require.NoError(t, r.Run(t.Context()))
 			checker, ok := r.checker.(checksum.StatusReporter)
-			require.True(t, ok, "flag must select the optimistic checker")
+			require.True(t, ok, "the default must select the optimistic checker")
 			require.False(t, checker.ChecksumStatus().Optimistic.FirstCleanPassAt.IsZero())
 			require.Equal(t, uint64(1), checker.ChecksumStatus().Optimistic.PassesCompleted)
 			require.False(t, r.checker.StartTime().IsZero())
@@ -33,6 +33,22 @@ func TestExperimentalLocklessMigration(t *testing.T) {
 			require.GreaterOrEqual(t, count, 1000)
 		})
 	}
+}
+
+func TestLegacyChecksumMigration(t *testing.T) {
+	tt := testutils.NewTestTable(t, "legacy_migration", "CREATE TABLE legacy_migration (id INT AUTO_INCREMENT PRIMARY KEY, value INT NOT NULL)")
+	tt.SeedRows(t, "INSERT INTO legacy_migration (value) SELECT 42", 1000)
+	r := NewTestRunner(t, "legacy_migration", "ENGINE=InnoDB", func(m *Migration) {
+		m.LegacyChecksum = true
+	})
+	defer func() { require.NoError(t, r.Close()) }()
+	require.NoError(t, r.Run(t.Context()))
+	_, ok := r.checker.(checksum.StatusReporter)
+	require.False(t, ok, "--legacy-checksum must select the snapshot checker")
+	require.False(t, r.checker.StartTime().IsZero())
+	var count int
+	require.NoError(t, tt.DB.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM legacy_migration").Scan(&count))
+	require.GreaterOrEqual(t, count, 1000)
 }
 
 // A multi-table (atomic) migration verifies through one multiChunker. The
@@ -50,8 +66,7 @@ func TestLocklessMultiTableMigration(t *testing.T) {
 	}
 
 	r := NewTestRunnerFromStatement(t,
-		"ALTER TABLE lockless_mt1 ADD COLUMN extra INT DEFAULT 0; ALTER TABLE lockless_mt2 ADD COLUMN extra INT DEFAULT 0",
-		func(m *Migration) { m.EnableExperimentalLocklessChecksum = true })
+		"ALTER TABLE lockless_mt1 ADD COLUMN extra INT DEFAULT 0; ALTER TABLE lockless_mt2 ADD COLUMN extra INT DEFAULT 0")
 	defer func() { require.NoError(t, r.Close()) }()
 	require.NoError(t, r.Run(t.Context()))
 
@@ -87,6 +102,31 @@ func TestLocklessCheckpointPersistsChecksumWatermark(t *testing.T) {
 	require.NotEmpty(t, watermark, "a verified prefix is resumable evidence under either algorithm")
 }
 
+// A checkpoint written under --legacy-checksum (the previous default) resumes
+// under the default lockless checksum at its saved watermark: the upgrade path.
+func TestLocklessResumesLegacyChecksumWatermark(t *testing.T) {
+	r := setupRunnerForChecksumTest(t, "legacy_to_lockless")
+	r.migration.LegacyChecksum = true
+	advanceRunnerToChecksumWatermarks(t, r)
+	_, isLockless := r.checker.(checksum.StatusReporter)
+	require.False(t, isLockless, "the checkpoint must be written by the snapshot checker")
+	r.status.Set(status.Checksum)
+	require.NoError(t, r.DumpCheckpoint(t.Context()))
+	_, checksumWM := latestCheckpointWatermarks(t, r)
+	require.NotEmpty(t, checksumWM)
+	statement := r.migration.Statement
+	require.NoError(t, r.Close())
+
+	resumed := NewTestRunnerFromStatement(t, statement)
+	defer func() { require.NoError(t, resumed.Close()) }()
+	require.NoError(t, resumed.Run(t.Context()))
+	require.True(t, resumed.usedResumeFromCheckpoint.Load())
+	checker, ok := resumed.checker.(checksum.StatusReporter)
+	require.True(t, ok)
+	require.False(t, checker.ChecksumStatus().Optimistic.FirstCleanPassAt.IsZero())
+	require.Positive(t, resumed.checker.GetProgress().RowsChecked)
+}
+
 // A saved checksum watermark is honoured by the lockless checker, not
 // discarded: resuming starts verification at the watermark and reports the
 // prefix below it as already checked.
@@ -101,9 +141,7 @@ func TestLocklessResumeHonoursChecksumWatermark(t *testing.T) {
 	statement := r.migration.Statement
 	require.NoError(t, r.Close())
 
-	resumed := NewTestRunnerFromStatement(t, statement, func(m *Migration) {
-		m.EnableExperimentalLocklessChecksum = true
-	})
+	resumed := NewTestRunnerFromStatement(t, statement)
 	defer func() { require.NoError(t, resumed.Close()) }()
 	require.NoError(t, resumed.Run(t.Context()))
 	require.True(t, resumed.usedResumeFromCheckpoint.Load())

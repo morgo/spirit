@@ -481,7 +481,7 @@ func (c *SingleChecker) Run(ctx context.Context) error {
 	if lastErr != nil {
 		return fmt.Errorf("%w (%d/%d); last error: %w", ErrAttemptsExhausted, c.maxRetries, c.maxRetries, lastErr)
 	}
-	return fmt.Errorf("%w (%d/%d). The data does not survive the schema change unmodified: check the ALTER for a conversion MySQL applies without a warning, such as adding a UNIQUE index to non-unique data or reducing a DATETIME/TIMESTAMP's fractional-second precision on rows that have one. If the ALTER is not lossy, this indicates either a manual modification to the _new table outside of Spirit, or a bug in Spirit; please report the latter @ github.com/block/spirit", ErrDifferencesExhausted, c.maxRetries, c.maxRetries)
+	return fmt.Errorf("%w (%d/%d). %s", ErrDifferencesExhausted, c.maxRetries, c.maxRetries, differencesExhaustedGuidance)
 }
 
 // logChunkSummary reports the pass's chunk-size distribution. Info level: it
