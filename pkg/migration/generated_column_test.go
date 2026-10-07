@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/block/spirit/pkg/checksum"
 	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/stretchr/testify/require"
@@ -37,6 +38,19 @@ func genColDML(ctx context.Context, db *sql.DB, tbl string, i int) error {
 		}
 	}
 	return nil
+}
+
+// requireNoConfirmedDifferences asserts the checksum confirmed no divergence.
+// The lockless checker's DifferencesFound also counts mismatches that were
+// only replication lag and reconciled on retry, which concurrent DML produces,
+// so for it the confirmed count is the one that means "had to repair".
+func requireNoConfirmedDifferences(t *testing.T, m *Runner, msg string) {
+	t.Helper()
+	if r, ok := m.checker.(checksum.StatusReporter); ok {
+		require.Zero(t, r.ChecksumStatus().Optimistic.ConfirmedDifferences, msg)
+		return
+	}
+	require.Zero(t, m.checker.DifferencesFound(), msg)
 }
 
 // TestGeneratedColumnModify covers ALTERs that change whether a column is
@@ -118,7 +132,7 @@ func TestGeneratedColumnModify(t *testing.T) {
 			// The initial checksum compared the copied and replayed rows and
 			// needed no repairs. (Without the fix it did not compare the column
 			// at all, so this alone would not catch it; the final check does.)
-			require.Zero(t, m.checker.DifferencesFound())
+			requireNoConfirmedDifferences(t, m, "the initial checksum had to repair rows")
 
 			// More DML while waiting on the sentinel: these rows only reach
 			// the new table through the binlog replay.
@@ -127,7 +141,7 @@ func TestGeneratedColumnModify(t *testing.T) {
 			}
 			testutils.RunSQLInDatabase(t, dbName, "DROP TABLE _spirit_sentinel")
 			require.NoError(t, running.wait(t))
-			require.Zero(t, m.checker.DifferencesFound(), "the checksum had to repair rows")
+			requireNoConfirmedDifferences(t, m, "the checksum had to repair rows")
 
 			var genExpr string
 			require.NoError(t, db.QueryRowContext(t.Context(),

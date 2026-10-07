@@ -1902,6 +1902,7 @@ func (c *LocklessChecker) Stats() LocklessCheckerStats {
 		WalkerStalls:                  c.walkerStalls.Load(),
 		MismatchesDetected:            c.mismatchesDetected.Load(),
 		PermanentFailures:             c.permanentFailures.Load(),
+		ConfirmedDifferences:          c.confirmedDifferences.Load(),
 		FirstCleanPassAt:              firstAt,
 		NextPassAt:                    nextAt,
 	}
