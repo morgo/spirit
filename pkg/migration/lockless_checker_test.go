@@ -102,6 +102,31 @@ func TestLocklessCheckpointPersistsChecksumWatermark(t *testing.T) {
 	require.NotEmpty(t, watermark, "a verified prefix is resumable evidence under either algorithm")
 }
 
+// A checkpoint written under --legacy-checksum (the previous default) resumes
+// under the default lockless checksum at its saved watermark: the upgrade path.
+func TestLocklessResumesLegacyChecksumWatermark(t *testing.T) {
+	r := setupRunnerForChecksumTest(t, "legacy_to_lockless")
+	r.migration.LegacyChecksum = true
+	advanceRunnerToChecksumWatermarks(t, r)
+	_, isLockless := r.checker.(checksum.StatusReporter)
+	require.False(t, isLockless, "the checkpoint must be written by the snapshot checker")
+	r.status.Set(status.Checksum)
+	require.NoError(t, r.DumpCheckpoint(t.Context()))
+	_, checksumWM := latestCheckpointWatermarks(t, r)
+	require.NotEmpty(t, checksumWM)
+	statement := r.migration.Statement
+	require.NoError(t, r.Close())
+
+	resumed := NewTestRunnerFromStatement(t, statement)
+	defer func() { require.NoError(t, resumed.Close()) }()
+	require.NoError(t, resumed.Run(t.Context()))
+	require.True(t, resumed.usedResumeFromCheckpoint.Load())
+	checker, ok := resumed.checker.(checksum.StatusReporter)
+	require.True(t, ok)
+	require.False(t, checker.ChecksumStatus().Optimistic.FirstCleanPassAt.IsZero())
+	require.Positive(t, resumed.checker.GetProgress().RowsChecked)
+}
+
 // A saved checksum watermark is honoured by the lockless checker, not
 // discarded: resuming starts verification at the watermark and reports the
 // prefix below it as already checked.

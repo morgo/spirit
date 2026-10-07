@@ -1665,12 +1665,25 @@ func TestRunUntilCleanRepeatedRepairsAreDifferencesExhausted(t *testing.T) {
 			require.ErrorIs(t, err, ErrVerificationUnresolved)
 			if tc.exhausted {
 				require.ErrorIs(t, err, ErrDifferencesExhausted)
+				require.ErrorContains(t, err, differencesExhaustedGuidance, "the operator gets the same guidance as from SingleChecker")
 			} else {
 				require.NotErrorIs(t, err, ErrDifferencesExhausted)
 			}
 			require.Equal(t, tc.maxPasses, recopier.callCount(), "one repair per pass")
 		})
 	}
+}
+
+// Stats is how a caller outside the package reads the confirmed count, so a
+// confirmed divergence must surface there, not only in the unexported counter.
+func TestLocklessStatsReportConfirmedDifferences(t *testing.T) {
+	c := newTestChecker(t, newTestChunker(1), fastConfig(), func(context.Context, *table.Chunk, int) (int64, int64, uint64, error) {
+		return 100, 99, 1000, nil
+	})
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	require.ErrorIs(t, c.Run(ctx), ErrPermanentDivergence)
+	require.Equal(t, uint64(1), c.Stats().ConfirmedDifferences)
 }
 
 // A chunk the checker repaired is not verified evidence. The repair happened

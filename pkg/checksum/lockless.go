@@ -916,8 +916,8 @@ func (c *LocklessChecker) runPasses(ctx context.Context, untilClean bool, minPas
 				// non-unique data). Wrap ErrDifferencesExhausted too, so a
 				// caller deciding whether to retry sees the same signal it
 				// gets from SingleChecker.
-				return fmt.Errorf("%w: %w: %d passes, each repaired at least one range, last had %d repaired and %d unresolved range(s)",
-					ErrVerificationUnresolved, ErrDifferencesExhausted, passNum, recopies, deferredHot)
+				return fmt.Errorf("%w: %w: %d passes, each repaired at least one range, last had %d repaired and %d unresolved range(s). %s",
+					ErrVerificationUnresolved, ErrDifferencesExhausted, passNum, recopies, deferredHot, differencesExhaustedGuidance)
 			}
 			return fmt.Errorf("%w: %d passes, last had %d repaired and %d unresolved range(s)",
 				ErrVerificationUnresolved, passNum, recopies, deferredHot)

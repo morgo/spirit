@@ -232,6 +232,7 @@ func TestTemporalPrecisionNarrowing(t *testing.T) {
 				func(m *Migration) { m.LegacyChecksum = tc.legacy })
 			err := m.Run(t.Context())
 			require.ErrorIs(t, err, checksum.ErrDifferencesExhausted)
+			require.ErrorContains(t, err, "fractional-second precision", "the operator is told what to check")
 			require.NoError(t, m.Close())
 		})
 	}
