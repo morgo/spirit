@@ -73,6 +73,20 @@ func hasForeignKeysCheck(ctx context.Context, r Resources, logger *slog.Logger) 
 			}
 			return refuse(errors.New("tables with existing foreign key constraints are not supported"))
 		}
+		// The change feed does not treat an ALTER that only adds or drops
+		// foreign keys on the new table as a schema change (the experimental
+		// cutover runs one), so a foreign key added to it from outside is
+		// caught here instead.
+		if r.NewTable != nil {
+			found, err := anyRow(ctx, r.DB, `SELECT 1 FROM information_schema.referential_constraints WHERE
+	constraint_schema=? AND table_name=? LIMIT 1`, r.NewTable.SchemaName, r.NewTable.TableName)
+			if err != nil {
+				return err
+			}
+			if found {
+				return refuse(fmt.Errorf("the new table %s has a foreign key, which the migration did not add: tables with foreign key constraints are not supported", r.NewTable.TableName))
+			}
+		}
 		return nil
 	}
 

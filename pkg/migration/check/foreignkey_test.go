@@ -324,3 +324,39 @@ func TestNewTableForeignKeysOnlyUnderCutoverLock(t *testing.T) {
 	}
 	require.NoError(t, hasForeignKeysCheck(t.Context(), resources(ScopeCutoverLocked), slog.Default()))
 }
+
+// TestNewTableForeignKeyWithoutExperimentalSupport adds a foreign key to the
+// new table of a table that has none, without
+// --enable-experimental-foreign-keys. The change feed does not treat that
+// ALTER as a schema change, because the experimental cutover runs one, so this
+// check has to refuse it.
+func TestNewTableForeignKeyWithoutExperimentalSupport(t *testing.T) {
+	db, err := sql.Open("block-mysql", testutils.DSN())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+	drop := "DROP TABLE IF EXISTS _nofk_child_new, nofk_child, nofk_parent"
+	testutils.RunSQL(t, drop)
+	t.Cleanup(func() { testutils.RunSQL(t, drop) })
+	testutils.RunSQL(t, "CREATE TABLE nofk_parent (id INT PRIMARY KEY)")
+	testutils.RunSQL(t, "CREATE TABLE nofk_child (id INT PRIMARY KEY, pid INT, KEY (pid))")
+	testutils.RunSQL(t, "CREATE TABLE _nofk_child_new LIKE nofk_child")
+	resources := func(scope ScopeFlag) Resources {
+		return Resources{
+			DB:        db,
+			Table:     &table.TableInfo{SchemaName: "test", TableName: "nofk_child"},
+			NewTable:  &table.TableInfo{SchemaName: "test", TableName: "_nofk_child_new"},
+			Statement: statement.MustNew("ALTER TABLE nofk_child ENGINE=InnoDB")[0],
+			scope:     scope,
+		}
+	}
+	scopes := []ScopeFlag{ScopePostSetup, ScopeCutover, ScopeCutoverLocked}
+	for _, scope := range scopes {
+		require.NoError(t, hasForeignKeysCheck(t.Context(), resources(scope), slog.Default()), "scope %v", scope)
+	}
+	testutils.RunSQL(t, "ALTER TABLE _nofk_child_new ADD CONSTRAINT fk_nofk FOREIGN KEY (pid) REFERENCES nofk_parent (id)")
+	for _, scope := range scopes {
+		err := hasForeignKeysCheck(t.Context(), resources(scope), slog.Default())
+		require.ErrorIs(t, err, ErrRefused, "scope %v", scope)
+		require.ErrorContains(t, err, "the new table _nofk_child_new has a foreign key", "scope %v", scope)
+	}
+}

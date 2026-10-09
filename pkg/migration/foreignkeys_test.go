@@ -3,6 +3,7 @@ package migration
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"slices"
@@ -644,5 +645,78 @@ func TestCutOverFailedAttemptRemovesForeignKeys(t *testing.T) {
 
 	// The application deletes a parent's child, then the parent, in one
 	// transaction.
+	deleteParent(t, db, 1)
+}
+
+// flushRecorder is a change.Source whose Flush, the cutover's flush before it
+// locks, first runs onFlush.
+type flushRecorder struct {
+	change.Source
+	onFlush func()
+}
+
+func (f *flushRecorder) Flush(ctx context.Context) error {
+	f.onFlush()
+	return f.Source.Flush(ctx)
+}
+
+// TestCutOverRetryRemovesLeftoverForeignKeys leaves a foreign key on the new
+// table after a failed attempt, as an attempt does when its RENAME's outcome
+// is unknown or its own removal fails on a dead locking session. The retry
+// must drop it before its unlocked flush: until then it holds the
+// application's parent deletes to the new table's rows.
+func TestCutOverRetryRemovesLeftoverForeignKeys(t *testing.T) {
+	t.Parallel()
+	testutils.SkipBeforeMySQLVersion(t, check.MinForeignKeyVersion, "changes made by foreign key cascades are only in the binary log from MySQL 9.6")
+	dbName, _ := testutils.CreateUniqueTestDatabase(t)
+	testutils.RunSQLInDatabase(t, dbName, "CREATE TABLE parent (id INT NOT NULL PRIMARY KEY)")
+	testutils.RunSQLInDatabase(t, dbName, `CREATE TABLE child (id INT NOT NULL PRIMARY KEY, pid INT NOT NULL, KEY pid (pid),
+		CONSTRAINT fk_c FOREIGN KEY (pid) REFERENCES parent (id))`)
+	testutils.RunSQLInDatabase(t, dbName, "CREATE TABLE _child_new LIKE child") // LIKE does not copy foreign keys
+	testutils.RunSQLInDatabase(t, dbName, "INSERT INTO parent VALUES (1), (2)")
+	testutils.RunSQLInDatabase(t, dbName, "INSERT INTO child VALUES (1, 1), (2, 2)")
+	testutils.RunSQLInDatabase(t, dbName, "INSERT INTO _child_new SELECT * FROM child")
+
+	cfg, err := mysql.ParseDSN(testutils.DSNForDatabase(dbName))
+	require.NoError(t, err)
+	dbConfig := dbconn.NewDBConfig()
+	db, err := dbconn.New(testutils.DSNForDatabase(dbName), dbConfig)
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+	tbl := table.NewTableInfo(db, dbName, "child")
+	require.NoError(t, tbl.SetInfo(t.Context()))
+	newTbl := table.NewTableInfo(db, dbName, "_child_new")
+	feed := change.NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), change.NewClientDefaultConfig())
+	defer feed.Close()
+	chunker, err := table.NewChunker(tbl, table.ChunkerConfig{NewTable: newTbl})
+	require.NoError(t, err)
+	require.NoError(t, feed.AddSubscription(tbl, newTbl, chunker))
+	require.NoError(t, feed.Start(t.Context()))
+
+	var atFlush [][]string
+	recorder := &flushRecorder{Source: feed, onFlush: func() {
+		atFlush = append(atFlush, foreignKeyNames(t, db, "_child_new"))
+	}}
+	cutover, err := NewCutOver(db, []*cutoverConfig{{table: tbl, newTable: newTbl, oldTableName: "_child_old"}}, recorder, dbConfig, slog.Default())
+	require.NoError(t, err)
+	cutover.foreignKeys = &foreignKeyCutover{db: db, dbConfig: dbConfig, logger: slog.Default(),
+		tables: []*foreignKeyTable{{table: tbl, newTable: newTbl, oldTableName: "_child_old"}}}
+	attempts := 0
+	cutover.checksUnderLock = func(context.Context) error {
+		attempts++
+		if attempts == 1 {
+			return errors.New("injected transient failure")
+		}
+		return fmt.Errorf("%w: injected", check.ErrRefused)
+	}
+	cutover.testAfterFailedAttempt = func() {
+		if attempts == 1 {
+			testutils.RunSQLInDatabase(t, dbName, "ALTER TABLE _child_new ADD CONSTRAINT _fk_c_new FOREIGN KEY (pid) REFERENCES parent (id)")
+		}
+	}
+	require.ErrorIs(t, cutover.Run(t.Context()), errCutoverRefused)
+	require.Equal(t, 2, attempts)
+	require.Equal(t, [][]string{nil, nil}, atFlush, "no attempt flushes with foreign keys on the new table")
+	require.Empty(t, foreignKeyNames(t, db, "_child_new"))
 	deleteParent(t, db, 1)
 }
