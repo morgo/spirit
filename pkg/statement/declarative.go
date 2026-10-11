@@ -174,6 +174,31 @@ func tablesByName(tables []table.TableSchema, key func(string) string, opts *Dif
 	return byName, nil
 }
 
+// matchReferenceCase spells each of desired's foreign key references the way
+// current spells a reference to the same table under key, so a reference that
+// differs from the stored one only in case is not diffed as a different
+// foreign key. A server that compares names case-insensitively reports the
+// reference in its own case (lower case under lower_case_table_names=1),
+// whatever case the schema file wrote it in. Under exact matching the key is
+// the name itself, so nothing changes.
+func matchReferenceCase(current, desired *CreateTable, key func(string) string) {
+	stored := make(map[string]*ForeignKeyReference)
+	for i := range current.Constraints {
+		if ref := current.Constraints[i].References; ref != nil {
+			stored[key(ref.Schema)+"."+key(ref.Table)] = ref
+		}
+	}
+	for i := range desired.Constraints {
+		ref := desired.Constraints[i].References
+		if ref == nil {
+			continue
+		}
+		if match, ok := stored[key(ref.Schema)+"."+key(ref.Table)]; ok {
+			ref.Schema, ref.Table = match.Schema, match.Table
+		}
+	}
+}
+
 // referencedTables returns the names of the tables ct's foreign keys
 // reference, without their schema: DeclarativeToImperative orders one
 // schema's tables, which carry no schema of their own to compare against.
@@ -207,6 +232,7 @@ func diffTable(name, currentSchema, desiredSchema string, opts *DiffOptions) (st
 	if tableNameKey(opts)(b.TableName) == tableNameKey(opts)(a.TableName) {
 		b.TableName = a.TableName
 	}
+	matchReferenceCase(a, b, tableNameKey(opts))
 	defer func() {
 		if r := recover(); r != nil {
 			stmts = nil

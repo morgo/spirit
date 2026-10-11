@@ -279,7 +279,44 @@ func TestDeclarativeToImperative_LowerCaseTableNames(t *testing.T) {
 			require.Equal(t, "parent", changes[0].Table)
 			require.Equal(t, "child", changes[1].Table)
 		})
+
+		t.Run(fmt.Sprintf("lower_case_table_names=%d/reference in another case matches the stored foreign key", lctn), func(t *testing.T) {
+			current := []table.TableSchema{
+				{Name: "customers", Schema: "CREATE TABLE `customers` (\n  `id` int NOT NULL,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB"},
+				{Name: "orders", Schema: "CREATE TABLE `orders` (\n  `id` int NOT NULL,\n  `cid` int DEFAULT NULL,\n  PRIMARY KEY (`id`),\n  KEY `cid` (`cid`),\n  CONSTRAINT `fk_c` FOREIGN KEY (`cid`) REFERENCES `customers` (`id`)\n) ENGINE=InnoDB"},
+			}
+			desired := []table.TableSchema{
+				{Name: "customers", Schema: "CREATE TABLE customers (id INT PRIMARY KEY)"},
+				{Name: "orders", Schema: "CREATE TABLE orders (id INT PRIMARY KEY, cid INT, KEY cid (cid), CONSTRAINT fk_c FOREIGN KEY (cid) REFERENCES Customers (id))"},
+			}
+			changes, err := DeclarativeToImperative(current, desired, opts)
+			require.NoError(t, err)
+			require.Empty(t, statementsToStrings(changes))
+		})
+
+		t.Run(fmt.Sprintf("lower_case_table_names=%d/reference in another case orders the drops", lctn), func(t *testing.T) {
+			current := []table.TableSchema{
+				{Name: "Alpha", Schema: "CREATE TABLE `Alpha` (\n  `id` int NOT NULL,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB"},
+				{Name: "Zeta", Schema: "CREATE TABLE `Zeta` (\n  `id` int NOT NULL,\n  `aid` int DEFAULT NULL,\n  PRIMARY KEY (`id`),\n  KEY `aid` (`aid`),\n  CONSTRAINT `fk_a` FOREIGN KEY (`aid`) REFERENCES `Alpha` (`id`)\n) ENGINE=InnoDB"},
+			}
+			changes, err := DeclarativeToImperative(current, nil, opts)
+			require.NoError(t, err)
+			require.Equal(t, []string{"DROP TABLE `Zeta`", "DROP TABLE `Alpha`"}, statementsToStrings(changes))
+		})
 	}
+
+	t.Run("lower_case_table_names=0 keeps a reference in another case as a different foreign key", func(t *testing.T) {
+		current := []table.TableSchema{
+			{Name: "orders", Schema: "CREATE TABLE `orders` (\n  `id` int NOT NULL,\n  `cid` int DEFAULT NULL,\n  PRIMARY KEY (`id`),\n  KEY `cid` (`cid`),\n  CONSTRAINT `fk_c` FOREIGN KEY (`cid`) REFERENCES `customers` (`id`)\n) ENGINE=InnoDB"},
+		}
+		desired := []table.TableSchema{
+			{Name: "orders", Schema: "CREATE TABLE orders (id INT PRIMARY KEY, cid INT, KEY cid (cid), CONSTRAINT fk_c FOREIGN KEY (cid) REFERENCES Customers (id))"},
+		}
+		changes, err := DeclarativeToImperative(current, desired, NewDiffOptions())
+		require.NoError(t, err)
+		require.Len(t, changes, 1)
+		require.Contains(t, changes[0].Statement, "REFERENCES `Customers`")
+	})
 
 	t.Run("lower_case_table_names=0 creates and drops", func(t *testing.T) {
 		current := []table.TableSchema{{Name: "orders", Schema: "CREATE TABLE orders (id INT PRIMARY KEY)"}}
