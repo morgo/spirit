@@ -397,7 +397,7 @@ func TestBufferedMapGeometry(t *testing.T) {
 // 1.0 becomes "\"1.0\"" (re-parsed as JSON STRING). The CRC32 over
 // CAST(j AS json) then disagrees, and every retry of pkg/checksum finds
 // fresh mismatches as concurrent traffic continues — manifesting as
-// "checksum found differences on every attempt (N/N)" on JSON-bearing
+// "checksum kept finding differences" on JSON-bearing
 // tables.
 //
 // All subtests pass with RenderJSONAsMySQLText=true on the
