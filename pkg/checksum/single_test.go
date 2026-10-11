@@ -295,21 +295,29 @@ func TestRetryDoesNotVacuouslyPass(t *testing.T) {
 }
 
 // ErrDifferencesExhausted tells a caller that a retry reproduces the
-// differences, so Run may return it only when every attempt completed having
-// found some. In a run whose first attempt errored and whose last one found
-// and repaired a difference, nothing re-verified that repair: the run is
-// exhausted attempts, not a reproduced divergence.
-func TestRunDifferencesExhaustedNeedsEveryAttempt(t *testing.T) {
+// differences, so Run may return it only when a completed attempt re-read a
+// repair and found the difference again. In a run whose first attempt errored
+// and whose last one found and repaired a difference, nothing re-verified that
+// repair: the run is exhausted attempts, not a reproduced divergence. When two
+// completed attempts follow the error, the second re-read the first one's
+// repair and found the difference again, so the divergence is reproduced.
+func TestRunDifferencesExhaustedNeedsARepairReread(t *testing.T) {
 	repairFailed := errors.New("repair failed")
 	for _, tc := range []struct {
-		name string
+		name  string
+		table string
+		// maxRetries is the attempt budget. Every attempt finds the
+		// difference and calls recopy once.
+		maxRetries int
 		// recopy is called for each repair, numbered from 1; repair is the
 		// checker's own repair path.
 		recopy func(ctx context.Context, call int, repair Recopier, chunk *table.Chunk) error
 		assert func(t *testing.T, err error)
 	}{
 		{
-			name: "first attempt errors, last attempt repairs",
+			name:       "first attempt errors, last attempt repairs",
+			table:      "diffexh_err_repair",
+			maxRetries: 2,
 			recopy: func(ctx context.Context, call int, repair Recopier, chunk *table.Chunk) error {
 				if call == 1 {
 					return repairFailed
@@ -320,23 +328,67 @@ func TestRunDifferencesExhaustedNeedsEveryAttempt(t *testing.T) {
 				require.ErrorIs(t, err, ErrAttemptsExhausted)
 				require.NotErrorIs(t, err, ErrDifferencesExhausted)
 				require.ErrorIs(t, err, repairFailed, "the attempt error stays triagable")
+				require.Contains(t, err.Error(), "(1/2 attempts errored)")
 				require.False(t, IsReproducible(err))
 			},
 		},
 		{
-			name: "every attempt finds differences",
+			name:       "every attempt finds differences",
+			table:      "diffexh_every",
+			maxRetries: 2,
 			// The repair reports success without writing, so every attempt
 			// completes and finds the difference again.
 			recopy: func(context.Context, int, Recopier, *table.Chunk) error { return nil },
 			assert: func(t *testing.T, err error) {
 				require.ErrorIs(t, err, ErrDifferencesExhausted)
 				require.NotErrorIs(t, err, ErrAttemptsExhausted)
+				require.Contains(t, err.Error(), "(2 consecutive of 2 attempts)")
 				require.True(t, IsReproducible(err))
+			},
+		},
+		{
+			name:       "first attempt errors, next two find differences",
+			table:      "diffexh_err_diff_diff",
+			maxRetries: 3,
+			// Attempt 1's repair fails; attempts 2 and 3 report a repair
+			// without writing, so attempt 3 re-reads attempt 2's repair and
+			// finds the difference again.
+			recopy: func(_ context.Context, call int, _ Recopier, _ *table.Chunk) error {
+				if call == 1 {
+					return repairFailed
+				}
+				return nil
+			},
+			assert: func(t *testing.T, err error) {
+				require.ErrorIs(t, err, ErrDifferencesExhausted)
+				require.NotErrorIs(t, err, ErrAttemptsExhausted)
+				require.Contains(t, err.Error(), "(2 consecutive of 3 attempts)")
+				require.True(t, IsReproducible(err))
+			},
+		},
+		{
+			name:       "an error between two differences",
+			table:      "diffexh_diff_err_diff",
+			maxRetries: 3,
+			// Attempts 1 and 3 report a repair without writing; attempt 2's
+			// repair fails, so attempt 3 is the only completed attempt after
+			// the error and nothing re-read its repair.
+			recopy: func(_ context.Context, call int, _ Recopier, _ *table.Chunk) error {
+				if call == 2 {
+					return repairFailed
+				}
+				return nil
+			},
+			assert: func(t *testing.T, err error) {
+				require.ErrorIs(t, err, ErrAttemptsExhausted)
+				require.NotErrorIs(t, err, ErrDifferencesExhausted)
+				require.Contains(t, err.Error(), "(1/3 attempts errored)")
+				require.False(t, IsReproducible(err))
 			},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			tbl := "diffexh_" + fmt.Sprint(len(tc.name))
+			tbl := tc.table
 			testutils.RunSQL(t, fmt.Sprintf("DROP TABLE IF EXISTS %s, _%s_new, _%s_chkpnt", tbl, tbl, tbl))
 			testutils.RunSQL(t, fmt.Sprintf("CREATE TABLE %s (a INT NOT NULL, b INT, c INT, PRIMARY KEY (a))", tbl))
 			testutils.RunSQL(t, fmt.Sprintf("CREATE TABLE _%s_new (a INT NOT NULL, b INT, c INT, PRIMARY KEY (a))", tbl))
@@ -364,7 +416,7 @@ func TestRunDifferencesExhaustedNeedsEveryAttempt(t *testing.T) {
 			require.NoError(t, chunker.Open())
 
 			config := newTestCheckerConfig(t, db)
-			config.MaxRetries = 2
+			config.MaxRetries = tc.maxRetries
 			checker, err := NewChecker([]*sql.DB{db}, chunker, []change.Source{feed}, config)
 			require.NoError(t, err)
 			single := checker.(*SingleChecker)
@@ -379,7 +431,7 @@ func TestRunDifferencesExhaustedNeedsEveryAttempt(t *testing.T) {
 			single.recopier = fake
 
 			tc.assert(t, checker.Run(t.Context()))
-			require.Equal(t, 2, fake.calls, "each attempt found the difference and tried to repair it")
+			require.Equal(t, tc.maxRetries, fake.calls, "each attempt found the difference and tried to repair it")
 		})
 	}
 }

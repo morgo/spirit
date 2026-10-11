@@ -367,11 +367,13 @@ func (c *SingleChecker) Run(ctx context.Context) error {
 	// Try the checksum up to n times if differences are found and we can fix them.
 	// lastErr is the previous attempt's outcome: nil when it completed having
 	// found differences. recentErr and erroredAttempts outlive an attempt that
-	// completed, so a run whose last attempt found differences after earlier
-	// ones errored is not reported as differences on every attempt: only an
-	// attempt that completes re-verifies the repairs of the one before it.
+	// completed. completedInARow counts the attempts since the last errored
+	// one, each of which completed and found differences: only an attempt that
+	// completes re-verifies the repairs of the one before it, so a run that
+	// errored is reported as reproducing its differences only when two
+	// completed attempts in a row found them.
 	var lastErr, recentErr error
-	erroredAttempts := 0
+	erroredAttempts, completedInARow := 0, 0
 	for attempt := 1; attempt <= c.maxRetries; attempt++ {
 		if attempt > 1 {
 			// If the previous attempt errored without finding a single
@@ -437,6 +439,7 @@ func (c *SingleChecker) Run(ctx context.Context) error {
 			c.logger.Error("checksum encountered an error", "error", err)
 			lastErr, recentErr = err, err
 			erroredAttempts++
+			completedInARow = 0
 			continue
 		}
 
@@ -451,6 +454,7 @@ func (c *SingleChecker) Run(ctx context.Context) error {
 		// this as the "last attempt outcome" so the exhausted-retries error
 		// below can distinguish it from a hard error path.
 		lastErr = nil
+		completedInARow++
 	}
 
 	// A cancellation that lands inside the final attempt leaves the loop here
@@ -471,28 +475,31 @@ func (c *SingleChecker) Run(ctx context.Context) error {
 
 	// Retries exhausted. There are two distinct shapes of failure here:
 	//
-	//   1. At least one attempt returned an error (erroredAttempts > 0) —
-	//      e.g. a transient context cancellation, a connection issue, or a
-	//      bug that surfaces as an error rather than a row diff. Surface the
-	//      most recent error verbatim so it's actually triagable. This
-	//      includes a mixed run whose other attempts found differences: an
-	//      attempt that errored did not re-verify the repairs before it, and
-	//      the last attempt's repairs were never re-verified at all, so the
-	//      differences are not shown to reproduce.
+	//   1. At least one attempt returned an error (erroredAttempts > 0) and
+	//      fewer than two completed attempts followed it — e.g. a transient
+	//      context cancellation, a connection issue, or a bug that surfaces
+	//      as an error rather than a row diff. Surface the most recent error
+	//      verbatim so it's actually triagable. This includes a mixed run
+	//      whose last attempt found differences: an attempt that errored did
+	//      not re-verify the repairs before it, and the last attempt's
+	//      repairs were never re-verified at all, so the differences are not
+	//      shown to reproduce.
 	//
-	//   2. Every attempt completed but kept finding row differences — this
-	//      is the original "lossy ALTER or bug" shape (e.g. adding a UNIQUE
-	//      INDEX to non-unique data, or a real bug in Spirit's copy phase).
-	//      The message names the lossy-ALTER causes first, because the
-	//      operator can act on them.
+	//   2. The attempts kept finding row differences — every attempt did, or
+	//      two in a row did after the last errored one, so a completed
+	//      attempt re-verified a repair and found the difference again. This
+	//      is the "lossy ALTER or bug" shape (e.g. adding a UNIQUE INDEX to
+	//      non-unique data, or a real bug in Spirit's copy phase). The
+	//      message names the lossy-ALTER causes first, because the operator
+	//      can act on them.
 	//
 	// Each shape carries its own sentinel so a caller can tell them apart
 	// without reading the message: only the second is reproducible, and a
 	// caller that decides whether to retry needs to know which it has.
-	if erroredAttempts > 0 {
+	if erroredAttempts > 0 && completedInARow < 2 {
 		return fmt.Errorf("%w (%d/%d attempts errored); last error: %w", ErrAttemptsExhausted, erroredAttempts, c.maxRetries, recentErr)
 	}
-	return fmt.Errorf("%w (%d/%d). %s", ErrDifferencesExhausted, c.maxRetries, c.maxRetries, differencesExhaustedGuidance)
+	return fmt.Errorf("%w (%d consecutive of %d attempts). %s", ErrDifferencesExhausted, completedInARow, c.maxRetries, differencesExhaustedGuidance)
 }
 
 // logChunkSummary reports the pass's chunk-size distribution. Info level: it
