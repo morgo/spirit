@@ -34,19 +34,25 @@ import (
 const differencesExhaustedGuidance = "The data does not survive the schema change unmodified: check the ALTER for a conversion MySQL applies without a warning, such as adding a UNIQUE index to non-unique data or reducing a DATETIME/TIMESTAMP's fractional-second precision on rows that have one. If the ALTER is not lossy, this indicates either a manual modification to the _new table outside of Spirit, or a bug in Spirit; please report the latter @ github.com/block/spirit"
 
 var (
-	// ErrDifferencesExhausted is returned by Run when every attempt completed
-	// but kept finding row differences. The table is diverging in a way the
-	// repairs cannot close, so a further attempt reproduces it: a lossy ALTER
-	// (adding a UNIQUE index to non-unique data being the common one), or a
-	// bug. Callers that decide whether to retry should not.
-	ErrDifferencesExhausted = errors.New("checksum found differences on every attempt")
+	// ErrDifferencesExhausted is returned by Run when the attempts kept finding
+	// row differences: every attempt completed and found them, or, after an
+	// attempt that errored, at least two completed attempts in a row did, so a
+	// completed attempt re-read a repair and found the difference again. The
+	// table is diverging in a way the repairs cannot close, so a further
+	// attempt reproduces it: a lossy ALTER (adding a UNIQUE index to
+	// non-unique data being the common one), or a bug. Callers that decide
+	// whether to retry should not.
+	ErrDifferencesExhausted = errors.New("checksum kept finding differences")
 
-	// ErrAttemptsExhausted is returned by Run when every attempt errored before
-	// it could compare the whole table — killed connections, a cancelled
-	// context, a failure inside a pass. Nothing has been proven about the data,
-	// and the condition may well be gone by the next attempt. It wraps the last
-	// attempt's error, which is the one worth triaging.
-	ErrAttemptsExhausted = errors.New("checksum errored on every attempt")
+	// ErrAttemptsExhausted is returned by Run when the attempts ran out and at
+	// least one of them errored before it could compare the whole table, and
+	// fewer than two completed attempts followed the last such error —
+	// killed connections, a cancelled context, a failure inside a pass. Any
+	// other attempt found and repaired differences, but an errored attempt
+	// says nothing about whether a repair held, so nothing has been proven
+	// about the data, and the condition may well be gone by the next attempt.
+	// It wraps the most recent attempt error, which is the one worth triaging.
+	ErrAttemptsExhausted = errors.New("checksum attempts errored before the table was verified")
 
 	// ErrPermanentDivergence is returned by RunContinuous when it confirms a
 	// difference: the source is not racing, and (for LocklessChecker) the
@@ -65,6 +71,32 @@ var (
 	// recopies on busy or distant replicas.
 	fixChunkTimeout = 10 * time.Minute
 )
+
+// IsReproducible reports whether err is a checksum verdict about the data:
+// one that checking the same data again would reach again. It covers
+// ErrDifferencesExhausted (a completed attempt found differences again after
+// the one before it repaired them, which includes an ErrVerificationUnresolved
+// whose every pass repaired) and ErrPermanentDivergence (a confirmed
+// difference). The error may be wrapped.
+//
+// One exception rests on a single observation: SingleChecker.Run with
+// MaxRetries set to 1 reports ErrDifferencesExhausted after one attempt that
+// found and repaired differences, which no later attempt re-read. A caller
+// that relies on this verdict leaves MaxRetries at its default.
+//
+// A bare ErrVerificationUnresolved is not reproducible. The pass budget ran
+// out with ranges that were changing too fast to verify, or that a single
+// repair did not settle, but no divergence is proven, and a later attempt
+// against a quieter table can pass. ErrAttemptsExhausted is not reproducible
+// either: an attempt that errored proved nothing about the data.
+//
+// Reproducible is about re-reading the same data, not about what a caller's
+// retry does to it: RunContinuous reports ErrPermanentDivergence without
+// repairing, and the initial Run of a resumed migration repairs that range.
+// Whether such a retry is worth making is the caller's decision.
+func IsReproducible(err error) bool {
+	return errors.Is(err, ErrDifferencesExhausted) || errors.Is(err, ErrPermanentDivergence)
+}
 
 const (
 	// repairBatchRows and repairBatchBytes bound how much of a mismatched chunk
