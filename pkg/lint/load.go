@@ -41,6 +41,21 @@ func LoadSchemaFromDSN(ctx context.Context, dsn string) ([]*statement.CreateTabl
 	return tables, nil
 }
 
+// LowerCaseTableNamesFromDSN returns the server's @@lower_case_table_names,
+// for statement.DiffOptions.LowerCaseTableNames.
+func LowerCaseTableNamesFromDSN(ctx context.Context, dsn string) (int, error) {
+	db, err := sql.Open(dbconn.DriverName, dsn)
+	if err != nil {
+		return 0, fmt.Errorf("failed to open database: %w", err)
+	}
+	defer utils.CloseAndLog(db)
+	var lowerCaseTableNames int
+	if err := db.QueryRowContext(ctx, "SELECT @@lower_case_table_names").Scan(&lowerCaseTableNames); err != nil {
+		return 0, fmt.Errorf("failed to read lower_case_table_names: %w", err)
+	}
+	return lowerCaseTableNames, nil
+}
+
 // LoadSchemaFromDir reads all .sql files from a directory and parses them as
 // CREATE TABLE statements. Each file should contain exactly one CREATE TABLE statement.
 func LoadSchemaFromDir(dir string) ([]*statement.CreateTable, error) {

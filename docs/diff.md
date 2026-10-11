@@ -37,7 +37,7 @@ The exit code is `0` if no errors are found, `1` if there are error-level violat
 - Type: String
 - Environment variable: `MYSQL_DSN`
 
-A Go MySQL DSN for the existing (source) schema. Mutually exclusive with `--source-dir`.
+A Go MySQL DSN for the existing (source) schema. Mutually exclusive with `--source-dir`. Table names are matched the way this server compares them: case-insensitively when its `lower_case_table_names` is 1 or 2, so a schema file that writes `Orders` for a live `orders` produces an `ALTER TABLE orders` rather than a `CREATE` and a `DROP`. With `--source-dir` there is no server to ask, and names match exactly.
 
 ### source-dir
 

@@ -89,7 +89,18 @@ func (cmd *DiffCmd) Run() error {
 			fmt.Fprintf(os.Stderr, "Error converting target schema: %s\n", err)
 			os.Exit(2)
 		}
-		plan, err := PlanChanges(currentSchemas, targetSchemas, nil, &config)
+		// The source is the server the plan is applied to, so its
+		// lower_case_table_names decides how table names match. A source
+		// directory has no server to ask, so names match exactly.
+		diffOpts := statement.NewDiffOptions()
+		if cmd.SourceDSN != "" {
+			diffOpts.LowerCaseTableNames, err = LowerCaseTableNamesFromDSN(ctx, cmd.SourceDSN)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error reading source server settings: %s\n", err)
+				os.Exit(2)
+			}
+		}
+		plan, err := PlanChanges(currentSchemas, targetSchemas, diffOpts, &config)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error planning changes: %s\n", err)
 			os.Exit(2)
