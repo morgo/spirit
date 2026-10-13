@@ -15,6 +15,7 @@ import (
 
 	"github.com/block/mysql"
 	"github.com/block/spirit/pkg/dbconn/sqlescape"
+	parsermysql "github.com/block/spirit/pkg/parser/mysql"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
@@ -205,9 +206,9 @@ func TestIsConnectionLossError(t *testing.T) {
 	require.True(t, IsConnectionLossError(driver.ErrBadConn))
 	require.True(t, IsConnectionLossError(mysql.ErrInvalidConn))
 	require.True(t, IsConnectionLossError(io.EOF))
-	require.True(t, IsConnectionLossError(&mysql.MySQLError{Number: 2003})) // CR_CONN_HOST_ERROR relayed by a proxy
-	require.True(t, IsConnectionLossError(&mysql.MySQLError{Number: 2013})) // CR_SERVER_LOST relayed by a proxy
-	require.True(t, IsConnectionLossError(&mysql.MySQLError{Number: 4031})) // ER_CLIENT_INTERACTION_TIMEOUT: killed by wait_timeout
+	require.True(t, IsConnectionLossError(&mysql.MySQLError{Number: 2003}))                                    // CR_CONN_HOST_ERROR relayed by a proxy
+	require.True(t, IsConnectionLossError(&mysql.MySQLError{Number: 2013}))                                    // CR_SERVER_LOST relayed by a proxy
+	require.True(t, IsConnectionLossError(&mysql.MySQLError{Number: parsermysql.ErrClientInteractionTimeout})) // killed by wait_timeout
 
 	// Wrapped variants must also be detected.
 	require.True(t, IsConnectionLossError(fmt.Errorf("rename failed: %w", driver.ErrBadConn)))
@@ -248,14 +249,14 @@ func TestIsLockContentionError(t *testing.T) {
 	// after lock contention" at an operator who is looking at something else.
 	require.False(t, IsLockContentionError(nil))
 	require.False(t, IsLockContentionError(errors.New("not a mysql error")))
-	require.False(t, IsLockContentionError(&mysql.MySQLError{Number: 1062})) // duplicate key
-	require.False(t, IsLockContentionError(&mysql.MySQLError{Number: 1064})) // syntax error
-	require.False(t, IsLockContentionError(&mysql.MySQLError{Number: 1146})) // no such table
-	require.False(t, IsLockContentionError(&mysql.MySQLError{Number: 1317})) // query interrupted: retryable, not contention
-	require.False(t, IsLockContentionError(&mysql.MySQLError{Number: 1406})) // data too long
-	require.False(t, IsLockContentionError(&mysql.MySQLError{Number: 1836})) // read only mode: retryable, not contention
-	require.False(t, IsLockContentionError(&mysql.MySQLError{Number: 2013})) // CR_SERVER_LOST: connection loss, not contention
-	require.False(t, IsLockContentionError(&mysql.MySQLError{Number: 4031})) // killed by wait_timeout: connection loss
+	require.False(t, IsLockContentionError(&mysql.MySQLError{Number: 1062}))                                    // duplicate key
+	require.False(t, IsLockContentionError(&mysql.MySQLError{Number: 1064}))                                    // syntax error
+	require.False(t, IsLockContentionError(&mysql.MySQLError{Number: 1146}))                                    // no such table
+	require.False(t, IsLockContentionError(&mysql.MySQLError{Number: 1317}))                                    // query interrupted: retryable, not contention
+	require.False(t, IsLockContentionError(&mysql.MySQLError{Number: 1406}))                                    // data too long
+	require.False(t, IsLockContentionError(&mysql.MySQLError{Number: 1836}))                                    // read only mode: retryable, not contention
+	require.False(t, IsLockContentionError(&mysql.MySQLError{Number: 2013}))                                    // CR_SERVER_LOST: connection loss, not contention
+	require.False(t, IsLockContentionError(&mysql.MySQLError{Number: parsermysql.ErrClientInteractionTimeout})) // killed by wait_timeout: connection loss
 	require.False(t, IsLockContentionError(driver.ErrBadConn))
 	require.False(t, IsLockContentionError(mysql.ErrInvalidConn))
 	require.False(t, IsLockContentionError(context.DeadlineExceeded))
@@ -342,12 +343,12 @@ func TestRetryableTrxRetriesKilledConnection(t *testing.T) {
 
 func TestShouldRetryForceExecAfterKill(t *testing.T) {
 	require.False(t, shouldRetryForceExecAfterKill(nil, true))
-	require.False(t, shouldRetryForceExecAfterKill(&mysql.MySQLError{Number: errLockWaitTimeout}, false))
-	require.False(t, shouldRetryForceExecAfterKill(&mysql.MySQLError{Number: errDeadlock}, true))
+	require.False(t, shouldRetryForceExecAfterKill(&mysql.MySQLError{Number: parsermysql.ErrLockWaitTimeout}, false))
+	require.False(t, shouldRetryForceExecAfterKill(&mysql.MySQLError{Number: parsermysql.ErrLockDeadlock}, true))
 	require.False(t, shouldRetryForceExecAfterKill(errors.New("not a mysql error"), true))
-	require.True(t, shouldRetryForceExecAfterKill(&mysql.MySQLError{Number: errLockWaitTimeout}, true))
+	require.True(t, shouldRetryForceExecAfterKill(&mysql.MySQLError{Number: parsermysql.ErrLockWaitTimeout}, true))
 	require.True(t, shouldRetryForceExecAfterKill(fmt.Errorf("force exec failed: %w",
-		&mysql.MySQLError{Number: errLockWaitTimeout}), true))
+		&mysql.MySQLError{Number: parsermysql.ErrLockWaitTimeout}), true))
 }
 
 // killedSessionLingersReason is why tests that force-kill an idle MDL holder
@@ -562,7 +563,7 @@ func TestForceExecBadFormatString(t *testing.T) {
 	require.ErrorContains(t, err, "missing arguments")
 }
 
-// TestRangeOptimizerRefusal covers the errCapacityExceeded (3170) branch of
+// TestRangeOptimizerRefusal covers the ER_CAPACITY_EXCEEDED (3170) branch of
 // the warning inspection: when range_optimizer_max_mem_size is too low MySQL
 // silently falls back to a table scan, so RetryableTransaction refuses the
 // statement instead of letting a chunk-ranged query scan the whole table.
@@ -592,7 +593,7 @@ func TestRangeOptimizerRefusal(t *testing.T) {
 	}
 	query := "INSERT INTO test.rangeopt2 SELECT * FROM test.rangeopt1 WHERE " + strings.Join(preds, " OR ")
 	_, err = RetryableTransaction(t.Context(), db, IgnoreDupKeyWarnings, config, query)
-	require.ErrorContains(t, err, "range_optimizer_max_mem_size")
+	require.ErrorContains(t, err, "Please decrease the target-chunk-size")
 }
 
 // An unsafe warning reads as one sentence naming its code, and stays
