@@ -703,7 +703,7 @@ func (ct *CreateTable) getPrimaryKeyIndex() *Index {
 // table.NewTableInfoFromMeta).
 //
 // This lets a caller holding a table's DDL — typically its SHOW CREATE TABLE —
-// supply check.Resources.Table without opening a connection.
+// supply check.Resources.Change.Table without opening a connection.
 func (ct *CreateTable) ToTableInfo(schemaName string) (*table.TableInfo, error) {
 	columns := make([]table.ColumnMeta, 0, len(ct.Columns))
 	for i := range ct.Columns {

@@ -12,9 +12,9 @@ import (
 	"strings"
 
 	"github.com/block/mysql"
+	"github.com/block/spirit/pkg/check"
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/dbconn/sqlescape"
-	"github.com/block/spirit/pkg/migration/check"
 	"github.com/block/spirit/pkg/parser/ast"
 	"github.com/block/spirit/pkg/parser/format"
 	parsermysql "github.com/block/spirit/pkg/parser/mysql"

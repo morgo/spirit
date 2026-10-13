@@ -9,8 +9,8 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/block/spirit/pkg/check"
 	"github.com/block/spirit/pkg/checksum"
-	"github.com/block/spirit/pkg/migration/check"
 	"github.com/block/spirit/pkg/sentinel"
 	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/testutils"

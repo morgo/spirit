@@ -157,7 +157,7 @@ type ColumnMeta struct {
 // SetInfo, chunking, and anything else that queries MySQL will fail on the nil
 // connection. It exists for callers that hold a table's DDL but no connection —
 // a planning tool classifying an ALTER before an apply — so they can supply
-// Resources.Table to the statement-scope checks.
+// check.Resources.Change.Table to the statement-phase checks.
 func NewTableInfoFromMeta(schemaName, tableName string, columns []ColumnMeta, keyColumns []string) (*TableInfo, error) {
 	t := NewTableInfo(nil, schemaName, tableName)
 	t.resetColumns()
