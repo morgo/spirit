@@ -5,10 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"net"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/block/spirit/pkg/applier"
@@ -27,10 +25,11 @@ var _ Source = (*gtidClient)(nil)
 // without GTIDs fall back to binlogClient.
 //
 // Shared with binlogClient through the embedded feedCore (see feedcore.go):
-// subscriptions and how they are built, DDL filtering, the fatal-error
-// callback, Stop/Close teardown, flush bookkeeping (FlushResidual and the
-// FeedStats flush fields), the Flush / FlushUnderTableLock / periodic-flush
-// loops, the syncer config, and row dispatch through the parker.
+// the connection settings and syncer config, subscriptions and how they are
+// built, DDL filtering, the fatal-error callback, Stop/Close teardown, flush
+// bookkeeping (FlushResidual and the FeedStats flush fields), the Flush /
+// FlushUnderTableLock / periodic-flush loops, and rows-event processing with
+// row dispatch through the parker.
 //
 // Specific to this client (in this file): the GTID position fields and
 // their accessors (Position, StartFromPosition, CurrentPosition,
@@ -39,7 +38,7 @@ var _ Source = (*gtidClient)(nil)
 // chasing a file offset), FeedStats, VerifyRowAtNextChange (it hands the
 // parker this client's flush), Start/recreateStreamer, readStream and event
 // decoding (per-transaction GTID promotion, processQueryEvent,
-// processRowsEvent, processTransactionPayload).
+// processTransactionPayload).
 //
 // Wire protocol: COM_BINLOG_DUMP_GTID via go-mysql's
 // BinlogSyncer.StartSyncGTID. The server requires gtid_mode=ON and
@@ -47,16 +46,8 @@ var _ Source = (*gtidClient)(nil)
 type gtidClient struct {
 	// feedCore holds the state and methods shared with binlogClient,
 	// including mu, which also guards this type's GTID fields
-	// (bufferedGTID / flushedGTID / pendingSID / pendingGNO) and streamer.
+	// (bufferedGTID / flushedGTID / pendingSID / pendingGNO).
 	feedCore
-
-	host string
-
-	cfg      replication.BinlogSyncerConfig
-	streamer *replication.BinlogStreamer
-
-	db       *sql.DB
-	dbConfig *dbconn.DBConfig
 
 	// bufferedGTID is everything we have seen from the stream and either
 	// fully decoded into subscriptions (committed transactions) or that
@@ -75,16 +66,6 @@ type gtidClient struct {
 	flushedGTID  mysql.GTIDSet
 	pendingSID   []byte
 	pendingGNO   int64
-
-	// rotations counts binlog rotations seen on the stream. Position
-	// tracking here is by GTID, so this is reported for diagnostics only.
-	rotations atomic.Int64
-
-	// lastEventTime is the source's own wall-clock timestamp on the newest
-	// binlog event the reader has seen, as unix seconds. Written by
-	// recordEventTime from the read loop, read back by eventTime; see
-	// FeedStats.BufferedEventAt.
-	lastEventTime atomic.Int64
 }
 
 // NewGTIDClient constructs the GTID-backed change.Source. It mirrors
@@ -94,15 +75,8 @@ type gtidClient struct {
 // and the binlog client based on the server's GTID support (fresh runs) or
 // the checkpointed position's encoding (resumes).
 func NewGTIDClient(db *sql.DB, host string, username, password string, appl applier.Applier, config *ClientConfig) Source {
-	if config.DBConfig == nil {
-		config.DBConfig = dbconn.NewDBConfig()
-	}
-	c := &gtidClient{
-		db:       db,
-		dbConfig: config.DBConfig,
-		host:     host,
-	}
-	c.configure(username, password, appl, config)
+	c := &gtidClient{}
+	c.configure(db, host, username, password, appl, config)
 	return c
 }
 
@@ -315,21 +289,9 @@ func (c *gtidClient) Start(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	host, portStr, err := net.SplitHostPort(c.host)
+	err := c.prepareSyncerConfig()
 	if err != nil {
-		return fmt.Errorf("failed to parse host: %w", err)
-	}
-	port, err := strconv.ParseUint(portStr, 10, 16)
-	if err != nil {
-		return fmt.Errorf("failed to parse port: %w", err)
-	}
-	c.cfg = c.buildSyncerConfig(host, uint16(port))
-	if c.dbConfig != nil {
-		tlsConfig, err := dbconn.GetTLSConfigForBinlog(c.dbConfig, host)
-		if err != nil {
-			return fmt.Errorf("failed to configure TLS for binlog connection: %w", err)
-		}
-		c.cfg.TLSConfig = tlsConfig
+		return err
 	}
 
 	// Determine the starting GTID set. On fresh start, this is
@@ -731,96 +693,6 @@ func (c *gtidClient) processTransactionPayload(e *replication.TransactionPayload
 			// unknown inner event types so a future row-event variant can't
 			// cause silent data loss without a trace.
 			c.logger.Debug("Received unknown event type inside transaction payload", "type", fmt.Sprintf("%T", inner.Event))
-		}
-	}
-	return nil
-}
-
-// processRowsEvent mirrors binlogClient.processRowsEvent.
-func (c *gtidClient) processRowsEvent(ev *replication.BinlogEvent, e *replication.RowsEvent) error {
-	if c.stopped.Load() {
-		// Post-cutover; see Source.Stop and binlogClient.processRowsEvent.
-		return nil
-	}
-	subName := encodeSchemaTable(string(e.Table.Schema), string(e.Table.Table))
-	sub, ok := c.subs.Get(subName)
-	if !ok {
-		return nil
-	}
-	if e.Rows == nil {
-		// Decode-time filter skipped a now-subscribed table's event; see the
-		// equivalent check in binlogClient.processRowsEvent.
-		return fmt.Errorf("rows event for subscribed table %s arrived with undecoded rows: subscriptions must be added before Start (see Source lifecycle)", subName)
-	}
-
-	if isMinimalRowImage(e) {
-		return fmt.Errorf("received a minimal RBR event for table %s.%s, but we require binlog_row_image=FULL on the source server", string(e.Table.Schema), string(e.Table.Table))
-	}
-
-	eventType := parseEventType(ev.Header.EventType)
-	if eventType == eventTypeUnknown {
-		// Hard-fail, mirroring the minimal-row-image check above — see the
-		// matching guard in binlogClient.processRowsEvent for why an
-		// unrecognized rows-event subtype must not be dropped.
-		return fmt.Errorf("%w for table %s.%s", unsupportedRowsEventError(ev.Header.EventType), string(e.Table.Schema), string(e.Table.Table))
-	}
-
-	tbl := sub.Tables()[0]
-
-	// Decode ENUM/SET integers and re-pad BINARY(N) values before key
-	// extraction and buffering — see the matching block in binlog.go's
-	// processRowsEvent and TableInfo.DecodeBinlogRow.
-	if tbl.NeedsBinlogRowDecoding() {
-		for _, row := range e.Rows {
-			if err := tbl.DecodeBinlogRow(row); err != nil {
-				return fmt.Errorf("decoding binlog row for %s.%s: %w", tbl.SchemaName, tbl.TableName, err)
-			}
-		}
-	}
-
-	if eventType == eventTypeUpdate {
-		immutableOrdinal := sub.ImmutableColumnOrdinal()
-		for i := 0; i < len(e.Rows); i += 2 {
-			beforeRow := e.Rows[i]
-			afterRow := e.Rows[i+1]
-			beforeKey, err := tbl.PrimaryKeyValues(beforeRow)
-			if err != nil {
-				return err
-			}
-			afterKey, err := tbl.PrimaryKeyValues(afterRow)
-			if err != nil {
-				return err
-			}
-			// See the matching block in binlog.go's processRowsEvent: an
-			// UPDATE to the declared-immutable sharding column must fail
-			// the stream fatally.
-			if err := checkImmutableColumn(tbl, immutableOrdinal, beforeRow, afterRow, beforeKey); err != nil {
-				return err
-			}
-			if pkChanged(beforeKey, afterKey) {
-				c.dispatchRow(sub, tbl, beforeKey, nil, true)
-				c.dispatchRow(sub, tbl, afterKey, afterRow, false)
-			} else {
-				c.dispatchRow(sub, tbl, beforeKey, afterRow, false)
-			}
-		}
-		return nil
-	}
-
-	for _, row := range e.Rows {
-		key, err := tbl.PrimaryKeyValues(row)
-		if err != nil {
-			return err
-		}
-		switch eventType { //nolint:exhaustive
-		case eventTypeInsert:
-			c.dispatchRow(sub, tbl, key, row, false)
-		case eventTypeDelete:
-			c.dispatchRow(sub, tbl, key, nil, true)
-		default:
-			// Unreachable; kept as a hard error for the same reason as the
-			// matching branch in binlogClient.processRowsEvent.
-			return fmt.Errorf("%w for table %s.%s", unsupportedRowsEventError(ev.Header.EventType), string(e.Table.Schema), string(e.Table.Table))
 		}
 	}
 	return nil
