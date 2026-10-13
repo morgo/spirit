@@ -89,3 +89,8 @@ func TestSharedFlushSequencing(t *testing.T) {
 	require.ErrorIs(t, c.flushUntilTrivial(ctx, flush, blockWait(context.Canceled), "test"), context.Canceled)
 	assert.Equal(t, []string{"flush(underLock=false,locks=0)", "blockWait"}, calls)
 }
+
+// processDDLNotification is processDDL for a DDL that is not foreign-keys-only.
+func (c *feedCore) processDDLNotification(schema, table string) {
+	c.processDDL(schema, table, false)
+}
