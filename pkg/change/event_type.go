@@ -45,7 +45,7 @@ var errUnsupportedRowsEvent = errors.New("unsupported rows event type")
 // PARTIAL_JSON) is the one a running server can start emitting after
 // preflight has already passed. Such an event carries real row changes, so
 // both clients fail the stream on it rather than dropping the rows; see
-// binlogClient.processRowsEvent.
+// feedCore.processRowsEvent.
 //
 // The message names the subtype both ways — go-mysql's string form and the
 // raw header byte — because an event type new enough that go-mysql has no

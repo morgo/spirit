@@ -73,9 +73,11 @@ func TestTLSConfigurationLogic(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			// Create a mock client with the test configuration
 			client := &binlogClient{
-				host:     tt.host,
-				dbConfig: tt.dbConfig,
-				cfg:      replication.BinlogSyncerConfig{},
+				feedCore: feedCore{
+					host:     tt.host,
+					dbConfig: tt.dbConfig,
+					cfg:      replication.BinlogSyncerConfig{},
+				},
 			}
 
 			// Extract host part for ServerName (remove port)

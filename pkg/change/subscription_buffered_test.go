@@ -220,10 +220,10 @@ func TestBufferedMapFlushUnderLockBypassesWatermark(t *testing.T) {
 
 	client := &binlogClient{
 		feedCore: feedCore{
-			logger: logger,
+			logger:   logger,
+			db:       db,
+			dbConfig: dbconn.NewDBConfig(),
 		},
-		db:       db,
-		dbConfig: dbconn.NewDBConfig(),
 	}
 
 	// Create mock chunker with current position at 5
@@ -354,10 +354,10 @@ func TestBufferedMapFlushWithoutLockRespectsWatermark(t *testing.T) {
 
 	client := &binlogClient{
 		feedCore: feedCore{
-			logger: logger,
+			logger:   logger,
+			db:       db,
+			dbConfig: dbconn.NewDBConfig(),
 		},
-		db:       db,
-		dbConfig: dbconn.NewDBConfig(),
 	}
 
 	// Create mock chunker with current position at 5
@@ -460,9 +460,9 @@ func TestBufferedMapQueueModeRouting(t *testing.T) {
 
 	client := &binlogClient{
 		feedCore: feedCore{
-			logger: slog.Default(),
+			logger:   slog.Default(),
+			dbConfig: dbconn.NewDBConfig(),
 		},
-		dbConfig: dbconn.NewDBConfig(),
 	}
 
 	sub := &bufferedMap{
@@ -533,10 +533,10 @@ func TestBufferedMapQueueModeFlush(t *testing.T) {
 
 	client := &binlogClient{
 		feedCore: feedCore{
-			logger: slog.Default(),
+			logger:   slog.Default(),
+			db:       db,
+			dbConfig: dbconn.NewDBConfig(),
 		},
-		db:       db,
-		dbConfig: dbconn.NewDBConfig(),
 	}
 
 	sub := &bufferedMap{
@@ -617,10 +617,10 @@ func TestBufferedMapQueueModeFIFOOrder(t *testing.T) {
 
 	client := &binlogClient{
 		feedCore: feedCore{
-			logger: slog.Default(),
+			logger:   slog.Default(),
+			db:       db,
+			dbConfig: dbconn.NewDBConfig(),
 		},
-		db:       db,
-		dbConfig: dbconn.NewDBConfig(),
 	}
 
 	sub := &bufferedMap{
@@ -686,10 +686,10 @@ func TestBufferedMapTransitionDrainsOutgoing(t *testing.T) {
 
 	client := &binlogClient{
 		feedCore: feedCore{
-			logger: slog.Default(),
+			logger:   slog.Default(),
+			db:       db,
+			dbConfig: dbconn.NewDBConfig(),
 		},
-		db:       db,
-		dbConfig: dbconn.NewDBConfig(),
 	}
 
 	sub := &bufferedMap{
@@ -774,10 +774,10 @@ func TestBufferedMapToggleDrainFailureLeavesFlagUnchanged(t *testing.T) {
 
 	client := &binlogClient{
 		feedCore: feedCore{
-			logger: slog.Default(),
+			logger:   slog.Default(),
+			db:       db,
+			dbConfig: dbconn.NewDBConfig(),
 		},
-		db:       db,
-		dbConfig: dbconn.NewDBConfig(),
 	}
 
 	sub := &bufferedMap{
@@ -850,9 +850,9 @@ func TestBufferedMapTogglePassthrough(t *testing.T) {
 
 	client := &binlogClient{
 		feedCore: feedCore{
-			logger: slog.Default(),
+			logger:   slog.Default(),
+			dbConfig: dbconn.NewDBConfig(),
 		},
-		dbConfig: dbconn.NewDBConfig(),
 	}
 
 	sub := &bufferedMap{
@@ -898,9 +898,9 @@ func TestBufferedMapConcurrentHasChanged(t *testing.T) {
 
 	client := &binlogClient{
 		feedCore: feedCore{
-			logger: slog.Default(),
+			logger:   slog.Default(),
+			dbConfig: dbconn.NewDBConfig(),
 		},
-		dbConfig: dbconn.NewDBConfig(),
 	}
 
 	sub := &bufferedMap{
@@ -953,9 +953,9 @@ func TestBufferedMapKeyOverwriteDedupes(t *testing.T) {
 
 	client := &binlogClient{
 		feedCore: feedCore{
-			logger: slog.Default(),
+			logger:   slog.Default(),
+			dbConfig: dbconn.NewDBConfig(),
 		},
-		dbConfig: dbconn.NewDBConfig(),
 	}
 
 	sub := &bufferedMap{
@@ -1000,9 +1000,9 @@ func TestBufferedMapHasChangedNilAndEmpty(t *testing.T) {
 
 	client := &binlogClient{
 		feedCore: feedCore{
-			logger: slog.Default(),
+			logger:   slog.Default(),
+			dbConfig: dbconn.NewDBConfig(),
 		},
-		dbConfig: dbconn.NewDBConfig(),
 	}
 
 	sub := &bufferedMap{
@@ -1050,9 +1050,9 @@ func TestBufferedMapKeyAboveWatermarkCounters(t *testing.T) {
 
 	client := &binlogClient{
 		feedCore: feedCore{
-			logger: slog.Default(),
+			logger:   slog.Default(),
+			dbConfig: dbconn.NewDBConfig(),
 		},
-		dbConfig: dbconn.NewDBConfig(),
 	}
 
 	sub := &bufferedMap{
@@ -1120,10 +1120,10 @@ func TestBufferedMapQueueFlushEmpty(t *testing.T) {
 
 	client := &binlogClient{
 		feedCore: feedCore{
-			logger: slog.Default(),
+			logger:   slog.Default(),
+			db:       db,
+			dbConfig: dbconn.NewDBConfig(),
 		},
-		db:       db,
-		dbConfig: dbconn.NewDBConfig(),
 	}
 
 	sub := &bufferedMap{
@@ -1177,10 +1177,10 @@ func TestBufferedMapQueueFlushUnderLock(t *testing.T) {
 
 	client := &binlogClient{
 		feedCore: feedCore{
-			logger: slog.Default(),
+			logger:   slog.Default(),
+			db:       db,
+			dbConfig: dbconn.NewDBConfig(),
 		},
-		db:       db,
-		dbConfig: dbconn.NewDBConfig(),
 	}
 
 	sub := &bufferedMap{
@@ -1258,10 +1258,10 @@ func TestBufferedMapQueueConcurrentFlush(t *testing.T) {
 
 	client := &binlogClient{
 		feedCore: feedCore{
-			logger: slog.Default(),
+			logger:   slog.Default(),
+			db:       db,
+			dbConfig: dbconn.NewDBConfig(),
 		},
-		db:       db,
-		dbConfig: dbconn.NewDBConfig(),
 	}
 
 	sub := &bufferedMap{
@@ -1862,10 +1862,10 @@ func TestBufferedMapSeparatorInPKValues(t *testing.T) {
 
 	client := &binlogClient{
 		feedCore: feedCore{
-			logger: slog.Default(),
+			logger:   slog.Default(),
+			db:       db,
+			dbConfig: dbconn.NewDBConfig(),
 		},
-		db:       db,
-		dbConfig: dbconn.NewDBConfig(),
 	}
 
 	sub := &bufferedMap{
