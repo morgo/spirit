@@ -60,6 +60,10 @@ type CutOver struct {
 	// separates "the cutover failed" from "we cannot tell who owns the table".
 	// (false, nil) is a read taken before a still-running rename committed.
 	testRenameCompleted func() (bool, error)
+	// testFlushError is a test-only seam: when non-nil, an attempt calls it
+	// before its pre-rename flush and fails with its error, if any, in place
+	// of the flush's.
+	testFlushError func(attempt int) error
 }
 
 // errCutoverRefused marks a cutover attempt refused by a check that ran under
@@ -159,7 +163,10 @@ func (c *CutOver) Run(ctx context.Context) error {
 		return errors.Join(append(history, ctx.Err(), ambiguity())...)
 	}
 	// prepare records, for stop, that the work before an attempt's rename
-	// failed. Such a failure ends the cutover instead of being retried.
+	// failed. Such a failure ends the cutover instead of being retried. It is
+	// never reset between attempts, which is correct only because every value
+	// but prepareOK ends the loop: do not make either one retryable without
+	// resetting it at the top of attempt.
 	const (
 		prepareOK = iota
 		prepareFailed
@@ -195,6 +202,12 @@ func (c *CutOver) Run(ctx context.Context) error {
 		// Try and catch up before we attempt the cutover.
 		// since we will need to catch up again with the lock held
 		// and we want to minimize that.
+		if c.testFlushError != nil {
+			if err := c.testFlushError(i); err != nil {
+				prepare = prepareFailed
+				return err
+			}
+		}
 		if err := c.feed.Flush(ctx); err != nil {
 			prepare = prepareFailed
 			return err

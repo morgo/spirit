@@ -364,7 +364,7 @@ func (c *CutOver) algorithmCutover(ctx context.Context) error {
 		if attempt > 1 {
 			c.logger.Warn("retrying rename while still holding source table locks",
 				"attempt", attempt,
-				"max-retries", c.dbConfig.MaxRetries)
+				"max_retries", c.dbConfig.MaxRetries)
 			time.Sleep(renameRetryWait)
 		}
 		if err = c.renameAllSources(afterSwitch, sourceLocks); err == nil {
