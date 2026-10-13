@@ -403,6 +403,73 @@ func TestCutoverCancelBeforeRenameDoesNotRename(t *testing.T) {
 	require.Equal(t, 1, count, "_new must still exist")
 }
 
+// completedSequence returns a testRenameCompleted seam that reports the
+// scripted answers in order, then the last one for every later call.
+func completedSequence(answers ...bool) (func() (bool, error), *atomic.Int32) {
+	var calls atomic.Int32
+	return func() (bool, error) {
+		n := int(calls.Add(1)) - 1
+		if n >= len(answers) {
+			n = len(answers) - 1
+		}
+		return answers[n], nil
+	}, &calls
+}
+
+// TestCutoverExhaustedAttemptsRecheckRename: the only attempt loses its
+// connection. The check right after it reads "not renamed", but the rename
+// commits afterwards; the final check after the attempts run out must still
+// find it and report success.
+func TestCutoverExhaustedAttemptsRecheckRename(t *testing.T) {
+	t.Parallel()
+	cutover, _, _ := newConnectionLossCutover(t, "cutoverexhaustedrecheck")
+	cutover.dbConfig.MaxRetries = 1
+	seam, calls := completedSequence(false, true)
+	cutover.testRenameCompleted = seam
+
+	require.NoError(t, cutover.Run(t.Context()))
+	require.Equal(t, int32(2), calls.Load())
+}
+
+// TestCutoverCancelRechecksRenameAfterUnconfirmedAttempt: the first attempt
+// loses its connection and the check reads "not renamed". The run is then
+// cancelled; the check made on cancel finds the rename committed, so the run
+// reports success, not a cancellation.
+func TestCutoverCancelRechecksRenameAfterUnconfirmedAttempt(t *testing.T) {
+	t.Parallel()
+	cutover, _, _ := newConnectionLossCutover(t, "cutovercancelrecheck")
+	ctx, cancel := context.WithCancel(t.Context())
+	cutover.testAfterRenameError = cancel
+	seam, calls := completedSequence(false, true)
+	cutover.testRenameCompleted = seam
+
+	require.NoError(t, cutover.Run(ctx))
+	require.Equal(t, int32(2), calls.Load())
+}
+
+// TestCutoverFailedFlushIsNotRetried: a failure in the work before an
+// attempt's rename ends the cutover. The first attempt loses its connection
+// and its rename reads as not committed, so a second attempt runs; its flush
+// fails, and no third attempt follows.
+func TestCutoverFailedFlushIsNotRetried(t *testing.T) {
+	t.Parallel()
+	cutover, _, _ := newConnectionLossCutover(t, "cutoverflushfail")
+	cutover.dbConfig.MaxRetries = 3
+	cutover.testRenameCompleted = func() (bool, error) { return false, nil }
+	flushErr := errors.New("injected: flush failed")
+	cutover.testFlushError = func(attempt int) error {
+		if attempt == 1 {
+			return flushErr
+		}
+		return nil
+	}
+
+	err := cutover.Run(t.Context())
+	require.ErrorIs(t, err, flushErr)
+	require.ErrorContains(t, err, "attempt 2:")
+	require.NotContains(t, err.Error(), "attempt 3:")
+}
+
 func newConnectionLossCutover(t *testing.T, tableName string) (*CutOver, *sql.DB, string) {
 	t.Helper()
 	newTableName := "_" + tableName + "_new"
