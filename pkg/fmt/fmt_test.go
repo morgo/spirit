@@ -278,6 +278,18 @@ func TestFmtCmd_Run(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, string(content), "`active` tinyint(1) DEFAULT '0'")
 	require.Contains(t, string(content), "DEFAULT '0000-00-00'")
+
+	// Run formats in strict mode: a definition MySQL would only accept by
+	// changing it (here a too-long index, into a prefix index) is an error,
+	// and the file is left as it was.
+	strictDir := t.TempDir()
+	const longKey = "CREATE TABLE `fmt_run_long_key` (\n  `id` int NOT NULL,\n  `a` varchar(2000) CHARACTER SET utf8mb4 DEFAULT NULL,\n  PRIMARY KEY (`id`),\n  KEY `a` (`a`)\n) ENGINE=InnoDB"
+	writeTestFile(t, strictDir, "long_key.sql", longKey)
+	cmd.Files = []string{strictDir}
+	require.Error(t, cmd.Run())
+	content, err = os.ReadFile(filepath.Join(strictDir, "long_key.sql"))
+	require.NoError(t, err)
+	require.Equal(t, longKey, string(content))
 }
 
 // Integration tests — require a running MySQL server.
