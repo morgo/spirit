@@ -68,6 +68,26 @@ type AuroraResult struct {
 	RedoAware bool
 }
 
+// Close closes r's throttlers, then its monitor pool, in that order so no
+// poller is still reading the pool when it closes. It is safe on a zero result
+// and after the throttlers were already closed (a multi-throttler closing its
+// children, or a failed Open): their Close is idempotent, and so is
+// (*sql.DB).Close.
+func (r AuroraResult) Close() error {
+	var errs []error
+	for _, t := range r.Throttlers {
+		if err := t.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if r.MonitorDB != nil {
+		if err := r.MonitorDB.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
 // Build probes the source for Aurora and assembles the Aurora throttlers.
 //
 // On a confirmed Aurora source the threads throttler is always built; the
@@ -155,6 +175,12 @@ func (s AuroraSetup) Build(ctx context.Context) (AuroraResult, error) {
 	throttlers = append(throttlers, tr)
 
 	return AuroraResult{Throttlers: throttlers, MonitorDB: monitorDB, RedoAware: mode == redoAwareMode}, nil
+}
+
+// BuildAurora is setup.Build as a plain function, so a runner can hold it in a
+// probe field that tests replace (CI has no Aurora to probe).
+func BuildAurora(ctx context.Context, setup AuroraSetup) (AuroraResult, error) {
+	return setup.Build(ctx)
 }
 
 // selectThreadsMode picks the redo-aware signal when the user can read the
