@@ -503,3 +503,30 @@ func TestNewAddsDSNTimeoutToDeadline(t *testing.T) {
 	require.GreaterOrEqual(t, elapsed, dsnTimeout+timeout, "the DSN timeout= was not added to the handshake budget")
 	require.Less(t, elapsed, 10*time.Second)
 }
+
+// TestMonitorOpener pins the Aurora monitor pool's shape: MonitorPoolSize
+// connections, a copy of the caller's config (the caller's pool size must not
+// change), and the label in connect errors so a failed monitor connect is told
+// apart from the main pool's.
+func TestMonitorOpener(t *testing.T) {
+	cfg := NewDBConfig()
+	cfg.MaxOpenConnections = 17
+	db, err := MonitorOpener(testutils.DSN(), cfg, "test monitor")()
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+	require.Equal(t, MonitorPoolSize, db.Stats().MaxOpenConnections)
+	require.Equal(t, 17, cfg.MaxOpenConnections, "MonitorOpener mutated the caller's config")
+	require.NoError(t, db.PingContext(t.Context()))
+
+	// A refused connection: take a free port, then close its listener.
+	var lc net.ListenConfig
+	lis, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	addr := lis.Addr().String()
+	require.NoError(t, lis.Close())
+	refused, err := MonitorOpener(fmt.Sprintf("spirit:spirit@tcp(%s)/test", addr), cfg, "test monitor")()
+	require.Error(t, err)
+	require.Nil(t, refused)
+	require.Contains(t, err.Error(), "TEST-MONITOR")
+	require.Equal(t, 17, cfg.MaxOpenConnections)
+}

@@ -118,3 +118,60 @@ func TestAuroraSetup_IsAuroraProbeFailureIsNonFatal(t *testing.T) {
 	require.ErrorContains(t, res.ProbeErr, "database is closed")
 	require.False(t, openCalled, "OpenMonitor must not be called when the probe fails")
 }
+
+// closeCounter is a Throttler that counts Close calls and returns err from
+// each.
+type closeCounter struct {
+	Noop
+	closes int
+	err    error
+}
+
+func (c *closeCounter) Close() error {
+	c.closes++
+	return c.err
+}
+
+func TestAuroraResultCloseZero(t *testing.T) {
+	// The non-Aurora result: nothing to close.
+	require.NoError(t, AuroraResult{}.Close())
+	require.NoError(t, AuroraResult{ProbeErr: errors.New("probe failed")}.Close())
+}
+
+func TestAuroraResultClose(t *testing.T) {
+	monitor, err := sql.Open("block-mysql", testutils.DSN())
+	require.NoError(t, err)
+	require.NoError(t, monitor.PingContext(t.Context()))
+
+	first, second := &closeCounter{}, &closeCounter{err: errors.New("second failed")}
+	res := AuroraResult{Throttlers: []Throttler{first, second}, MonitorDB: monitor}
+	err = res.Close()
+	require.ErrorContains(t, err, "second failed", "a throttler's Close error is returned")
+	require.Equal(t, 1, first.closes)
+	require.Equal(t, 1, second.closes, "an earlier error does not skip later throttlers")
+	require.ErrorContains(t, monitor.PingContext(t.Context()), "database is closed",
+		"the monitor pool is closed even when a throttler's Close failed")
+}
+
+// TestAuroraResultDoubleClose covers the paths that close a result whose
+// throttlers a multi-throttler already closed: the real Aurora throttlers and
+// the pool must tolerate a second Close.
+func TestAuroraResultDoubleClose(t *testing.T) {
+	monitor, err := sql.Open("block-mysql", testutils.DSN())
+	require.NoError(t, err)
+	logger := discardLogger()
+	cl, err := NewCommitLatencyThrottler(monitor, 100*time.Millisecond, logger)
+	require.NoError(t, err)
+	tr, err := newAuroraThreadsThrottler(monitor, globalStatusMode, logger)
+	require.NoError(t, err)
+	res := AuroraResult{Throttlers: []Throttler{cl, tr}, MonitorDB: monitor}
+	// The threads throttler's Threads_running fallback runs on community
+	// MySQL, so its poller is live when it is closed (commit latency needs
+	// Aurora's status variables and stays unopened).
+	require.NoError(t, tr.Open(t.Context()))
+
+	require.NoError(t, NewMultiThrottler(res.Throttlers...).Close())
+	require.NoError(t, res.Close())
+	require.NoError(t, res.Close())
+	require.ErrorContains(t, monitor.PingContext(t.Context()), "database is closed")
+}

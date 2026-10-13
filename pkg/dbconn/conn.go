@@ -481,6 +481,23 @@ func NewWithConnectionType(inputDSN string, config *DBConfig, connectionType str
 	return newWithConnectTimeout(context.Background(), inputDSN, config, connectionType, connectTimeout)
 }
 
+// MonitorPoolSize is the pool size MonitorOpener gives the Aurora monitor
+// pool: both Aurora throttlers poll concurrently without serializing on one
+// connection.
+const MonitorPoolSize = 2
+
+// MonitorOpener returns the throttler.AuroraSetup.OpenMonitor closure: it
+// opens a MonitorPoolSize pool on dsn from a copy of cfg (cfg is never
+// mutated), labelled label in connect errors. The throttler package does not
+// import dbconn, so the runners pass it this.
+func MonitorOpener(dsn string, cfg *DBConfig, label string) func() (*sql.DB, error) {
+	return func() (*sql.DB, error) {
+		monitorCfg := *cfg // shallow copy; MaxOpenConnections is value-typed
+		monitorCfg.MaxOpenConnections = MonitorPoolSize
+		return NewWithConnectionType(dsn, &monitorCfg, label)
+	}
+}
+
 // NewContext is like New, but the connect-time ping also ends when ctx is
 // done, so a caller that is shutting down is not held for up to
 // connectTimeout by a server that never completes the handshake.
