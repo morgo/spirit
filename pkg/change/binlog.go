@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"net"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -28,31 +27,13 @@ var _ Source = (*binlogClient)(nil)
 type binlogClient struct {
 	// feedCore holds the state and methods shared with gtidClient,
 	// including mu, which also guards this type's position fields
-	// (bufferedPos / flushedPos), streamer, and the cached binlogStatusStmt.
+	// (bufferedPos / flushedPos) and the cached binlogStatusStmt.
 	feedCore
 
-	host string
-
-	cfg      replication.BinlogSyncerConfig
-	streamer *replication.BinlogStreamer
-
-	// The DB connection is used for queries like SHOW MASTER STATUS
-	db               *sql.DB
-	dbConfig         *dbconn.DBConfig
 	binlogStatusStmt string // cached: "SHOW MASTER STATUS" or "SHOW BINARY LOG STATUS"
 
 	bufferedPos mysql.Position // buffered position
 	flushedPos  mysql.Position // safely written to new table
-
-	// rotations counts binlog rotations followed by the reader. See
-	// FeedStats.Rotations.
-	rotations atomic.Int64
-
-	// lastEventTime is the source's own wall-clock timestamp on the newest
-	// binlog event the reader has seen, as unix seconds. Written by
-	// recordEventTime from the read loop, read back by eventTime; see
-	// FeedStats.BufferedEventAt.
-	lastEventTime atomic.Int64
 
 	flushedBinlogs atomic.Int64 // stall-triggered rotations reported as FeedStats.ForcedRotations
 }
@@ -62,15 +43,8 @@ type binlogClient struct {
 // alternative sources (e.g. VStream) will live behind their own
 // constructors. config.Applier is required.
 func NewBinlogClient(db *sql.DB, host string, username, password string, appl applier.Applier, config *ClientConfig) Source {
-	if config.DBConfig == nil {
-		config.DBConfig = dbconn.NewDBConfig() // default DB config
-	}
-	c := &binlogClient{
-		db:       db,
-		dbConfig: config.DBConfig,
-		host:     host,
-	}
-	c.configure(username, password, appl, config)
+	c := &binlogClient{}
+	c.configure(db, host, username, password, appl, config)
 	return c
 }
 
@@ -284,24 +258,9 @@ func (c *binlogClient) Start(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	host, portStr, err := net.SplitHostPort(c.host)
+	err := c.prepareSyncerConfig()
 	if err != nil {
-		return fmt.Errorf("failed to parse host: %w", err)
-	}
-	// convert portStr to a uint16
-	port, err := strconv.ParseUint(portStr, 10, 16)
-	if err != nil {
-		return fmt.Errorf("failed to parse port: %w", err)
-	}
-	c.cfg = c.buildSyncerConfig(host, uint16(port))
-
-	// Apply TLS configuration using the same infrastructure as main database connections
-	if c.dbConfig != nil {
-		tlsConfig, err := dbconn.GetTLSConfigForBinlog(c.dbConfig, host)
-		if err != nil {
-			return fmt.Errorf("failed to configure TLS for binlog connection: %w", err)
-		}
-		c.cfg.TLSConfig = tlsConfig
+		return err
 	}
 	// Determine where to start the sync from.
 	// We default from what the current position is right
@@ -693,136 +652,6 @@ func (c *binlogClient) readStream(ctx context.Context) {
 			})
 		}
 	}
-}
-
-// processRowsEvent processes a RowsEvent. It looks up the subscription
-// for the event's table and dispatches per-row HasChanged calls.
-//
-//   - If there is no subscription, the event is ignored.
-//   - Otherwise we call HasChanged for each affected key.
-//
-// The subscription lookup goes through c.subs (its own RWMutex); c.Lock
-// is not held here. That's load-bearing for backpressure: bufferedMap.
-// HasChanged can park on its own condition variable when the buffer is
-// full, and a c.Lock held across the park would block c.flush() — the
-// very flush that drains the buffer and would wake the parker.
-//
-// We require binlog_row_image=FULL on the source. With FULL each row
-// (before and after image alike) contains every column, so PK extraction
-// works the same way for all event types and no reconstruction is needed.
-// If a MINIMAL image slips through we error out.
-func (c *binlogClient) processRowsEvent(ev *replication.BinlogEvent, e *replication.RowsEvent) error {
-	if c.stopped.Load() {
-		// Post-cutover. The subscription's TableInfo no longer describes the
-		// table this event's name resolves to, so decoding it would fail on a
-		// row image that is perfectly valid for the table that produced it.
-		// See Source.Stop.
-		return nil
-	}
-	subName := encodeSchemaTable(string(e.Table.Schema), string(e.Table.Table))
-	sub, ok := c.subs.Get(subName)
-	if !ok {
-		return nil // ignore event, it could be to a _new table.
-	}
-	if e.Rows == nil {
-		// The decode-time filter (newRowsEventDecodeFunc) skipped this event's
-		// row images because the table had no subscription when the event was
-		// parsed — yet one exists now. That means AddSubscription was called
-		// after Start, violating the Source lifecycle, and silently treating
-		// the event as empty would lose rows. DecodeData always allocates
-		// e.Rows, so nil cannot be a legitimately decoded event.
-		return fmt.Errorf("rows event for subscribed table %s arrived with undecoded rows: subscriptions must be added before Start (see Source lifecycle)", subName)
-	}
-
-	if isMinimalRowImage(e) {
-		return fmt.Errorf("received a minimal RBR event for table %s.%s, but we require binlog_row_image=FULL on the source server", string(e.Table.Schema), string(e.Table.Table))
-	}
-
-	eventType := parseEventType(ev.Header.EventType)
-	if eventType == eventTypeUnknown {
-		// Hard-fail, mirroring the minimal-row-image check above. go-mysql
-		// parses several rows-event subtypes we don't recognize into a
-		// plain *replication.RowsEvent — PARTIAL_UPDATE_ROWS_EVENT, which
-		// the server emits once binlog_row_value_options=PARTIAL_JSON is
-		// set, is the live one (the preflight check reads the global, and
-		// the global can change afterwards). Such an event still carries
-		// row changes for a table we are subscribed to, so dropping it with
-		// only an error log loses them silently; they would surface, if at
-		// all, as a checksum mismatch at the end of the run.
-		return fmt.Errorf("%w for table %s.%s", unsupportedRowsEventError(ev.Header.EventType), string(e.Table.Schema), string(e.Table.Table))
-	}
-
-	tbl := sub.Tables()[0]
-
-	// Decode ENUM ordinals / SET bitmasks back to their string form and
-	// re-pad BINARY(N) values (MySQL strips trailing 0x00 from the row
-	// image) before we hand the row image to the subscription. Without
-	// this the applier would insert ENUM/SET integers as literal values
-	// on migrated columns, and replay short BINARY values into targets
-	// that don't re-pad (e.g. VARBINARY). Padding must happen before
-	// PrimaryKeyValues below so binary PK keys match what a SELECT
-	// returns. See TableInfo.DecodeBinlogRow.
-	if tbl.NeedsBinlogRowDecoding() {
-		for _, row := range e.Rows {
-			if err := tbl.DecodeBinlogRow(row); err != nil {
-				return fmt.Errorf("decoding binlog row for %s.%s: %w", tbl.SchemaName, tbl.TableName, err)
-			}
-		}
-	}
-
-	if eventType == eventTypeUpdate {
-		// UPDATE events always carry before/after image pairs.
-		immutableOrdinal := sub.ImmutableColumnOrdinal()
-		for i := 0; i < len(e.Rows); i += 2 {
-			beforeRow := e.Rows[i]
-			afterRow := e.Rows[i+1]
-
-			beforeKey, err := tbl.PrimaryKeyValues(beforeRow)
-			if err != nil {
-				return err
-			}
-			afterKey, err := tbl.PrimaryKeyValues(afterRow)
-			if err != nil {
-				return err
-			}
-
-			// Sharded operations track changes by PRIMARY KEY only, so an
-			// UPDATE to the sharding (vindex) column would leave a stale
-			// copy of the row on its old shard. The subscription declares
-			// the column immutable and we fail the stream fatally instead.
-			if err := checkImmutableColumn(tbl, immutableOrdinal, beforeRow, afterRow, beforeKey); err != nil {
-				return err
-			}
-
-			if pkChanged(beforeKey, afterKey) {
-				c.dispatchRow(sub, tbl, beforeKey, nil, true)      // delete old PK
-				c.dispatchRow(sub, tbl, afterKey, afterRow, false) // insert new PK
-			} else {
-				c.dispatchRow(sub, tbl, beforeKey, afterRow, false)
-			}
-		}
-		return nil
-	}
-
-	// INSERT and DELETE: one row per entry.
-	for _, row := range e.Rows {
-		key, err := tbl.PrimaryKeyValues(row)
-		if err != nil {
-			return err
-		}
-		switch eventType { //nolint:exhaustive
-		case eventTypeInsert:
-			c.dispatchRow(sub, tbl, key, row, false)
-		case eventTypeDelete:
-			c.dispatchRow(sub, tbl, key, nil, true)
-		default:
-			// Unreachable today: eventTypeUnknown is rejected above and
-			// eventTypeUpdate returned earlier. Kept as a hard error so a
-			// future eventType addition cannot silently drop rows here.
-			return fmt.Errorf("%w for table %s.%s", unsupportedRowsEventError(ev.Header.EventType), string(e.Table.Schema), string(e.Table.Table))
-		}
-	}
-	return nil
 }
 
 // processTransactionPayload processes the events decompressed from a

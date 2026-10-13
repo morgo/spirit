@@ -228,7 +228,7 @@ func TestImmutableColumnMissingAtSetup(t *testing.T) {
 }
 
 // TestProcessRowsEventImmutableColumn feeds synthetic UPDATE row events
-// directly into both processRowsEvent implementations to pin down the
+// directly into processRowsEvent through both clients to pin down the
 // exact enforcement semantics: value comparisons are normalised the same
 // way as pkChanged (so []byte vs string forms of the same value do not
 // false-positive), NULL transitions count as changes, PK-changing updates

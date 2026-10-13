@@ -275,8 +275,8 @@ func pkValueEqual(a, b any) bool {
 // applier.MySQLApplier.UpsertRows): modifications are tracked by PRIMARY
 // KEY only, so an UPDATE that moved a row's sharding-column value would
 // flush the new row image to its new shard while the old shard silently
-// kept a stale copy of the row. Both processRowsEvent implementations treat
-// the returned error as fatal, which cancels the entire operation.
+// kept a stale copy of the row. processRowsEvent treats the returned error
+// as fatal, which cancels the entire operation.
 //
 // key is the row's before-image PRIMARY KEY, used only for the error
 // message. Values are compared with the same normalisation rules as

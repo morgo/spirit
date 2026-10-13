@@ -1072,11 +1072,11 @@ func TestAllChangesFlushed(t *testing.T) {
 	srcTable, dstTable := setupTestTables(t, t1, t2)
 	client := &binlogClient{
 		feedCore: feedCore{
-			logger: slog.Default(),
-			subs:   newSubscriptionRegistry(),
+			logger:   slog.Default(),
+			subs:     newSubscriptionRegistry(),
+			db:       nil,
+			dbConfig: dbconn.NewDBConfig(),
 		},
-		db:       nil,
-		dbConfig: dbconn.NewDBConfig(),
 	}
 
 	// Test 1: Initial state - should be flushed when no changes
