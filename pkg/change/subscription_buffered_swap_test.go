@@ -71,10 +71,10 @@ func TestBufferedMapSwapPairFlushesViaReplace(t *testing.T) {
 
 	client := &binlogClient{
 		feedCore: feedCore{
-			logger: slog.Default(),
+			logger:   slog.Default(),
+			db:       db,
+			dbConfig: dbconn.NewDBConfig(),
 		},
-		db:       db,
-		dbConfig: dbconn.NewDBConfig(),
 	}
 
 	// Seed the pre-swap state in the destination table directly. The
