@@ -18,6 +18,8 @@ That pipeline is not complete, and is unlikely to ever be. MySQL rewrites table 
 
 The `AUTO_INCREMENT` table option is stripped from the output because it is instance-specific and not meaningful in schema files.
 
+`spirit fmt` connects with the same session settings as every other spirit connection, so a file is canonicalized the way spirit sees it. The setting that matters most is `sql_mode`, which is `NO_AUTO_VALUE_ON_ZERO` rather than the server's default. Strict mode is therefore off: a definition that a strict server rejects, such as `DEFAULT '0000-00-00'` on a `DATE` column, is accepted and formatted. Use [`spirit lint`](lint.md) to find such definitions. The connection uses TLS when the server supports it, and falls back to plaintext when the server does not.
+
 Basic usage:
 
 ```bash
