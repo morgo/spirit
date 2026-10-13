@@ -13,9 +13,11 @@ import (
 	"github.com/block/spirit/pkg/applier"
 	"github.com/block/spirit/pkg/change"
 	"github.com/block/spirit/pkg/checkpoint"
+	"github.com/block/spirit/pkg/flags"
 	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
+	"github.com/block/spirit/pkg/utils"
 	"github.com/stretchr/testify/require"
 )
 
@@ -281,4 +283,37 @@ func TestCloseRunsAllClosersOnError(t *testing.T) {
 		"target DB 1 must be closed despite the chunker error")
 	require.ErrorContains(t, db2.PingContext(t.Context()), "database is closed",
 		"target DB 2 must be closed despite the chunker error")
+}
+
+// TestRunClosesOpenedSourcesWhenALaterSourceFailsToConnect pins that Run
+// closes the sources it already opened when a later source fails to connect.
+// The close used to be registered only after every source had connected, so
+// sources 0..i-1 leaked their pools.
+func TestRunClosesOpenedSourcesWhenALaterSourceFailsToConnect(t *testing.T) {
+	srcName, _ := testutils.CreateUniqueTestDatabase(t)
+	tgtName, _ := testutils.CreateUniqueTestDatabase(t)
+	const missing = "move_conn_leak_missing" // never created: connecting to it fails with ER_BAD_DB_ERROR
+
+	runner, err := NewRunner(&Move{
+		SourceDSNs: []string{testutils.DSNForDatabase(srcName), testutils.DSNForDatabase(missing)},
+		TargetDSN:  testutils.DSNForDatabase(tgtName),
+		Common:     flags.Common{Threads: 1, WriteThreads: 1},
+	})
+	require.NoError(t, err)
+	defer utils.CloseAndLog(runner)
+
+	err = runner.Run(t.Context())
+	require.ErrorContains(t, err, "failed to connect to source 1")
+
+	// The first source's pool held its connect-time ping connection open.
+	// After Run returns, no session may remain on its database.
+	db, err := sql.Open("block-mysql", testutils.DSN())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+	require.Eventually(t, func() bool {
+		var n int
+		err := db.QueryRowContext(t.Context(),
+			"SELECT COUNT(*) FROM information_schema.processlist WHERE db = ?", srcName).Scan(&n)
+		return err == nil && n == 0
+	}, 10*time.Second, 50*time.Millisecond, "the first source's connections were not closed")
 }

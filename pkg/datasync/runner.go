@@ -305,13 +305,13 @@ func (r *Runner) Run(ctx context.Context) (retErr error) {
 	// injected non-MySQL source, spirit still needs SQL access to the
 	// source for SHOW FULL TABLES / SHOW CREATE TABLE and the initial-copy
 	// SELECTs.
-	db, err := dbconn.New(r.sync.SourceDSN, r.sourceDBConfig)
-	if err != nil {
-		return fmt.Errorf("failed to connect to source: %w", err)
-	}
 	cfg, err := mysql.ParseDSN(r.sync.SourceDSN)
 	if err != nil {
 		return fmt.Errorf("failed to parse source DSN: %w", err)
+	}
+	db, err := dbconn.New(r.sync.SourceDSN, r.sourceDBConfig)
+	if err != nil {
+		return fmt.Errorf("failed to connect to source: %w", err)
 	}
 	r.source = sourceInfo{db: db, config: cfg}
 

@@ -1280,16 +1280,24 @@ func (r *Runner) Run(ctx context.Context) (retErr error) {
 		sourceDSNs = []string{r.move.SourceDSN}
 	}
 
-	// Open connections to all sources.
+	// Open connections to all sources. The close is registered before the
+	// first connect, so a failure at source i still closes sources 0..i-1.
 	r.sources = make([]sourceInfo, len(sourceDSNs))
-	for i, dsn := range sourceDSNs {
-		db, err := dbconn.New(dsn, r.dbConfig)
-		if err != nil {
-			return fmt.Errorf("failed to connect to source %d: %w", i, err)
+	defer func() {
+		for i := range r.sources {
+			if r.sources[i].db != nil {
+				utils.CloseAndLog(r.sources[i].db)
+			}
 		}
+	}()
+	for i, dsn := range sourceDSNs {
 		cfg, err := mysql.ParseDSN(dsn)
 		if err != nil {
 			return fmt.Errorf("failed to parse source DSN %d: %w", i, err)
+		}
+		db, err := dbconn.New(dsn, r.dbConfig)
+		if err != nil {
+			return fmt.Errorf("failed to connect to source %d: %w", i, err)
 		}
 		r.sources[i] = sourceInfo{db: db, config: cfg, dsn: dsn}
 		// Attach this shard's key range BEFORE the sort below, so it stays
@@ -1309,11 +1317,6 @@ func (r *Runner) Run(ctx context.Context) (retErr error) {
 	slices.SortFunc(r.sources, func(a, b sourceInfo) int {
 		return strings.Compare(a.sourceKey(), b.sourceKey())
 	})
-	defer func() {
-		for i := range r.sources {
-			utils.CloseAndLog(r.sources[i].db)
-		}
-	}()
 
 	// If targets are already configured (e.g., for resharding), use them.
 	// Otherwise, create a single target from TargetDSN (for simple 1:1 moves).
@@ -1322,11 +1325,11 @@ func (r *Runner) Run(ctx context.Context) (retErr error) {
 		r.targets = slices.Clone(r.move.Targets)
 		r.logger.Info("Using pre-configured targets", "count", len(r.targets))
 	} else {
-		db, err := dbconn.New(r.move.TargetDSN, r.dbConfig)
+		targetConfig, err := mysql.ParseDSN(r.move.TargetDSN)
 		if err != nil {
 			return err
 		}
-		targetConfig, err := mysql.ParseDSN(r.move.TargetDSN)
+		db, err := dbconn.New(r.move.TargetDSN, r.dbConfig)
 		if err != nil {
 			return err
 		}
