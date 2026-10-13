@@ -13,19 +13,13 @@ import (
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/dbconn/sqlescape"
 	"github.com/block/spirit/pkg/migration/check"
+	"github.com/block/spirit/pkg/runtime"
 	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/utils"
 )
 
 const (
-	// cutoverInitialBackoff is the starting per-retry delay before
-	// re-attempting the rename. It doubles on each subsequent failure up
-	// to cutoverMaxBackoff. Without backoff a contended table lock
-	// produces a tight retry loop that worsens contention; this gives
-	// the source of contention time to clear.
-	cutoverInitialBackoff = 100 * time.Millisecond
-	cutoverMaxBackoff     = 10 * time.Second
 	// renameVerifyTimeout bounds each check of whether the cutover rename
 	// committed. The check runs on a context detached from the run's, so it
 	// can still read the server state after the run has been cancelled.
@@ -66,6 +60,10 @@ type CutOver struct {
 	// separates "the cutover failed" from "we cannot tell who owns the table".
 	// (false, nil) is a read taken before a still-running rename committed.
 	testRenameCompleted func() (bool, error)
+	// testFlushError is a test-only seam: when non-nil, an attempt calls it
+	// before its pre-rename flush and fails with its error, if any, in place
+	// of the flush's.
+	testFlushError func(attempt int) error
 }
 
 // errCutoverRefused marks a cutover attempt refused by a check that ran under
@@ -123,11 +121,6 @@ func (c *CutOver) Run(ctx context.Context) error {
 		// because the alternative is a cutover that cannot run at all.
 		dbconn.SetPoolSize(c.db, 5)
 	}
-	// Collect every attempt's error and join them on exit, so an operator
-	// debugging a flapping cutover sees the full failure history rather
-	// than just whatever happened on the last try.
-	var attemptErrs []error
-	backoff := cutoverInitialBackoff
 	// renameMayHaveCommitted is set when an attempt fails with an error that
 	// leaves the rename's outcome unknown (dbconn.IsOutcomeUnknown). RENAME
 	// TABLE is atomic server-side, but if the connection dies after the server
@@ -152,43 +145,35 @@ func (c *CutOver) Run(ctx context.Context) error {
 		renameStateUnverified = !verified || (!completed && renameMayStillBeRunning)
 		return completed
 	}
-	fail := func(errs ...error) error {
-		all := append(attemptErrs, errs...) //nolint:gocritic // deliberately not appending back into attemptErrs
+	// ambiguity is appended to every failure: the marker when the rename's
+	// outcome could not be verified, otherwise nothing.
+	ambiguity := func() error {
 		if renameStateUnverified {
-			all = append(all, status.ErrOwnershipAmbiguous)
+			return status.ErrOwnershipAmbiguous
 		}
-		return errors.Join(all...)
+		return nil
 	}
 	// cancelled returns for a done ctx. If an earlier attempt's rename may
 	// have committed, it checks first: a cancel must not turn a committed
 	// cutover into a reported failure.
-	cancelled := func() error {
+	cancelled := func(history []error) error {
 		if renameMayHaveCommitted && confirm() {
 			return nil
 		}
-		return fail(ctx.Err())
+		return errors.Join(append(history, ctx.Err(), ambiguity())...)
 	}
-	for i := range max(1, c.dbConfig.MaxRetries) {
-		if ctx.Err() != nil {
-			return cancelled()
-		}
-		if i > 0 {
-			// Exponential backoff between attempts. Without this a
-			// contended lock produces a tight retry loop that worsens
-			// contention. Sleeping ctx-aware so a cancel during backoff
-			// returns promptly instead of waiting out the full delay.
-			timer := time.NewTimer(backoff)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-				return cancelled()
-			case <-timer.C:
-			}
-			backoff *= 2
-			if backoff > cutoverMaxBackoff {
-				backoff = cutoverMaxBackoff
-			}
-		}
+	// prepare records, for stop, that the work before an attempt's rename
+	// failed. Such a failure ends the cutover instead of being retried. It is
+	// never reset between attempts, which is correct only because every value
+	// but prepareOK ends the loop: do not make either one retryable without
+	// resetting it at the top of attempt.
+	const (
+		prepareOK = iota
+		prepareFailed
+		prepareCancelled
+	)
+	prepare := prepareOK
+	attempt := func(ctx context.Context, i int) error {
 		// If a previous attempt failed ambiguously, re-check the server state
 		// before doing anything else — in particular before feed.Flush below,
 		// which would otherwise fail with ER_NO_SUCH_TABLE applying buffered
@@ -207,77 +192,87 @@ func (c *CutOver) Run(ctx context.Context) error {
 		if i > 0 && c.foreignKeys != nil {
 			if err := c.foreignKeys.removeFromNewTables(ctx, c.foreignKeys.forceExec); err != nil {
 				if ctx.Err() != nil {
-					return cancelled()
+					prepare = prepareCancelled
+					return err
 				}
-				return fail(fmt.Errorf("could not drop the foreign keys a failed cutover attempt left on the new tables: %w", err))
+				prepare = prepareFailed
+				return fmt.Errorf("could not drop the foreign keys a failed cutover attempt left on the new tables: %w", err)
 			}
 		}
 		// Try and catch up before we attempt the cutover.
 		// since we will need to catch up again with the lock held
 		// and we want to minimize that.
-		if err := c.feed.Flush(ctx); err != nil {
-			return fail(err)
+		if c.testFlushError != nil {
+			if err := c.testFlushError(i); err != nil {
+				prepare = prepareFailed
+				return err
+			}
 		}
-		// We use maxCutoverRetries as our retrycount, but nested
-		// within c.algorithmX() it may also have a retry for the specific statement
-		c.logger.Warn("Attempting final cut over operation",
-			"attempt", i+1,
-			"max_retries", c.dbConfig.MaxRetries,
-		)
+		if err := c.feed.Flush(ctx); err != nil {
+			prepare = prepareFailed
+			return err
+		}
 		// if specified in c.config[0], we will use the test cutover for failure injection.
 		// we don't need to exhaustively check all configs.
-		var err error
 		if len(c.config) > 0 && c.config[0].useTestCutover {
-			err = c.partialRenameForTest(ctx)
-		} else {
-			err = c.algorithmRenameUnderLock(ctx)
+			return c.partialRenameForTest(ctx)
 		}
-		if err != nil {
-			attemptErrs = append(attemptErrs, fmt.Errorf("attempt %d: %w", i+1, err))
-			if errors.Is(err, errCutoverRefused) {
-				// A retry would be refused for the same reason.
-				c.logger.Error("cutover refused under the table lock", "error", err.Error())
-				return fail()
+		return c.algorithmRenameUnderLock(ctx)
+	}
+	stop := func(err error) (runtime.CutoverVerdict, error) {
+		switch prepare {
+		case prepareCancelled:
+			if renameMayHaveCommitted && confirm() {
+				return runtime.CutoverVerdictSucceeded, nil
 			}
-			if dbconn.IsOutcomeUnknown(err) {
-				// Ambiguous failure: the connection died, or the client
-				// stopped waiting for the reply, so the client cannot know
-				// whether the server committed the rename. Verify the actual
-				// server state on a fresh connection before treating this as
-				// a failure.
-				// Deterministic SQL errors (lock wait timeout, deadlock, ...)
-				// deliberately skip this: for those the server positively
-				// reported the statement failed, so the normal retry path is
-				// correct.
-				renameMayHaveCommitted = true
-				if errors.Is(err, dbconn.ErrStatementOutcomeUnknown) {
-					renameMayStillBeRunning = true
-				}
-				if confirm() {
-					return nil
-				}
-			}
-			c.logger.Warn("cutover failed",
-				"error", err.Error(),
-				"next_backoff", backoff,
-			)
-			if c.testAfterFailedAttempt != nil {
-				c.testAfterFailedAttempt()
-			}
-			continue
+			return runtime.CutoverVerdictFailed, errors.Join(ctx.Err(), ambiguity())
+		case prepareFailed:
+			return runtime.CutoverVerdictFailed, ambiguity()
 		}
-		c.logger.Warn("final cut over operation complete")
-		return nil
+		if errors.Is(err, errCutoverRefused) {
+			// A retry would be refused for the same reason.
+			c.logger.Error("cutover refused under the table lock", "error", err.Error())
+			return runtime.CutoverVerdictFailed, ambiguity()
+		}
+		if dbconn.IsOutcomeUnknown(err) {
+			// Ambiguous failure: the connection died, or the client
+			// stopped waiting for the reply, so the client cannot know
+			// whether the server committed the rename. Verify the actual
+			// server state on a fresh connection before treating this as
+			// a failure.
+			// Deterministic SQL errors (lock wait timeout, deadlock, ...)
+			// deliberately skip this: for those the server positively
+			// reported the statement failed, so the normal retry path is
+			// correct.
+			renameMayHaveCommitted = true
+			if errors.Is(err, dbconn.ErrStatementOutcomeUnknown) {
+				renameMayStillBeRunning = true
+			}
+			if confirm() {
+				return runtime.CutoverVerdictSucceeded, nil
+			}
+		}
+		if c.testAfterFailedAttempt != nil {
+			c.testAfterFailedAttempt()
+		}
+		return runtime.CutoverVerdictRetry, nil
 	}
 	// Retries are exhausted. If any attempt failed ambiguously, give the
 	// state check one final chance before declaring failure: the server may
 	// have committed the rename only after the last in-loop verification ran
 	// (e.g. the dying rename was still waiting on metadata locks).
-	if renameMayHaveCommitted && confirm() {
-		return nil
+	exhausted := func(history []error) error {
+		if renameMayHaveCommitted && confirm() {
+			return nil
+		}
+		return errors.Join(append(history, ambiguity())...)
 	}
-	c.logger.Error("cutover failed, and retries exhausted")
-	return fail()
+	// Each attempt may also retry its own statements, within
+	// c.algorithmRenameUnderLock.
+	return runtime.RetryCutover(ctx, runtime.CutoverRetry{
+		Attempts: c.dbConfig.MaxRetries,
+		Logger:   c.logger,
+	}, attempt, stop, cancelled, exhausted)
 }
 
 // confirmRenameCompleted wraps renameCompleted with logging for use in the

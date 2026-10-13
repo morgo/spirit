@@ -20,6 +20,7 @@ The name matches the standard library's `runtime` package. A file that needs bot
 | `Lifecycle` | Three copies of the cancel function a `Run` invocation publishes, the opening lines of `Run`, and the evidence behind `Result()` | migration, move, datasync |
 | `SharedThrottler` | Two copies of the mutex-guarded throttler that setup resolves | migration, move |
 | `RecordCopyCompleted` | Three identical copies of the copy aggregate reported when the copy ends | migration, move, datasync |
+| `RetryCutover` | Two copies of the cutover attempt loop, one with a backoff and joined attempt errors and one without | migration, move |
 
 ### `Snapshot` and `Source`
 
@@ -71,6 +72,18 @@ This holds the throttler that setup resolves partway through. `Progress` and the
 ### `RecordCopyCompleted`
 
 This reports the copy aggregate (rows and chunks) when the copy ends. A resumed run's chunker restores its row count from the checkpoint but starts its chunk count at zero. `RecordCopyCompleted` subtracts the restored rows so that the two counts cover the same invocation.
+
+### `RetryCutover`
+
+This runs the cutover's attempt loop for migration and move. It does the following:
+
+1. Runs up to `CutoverRetry.Attempts` attempts. A value below 1 is one attempt.
+2. Checks the context before every attempt. Between attempts it sleeps a backoff that starts at `CutoverInitialBackoff` (100ms) and doubles up to `CutoverMaxBackoff` (10s). The sleep ends early on cancel.
+3. Records every failed attempt's error as `attempt N: <error>`. The error it returns joins them, so an operator sees every attempt, not only the last.
+
+What happens after a failed attempt is the runner's. Its `StopFunc` is passed that attempt's error only, never the history, and returns a verdict: retry, succeeded (the runner proved the cutover committed) or failed (with an optional error appended after the history, such as `status.ErrOwnershipAmbiguous`). The runner also supplies what a cancel returns and what running out of attempts returns. Migration uses both to check whether a rename whose outcome was unknown committed after all. Move uses the defaults: the history joined with the context's error, and the history.
+
+The loop does not cover move's rename retries under the source locks (`renameRetryWait`). Those happen inside one attempt, after the traffic switch, and must not release the locks.
 
 ## What does not live here (yet)
 
