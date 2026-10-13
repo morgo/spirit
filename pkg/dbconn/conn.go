@@ -481,6 +481,23 @@ func NewWithConnectionType(inputDSN string, config *DBConfig, connectionType str
 	return newWithConnectTimeout(context.Background(), inputDSN, config, connectionType, connectTimeout)
 }
 
+// MonitorPoolSize is the pool size MonitorOpener gives the Aurora monitor
+// pool: both Aurora throttlers poll concurrently without serializing on one
+// connection.
+const MonitorPoolSize = 2
+
+// MonitorOpener returns the throttler.AuroraSetup.OpenMonitor closure: it
+// opens a MonitorPoolSize pool on dsn from a copy of cfg (cfg is never
+// mutated), labelled label in connect errors. The throttler package does not
+// import dbconn, so the runners pass it this.
+func MonitorOpener(dsn string, cfg *DBConfig, label string) func() (*sql.DB, error) {
+	return func() (*sql.DB, error) {
+		monitorCfg := *cfg // shallow copy; MaxOpenConnections is value-typed
+		monitorCfg.MaxOpenConnections = MonitorPoolSize
+		return NewWithConnectionType(dsn, &monitorCfg, label)
+	}
+}
+
 // NewContext is like New, but the connect-time ping also ends when ctx is
 // done, so a caller that is shutting down is not held for up to
 // connectTimeout by a server that never completes the handshake.
@@ -719,81 +736,15 @@ func GetTLSConfigForBinlog(config *DBConfig, host string) (*tls.Config, error) {
 	}
 
 	var tlsConfig *tls.Config
-
-	switch strings.ToUpper(config.TLSMode) {
-	case "DISABLED":
-		// No TLS for the binlog connection. (Unreachable in practice because
-		// the early return above handles DISABLED, but kept explicit so the
-		// switch covers every documented mode rather than treating DISABLED as
-		// an unknown mode that falls into the PREFERRED-style default.)
-		return nil, nil
-
-	case "PREFERRED":
-		// For PREFERRED mode, we need to setup custom TLS config
-		if err := initCustomTLS(config); err != nil {
+	if strings.ToUpper(config.TLSMode) == "REQUIRED" && IsRDSHost(host) {
+		if err := initRDSTLS(); err != nil {
 			return nil, err
 		}
-		var certData []byte
-		if config.TLSCertificatePath != "" {
-			var err error
-			certData, err = LoadCertificateFromFile(config.TLSCertificatePath)
-			if err != nil {
-				return nil, fmt.Errorf("failed to load TLS certificate: %w", err)
-			}
-		}
-		tlsConfig = NewCustomTLSConfig(certData, config.TLSMode)
-
-	case "REQUIRED":
-		if IsRDSHost(host) {
-			if err := initRDSTLS(); err != nil {
-				return nil, err
-			}
-			tlsConfig = NewTLSConfig()
-		} else {
-			if err := initCustomTLS(config); err != nil {
-				return nil, err
-			}
-			var certData []byte
-			if config.TLSCertificatePath != "" {
-				var err error
-				certData, err = LoadCertificateFromFile(config.TLSCertificatePath)
-				if err != nil {
-					return nil, fmt.Errorf("failed to load TLS certificate: %w", err)
-				}
-			}
-			tlsConfig = NewCustomTLSConfig(certData, config.TLSMode)
-		}
-
-	case "VERIFY_CA":
-		if err := initCustomTLS(config); err != nil {
-			return nil, err
-		}
-		var certData []byte
-		if config.TLSCertificatePath != "" {
-			var err error
-			certData, err = LoadCertificateFromFile(config.TLSCertificatePath)
-			if err != nil {
-				return nil, fmt.Errorf("failed to load TLS certificate: %w", err)
-			}
-		}
-		tlsConfig = NewCustomTLSConfig(certData, config.TLSMode)
-
-	case "VERIFY_IDENTITY":
-		if err := initCustomTLS(config); err != nil {
-			return nil, err
-		}
-		var certData []byte
-		if config.TLSCertificatePath != "" {
-			var err error
-			certData, err = LoadCertificateFromFile(config.TLSCertificatePath)
-			if err != nil {
-				return nil, fmt.Errorf("failed to load TLS certificate: %w", err)
-			}
-		}
-		tlsConfig = NewCustomTLSConfig(certData, config.TLSMode)
-
-	default:
-		// For unknown modes, use PREFERRED logic
+		tlsConfig = NewTLSConfig()
+	} else {
+		// PREFERRED, VERIFY_CA, VERIFY_IDENTITY, REQUIRED against a non-RDS
+		// host, and any unknown mode (treated as PREFERRED) all use the
+		// custom config.
 		if err := initCustomTLS(config); err != nil {
 			return nil, err
 		}

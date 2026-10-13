@@ -121,7 +121,8 @@ type Runner struct {
 	// from the targets (moveFlushBounds).
 	flushConcurrency, flushBatchSize int
 	// buildAurora and auroraVCPUs are the instance probes setupThrottling runs.
-	// NewRunner sets them to the throttler package's; tests replace them,
+	// NewRunner sets buildAurora to throttler.BuildAurora; a nil auroraVCPUs is
+	// throttler.AuroraVCPUs (concurrency.Request.VCPUs). Tests replace them,
 	// because CI has no Aurora to probe.
 	buildAurora func(context.Context, throttler.AuroraSetup) (throttler.AuroraResult, error)
 	auroraVCPUs func(context.Context, *sql.DB) (int, error)
@@ -219,14 +220,9 @@ func NewRunner(m *Move) (*Runner, error) {
 		reverseWriteThreads: m.WriteThreads,
 		logger:              slog.Default(),
 		metricsSink:         &metrics.NoopSink{},
-		buildAurora:         buildAurora,
-		auroraVCPUs:         throttler.AuroraVCPUs,
+		buildAurora:         throttler.BuildAurora,
 	}
 	return r, nil
-}
-
-func buildAurora(ctx context.Context, setup throttler.AuroraSetup) (throttler.AuroraResult, error) {
-	return setup.Build(ctx)
 }
 
 func (r *Runner) runCopy(ctx context.Context) error {
@@ -725,17 +721,15 @@ func (r *Runner) setupThrottling(ctx context.Context) error {
 	for i, group := range groups {
 		target := r.targets[group.Indices[0]]
 		result, err := r.buildAurora(ctx, throttler.AuroraSetup{
-			Source: target.DB,
-			OpenMonitor: func() (*sql.DB, error) {
-				cfg := *r.dbConfig
-				cfg.MaxOpenConnections = 2
-				return dbconn.NewWithConnectionType(target.Config.FormatDSN(), &cfg, "move target monitor")
-			},
+			Source:                 target.DB,
+			OpenMonitor:            dbconn.MonitorOpener(target.Config.FormatDSN(), r.dbConfig, "move target monitor"),
 			CommitLatencyThreshold: r.move.MaxCommitLatency,
 			Logger:                 r.logger.With("target", targetKey(target)),
 		})
 		if err != nil {
-			closeAuroraResults(results[:i])
+			for _, built := range results[:i] {
+				_ = built.Close()
+			}
 			return err
 		}
 		results[i] = result
@@ -758,7 +752,9 @@ func (r *Runner) applyAuroraResults(ctx context.Context, groups []host.Group, re
 	if len(signals) > 0 {
 		composite := throttler.NewMultiThrottler(signals...)
 		if err := composite.Open(ctx); err != nil {
-			closeAuroraResults(results)
+			for _, result := range results {
+				_ = result.Close()
+			}
 			return err
 		}
 		r.throttler.Set(composite)
@@ -1280,16 +1276,24 @@ func (r *Runner) Run(ctx context.Context) (retErr error) {
 		sourceDSNs = []string{r.move.SourceDSN}
 	}
 
-	// Open connections to all sources.
+	// Open connections to all sources. The close is registered before the
+	// first connect, so a failure at source i still closes sources 0..i-1.
 	r.sources = make([]sourceInfo, len(sourceDSNs))
-	for i, dsn := range sourceDSNs {
-		db, err := dbconn.New(dsn, r.dbConfig)
-		if err != nil {
-			return fmt.Errorf("failed to connect to source %d: %w", i, err)
+	defer func() {
+		for i := range r.sources {
+			if r.sources[i].db != nil {
+				utils.CloseAndLog(r.sources[i].db)
+			}
 		}
+	}()
+	for i, dsn := range sourceDSNs {
 		cfg, err := mysql.ParseDSN(dsn)
 		if err != nil {
 			return fmt.Errorf("failed to parse source DSN %d: %w", i, err)
+		}
+		db, err := dbconn.New(dsn, r.dbConfig)
+		if err != nil {
+			return fmt.Errorf("failed to connect to source %d: %w", i, err)
 		}
 		r.sources[i] = sourceInfo{db: db, config: cfg, dsn: dsn}
 		// Attach this shard's key range BEFORE the sort below, so it stays
@@ -1309,11 +1313,6 @@ func (r *Runner) Run(ctx context.Context) (retErr error) {
 	slices.SortFunc(r.sources, func(a, b sourceInfo) int {
 		return strings.Compare(a.sourceKey(), b.sourceKey())
 	})
-	defer func() {
-		for i := range r.sources {
-			utils.CloseAndLog(r.sources[i].db)
-		}
-	}()
 
 	// If targets are already configured (e.g., for resharding), use them.
 	// Otherwise, create a single target from TargetDSN (for simple 1:1 moves).
@@ -1322,11 +1321,11 @@ func (r *Runner) Run(ctx context.Context) (retErr error) {
 		r.targets = slices.Clone(r.move.Targets)
 		r.logger.Info("Using pre-configured targets", "count", len(r.targets))
 	} else {
-		db, err := dbconn.New(r.move.TargetDSN, r.dbConfig)
+		targetConfig, err := mysql.ParseDSN(r.move.TargetDSN)
 		if err != nil {
 			return err
 		}
-		targetConfig, err := mysql.ParseDSN(r.move.TargetDSN)
+		db, err := dbconn.New(r.move.TargetDSN, r.dbConfig)
 		if err != nil {
 			return err
 		}

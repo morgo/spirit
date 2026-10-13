@@ -72,7 +72,8 @@ type Runner struct {
 	// unless autoscaling was requested and the target qualified.
 	autoscale concurrency.Plan
 	// buildAurora and auroraVCPUs are the instance probes setupAutoscaling runs.
-	// NewRunner sets them to the throttler package's; tests replace them,
+	// NewRunner sets buildAurora to throttler.BuildAurora; a nil auroraVCPUs is
+	// throttler.AuroraVCPUs (concurrency.Request.VCPUs). Tests replace them,
 	// because CI has no Aurora to probe.
 	buildAurora func(context.Context, throttler.AuroraSetup) (throttler.AuroraResult, error)
 	auroraVCPUs func(context.Context, *sql.DB) (int, error)
@@ -165,10 +166,7 @@ func NewRunner(m *Migration) (*Runner, error) {
 		logger:      slog.Default(),
 		metricsSink: &metrics.NoopSink{},
 		changes:     changes,
-		buildAurora: func(ctx context.Context, setup throttler.AuroraSetup) (throttler.AuroraResult, error) {
-			return setup.Build(ctx)
-		},
-		auroraVCPUs: throttler.AuroraVCPUs,
+		buildAurora: throttler.BuildAurora,
 	}
 	for _, change := range changes {
 		change.runner = runner // link back.
@@ -1108,21 +1106,17 @@ func (r *Runner) setThrottlerOnPhases() {
 // on non-Aurora targets, so this is safe to call unconditionally.
 //
 // OpenMonitor is invoked lazily by Build only after IsAurora returns true, so
-// non-Aurora users never pay the connect cost. MaxOpenConnections=2 lets both
-// Aurora throttlers poll concurrently without serializing on a single conn,
-// with a touch of headroom.
+// non-Aurora users never pay the connect cost. The monitor pool holds
+// dbconn.MonitorPoolSize connections, so both Aurora throttlers poll
+// concurrently without serializing on a single conn.
 //
 // A test throttler replaces the Aurora throttlers entirely, so there is no
 // probe and autoscaling cannot engage.
 func (r *Runner) setupAutoscaling(ctx context.Context) error {
 	if r.migration.testThrottler == nil {
 		result, err := r.buildAurora(ctx, throttler.AuroraSetup{
-			Source: r.db,
-			OpenMonitor: func() (*sql.DB, error) {
-				monitorCfg := *r.dbConfig // shallow copy — MaxOpenConnections is value-typed
-				monitorCfg.MaxOpenConnections = 2
-				return dbconn.NewWithConnectionType(r.dsn(), &monitorCfg, "monitor database")
-			},
+			Source:                 r.db,
+			OpenMonitor:            dbconn.MonitorOpener(r.dsn(), r.dbConfig, "monitor database"),
 			CommitLatencyThreshold: r.migration.MaxCommitLatency,
 			Logger:                 r.logger,
 		})
@@ -1195,11 +1189,10 @@ func (r *Runner) setupThrottler(ctx context.Context) error {
 		// failure, but the *sql.DB connections backing replica throttlers
 		// are owned by r.replicas (and the Aurora monitor pool is owned
 		// by r.monitorDB) — clean those up too rather than leaving them
-		// dangling until Runner.Close() runs.
-		if r.monitorDB != nil {
-			_ = r.monitorDB.Close()
-			r.monitorDB = nil
-		}
+		// dangling until Runner.Close() runs. Closing the Aurora throttlers
+		// a second time is safe: their Close is idempotent.
+		_ = r.aurora.Close()
+		r.monitorDB = nil
 		_ = r.closeReplicas()
 		return fmt.Errorf("opening throttlers: %w", err)
 	}
