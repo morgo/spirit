@@ -13,6 +13,7 @@ import (
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/dbconn/sqlescape"
 	"github.com/block/spirit/pkg/move/check"
+	"github.com/block/spirit/pkg/runtime"
 	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/utils"
@@ -94,6 +95,10 @@ type CutOver struct {
 	// before the source rename. It must run at most once.
 	postSwitch     func(ctx context.Context) error
 	postSwitchDone bool
+
+	// testSleep, when non-nil, replaces the backoff between cutover attempts
+	// (see runtime.CutoverRetry.Sleep). It is a test seam.
+	testSleep func(ctx context.Context, d time.Duration) error
 }
 
 // SetChecksUnderLock registers checks to run under the source locks after
@@ -160,16 +165,13 @@ func NewCutOver(sources []CutOverSource, cutoverFunc func(ctx context.Context) e
 }
 
 func (c *CutOver) Run(ctx context.Context) error {
-	return c.runWithRetries(ctx, func(attempt int) error {
+	return c.runWithRetries(ctx, func(int) error {
 		// Flush all sources before attempting the cutover.
 		for i, src := range c.sources {
 			if err := src.ReplClient.Flush(ctx); err != nil {
 				return fmt.Errorf("source %d: flush failed: %w", i, err)
 			}
 		}
-		c.logger.Warn("Attempting final cut over operation",
-			"attempt", attempt+1,
-			"max-retries", c.dbConfig.MaxRetries)
 		return c.algorithmCutover(ctx)
 	})
 }
@@ -177,70 +179,66 @@ func (c *CutOver) Run(ctx context.Context) error {
 // runWithRetries owns the cutover retry policy: which failures may be tried
 // again from the top, and which have left table ownership in a state that a
 // retry could make worse. runAttempt is a parameter so the policy can be
-// tested without a live topology.
+// tested without a live topology. The loop itself (backoff, the joined
+// "attempt N:" history, cancellation) is runtime.RetryCutover.
 func (c *CutOver) runWithRetries(ctx context.Context, runAttempt func(attempt int) error) error {
-	var err error
-	for attempt := range c.dbConfig.MaxRetries {
-		if ctx.Err() != nil {
-			return ctx.Err()
+	return runtime.RetryCutover(ctx, runtime.CutoverRetry{
+		Attempts: c.dbConfig.MaxRetries,
+		Logger:   c.logger,
+		Sleep:    c.testSleep,
+	}, func(_ context.Context, i int) error {
+		return runAttempt(i)
+	}, c.stopRetrying, nil, nil)
+}
+
+// stopRetrying classifies a failed attempt's error. Every failure it stops on
+// is appended to the attempt history with its status marker; the attempt's
+// error itself is already in that history.
+func (c *CutOver) stopRetrying(err error) (runtime.CutoverVerdict, error) {
+	// withMutation adds the durable-mutation marker when the callback reported
+	// one.
+	withMutation := func(err error) error {
+		if c.cutoverFuncMutated {
+			return errors.Join(status.ErrDurableMutation, err)
 		}
-		err = runAttempt(attempt)
-		if err != nil {
-			if errors.Is(err, errCutoverRefused) {
-				// Refused before the traffic switch: the source is still live and
-				// a retry would be refused for the same reason.
-				c.logger.Error("cutover refused under the source table locks; not retrying",
-					"error", err.Error())
-				return err
-			}
-			if errors.Is(err, errRenameRollbackFailed) || errors.Is(err, status.ErrOwnershipAmbiguous) {
-				c.logger.Error("cutover rename left ownership unresolved; not retrying",
-					"error", err.Error())
-				ownershipErr := fmt.Errorf("%w: cutover rename left ownership unresolved: %w",
-					status.ErrOwnershipAmbiguous, err)
-				if c.cutoverFuncMutated {
-					return errors.Join(status.ErrDurableMutation, ownershipErr)
-				}
-				return ownershipErr
-			}
-			if c.cutoverFuncAmbiguous && !c.cutoverFuncSucceeded {
-				c.logger.Error("cutover callback failed with ambiguous ownership; not retrying",
-					"error", err.Error())
-				ownershipErr := fmt.Errorf("%w: cutover callback left ownership ambiguous: %w",
-					status.ErrOwnershipAmbiguous, err)
-				if c.cutoverFuncMutated {
-					return errors.Join(status.ErrDurableMutation, ownershipErr)
-				}
-				return ownershipErr
-			}
-			if c.cutoverFuncMutated && !c.cutoverFuncSucceeded {
-				c.logger.Error("cutover callback failed after reporting a durable mutation; not retrying",
-					"error", err.Error())
-				return fmt.Errorf("%w: cutover callback failed after a durable mutation: %w",
-					status.ErrDurableMutation, err)
-			}
-			if c.cutoverFuncSucceeded {
-				// Traffic may already be on the target. Retrying from the top
-				// would release the source locks and could replay straggler
-				// writes over newer target rows.
-				c.logger.Error("cutover failed after the cutover function had already succeeded; not retrying",
-					"error", err.Error())
-				ownershipErr := fmt.Errorf("%w: cutover failed after the cutover function succeeded; "+
-					"source tables are unlocked and not fully renamed; manual intervention required: %w",
-					status.ErrOwnershipAmbiguous, err)
-				if c.cutoverFuncMutated {
-					return errors.Join(status.ErrDurableMutation, ownershipErr)
-				}
-				return ownershipErr
-			}
-			c.logger.Warn("cutover failed", "error", err.Error())
-			continue
-		}
-		c.logger.Warn("final cut over operation complete")
-		return nil
+		return err
 	}
-	c.logger.Error("cutover failed, and retries exhausted")
-	return err
+	if errors.Is(err, errCutoverRefused) {
+		// Refused before the traffic switch: the source is still live and
+		// a retry would be refused for the same reason.
+		c.logger.Error("cutover refused under the source table locks; not retrying",
+			"error", err.Error())
+		return runtime.CutoverVerdictFailed, nil
+	}
+	if errors.Is(err, errRenameRollbackFailed) || errors.Is(err, status.ErrOwnershipAmbiguous) {
+		c.logger.Error("cutover rename left ownership unresolved; not retrying",
+			"error", err.Error())
+		return runtime.CutoverVerdictFailed, withMutation(fmt.Errorf("%w: cutover rename left ownership unresolved",
+			status.ErrOwnershipAmbiguous))
+	}
+	if c.cutoverFuncAmbiguous && !c.cutoverFuncSucceeded {
+		c.logger.Error("cutover callback failed with ambiguous ownership; not retrying",
+			"error", err.Error())
+		return runtime.CutoverVerdictFailed, withMutation(fmt.Errorf("%w: cutover callback left ownership ambiguous",
+			status.ErrOwnershipAmbiguous))
+	}
+	if c.cutoverFuncMutated && !c.cutoverFuncSucceeded {
+		c.logger.Error("cutover callback failed after reporting a durable mutation; not retrying",
+			"error", err.Error())
+		return runtime.CutoverVerdictFailed, fmt.Errorf("%w: cutover callback failed after a durable mutation",
+			status.ErrDurableMutation)
+	}
+	if c.cutoverFuncSucceeded {
+		// Traffic may already be on the target. Retrying from the top
+		// would release the source locks and could replay straggler
+		// writes over newer target rows.
+		c.logger.Error("cutover failed after the cutover function had already succeeded; not retrying",
+			"error", err.Error())
+		return runtime.CutoverVerdictFailed, withMutation(fmt.Errorf("%w: cutover failed after the cutover function succeeded; "+
+			"source tables are unlocked and not fully renamed; manual intervention required",
+			status.ErrOwnershipAmbiguous))
+	}
+	return runtime.CutoverVerdictRetry, nil
 }
 
 func (c *CutOver) runCutoverCallback(ctx context.Context) error {
@@ -366,7 +364,7 @@ func (c *CutOver) algorithmCutover(ctx context.Context) error {
 		if attempt > 1 {
 			c.logger.Warn("retrying rename while still holding source table locks",
 				"attempt", attempt,
-				"max-retries", c.dbConfig.MaxRetries)
+				"max_retries", c.dbConfig.MaxRetries)
 			time.Sleep(renameRetryWait)
 		}
 		if err = c.renameAllSources(afterSwitch, sourceLocks); err == nil {

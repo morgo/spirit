@@ -83,9 +83,9 @@ func TestClientTLSConfiguration(t *testing.T) {
 				feedCore: feedCore{
 					username: "testuser",
 					password: "testpass",
+					host:     tc.host,
+					dbConfig: tlsConfig,
 				},
-				host:     tc.host,
-				dbConfig: tlsConfig,
 			}
 
 			// Verify TLS config is stored correctly
