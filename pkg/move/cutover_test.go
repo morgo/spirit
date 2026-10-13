@@ -411,17 +411,28 @@ func TestCutOverDoesNotRetryUnresolvedRenameOwnership(t *testing.T) {
 func TestCutOverRetriesResolvedFailures(t *testing.T) {
 	cfg := dbconn.NewDBConfig()
 	cfg.MaxRetries = 3
-	cutover := &CutOver{dbConfig: cfg, logger: slog.Default()}
+	var sleeps []time.Duration
+	cutover := &CutOver{dbConfig: cfg, logger: slog.Default(),
+		testSleep: func(_ context.Context, d time.Duration) error {
+			sleeps = append(sleeps, d)
+			return nil
+		}}
 	attempts := 0
 
 	err := cutover.runWithRetries(t.Context(), func(int) error {
 		attempts++
-		return errors.New("lock wait timeout")
+		return fmt.Errorf("lock wait timeout %d", attempts)
 	})
 
 	require.Error(t, err)
 	require.NotErrorIs(t, err, status.ErrOwnershipAmbiguous)
 	require.Equal(t, 3, attempts)
+	// Every attempt's error is kept, not only the last one's.
+	for i := 1; i <= 3; i++ {
+		require.ErrorContains(t, err, fmt.Sprintf("attempt %d: lock wait timeout %d", i, i))
+	}
+	// The attempts back off between each other, like a migration's.
+	require.Equal(t, []time.Duration{100 * time.Millisecond, 200 * time.Millisecond}, sleeps)
 }
 
 // TestCutOverFuncSucceededFailureIsAmbiguous covers the pre-existing
