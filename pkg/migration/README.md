@@ -140,13 +140,13 @@ If no sentinel exists, the step returns immediately. While waiting, a **continuo
 
 ### 14. Cutover
 
-Cutover checks (`ScopeCutover`) run first. Then `CutOver.Run` (`cutover.go`) makes up to three attempts, with backoff starting at 100ms and capped at 10s. Each attempt:
+Cutover checks (`PhaseCutover`) run first. Then `CutOver.Run` (`cutover.go`) makes up to three attempts, with backoff starting at 100ms and capped at 10s. Each attempt:
 
 1. Flushes the change source *without* a lock, so the locked section has little left to apply.
 2. Takes `LOCK TABLES <table> WRITE, _<table>_new WRITE[, ...]` on a dedicated connection. Blocking sessions are [force-killed](#force-kill).
 3. Calls `FlushUnderTableLock` (flush, wait for the change source to reach the current binlog position, flush again), then asserts every change has been applied.
 4. With `--enable-experimental-foreign-keys`, adds the table's foreign keys to `_new`, with `foreign_key_checks` off (`foreignKeyCutover.addToNewTables` in `foreignkeys.go`). `_new` has none until here. This is metadata-only only when `_new` has an index each foreign key can use; otherwise MySQL builds one under the lock (`LOCK=NONE` does not prevent it, and `ALGORITHM=INSTANT` is refused for `ADD FOREIGN KEY`), so before step 2 `foreignKeyCutover.probe` adds the same foreign keys to an empty `CREATE TABLE ... LIKE _new` copy that references empty copies of the parent tables, and refuses the cutover if its indexes changed. Here, the cutover refuses unless the foreign keys and `_new`'s columns and indexes are the ones probed. MySQL picks the index from the definition, not the rows, so the probe gets MySQL's own answer rather than a prediction of it.
-5. Runs the cutover-locked checks (`ScopeCutoverLocked`), which catch a foreign key or trigger added during the migration, and check the foreign keys added to `_new`. These refuse the cutover with no retry.
+5. Runs the cutover-locked checks (`PhaseCutoverLocked`), which catch a foreign key or trigger added during the migration, and check the foreign keys added to `_new`. These refuse the cutover with no retry.
 6. Raises `_new`'s `AUTO_INCREMENT` to at least the source's, unless the `ALTER` set `AUTO_INCREMENT` itself.
 7. `RENAME TABLE <table> TO _<table>_old, _<table>_new TO <table>[, ...]`. For a multi-table migration, every table is renamed in the same statement.
 8. Stops the change source while still holding the lock. With foreign keys, drops the foreign keys of `_<table>_old` and restores the original foreign key names (`foreignKeyCutover.settle`). Then `UNLOCK TABLES`. A failed attempt drops the foreign keys it added to `_new` before it unlocks.
@@ -191,16 +191,16 @@ Because the checkpoint and sentinel names are fixed, two atomic multi-table migr
 
 ## Checks
 
-Package `pkg/migration/check` holds the rules that decide whether Spirit can safely run a statement. Each check registers itself in an `init()` with a name, a callback and a scope bitmask. `check.RunChecks` runs every check in the requested scope in name order (so the same statement always reports the same error), and stops at the first failure. The runner runs checks once per table.
+Package [`pkg/check`](../check/README.md) holds the rules that decide whether Spirit can safely run a statement. Each check registers itself in an `init()` with a name, a callback, a phase bitmask and a runtime bitmask. `check.RunChecks` runs every check registered for the runner (`check.Migration`) and the requested phase in name order (so the same statement always reports the same error), and stops at the first failure. The runner runs checks once per table.
 
-| Scope | When it runs | Checks |
+| Phase | When it runs | Checks |
 |-------|-------------|--------|
-| `ScopePreRun` | `Migration.Run`, before `Runner.Run` (see [below](#using-spirit-migration-as-a-go-package)) | `version` |
-| `ScopeStatement` | Before advisory locks and the INSTANT/INPLACE attempt | `addforeignkey`, `enumReorder`, `enumSetRemoval`, `illegalClause`, `primarykey`, `primarykeybit`, `primarykeycollationstatement`, `primarykeyexists`, `primarykeyfloat`, `setReorder`, `tableidentifier` |
-| `ScopePreflight` | After the INSTANT/INPLACE attempt fails, before setup | `addforeignkey`, `configuration`, `dropadd`, `enumReorder`, `enumSetRemoval`, `hasforeignkeys`, `hastriggers`, `illegalClause`, `primarykey`, `privileges`, `rename`, `replica`, `setReorder`, `settings`, `tableidentifier`, `tablename` |
-| `ScopePostSetup` | After `_new` exists, before the copy | `primarykeybit`, `primarykeycollation`, `primarykeyfloat`, `replicahealth` |
-| `ScopeCutover` | After the sentinel wait, before cutover | `hasforeignkeys`, `hastriggers`, `replicahealth` |
-| `ScopeCutoverLocked` | Inside cutover, while the table lock is held | `hasforeignkeys`, `hastriggers` |
+| `PhasePreRun` | `Migration.Run`, before `Runner.Run` (see [below](#using-spirit-migration-as-a-go-package)) | `version` |
+| `PhaseStatement` | Before advisory locks and the INSTANT/INPLACE attempt | `addforeignkey`, `enumReorder`, `enumSetRemoval`, `illegalClause`, `primarykey`, `primarykeybit`, `primarykeycollationstatement`, `primarykeyexists`, `primarykeyfloat`, `setReorder`, `tableidentifier` |
+| `PhasePreflight` | After the INSTANT/INPLACE attempt fails, before setup | `addforeignkey`, `configuration`, `dropadd`, `enumReorder`, `enumSetRemoval`, `hasforeignkeys`, `hastriggers`, `illegalClause`, `primarykey`, `privileges`, `rename`, `replica`, `setReorder`, `settings`, `tableidentifier`, `tablename`, `version` |
+| `PhasePostSetup` | After `_new` exists, before the copy | `hasforeignkeys`, `primarykeybit`, `primarykeycollation`, `primarykeyfloat`, `replicahealth` |
+| `PhaseCutover` | After the sentinel wait, before cutover | `hasforeignkeys`, `hastriggers`, `replicahealth` |
+| `PhaseCutoverLocked` | Inside cutover, while the table lock is held | `hasforeignkeys`, `hastriggers` |
 
 What the checks enforce, grouped:
 
@@ -211,11 +211,11 @@ What the checks enforce, grouped:
 - **Foreign keys and triggers** (`addforeignkey`, `hasforeignkeys`, `hastriggers`): no foreign key may reference or be referenced by the table, and it may have no triggers. These are checked again at cutover, because one could have been added during the copy. With `--enable-experimental-foreign-keys` (MySQL 9.7+), the table may have foreign keys to other tables: `hasforeignkeys` then checks the server version and `innodb_native_foreign_keys`, and that the new table has no foreign keys, except under the cutover lock, where it must have a copy of each (`foreignkeys.go` adds them).
 - **Column changes** (`dropadd`, `rename`, `enumReorder`, `setReorder`, `enumSetRemoval`): no dropping and re-adding the same column, no renaming the table or a primary key column, and no `ENUM`/`SET` change that would alter the meaning of stored values. See [Unsupported Features](../../README.md#unsupported-features).
 
-Statement-scope checks use only the statement and the table's current definition, with no database connection. A failure in this scope is certain: Spirit can never run the statement. Checks that MySQL's own DDL might satisfy (`dropadd`, `rename`) are excluded from it. `check.StatementRefusal` exposes this scope to callers that want to classify a statement before running it.
+Statement-phase checks use only the statement and the table's current definition, with no database connection. A failure in this phase is certain: Spirit can never run the statement. Checks that MySQL's own DDL might satisfy (`dropadd`, `rename`) are excluded from it. `check.StatementRefusal` exposes this phase to callers that want to classify a statement before running it.
 
 A check wraps its error with `refuse()` (matched by `check.ErrRefused`) when retrying cannot help. Only `hasforeignkeys` and `hastriggers` do this, so that cutover stops retrying when they fail. No flag skips a check.
 
-To add a check, create `pkg/migration/check/<name>.go` with an `init()` that calls `registerCheck`, and a matching `_test.go`. Follow an existing check such as `tablename.go`.
+To add a check, see [pkg/check](../check/README.md#adding-a-check).
 
 ## Verification
 
@@ -345,7 +345,7 @@ func (sm *Spirit) Execute(ctx context.Context, m *ExecutableTask) error {
 Differences from the CLI to be aware of:
 
 - **Validation.** Kong calls `Migration.Validate()` for CLI users. `NewRunner` validates individual flags but not the cross-flag rules in `Validate`, such as whether `--max-connections` is large enough for the thread counts. Call `Validate()` yourself.
-- **Version check.** `Migration.Run()` (what the CLI calls) runs the `ScopePreRun` checks, which today means the MySQL 8.0+ version check. `Runner.Run` does not run them.
+- **Version check.** `Migration.Run()` (what the CLI calls) runs the `PhasePreRun` checks, which today means the MySQL 8.0+ version check. `Runner.Run` does not run them.
 - **Defaults.** Zero values mean "use the default", the same as the CLI. `NewRunner` fills them in.
 
 ### API
@@ -354,7 +354,7 @@ Differences from the CLI to be aware of:
 |--------|---------|
 | `Migration` | The configuration, also the Kong CLI struct. Embeds `flags.Common` (shared with `move` and `sync`) and `flags.Cutover` (shared with `move`) |
 | `Migration.Validate()` | Cross-flag validation |
-| `Migration.Run()` | CLI entry point: `NewRunner`, `ScopePreRun` checks, `Runner.Run`, `Close` |
+| `Migration.Run()` | CLI entry point: `NewRunner`, `PhasePreRun` checks, `Runner.Run`, `Close` |
 | `NewRunner(*Migration)` | Parses the statement, applies defaults, and builds a `Runner`. Does not connect |
 | `Runner.SetLogger(*slog.Logger)` | Defaults to `slog.Default()` |
 | `Runner.SetMetricsSink(metrics.Sink)` | Phase, copier, applier and checksum metrics. Defaults to a no-op sink |

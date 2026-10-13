@@ -9,10 +9,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/block/spirit/pkg/check"
 	"github.com/block/spirit/pkg/checksum"
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/flags"
-	"github.com/block/spirit/pkg/migration/check"
 	"github.com/block/spirit/pkg/statement"
 	"github.com/block/spirit/pkg/throttler"
 	"github.com/block/spirit/pkg/utils"
@@ -91,7 +91,7 @@ func (m *Migration) Run() error {
 		return err
 	}
 	defer utils.CloseAndLog(migration)
-	if err := migration.runChecks(context.TODO(), check.ScopePreRun); err != nil {
+	if err := migration.runChecks(context.TODO(), check.PhasePreRun); err != nil {
 		return err
 	}
 	if err := migration.Run(context.TODO()); err != nil {

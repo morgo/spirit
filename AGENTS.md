@@ -161,6 +161,7 @@ pkg/
   applier/    → Write layer for target tables (single-target and sharded)
   table/      → Chunking strategies (optimistic, composite, multi)
   checksum/   → Post-copy data verification (CRC32 + BIT_XOR)
+  check/      → Pre-run, preflight, post-setup and cutover checks, by phase and runtime (migration, move, datasync)
   dbconn/     → MySQL connection management, TLS, retries, locking, kill logic
   statement/  → SQL parsing via pkg/parser (ALTER, CREATE, DROP, RENAME)
   lint/       → Static analysis framework for schemas and DDL (built-in linters)
@@ -258,6 +259,7 @@ These three runners began as copy-paste forks and **drift silently** — a safet
 | The cutover attempt loop: attempt count (`dbconn.DBConfig.MaxRetries`; below 1 is one attempt), exponential backoff (`CutoverInitialBackoff` 100ms doubling to `CutoverMaxBackoff` 10s), every failed attempt's error kept as `attempt N: …` and joined, cancel checks before each attempt and during the backoff. Which failures stop the loop is the runner's: its `StopFunc` classifies only the current attempt's error, and it supplies its own cancel and exhausted results (migration re-checks whether its rename committed in each) | `pkg/runtime` (`RetryCutover`) | migration, move (datasync has no cutover) |
 | Fitting the checksum's read bounds (start and ceiling) to `--max-connections` | `dbconn.ReadBoundsForPool` (the runner supplies its reserve and how many connections one reader holds on the busiest pool) | migration, move (datasync partitions its target pool in `Request.Fit`, below) |
 | Checkpoint table (one schema + create/drop/exists/write/read) | `pkg/checkpoint` (`Table` + `Mode`) | migration, move, datasync |
+| Checks: configuration, privileges, version, table and schema-object refusals. Each check registers once with a `Phase` mask and a `Runtime` mask (`check.Migration`, `check.Move`, `check.Sync`); `RunChecks` runs only the caller's. `Resources` describes the run as sources and targets, so a shared check is written once; a runner-specific rule is a runtime test inside the check (e.g. sync's `configuration` skips `performance_schema`), and a different *policy* is a different check (move refuses source schema objects in `source_schema_objects`, sync logs them in `unsynced_source_objects`). A new check goes in `pkg/check`, registered for every runtime it applies to | `pkg/check` (`RunChecks`, `Resources`, `Checks`) | migration, move, datasync (datasync skips `configuration` for an injected `change.Source`) |
 | Sentinel cutover gate (`Create`/`Exists`/`Wait`) | `pkg/sentinel` | migration, move (datasync has no cutover) |
 | Lockless (optimistic) checksum, N sources × M targets | `pkg/checksum` `LocklessChecker` | move (always), datasync (always), migration (default; `--legacy-checksum` selects `SingleChecker`) |
 | Row copy, write layer, chunking, change feed, connections, throttling | `pkg/copier`, `pkg/applier`, `pkg/table`, `pkg/change`, `pkg/dbconn`, `pkg/throttler` | all |

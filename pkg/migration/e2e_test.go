@@ -10,9 +10,9 @@ import (
 	"time"
 
 	"github.com/block/spirit/pkg/change"
+	"github.com/block/spirit/pkg/check"
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/dbconn/sqlescape"
-	"github.com/block/spirit/pkg/migration/check"
 	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
@@ -388,7 +388,7 @@ func TestPreRunChecksE2E(t *testing.T) {
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
-	err = m.runChecks(t.Context(), check.ScopePreRun)
+	err = m.runChecks(t.Context(), check.PhasePreRun)
 	require.NoError(t, err)
 	require.NoError(t, m.Close())
 }

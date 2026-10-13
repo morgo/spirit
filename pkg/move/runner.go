@@ -18,6 +18,7 @@ import (
 	"github.com/block/spirit/pkg/applier"
 	"github.com/block/spirit/pkg/buildinfo"
 	"github.com/block/spirit/pkg/change"
+	"github.com/block/spirit/pkg/check"
 	"github.com/block/spirit/pkg/checkpoint"
 	"github.com/block/spirit/pkg/checksum"
 	"github.com/block/spirit/pkg/concurrency"
@@ -25,7 +26,6 @@ import (
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/host"
 	"github.com/block/spirit/pkg/metrics"
-	"github.com/block/spirit/pkg/move/check"
 	"github.com/block/spirit/pkg/runtime"
 	"github.com/block/spirit/pkg/sentinel"
 	"github.com/block/spirit/pkg/statement"
@@ -55,7 +55,7 @@ var (
 	// this name can only have been created by a move, which is what lets
 	// decideResume treat an empty one as a dead move's leavings and recover
 	// without --force. Keep it in sync with moveCheckpointTableName in
-	// pkg/move/check (that package cannot import this one).
+	// pkg/check (that package cannot import this one).
 	checkpointTableName = "_spirit_move_checkpoint"
 	// Sentinel-wait timing lives in pkg/sentinel (sentinel.WaitLimit /
 	// sentinel.CheckInterval / sentinel.TableName) and continuous-checksum
@@ -370,7 +370,7 @@ func (r *Runner) getTables(ctx context.Context, src *sourceInfo) ([]*table.Table
 // This function skips tables that already exist (they were validated by checkTargetEmpty).
 func (r *Runner) createTargetTables(ctx context.Context) error {
 	// All sources have identical schemas (enforced by the source_schema_consistency
-	// check at ScopePostSetup), so use sources[0] for SHOW CREATE TABLE.
+	// check at PhasePostSetup), so use sources[0] for SHOW CREATE TABLE.
 	for _, t := range r.sourceTables {
 		var createStmt string
 		row := r.sources[0].db.QueryRowContext(ctx, fmt.Sprintf("SHOW CREATE TABLE %s", t.QuotedTableName))
@@ -587,7 +587,7 @@ func (r *Runner) setupDiscovery(ctx context.Context) error {
 
 	// Run preflight checks on the source database
 	r.logger.Debug("Running preflight checks")
-	if err := r.runChecks(ctx, check.ScopePreflight); err != nil {
+	if err := r.runChecks(ctx, check.PhasePreflight); err != nil {
 		return err
 	}
 
@@ -645,7 +645,7 @@ func (r *Runner) setupUnderLocks(ctx context.Context) error {
 	// and resumeFromCheckpoint once that is known.
 
 	// Run post-setup checks
-	if err = r.runChecks(ctx, check.ScopePostSetup); err != nil {
+	if err = r.runChecks(ctx, check.PhasePostSetup); err != nil {
 		// New-copy checks failed — usually because tables already exist on the
 		// target. Resume if we can; recover automatically when the target is
 		// provably a dead attempt's partial copy; otherwise --force wipes the
@@ -678,7 +678,7 @@ func (r *Runner) setupUnderLocks(ctx context.Context) error {
 				// A failure that wiping the target cannot fix (an unsupported
 				// name, a missing or FLOAT/BIT primary key, ...) is reported
 				// as itself, not with advice to re-run with --force.
-				if preErr := r.runChecks(ctx, check.ScopePostSetup, check.TargetStateCheckName); preErr != nil {
+				if preErr := r.runChecks(ctx, check.PhasePostSetup, check.TargetStateCheckName); preErr != nil {
 					return preErr
 				}
 				return fmt.Errorf("target state is invalid for both new copy and resume (re-run with --force to wipe the target and start fresh): %w", err)
@@ -687,7 +687,7 @@ func (r *Runner) setupUnderLocks(ctx context.Context) error {
 		}
 		// A wipe only cures target state. Validate all other checks first,
 		// including when an empty checkpoint proves this is a prior attempt.
-		if preErr := r.runChecks(ctx, check.ScopePostSetup, check.TargetStateCheckName); preErr != nil {
+		if preErr := r.runChecks(ctx, check.PhasePostSetup, check.TargetStateCheckName); preErr != nil {
 			return fmt.Errorf("refusing to wipe the target because a check that wiping cannot fix is failing: %w", preErr)
 		}
 		if werr := r.wipeTargets(ctx); werr != nil {
@@ -699,7 +699,7 @@ func (r *Runner) setupUnderLocks(ctx context.Context) error {
 		// target (target_state passes for the absent tables, exactly as a fresh
 		// move); abort if anything still fails rather than copying into a state
 		// that would only fail at cutover.
-		if err := r.runChecks(ctx, check.ScopePostSetup); err != nil {
+		if err := r.runChecks(ctx, check.PhasePostSetup); err != nil {
 			return fmt.Errorf("target still fails post-setup checks after wiping: %w", err)
 		}
 		return r.newCopy(ctx)
@@ -892,7 +892,7 @@ func (r *Runner) decideResume(ctx context.Context) (resumeDecision, error) {
 			return resumeNone, fmt.Errorf("could not read checkpoint to decide resume: %w", err)
 		}
 	}
-	if err := r.runChecks(ctx, check.ScopeResume); err != nil {
+	if err := r.runChecks(ctx, check.PhaseResume); err != nil {
 		r.logger.Info("resume pre-checks failed", "reason", err)
 		return resumeNone, nil
 	}
@@ -1404,7 +1404,7 @@ func (r *Runner) Run(ctx context.Context) (retErr error) {
 		// schema-objects check here: with no tables there is no table trigger
 		// to match, but a target event (or a trigger on a leftover checkpoint
 		// table) is still refused before the cutover callback.
-		if err := check.TargetSchemaObjectsError(ctx, r.targets, nil); err != nil {
+		if err := check.TargetSchemaObjectsError(ctx, r.checkResources()); err != nil {
 			return err
 		}
 		r.logger.Info("No tables to copy, proceeding directly to cutover")
@@ -1535,7 +1535,7 @@ func (r *Runner) Run(ctx context.Context) (retErr error) {
 		// with sql_log_bin=0), so check the source schemas again under the
 		// cutover's table locks, before traffic is switched.
 		cutover.SetChecksUnderLock(func(ctx context.Context) error {
-			return r.runChecks(ctx, check.ScopePreCutover)
+			return r.runChecks(ctx, check.PhaseCutoverLocked)
 		})
 		cutover.SetPreSwitch(func(ctx context.Context) error {
 			// Carry the counters over before the reverse-feed positions are
@@ -1726,23 +1726,25 @@ func (r *Runner) SetMetricsSink(sink metrics.Sink) {
 
 // checkResources describes this move for both full and pre-wipe validation.
 func (r *Runner) checkResources() check.Resources {
-	sources := make([]check.SourceResource, len(r.sources))
+	sources := make([]check.Endpoint, len(r.sources))
 	for i := range r.sources {
-		sources[i] = check.SourceResource{
+		sources[i] = check.Endpoint{
 			DB:     r.sources[i].db,
 			Config: r.sources[i].config,
 			Tables: r.sources[i].tables,
 		}
 	}
 	return check.Resources{
-		Sources:        sources,
-		Targets:        r.targets,
-		SourceTables:   r.sourceTables,
-		MoveEverything: len(r.move.SourceTables) == 0,
+		Runtime:         check.Move,
+		Sources:         sources,
+		Targets:         r.targets,
+		SourceTables:    r.sourceTables,
+		CheckpointTable: checkpointTableName,
+		Options:         check.Options{MoveEverything: len(r.move.SourceTables) == 0},
 	}
 }
 
-func (r *Runner) runChecks(ctx context.Context, scope check.ScopeFlag, exclude ...string) error {
+func (r *Runner) runChecks(ctx context.Context, scope check.Phase, exclude ...string) error {
 	return check.RunChecks(ctx, r.checkResources(), r.logger, scope, exclude...)
 }
 
@@ -1787,7 +1789,7 @@ func (r *Runner) restoreIndexesForTargets(ctx context.Context, host string, targ
 		// Get CREATE TABLE statement from source
 		var sourceCreateStmt string
 		// All sources have identical schemas (enforced by the source_schema_consistency
-		// check at ScopePostSetup), so use sources[0].
+		// check at PhasePostSetup), so use sources[0].
 		row := r.sources[0].db.QueryRowContext(ctx, fmt.Sprintf("SHOW CREATE TABLE %s", tbl.QuotedTableName))
 		var tableName string
 		if err := row.Scan(&tableName, &sourceCreateStmt); err != nil {

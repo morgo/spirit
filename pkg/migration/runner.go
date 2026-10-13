@@ -16,6 +16,7 @@ import (
 	"github.com/block/spirit/pkg/applier"
 	"github.com/block/spirit/pkg/buildinfo"
 	"github.com/block/spirit/pkg/change"
+	"github.com/block/spirit/pkg/check"
 	"github.com/block/spirit/pkg/checkpoint"
 	"github.com/block/spirit/pkg/checksum"
 	"github.com/block/spirit/pkg/concurrency"
@@ -23,7 +24,6 @@ import (
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/dbconn/sqlescape"
 	"github.com/block/spirit/pkg/metrics"
-	"github.com/block/spirit/pkg/migration/check"
 	"github.com/block/spirit/pkg/runtime"
 	"github.com/block/spirit/pkg/sentinel"
 	"github.com/block/spirit/pkg/status"
@@ -448,14 +448,14 @@ func (r *Runner) Run(ctx context.Context) (retErr error) {
 		}
 		tables = append(tables, change.table)
 	}
-	// Run the statement-scope checks before MySQL's native DDL is attempted.
-	// A ScopeStatement failure is documented as a refusal a caller can report
+	// Run the statement-phase checks before MySQL's native DDL is attempted.
+	// A PhaseStatement failure is documented as a refusal a caller can report
 	// as certain (see check.StatementRefusal), so the runner must refuse
 	// exactly those statements, including ones the native DDL could complete.
 	// Run later, as preflight is, they would only apply when the native
 	// attempt fails: an INSTANT ADD COLUMN on a table with a FLOAT or BIT in
 	// its primary key would succeed where a planning tool reported a refusal.
-	if err := r.runChecks(ctx, check.ScopeStatement); err != nil {
+	if err := r.runChecks(ctx, check.PhaseStatement); err != nil {
 		return err
 	}
 
@@ -511,7 +511,7 @@ func (r *Runner) Run(ctx context.Context) (retErr error) {
 	}
 
 	// Perform preflight basic checks.
-	if err := r.runChecks(ctx, check.ScopePreflight); err != nil {
+	if err := r.runChecks(ctx, check.PhasePreflight); err != nil {
 		return err
 	}
 
@@ -523,7 +523,7 @@ func (r *Runner) Run(ctx context.Context) (retErr error) {
 	}
 
 	// Run post-setup checks
-	if err := r.runChecks(ctx, check.ScopePostSetup); err != nil {
+	if err := r.runChecks(ctx, check.PhasePostSetup); err != nil {
 		return err
 	}
 
@@ -575,7 +575,7 @@ func (r *Runner) Run(ctx context.Context) (retErr error) {
 		}
 	}
 	// Run any checks that need to be done pre-cutover.
-	if err := r.runChecks(ctx, check.ScopeCutover); err != nil {
+	if err := r.runChecks(ctx, check.PhaseCutover); err != nil {
 		return err
 	}
 	var foreignKeys *foreignKeyCutover
@@ -604,7 +604,7 @@ func (r *Runner) Run(ctx context.Context) (retErr error) {
 		// trigger or foreign key created while the cutover waits for its lock
 		// is only caught by checking again once the lock is held.
 		cutover.checksUnderLock = func(ctx context.Context) error {
-			return r.runChecks(ctx, check.ScopeCutoverLocked)
+			return r.runChecks(ctx, check.PhaseCutoverLocked)
 		}
 		cutover.foreignKeys = foreignKeys
 		// Drop the _old table if it exists. This ensures
@@ -760,39 +760,56 @@ func (r *Runner) foreignKeyCutover() *foreignKeyCutover {
 
 // runChecks wraps around check.RunChecks and adds the context of this migration
 // We redundantly run checks, once per change.
-func (r *Runner) runChecks(ctx context.Context, scope check.ScopeFlag) error {
+func (r *Runner) runChecks(ctx context.Context, phase check.Phase) error {
 	for _, change := range r.changes {
 		if err := check.RunChecks(ctx, check.Resources{
-			DB:            r.db,
-			Replicas:      r.replicas,
-			Table:         change.table,
-			NewTable:      change.newTable,
-			Statement:     change.stmt,
-			Threads:       r.migration.Threads,
-			ReplicaMaxLag: r.migration.ReplicaMaxLag,
+			Runtime: check.Migration,
+			Sources: []check.Endpoint{{
+				DB:     r.db,
+				Config: r.sourceConfig(),
+				Tables: []*table.TableInfo{change.table},
+			}},
+			Replicas: r.replicas,
+			Change: check.Change{
+				Table:     change.table,
+				NewTable:  change.newTable,
+				Statement: change.stmt,
+			},
+			Options: check.Options{
+				Threads:                 r.migration.Threads,
+				ReplicaMaxLag:           r.migration.ReplicaMaxLag,
+				ExperimentalForeignKeys: r.migration.EnableExperimentalForeignKeys,
+			},
 			// For the pre-run checks we don't have a DB connection yet.
 			// Instead we check the credentials provided.
-			Host:                    r.migration.Host,
-			Username:                r.migration.Username,
-			Password:                *r.migration.Password,
-			TLSMode:                 r.migration.TLSMode,
-			TLSCertificatePath:      r.migration.TLSCertificatePath,
-			ExperimentalForeignKeys: r.migration.EnableExperimentalForeignKeys,
-		}, r.logger, scope); err != nil {
+			Credentials: check.Credentials{
+				Host:               r.migration.Host,
+				Username:           r.migration.Username,
+				Password:           *r.migration.Password,
+				TLSMode:            r.migration.TLSMode,
+				TLSCertificatePath: r.migration.TLSCertificatePath,
+			},
+		}, r.logger, phase); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (r *Runner) dsn() string {
+// sourceConfig is the connection configuration of the server the migration
+// alters its tables on, at the migrated schema.
+func (r *Runner) sourceConfig() *mysql.Config {
 	cfg := mysql.NewConfig()
 	cfg.User = r.migration.Username
 	cfg.Passwd = *r.migration.Password
 	cfg.Net = "tcp"
 	cfg.Addr = r.migration.Host
 	cfg.DBName = r.changes[0].stmt.Schema
-	return cfg.FormatDSN()
+	return cfg
+}
+
+func (r *Runner) dsn() string {
+	return r.sourceConfig().FormatDSN()
 }
 
 func (r *Runner) checkpointTableName() string {

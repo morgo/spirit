@@ -1,0 +1,85 @@
+package check
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+
+	"github.com/block/spirit/pkg/parser/mysql"
+	"github.com/block/spirit/pkg/utils"
+)
+
+func init() {
+	register(check{name: "setReorder", run: setReorderCheck, phases: PhasePreflight | PhaseStatement, runtimes: Migration})
+}
+
+// setReorderCheck prevents SET value reordering in all modes.
+//
+// MySQL outputs SET member strings in the order they are defined in the column
+// definition. When SET members are reordered, the string representation of
+// multi-member values changes (e.g. "read,execute" becomes "execute,read"),
+// even though the actual data is correct. This causes Spirit's CRC32 checksum
+// to fail because it compares CAST(col AS char) representations, which differ
+// between source and target tables. The migration would always fail at the
+// checksum phase.
+//
+// Since checksums are compulsory: it's better to fast-fail than get to the end
+// and find out that the data is "corrupted".
+//
+// Adding new SET values at the end of the list is always safe. The new list must
+// start with the existing values as a prefix.
+func setReorderCheck(ctx context.Context, r Resources, logger *slog.Logger) error {
+	haveTypes, err := requireCurrentColumnTypes(r, logger, "setReorder")
+	if err != nil {
+		return err
+	}
+	if !haveTypes {
+		return nil
+	}
+	for _, col := range findModifiedEnumSetColumns(*r.Change.Statement.StmtNode) {
+		if col.ColDef.Tp.GetType() != mysql.TypeSet {
+			continue // handled by enumReorderCheck
+		}
+
+		if len(col.ColDef.Tp.GetElems()) == 0 {
+			continue
+		}
+
+		existingType, ok := r.Change.Table.GetColumnMySQLType(col.LookupName)
+		if !ok {
+			return cannotClassify("unable to validate SET reorder for column %q: existing column type not found in table metadata", col.LookupName)
+		}
+
+		// The SET reorder check only applies when the existing column is
+		// also a SET. If the existing column is a different type (e.g.,
+		// VARCHAR → SET or ENUM → SET), the reorder check is not applicable.
+		// Cross-type conversions like ENUM → SET are caught by enumSetRemovalCheck.
+		if !utils.IsSetType(existingType) {
+			continue
+		}
+
+		// Not ParseEnumSetElements(existingType): information_schema reports
+		// a member character outside utf8mb3 as '?', and EnumSetMembers has
+		// the member MySQL stores.
+		existingElems, ok := r.Change.Table.EnumSetMembers(col.LookupName)
+		if !ok {
+			return cannotClassify("unable to validate SET reorder for column %q: its members were not found in table metadata", col.LookupName)
+		}
+		if len(existingElems) == 0 {
+			continue
+		}
+		newElems, err := storedNewMembers(ctx, r, col)
+		if err != nil {
+			return err
+		}
+
+		if !isPrefix(existingElems, newElems) {
+			return fmt.Errorf("unsafe SET value reorder on column %q. "+
+				"Reordering SET members changes the string representation of multi-member values "+
+				"(e.g. 'read,execute' becomes 'execute,read'), which causes the checksum to fail. "+
+				"Only add new values at the end of the list",
+				col.LookupName)
+		}
+	}
+	return nil
+}

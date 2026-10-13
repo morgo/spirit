@@ -1015,7 +1015,7 @@ are in the `castExpr` comment in `pkg/table`.
 
 Spirit only supports conversions that preserve the data. A few conversions are
 refused in preflight by their *shape* — `enumSetRemoval`
-(`pkg/migration/check/`) rejects `ENUM`/`SET` → numeric and `SET` → `ENUM`
+(`pkg/check/`) rejects `ENUM`/`SET` → numeric and `SET` → `ENUM`
 outright — but **no preflight check measures your data against the narrower
 type**, so for the general case nothing has looked at a single row by the time
 the copy starts. Two different mechanisms catch it afterwards, and it is worth

@@ -10,9 +10,9 @@ import (
 	"time"
 
 	"github.com/block/spirit/pkg/change"
+	"github.com/block/spirit/pkg/check"
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/dbconn/sqlescape"
-	"github.com/block/spirit/pkg/move/check"
 	"github.com/block/spirit/pkg/runtime"
 	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/table"

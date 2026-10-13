@@ -10,7 +10,7 @@ package statement
 // arrive as tinyint(1), SERIAL as bigint unsigned auto_increment unique,
 // INTEGER as int, NVARCHAR as varchar, ...). The ones that survive into the
 // structured form are handled here: each is a Normalizer registered from an
-// init() in its own normalize_*.go file, mirroring how pkg/migration/check
+// init() in its own normalize_*.go file, mirroring how pkg/check
 // registers checks. Contributors add a MySQL behavior by dropping in a new
 // file — no change to Diff or the parser is required.
 //

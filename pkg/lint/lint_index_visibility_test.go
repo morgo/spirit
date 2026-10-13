@@ -8,7 +8,7 @@ import (
 )
 
 // TestIndexVisibilityMixedLinter covers the cases that used to be enforced by
-// the "visibility" preflight check in pkg/migration/check.
+// the "visibility" preflight check in pkg/check.
 func TestIndexVisibilityMixedLinter(t *testing.T) {
 	tests := []struct {
 		alter    string

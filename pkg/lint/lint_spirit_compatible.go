@@ -15,7 +15,7 @@ func init() {
 }
 
 // SpiritCompatibleLinter refuses a new table that Spirit could not alter later.
-// Each rule mirrors a check in pkg/migration/check that refuses every ALTER
+// Each rule mirrors a check in pkg/check that refuses every ALTER
 // against such a table, so the table can only be changed by blocking DDL or by
 // first fixing it with a tool other than Spirit:
 //
