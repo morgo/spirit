@@ -21,7 +21,7 @@ import (
 const TargetStateCheckName = "target_state"
 
 func init() {
-	registerCheck(TargetStateCheckName, targetStateCheck, ScopePostSetup)
+	register(check{name: TargetStateCheckName, run: targetStateCheck, phases: PhasePostSetup, runtimes: Move})
 }
 
 // targetStateCheck validates that target databases are ready for the move operation.
@@ -29,7 +29,7 @@ func init() {
 // OR if they do exist, they must be empty (zero rows) and have matching schema to the source.
 // If SourceTables is not specified, it checks that the target database is completely empty.
 //
-// This check runs at ScopePostSetup because it needs the source tables to be discovered first.
+// This check runs at PhasePostSetup because it needs the source tables to be discovered first.
 func targetStateCheck(ctx context.Context, r Resources, logger *slog.Logger) error {
 	if len(r.SourceTables) == 0 {
 		return nil // No source tables to validate against, skip check

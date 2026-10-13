@@ -13,8 +13,7 @@ func init() {
 	// The rename-safety conditions must hold for both a fresh copy and a
 	// resume from checkpoint, and the runner only ever runs one of the two
 	// scopes, so the same check is registered under both.
-	registerCheck("rename_safety", renameSafetyCheck, ScopePostSetup)
-	registerCheck("rename_safety_resume", renameSafetyCheck, ScopeResume)
+	register(check{name: "rename_safety", run: renameSafetyCheck, phases: PhasePostSetup | PhaseResume, runtimes: Move})
 }
 
 // CutoverOldName returns the name the move cutover renames a source table

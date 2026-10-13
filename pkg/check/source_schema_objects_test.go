@@ -14,15 +14,13 @@ import (
 
 // TestSourceSchemaObjectsCheckRegistered pins that the check runs before
 // table discovery (preflight), before a fresh copy (post-setup), before a
-// resume from checkpoint (the runner only runs one of those two scopes), and
+// resume from checkpoint (the runner only runs one of those two phases), and
 // under the forward cutover's locks.
 func TestSourceSchemaObjectsCheckRegistered(t *testing.T) {
 	lock.Lock()
 	defer lock.Unlock()
-	require.Equal(t, ScopePreflight, checks["source_schema_objects_preflight"].scope)
-	require.Equal(t, ScopePostSetup, checks["source_schema_objects"].scope)
-	require.Equal(t, ScopeResume, checks["source_schema_objects_resume"].scope)
-	require.Equal(t, ScopePreCutover, checks["source_schema_objects_precutover"].scope)
+	require.Equal(t, PhasePreflight|PhasePostSetup|PhaseResume|PhaseCutoverLocked, checks["source_schema_objects"].phases)
+	require.Equal(t, Move, checks["source_schema_objects"].runtimes)
 }
 
 // TestSourceSchemaObjectsCheckEachType checks that each object type is
@@ -76,7 +74,8 @@ func TestSourceSchemaObjectsCheckEachType(t *testing.T) {
 			t1 := table.NewTableInfo(srcDB, srcName, "t1")
 			require.NoError(t, t1.SetInfo(t.Context()))
 			r := Resources{
-				Sources:      []SourceResource{{DB: srcDB, Config: &mysql.Config{DBName: srcName}}},
+				Runtime:      Move,
+				Sources:      []Endpoint{{DB: srcDB, Config: &mysql.Config{DBName: srcName}}},
 				SourceTables: []*table.TableInfo{t1},
 			}
 			require.NoError(t, sourceSchemaObjectsCheck(t.Context(), r, slog.Default()))
@@ -110,7 +109,7 @@ func TestSourceSchemaObjectsCheckListsAllGroupedPerSource(t *testing.T) {
 	testutils.RunSQLInDatabaseAsRoot(t, src2Name, "CREATE FUNCTION f1() RETURNS INT DETERMINISTIC RETURN 1")
 	testutils.RunSQLInDatabaseAsRoot(t, src2Name, "CREATE PROCEDURE p1() SELECT 1")
 
-	r := Resources{Sources: []SourceResource{
+	r := Resources{Runtime: Move, Sources: []Endpoint{
 		{DB: src0DB, Config: &mysql.Config{DBName: src0Name}},
 		{DB: src1DB, Config: &mysql.Config{DBName: src1Name}},
 		{DB: src2DB, Config: &mysql.Config{DBName: src2Name}},
@@ -118,9 +117,9 @@ func TestSourceSchemaObjectsCheckListsAllGroupedPerSource(t *testing.T) {
 	want := "cannot move: move does not copy triggers, views, stored procedures, stored functions or events, and they must be dropped before the move can continue: " +
 		"source 0 (" + src0Name + "): trigger 't1_ad' on table 't1', trigger 't1_bu' on table 't1', view 'v1', event 'e1'; " +
 		"source 2 (" + src2Name + "): procedure 'p1', function 'f1'"
-	for _, scope := range []ScopeFlag{ScopePreflight, ScopePostSetup, ScopeResume, ScopePreCutover} {
+	for _, scope := range []Phase{PhasePreflight, PhasePostSetup, PhaseResume, PhaseCutoverLocked} {
 		err := RunChecks(t.Context(), r, slog.Default(), scope,
-			otherChecks("source_schema_objects_preflight", "source_schema_objects", "source_schema_objects_resume", "source_schema_objects_precutover")...)
+			otherChecks("source_schema_objects")...)
 		require.EqualError(t, err, want, "scope %d", scope)
 	}
 }
@@ -136,12 +135,12 @@ func TestSourceSchemaObjectsCheckIgnoresOtherSchemas(t *testing.T) {
 	testutils.RunSQLInDatabaseAsRoot(t, otherName, "CREATE VIEW v1 AS SELECT id FROM t1")
 	testutils.RunSQLInDatabaseAsRoot(t, otherName, "CREATE PROCEDURE p1() SELECT 1")
 
-	require.NoError(t, SourceSchemaObjectsError(t.Context(), []SourceResource{{DB: srcDB, Config: &mysql.Config{DBName: srcName}}}))
+	require.NoError(t, SourceSchemaObjectsError(t.Context(), []Endpoint{{DB: srcDB, Config: &mysql.Config{DBName: srcName}}}))
 	require.NoError(t, SourceSchemaObjectsError(t.Context(), nil))
 }
 
 func TestSourceSchemaObjectsCheckUninitializedSource(t *testing.T) {
-	err := sourceSchemaObjectsCheck(t.Context(), Resources{Sources: []SourceResource{{}}}, slog.Default())
+	err := sourceSchemaObjectsCheck(t.Context(), Resources{Runtime: Move, Sources: []Endpoint{{}}}, slog.Default())
 	require.EqualError(t, err, "source 0 database connection or config is not initialized")
 }
 
@@ -156,7 +155,7 @@ func TestReverseWindowSchemaObjectsError(t *testing.T) {
 			testutils.RunSQLInDatabase(t, name, "CREATE TABLE "+tbl+" (id INT NOT NULL PRIMARY KEY, v INT)")
 		}
 	}
-	sources := []SourceResource{
+	sources := []Endpoint{
 		{DB: src0DB, Config: &mysql.Config{DBName: src0Name}},
 		{DB: src1DB, Config: &mysql.Config{DBName: src1Name}},
 	}
@@ -176,7 +175,7 @@ func TestReverseWindowSchemaObjectsError(t *testing.T) {
 	require.EqualError(t, err, "triggers and events in the source schema can write to the retired tables without passing through the reverse feed, and they must be dropped before the reverse window or a rollback can continue: source 1 ("+src1Name+"): trigger 'other_bi' on table 'other', trigger 't1_old_bu' on table 't1_old', event 'e1'")
 	require.ErrorIs(t, err, ErrRefused)
 
-	require.EqualError(t, ReverseWindowSchemaObjectsError(t.Context(), []SourceResource{{}}),
+	require.EqualError(t, ReverseWindowSchemaObjectsError(t.Context(), []Endpoint{{}}),
 		"source 0 database connection or config is not initialized")
 }
 
@@ -196,13 +195,13 @@ func TestReverseWindowSchemaObjectsErrorRequiresVisibility(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			db, cfg := createMoveTestUser(t, tc.user, schema, fmt.Sprintf(tc.grant, schema))
-			err := ReverseWindowSchemaObjectsError(t.Context(), []SourceResource{{DB: db, Config: cfg}})
+			err := ReverseWindowSchemaObjectsError(t.Context(), []Endpoint{{DB: db, Config: cfg}})
 			require.EqualError(t, err, "source 0 ("+schema+"): "+prefix+fmt.Sprintf(tc.needed, schema))
 			require.ErrorIs(t, err, ErrRefused)
 		})
 	}
 	db, cfg := createMoveTestUser(t, "testmovevis_rwok", schema, "GRANT SELECT, TRIGGER, EVENT ON `"+schema+"`.* TO %s")
-	require.NoError(t, ReverseWindowSchemaObjectsError(t.Context(), []SourceResource{{DB: db, Config: cfg}}))
+	require.NoError(t, ReverseWindowSchemaObjectsError(t.Context(), []Endpoint{{DB: db, Config: cfg}}))
 }
 
 // TestSourceSchemaObjectsCheckOrder pins the report order of the single
@@ -222,7 +221,7 @@ func TestSourceSchemaObjectsCheckOrder(t *testing.T) {
 	} {
 		testutils.RunSQLInDatabaseAsRoot(t, srcName, stmt)
 	}
-	err := SourceSchemaObjectsError(t.Context(), []SourceResource{{DB: srcDB, Config: &mysql.Config{DBName: srcName}}})
+	err := SourceSchemaObjectsError(t.Context(), []Endpoint{{DB: srcDB, Config: &mysql.Config{DBName: srcName}}})
 	require.EqualError(t, err, "cannot move: move does not copy triggers, views, stored procedures, stored functions or events, and they must be dropped before the move can continue: source 0 ("+srcName+"): "+
 		"trigger 'at' on table 't1', trigger 'Zt' on table 't1', view 'Bv', view 'av', procedure 'ap', procedure 'Zp'")
 }

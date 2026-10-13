@@ -26,10 +26,7 @@ func init() {
 	// binlog position current when it starts, so it misses objects created
 	// before that, and it cancels the move on DDL only until the move enters
 	// the cutover state, after which a schema change is ignored.
-	registerCheck("source_schema_objects_preflight", sourceSchemaObjectsCheck, ScopePreflight)
-	registerCheck("source_schema_objects", sourceSchemaObjectsCheck, ScopePostSetup)
-	registerCheck("source_schema_objects_resume", sourceSchemaObjectsCheck, ScopeResume)
-	registerCheck("source_schema_objects_precutover", sourceSchemaObjectsCheck, ScopePreCutover)
+	register(check{name: "source_schema_objects", run: sourceSchemaObjectsCheck, phases: PhasePreflight | PhasePostSetup | PhaseResume | PhaseCutoverLocked, runtimes: Move})
 }
 
 // sourceSchemaObjectsCheck refuses a move when a source schema contains a
@@ -94,7 +91,7 @@ func schemaObjectsQuery(kinds []int) string {
 //
 // The reverse window (entry and reverse cutover) uses the narrower
 // ReverseWindowSchemaObjectsError.
-func SourceSchemaObjectsError(ctx context.Context, sources []SourceResource) error {
+func SourceSchemaObjectsError(ctx context.Context, sources []Endpoint) error {
 	var groups []string
 	for i, src := range sources {
 		// Guard against partially-populated Resources so a missing connection
@@ -168,7 +165,7 @@ func schemaObjects(ctx context.Context, db querier, schema string, kinds []int) 
 
 // describeSchemaObjects lists the objects of the given kinds in src's schema
 // as descriptions, e.g. "view 'v1'" or "trigger 't1_ai' on table 't1'".
-func describeSchemaObjects(ctx context.Context, src SourceResource, kinds []int) ([]string, error) {
+func describeSchemaObjects(ctx context.Context, src Endpoint, kinds []int) ([]string, error) {
 	objects, err := schemaObjects(ctx, src.DB, src.Config.DBName, kinds)
 	if err != nil {
 		return nil, err
@@ -211,7 +208,7 @@ var reverseWindowVisibility = []schemaObject{schemaTriggers, schemaEvents}
 //
 // Like SourceSchemaObjectsError, it first checks that the user can see the
 // schema's triggers and events, and refuses if not.
-func ReverseWindowSchemaObjectsError(ctx context.Context, sources []SourceResource) error {
+func ReverseWindowSchemaObjectsError(ctx context.Context, sources []Endpoint) error {
 	var groups []string
 	for i, src := range sources {
 		if src.DB == nil || src.Config == nil {

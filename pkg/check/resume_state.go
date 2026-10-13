@@ -9,7 +9,7 @@ import (
 )
 
 func init() {
-	registerCheck("resume_state", resumeStateCheck, ScopeResume)
+	register(check{name: "resume_state", run: resumeStateCheck, phases: PhaseResume, runtimes: Move})
 }
 
 // moveCheckpointTableName must match pkg/move's checkpointTableName. It is
@@ -18,7 +18,7 @@ func init() {
 const moveCheckpointTableName = "_spirit_move_checkpoint"
 
 // resumeStateCheck validates that the state is compatible with resuming from a checkpoint.
-// This check runs at ScopeResume and verifies:
+// This check runs at PhaseResume and verifies:
 // 1. Checkpoint table exists on the first target
 // 2. Target tables exist with matching schema to source
 // 3. All source tables have corresponding target tables

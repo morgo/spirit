@@ -27,9 +27,7 @@ func init() {
 	// locks, just before traffic is switched: a trigger or an event created on
 	// a target during the copy has already run for the rows written since, and
 	// would go live with the target.
-	registerCheck("target_schema_objects", targetSchemaObjectsCheck, ScopePostSetup)
-	registerCheck("target_schema_objects_resume", targetSchemaObjectsCheck, ScopeResume)
-	registerCheck("target_schema_objects_precutover", targetSchemaObjectsCheck, ScopePreCutover)
+	register(check{name: "target_schema_objects", run: targetSchemaObjectsCheck, phases: PhasePostSetup | PhaseResume | PhaseCutoverLocked, runtimes: Move})
 }
 
 // targetObjectKinds are the object kinds refused on a target: triggers and

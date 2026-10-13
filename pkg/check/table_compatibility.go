@@ -12,8 +12,7 @@ func init() {
 	// A resume from checkpoint copies and replays with the same code as a
 	// fresh copy, so the table requirements hold for both; the resume path
 	// does not re-run the post-setup checks, so register under both.
-	registerCheck("table_compatibility", tableCompatibilityCheck, ScopePostSetup)
-	registerCheck("table_compatibility_resume", tableCompatibilityCheck, ScopeResume)
+	register(check{name: "table_compatibility", run: tableCompatibilityCheck, phases: PhasePostSetup | PhaseResume, runtimes: Move})
 }
 
 // tableCompatibilityCheck verifies that all source tables are compatible

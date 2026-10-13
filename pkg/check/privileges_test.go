@@ -38,7 +38,7 @@ func TestPrivileges(t *testing.T) {
 
 	r := Resources{
 		Runtime: Migration,
-		Sources: []Endpoint{{DB: lowPrivDB}},
+		Sources: []Endpoint{{DB: lowPrivDB, Config: &mysql.Config{DBName: "test"}}},
 		Change:  Change{Table: &table.TableInfo{TableName: "test", SchemaName: "test"}},
 	}
 	err = privilegesCheck(t.Context(), r, slog.Default())
@@ -89,7 +89,7 @@ func TestPrivileges(t *testing.T) {
 	// Test the root user
 	r = Resources{
 		Runtime: Migration,
-		Sources: []Endpoint{{DB: db}},
+		Sources: []Endpoint{{DB: db, Config: &mysql.Config{DBName: "test"}}},
 		Change:  Change{Table: &table.TableInfo{TableName: "test", SchemaName: "test"}},
 	}
 	err = privilegesCheck(t.Context(), r, slog.Default())
@@ -151,7 +151,7 @@ func TestPrivilegesWithRDSSuperuserRole(t *testing.T) {
 		defer utils.CloseAndLog(lowPrivDB)
 		r := Resources{
 			Runtime: Migration,
-			Sources: []Endpoint{{DB: lowPrivDB}},
+			Sources: []Endpoint{{DB: lowPrivDB, Config: &mysql.Config{DBName: "test"}}},
 			Change:  Change{Table: &table.TableInfo{TableName: "test", SchemaName: "test"}},
 		}
 		return privilegesCheck(t.Context(), r, slog.Default())
@@ -213,7 +213,7 @@ func TestPrivilegesShadowedDatabaseGrant(t *testing.T) {
 
 	r := Resources{
 		Runtime: Migration,
-		Sources: []Endpoint{{DB: lowPrivDB}},
+		Sources: []Endpoint{{DB: lowPrivDB, Config: &mysql.Config{DBName: "test"}}},
 		Change:  Change{Table: &table.TableInfo{TableName: "test", SchemaName: "test"}},
 	}
 	err = privilegesCheck(t.Context(), r, slog.Default())

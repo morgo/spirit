@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/block/mysql"
+	"github.com/block/spirit/pkg/applier"
 	"github.com/block/spirit/pkg/statement"
 	"github.com/block/spirit/pkg/table"
 )
@@ -47,6 +48,10 @@ const (
 	PhasePreflight Phase = 1 << 1
 	PhasePostSetup Phase = 1 << 2
 	PhaseCutover   Phase = 1 << 3
+	// PhaseResume runs when a move resumes from a checkpoint, in place of
+	// PhasePostSetup: an object can be created on a source or a target
+	// between runs, so the checks of the setup are repeated.
+	PhaseResume Phase = 1 << 4
 	// phaseTesting is for this package's tests only.
 	phaseTesting Phase = 1 << 5
 	// PhaseStatement marks checks a caller can run ahead of an apply to learn
@@ -103,6 +108,10 @@ const (
 	// condition, or it takes the table lock again on every retry. Keep these
 	// checks to fast reads: they run while the application's writes to the
 	// table are blocked.
+	//
+	// A move runs this phase while its forward cutover holds the table locks
+	// on every source, after the final flush and before the traffic switch
+	// and the source rename. A refusal leaves the source live.
 	PhaseCutoverLocked Phase = 1 << 7
 )
 
@@ -130,6 +139,13 @@ type Options struct {
 	// ExperimentalForeignKeys is --enable-experimental-foreign-keys: a table
 	// with foreign keys of its own is supported on MySQL 9.7 and later.
 	ExperimentalForeignKeys bool
+	// MoveEverything is true when a move was given no explicit table list,
+	// so every table in each source database is moved. The
+	// source_schema_consistency check then also requires an identical table
+	// *set* across all sources: when moving everything, an extra or missing
+	// table on one shard is a drift error; when only a named subset is
+	// moved, tables outside that subset are ignored.
+	MoveEverything bool
 }
 
 // Credentials are the connection settings PhasePreRun checks connect with:
@@ -151,6 +167,12 @@ type Resources struct {
 	// Sources are the servers the run reads from. A migration has exactly
 	// one: the server it alters the table on.
 	Sources []Endpoint
+	// Targets are the servers a move writes to.
+	Targets []applier.Target
+	// SourceTables are the first source's tables. They stand for every
+	// source where only their reported definition matters; Sources[i].Tables
+	// holds each source's own (Move only).
+	SourceTables []*table.TableInfo
 	// Replicas are the migration's replicas, for the replica checks.
 	Replicas []*sql.DB
 	// Change is the migration's table and statement (Migration only).
@@ -260,4 +282,34 @@ func (r Resources) sourceDB() *sql.DB {
 		return nil
 	}
 	return r.Sources[0].DB
+}
+
+// schema returns the endpoint's schema, or "" when it has no configuration.
+func (e Endpoint) schema() string {
+	if e.Config == nil {
+		return ""
+	}
+	return e.Config.DBName
+}
+
+// sourceError attributes err to source i. A migration has a single source, so
+// its errors are returned unchanged; a move names the source.
+func (r Resources) sourceError(i int, err error) error {
+	if r.Runtime == Migration {
+		return err
+	}
+	return fmt.Errorf("source %d: %w", i, err)
+}
+
+// noun names the runtime's operation in an error message ("run a migration").
+func (rt Runtime) noun() string {
+	switch rt {
+	case Migration:
+		return "migration"
+	case Move:
+		return "move"
+	case Sync:
+		return "sync"
+	}
+	return "spirit operation"
 }

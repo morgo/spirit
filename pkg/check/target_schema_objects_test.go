@@ -16,24 +16,18 @@ import (
 
 const targetObjectsPrefix = "cannot move: triggers on the tables move writes to on the target, and events in the target schema, run on their own and can write to the moved tables; they must be dropped before the move can continue: "
 
-var targetObjectsChecks = []string{"target_schema_objects", "target_schema_objects_resume", "target_schema_objects_precutover"}
+var targetObjectsChecks = []string{"target_schema_objects"}
 
 // TestTargetSchemaObjectsCheckRegistered pins that the check runs before a
 // fresh copy (post-setup), before a resume from checkpoint (the runner writes
-// to the target only after one of those two scopes), and under the forward
+// to the target only after one of those two phases), and under the forward
 // cutover's locks. It has no preflight registration: the moved tables are not
 // known yet at preflight.
 func TestTargetSchemaObjectsCheckRegistered(t *testing.T) {
 	lock.Lock()
 	defer lock.Unlock()
-	require.Equal(t, ScopePostSetup, checks["target_schema_objects"].scope)
-	require.Equal(t, ScopeResume, checks["target_schema_objects_resume"].scope)
-	require.Equal(t, ScopePreCutover, checks["target_schema_objects_precutover"].scope)
-	for name, c := range checks {
-		if c.scope == ScopePreflight {
-			require.NotContains(t, targetObjectsChecks, name)
-		}
-	}
+	require.Equal(t, PhasePostSetup|PhaseResume|PhaseCutoverLocked, checks["target_schema_objects"].phases)
+	require.Equal(t, Move, checks["target_schema_objects"].runtimes)
 }
 
 // TestRefusedTargetObjects checks which listed objects are refused, and that
@@ -93,10 +87,11 @@ func TestTargetSchemaObjectsCheck(t *testing.T) {
 		}
 	}
 	r := Resources{
+		Runtime:      Move,
 		Targets:      []applier.Target{targetResource(t, tgt0Name, tgt0DB), targetResource(t, tgt1Name, tgt1DB)},
 		SourceTables: []*table.TableInfo{t1},
 	}
-	scopes := []ScopeFlag{ScopePostSetup, ScopeResume, ScopePreCutover}
+	scopes := []Phase{PhasePostSetup, PhaseResume, PhaseCutoverLocked}
 	only := otherChecks(targetObjectsChecks...)
 
 	// Objects move never writes through or runs: a trigger on a table that is
@@ -155,7 +150,7 @@ func TestTargetSchemaObjectsCheckRequiresVisibility(t *testing.T) {
 			err := TargetSchemaObjectsError(t.Context(), targets, nil)
 			require.EqualError(t, err, want)
 			require.ErrorIs(t, err, ErrRefused)
-			err = privilegesCheck(t.Context(), Resources{Targets: targets}, slog.Default())
+			err = privilegesCheck(t.Context(), Resources{Runtime: Move, Targets: targets}, slog.Default())
 			require.EqualError(t, err, want)
 			require.ErrorIs(t, err, ErrRefused)
 
@@ -168,10 +163,10 @@ func TestTargetSchemaObjectsCheckRequiresVisibility(t *testing.T) {
 	}
 	db, cfg := createMoveTestUser(t, "testmovevis_tgtok", schema, "GRANT SELECT, TRIGGER, EVENT ON `"+schema+"`.* TO %s")
 	targets := []applier.Target{{DB: db, Config: cfg}}
-	require.NoError(t, privilegesCheck(t.Context(), Resources{Targets: targets}, slog.Default()))
+	require.NoError(t, privilegesCheck(t.Context(), Resources{Runtime: Move, Targets: targets}, slog.Default()))
 	require.EqualError(t, TargetSchemaObjectsError(t.Context(), targets, nil),
 		targetObjectsPrefix+"target 0 ("+schema+"): event 'e1'", "with the grants, the objects are visible")
-	require.EqualError(t, privilegesCheck(t.Context(), Resources{Targets: []applier.Target{{}}}, slog.Default()),
+	require.EqualError(t, privilegesCheck(t.Context(), Resources{Runtime: Move, Targets: []applier.Target{{}}}, slog.Default()),
 		"target 0 database connection or config is not initialized")
 }
 
@@ -200,6 +195,6 @@ func TestTargetSchemaObjectsUsesTargetLowerCaseTableNames(t *testing.T) {
 	require.NoError(t, TargetSchemaObjectsError(t.Context(), targets, tables))
 
 	testutils.RunSQLInDatabaseAsRoot(t, tgtName, "CREATE TRIGGER moved_ai AFTER INSERT ON Orders FOR EACH ROW SET @x = 1")
-	require.EqualError(t, RunChecks(t.Context(), Resources{Targets: targets, SourceTables: tables}, slog.Default(), ScopePostSetup, otherChecks(targetObjectsChecks...)...),
+	require.EqualError(t, RunChecks(t.Context(), Resources{Runtime: Move, Targets: targets, SourceTables: tables}, slog.Default(), PhasePostSetup, otherChecks(targetObjectsChecks...)...),
 		targetObjectsPrefix+"target 0 ("+tgtName+"): trigger 'moved_ai' on table 'Orders'")
 }

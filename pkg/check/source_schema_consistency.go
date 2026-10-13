@@ -11,7 +11,7 @@ import (
 )
 
 func init() {
-	registerCheck("source_schema_consistency", sourceSchemaConsistencyCheck, ScopePostSetup)
+	register(check{name: "source_schema_consistency", run: sourceSchemaConsistencyCheck, phases: PhasePostSetup, runtimes: Move})
 }
 
 // sourceSchemaConsistencyCheck verifies that, in an N-source (N:M) move, every
@@ -25,7 +25,7 @@ func init() {
 // compatible-but-different type at worst.
 //
 // The check is a no-op for single-source moves (there is nothing to compare
-// against) and runs at ScopePostSetup — after the table list has been
+// against) and runs at PhasePostSetup — after the table list has been
 // discovered from sources[0] (r.SourceTables) but before target tables are
 // created in newCopy.
 //
@@ -77,7 +77,7 @@ func sourceSchemaConsistencyCheck(ctx context.Context, r Resources, logger *slog
 		}
 
 		// 1. Validate the table set when moving everything.
-		if r.MoveEverything {
+		if r.Options.MoveEverything {
 			gotTables, err := listTables(ctx, r, i)
 			if err != nil {
 				return fmt.Errorf("source %d (%s): failed to list tables: %w", i, src.Config.DBName, err)

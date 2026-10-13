@@ -45,7 +45,8 @@ func TestTargetStateCheck(t *testing.T) {
 	// Test 1: Empty target should pass
 	t.Run("empty target passes", func(t *testing.T) {
 		r := Resources{
-			Sources: []SourceResource{{DB: sourceDB}},
+			Runtime: Move,
+			Sources: []Endpoint{{DB: sourceDB}},
 			Targets: []applier.Target{
 				{
 					DB:     targetDB,
@@ -67,7 +68,8 @@ func TestTargetStateCheck(t *testing.T) {
 		}()
 
 		r := Resources{
-			Sources: []SourceResource{{DB: sourceDB}},
+			Runtime: Move,
+			Sources: []Endpoint{{DB: sourceDB}},
 			Targets: []applier.Target{
 				{
 					DB:     targetDB,
@@ -93,7 +95,8 @@ func TestTargetStateCheck(t *testing.T) {
 		}()
 
 		r := Resources{
-			Sources: []SourceResource{{DB: sourceDB}},
+			Runtime: Move,
+			Sources: []Endpoint{{DB: sourceDB}},
 			Targets: []applier.Target{
 				{
 					DB:     targetDB,
@@ -118,7 +121,8 @@ func TestTargetStateCheck(t *testing.T) {
 		}()
 
 		r := Resources{
-			Sources: []SourceResource{{DB: sourceDB}},
+			Runtime: Move,
+			Sources: []Endpoint{{DB: sourceDB}},
 			Targets: []applier.Target{
 				{
 					DB:     targetDB,
@@ -155,7 +159,8 @@ func TestTargetStateCheckSchemaTypesAndCollation(t *testing.T) {
 
 	newResources := func() Resources {
 		return Resources{
-			Sources:      []SourceResource{{DB: srcDB, Config: &mysql.Config{DBName: srcName}}},
+			Runtime:      Move,
+			Sources:      []Endpoint{{DB: srcDB, Config: &mysql.Config{DBName: srcName}}},
 			Targets:      []applier.Target{{DB: tgtDB, Config: targetConfig}},
 			SourceTables: []*table.TableInfo{sourceTable},
 		}
@@ -231,7 +236,8 @@ func TestTargetStateCheckNotNullShardKey(t *testing.T) {
 
 	newResources := func() Resources {
 		return Resources{
-			Sources:      []SourceResource{{DB: srcDB, Config: &mysql.Config{DBName: srcName}}},
+			Runtime:      Move,
+			Sources:      []Endpoint{{DB: srcDB, Config: &mysql.Config{DBName: srcName}}},
 			Targets:      []applier.Target{{DB: tgtDB, Config: targetConfig}},
 			SourceTables: []*table.TableInfo{sourceTable},
 		}
@@ -270,7 +276,8 @@ func TestTargetStateCheckMisreportedEnumSetTarget(t *testing.T) {
 	sourceTable := table.NewTableInfo(srcDB, srcName, "t")
 	require.NoError(t, sourceTable.SetInfo(t.Context()))
 	r := Resources{
-		Sources:      []SourceResource{{DB: srcDB, Config: &mysql.Config{DBName: srcName}}},
+		Runtime:      Move,
+		Sources:      []Endpoint{{DB: srcDB, Config: &mysql.Config{DBName: srcName}}},
 		Targets:      []applier.Target{{DB: tgtDB, Config: &mysql.Config{DBName: tgtName}}},
 		SourceTables: []*table.TableInfo{sourceTable},
 	}
@@ -318,7 +325,8 @@ func TestTargetStateCheckRejectsNullableTargetColumn(t *testing.T) {
 	require.NoError(t, err)
 
 	err = targetStateCheck(t.Context(), Resources{
-		Sources:      []SourceResource{{DB: srcDB, Config: &mysql.Config{DBName: srcName}}},
+		Runtime:      Move,
+		Sources:      []Endpoint{{DB: srcDB, Config: &mysql.Config{DBName: srcName}}},
 		Targets:      []applier.Target{{DB: tgtDB, Config: &mysql.Config{DBName: tgtName}}},
 		SourceTables: []*table.TableInfo{sourceTable},
 	}, slog.Default())

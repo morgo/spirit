@@ -18,9 +18,8 @@ func TestRenameSafetyCheckRegistered(t *testing.T) {
 	lock.Lock()
 	defer lock.Unlock()
 	require.Contains(t, checks, "rename_safety")
-	require.Equal(t, ScopePostSetup, checks["rename_safety"].scope)
-	require.Contains(t, checks, "rename_safety_resume")
-	require.Equal(t, ScopeResume, checks["rename_safety_resume"].scope)
+	require.Equal(t, PhasePostSetup|PhaseResume, checks["rename_safety"].phases)
+	require.Equal(t, Move, checks["rename_safety"].runtimes)
 }
 
 func TestCutoverOldName(t *testing.T) {
@@ -36,7 +35,8 @@ func TestRenameSafetyCheck(t *testing.T) {
 	require.NoError(t, sourceTable.SetInfo(t.Context()))
 
 	resources := Resources{
-		Sources: []SourceResource{{
+		Runtime: Move,
+		Sources: []Endpoint{{
 			DB:     srcDB,
 			Config: &mysql.Config{DBName: srcName},
 		}},
@@ -62,6 +62,7 @@ func TestRenameSafetyCheck(t *testing.T) {
 		// from the name alone, so a synthetic TableInfo is sufficient.
 		longName := strings.Repeat("a", utils.MaxTableNameLength-3)
 		r := Resources{
+			Runtime:      Move,
 			Sources:      resources.Sources,
 			SourceTables: []*table.TableInfo{{TableName: longName}},
 		}
@@ -73,6 +74,7 @@ func TestRenameSafetyCheck(t *testing.T) {
 	t.Run("passes when table name plus _old is exactly 64 characters", func(t *testing.T) {
 		boundaryName := strings.Repeat("a", utils.MaxTableNameLength-4)
 		r := Resources{
+			Runtime:      Move,
 			Sources:      resources.Sources,
 			SourceTables: []*table.TableInfo{{TableName: boundaryName}},
 		}

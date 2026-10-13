@@ -52,9 +52,9 @@ func createW3DDatabase(t *testing.T) (string, *sql.DB) {
 	return dbName, scopedDB
 }
 
-// sourceResourceFor builds a SourceResource for a w3d source database.
-func sourceResourceFor(name string, db *sql.DB) SourceResource {
-	return SourceResource{DB: db, Config: &mysql.Config{DBName: name}}
+// sourceResourceFor builds a Endpoint for a w3d source database.
+func sourceResourceFor(name string, db *sql.DB) Endpoint {
+	return Endpoint{DB: db, Config: &mysql.Config{DBName: name}}
 }
 
 // sourceTablesFor builds the canonical SourceTables slice (as the runner would
@@ -83,12 +83,13 @@ func TestSourceSchemaConsistencyCheck(t *testing.T) {
 
 	baseResources := func(moveEverything bool, srcTableNames ...string) Resources {
 		return Resources{
-			Sources: []SourceResource{
+			Runtime: Move,
+			Sources: []Endpoint{
 				sourceResourceFor(src0Name, src0DB),
 				sourceResourceFor(src1Name, src1DB),
 			},
-			SourceTables:   sourceTablesFor(t, src0DB, src0Name, srcTableNames...),
-			MoveEverything: moveEverything,
+			SourceTables: sourceTablesFor(t, src0DB, src0Name, srcTableNames...),
+			Options:      Options{MoveEverything: moveEverything},
 		}
 	}
 
@@ -198,9 +199,10 @@ func TestSourceSchemaConsistencyCheck(t *testing.T) {
 	// Test 8: single source is a no-op (nothing to compare against).
 	t.Run("single source no-op", func(t *testing.T) {
 		r := Resources{
-			Sources:        []SourceResource{sourceResourceFor(src0Name, src0DB)},
-			SourceTables:   sourceTablesFor(t, src0DB, src0Name, "users"),
-			MoveEverything: true,
+			Runtime:      Move,
+			Sources:      []Endpoint{sourceResourceFor(src0Name, src0DB)},
+			SourceTables: sourceTablesFor(t, src0DB, src0Name, "users"),
+			Options:      Options{MoveEverything: true},
 		}
 		require.NoError(t, sourceSchemaConsistencyCheck(t.Context(), r, slog.Default()))
 	})

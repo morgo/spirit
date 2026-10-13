@@ -22,6 +22,7 @@ func TestTableCompatibilityCheckPass(t *testing.T) {
 	require.NoError(t, tblInfo.SetInfo(context.Background()))
 
 	r := Resources{
+		Runtime:      Move,
 		SourceTables: []*table.TableInfo{tblInfo},
 	}
 	err := tableCompatibilityCheck(context.Background(), r, slog.Default())
@@ -39,6 +40,7 @@ func TestTableCompatibilityCheckNonMemoryComparablePK(t *testing.T) {
 	require.NoError(t, tblInfo.SetInfo(context.Background()))
 
 	r := Resources{
+		Runtime:      Move,
 		SourceTables: []*table.TableInfo{tblInfo},
 	}
 	require.NoError(t, tableCompatibilityCheck(context.Background(), r, slog.Default()))
@@ -56,6 +58,7 @@ func TestTableCompatibilityCheckMultipleTables(t *testing.T) {
 	require.NoError(t, varcharPKTable.SetInfo(context.Background()))
 
 	r := Resources{
+		Runtime:      Move,
 		SourceTables: []*table.TableInfo{intPKTable, varcharPKTable},
 	}
 	require.NoError(t, tableCompatibilityCheck(context.Background(), r, slog.Default()))
@@ -64,6 +67,7 @@ func TestTableCompatibilityCheckMultipleTables(t *testing.T) {
 func TestTableCompatibilityCheckNoTables(t *testing.T) {
 	// Empty table list should pass (nothing to check)
 	r := Resources{
+		Runtime:      Move,
 		SourceTables: []*table.TableInfo{},
 	}
 	err := tableCompatibilityCheck(context.Background(), r, slog.Default())
@@ -86,13 +90,13 @@ func TestTableCompatibilityCheckFloatAndBitPK(t *testing.T) {
 	}
 	floatPK, bitPK, cols := info("float_pk"), info("bit_pk"), info("float_bit_cols")
 
-	err := tableCompatibilityCheck(t.Context(), Resources{SourceTables: []*table.TableInfo{cols, floatPK}}, slog.Default())
+	err := tableCompatibilityCheck(t.Context(), Resources{Runtime: Move, SourceTables: []*table.TableInfo{cols, floatPK}}, slog.Default())
 	require.ErrorContains(t, err, `table 'float_pk' cannot be moved: primary key column "f" of table "float_pk" is a FLOAT, which is not supported`)
 
-	err = tableCompatibilityCheck(t.Context(), Resources{SourceTables: []*table.TableInfo{cols, bitPK}}, slog.Default())
+	err = tableCompatibilityCheck(t.Context(), Resources{Runtime: Move, SourceTables: []*table.TableInfo{cols, bitPK}}, slog.Default())
 	require.ErrorContains(t, err, `table 'bit_pk' cannot be moved: primary key column "b" of table "bit_pk" is a BIT, which is not supported`)
 
-	require.NoError(t, tableCompatibilityCheck(t.Context(), Resources{SourceTables: []*table.TableInfo{cols}}, slog.Default()))
+	require.NoError(t, tableCompatibilityCheck(t.Context(), Resources{Runtime: Move, SourceTables: []*table.TableInfo{cols}}, slog.Default()))
 }
 
 // TestTableCompatibilityCheckMisreportedEnumSet checks that a table with an
@@ -113,12 +117,12 @@ func TestTableCompatibilityCheckMisreportedEnumSet(t *testing.T) {
 	}
 	enum4, set4, qmark := info("enum_4byte"), info("set_4byte"), info("enum_qmark")
 
-	err := tableCompatibilityCheck(t.Context(), Resources{SourceTables: []*table.TableInfo{qmark, enum4}}, slog.Default())
+	err := tableCompatibilityCheck(t.Context(), Resources{Runtime: Move, SourceTables: []*table.TableInfo{qmark, enum4}}, slog.Default())
 	require.ErrorContains(t, err, `table 'enum_4byte' cannot be moved: column "e" of table "enum_4byte" is enum('?','a'), but MySQL stores a member with a character outside utf8mb3 there`)
-	err = tableCompatibilityCheck(t.Context(), Resources{SourceTables: []*table.TableInfo{set4}}, slog.Default())
+	err = tableCompatibilityCheck(t.Context(), Resources{Runtime: Move, SourceTables: []*table.TableInfo{set4}}, slog.Default())
 	require.ErrorContains(t, err, `table 'set_4byte' cannot be moved: column "s" of table "set_4byte" is set('x','?')`)
 
-	require.NoError(t, tableCompatibilityCheck(t.Context(), Resources{SourceTables: []*table.TableInfo{qmark}}, slog.Default()))
+	require.NoError(t, tableCompatibilityCheck(t.Context(), Resources{Runtime: Move, SourceTables: []*table.TableInfo{qmark}}, slog.Default()))
 }
 
 // TestTableCompatibilityCheckMisreportedEnumSetOnLaterSource checks that a
@@ -138,7 +142,8 @@ func TestTableCompatibilityCheckMisreportedEnumSetOnLaterSource(t *testing.T) {
 	t0, t1 := info(db0, name0), info(db1, name1)
 
 	r := Resources{
-		Sources:      []SourceResource{{DB: db0, Tables: []*table.TableInfo{t0}}, {DB: db1, Tables: []*table.TableInfo{t1}}},
+		Runtime:      Move,
+		Sources:      []Endpoint{{DB: db0, Tables: []*table.TableInfo{t0}}, {DB: db1, Tables: []*table.TableInfo{t1}}},
 		SourceTables: []*table.TableInfo{t0},
 	}
 	err := tableCompatibilityCheck(t.Context(), r, slog.Default())
@@ -154,8 +159,8 @@ func TestTableCompatibilityCheckMisreportedEnumSetOnLaterSource(t *testing.T) {
 func TestTableCompatibilityCheckRegisteredForResume(t *testing.T) {
 	lock.Lock()
 	defer lock.Unlock()
-	require.Equal(t, ScopePostSetup, checks["table_compatibility"].scope)
-	require.Equal(t, ScopeResume, checks["table_compatibility_resume"].scope)
+	require.Equal(t, PhasePostSetup|PhaseResume, checks["table_compatibility"].phases)
+	require.Equal(t, Move, checks["table_compatibility"].runtimes)
 }
 
 // TestTableCompatibilityCheckUnsupportedNames checks that a '.' or a backtick
@@ -179,35 +184,37 @@ func TestTableCompatibilityCheckUnsupportedNames(t *testing.T) {
 		{
 			name: "plain names pass",
 			r: Resources{
-				Sources:      []SourceResource{{Config: withDB("src1")}},
+				Runtime:      Move,
+				Sources:      []Endpoint{{Config: withDB("src1")}},
 				Targets:      []applier.Target{{Config: withDB("dst1")}},
 				SourceTables: []*table.TableInfo{keyed("src1", "t1"), keyed("src1", "t2")},
 			},
 		},
 		{
 			name:    "dot in table name",
-			r:       Resources{SourceTables: []*table.TableInfo{keyed("src1", "t1"), keyed("src1", "t.2")}},
+			r:       Resources{Runtime: Move, SourceTables: []*table.TableInfo{keyed("src1", "t1"), keyed("src1", "t.2")}},
 			wantErr: `table 't.2' cannot be moved: table name "t.2" contains a '.', which Spirit does not support`,
 		},
 		{
 			name:    "backtick in table name",
-			r:       Resources{SourceTables: []*table.TableInfo{keyed("src1", "t`2")}},
+			r:       Resources{Runtime: Move, SourceTables: []*table.TableInfo{keyed("src1", "t`2")}},
 			wantErr: "table 't`2' cannot be moved: table name \"t`2\" contains a backtick, which Spirit does not support",
 		},
 		{
 			name:    "dot in table schema name",
-			r:       Resources{SourceTables: []*table.TableInfo{keyed("src.1", "t1")}},
+			r:       Resources{Runtime: Move, SourceTables: []*table.TableInfo{keyed("src.1", "t1")}},
 			wantErr: `table 't1' cannot be moved: schema name "src.1" contains a '.', which Spirit does not support`,
 		},
 		{
 			name:    "backtick in table schema name",
-			r:       Resources{SourceTables: []*table.TableInfo{keyed("src`1", "t1")}},
+			r:       Resources{Runtime: Move, SourceTables: []*table.TableInfo{keyed("src`1", "t1")}},
 			wantErr: "table 't1' cannot be moved: schema name \"src`1\" contains a backtick",
 		},
 		{
 			name: "dot in a second source schema",
 			r: Resources{
-				Sources:      []SourceResource{{Config: withDB("src1")}, {Config: withDB("src.2")}},
+				Runtime:      Move,
+				Sources:      []Endpoint{{Config: withDB("src1")}, {Config: withDB("src.2")}},
 				SourceTables: []*table.TableInfo{keyed("src1", "t1")},
 			},
 			wantErr: `cannot move: source schema name "src.2" contains a '.', which Spirit does not support`,
@@ -215,13 +222,15 @@ func TestTableCompatibilityCheckUnsupportedNames(t *testing.T) {
 		{
 			name: "backtick in source schema",
 			r: Resources{
-				Sources: []SourceResource{{Config: withDB("src`1")}},
+				Runtime: Move,
+				Sources: []Endpoint{{Config: withDB("src`1")}},
 			},
 			wantErr: "cannot move: source schema name \"src`1\" contains a backtick",
 		},
 		{
 			name: "dot in target schema",
 			r: Resources{
+				Runtime:      Move,
 				Targets:      []applier.Target{{Config: withDB("dst.1")}},
 				SourceTables: []*table.TableInfo{keyed("src1", "t1")},
 			},
@@ -230,6 +239,7 @@ func TestTableCompatibilityCheckUnsupportedNames(t *testing.T) {
 		{
 			name: "backtick in target schema",
 			r: Resources{
+				Runtime: Move,
 				Targets: []applier.Target{{Config: withDB("dst1")}, {Config: withDB("dst`2")}},
 			},
 			wantErr: "cannot move: target schema name \"dst`2\" contains a backtick",
@@ -239,8 +249,8 @@ func TestTableCompatibilityCheckUnsupportedNames(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			// Both registrations share the callback; run through RunChecks at
 			// each scope so the resume path is covered as well.
-			for _, scope := range []ScopeFlag{ScopePostSetup, ScopeResume} {
-				err := RunChecks(t.Context(), tt.r, slog.Default(), scope, otherChecks("table_compatibility", "table_compatibility_resume")...)
+			for _, scope := range []Phase{PhasePostSetup, PhaseResume} {
+				err := RunChecks(t.Context(), tt.r, slog.Default(), scope, otherChecks("table_compatibility")...)
 				if tt.wantErr == "" {
 					require.NoError(t, err)
 					continue

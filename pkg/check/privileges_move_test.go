@@ -47,7 +47,8 @@ func TestMovePrivileges(t *testing.T) {
 	defer utils.CloseAndLog(lowPrivDB)
 
 	r := Resources{
-		Sources: []SourceResource{{DB: lowPrivDB, Config: sourceConfig}},
+		Runtime: Move,
+		Sources: []Endpoint{{DB: lowPrivDB, Config: sourceConfig}},
 	}
 	err = privilegesCheck(t.Context(), r, slog.Default())
 	require.Error(t, err) // privileges fail, since user has nothing granted.
@@ -85,14 +86,15 @@ func TestMovePrivileges(t *testing.T) {
 	lowPrivDB, err = sql.Open("block-mysql", fmt.Sprintf("%s:%s@tcp(%s)/%s", config.User, config.Passwd, config.Addr, config.DBName))
 	require.NoError(t, err)
 	defer utils.CloseAndLog(lowPrivDB)
-	r.Sources = []SourceResource{{DB: lowPrivDB, Config: sourceConfig}}
+	r.Sources = []Endpoint{{DB: lowPrivDB, Config: sourceConfig}}
 
 	err = privilegesCheck(t.Context(), r, slog.Default())
 	require.NoError(t, err) // all privileges granted, should pass now
 
 	// Test the root user
 	r = Resources{
-		Sources: []SourceResource{{DB: db, Config: sourceConfig}},
+		Runtime: Move,
+		Sources: []Endpoint{{DB: db, Config: sourceConfig}},
 	}
 	err = privilegesCheck(t.Context(), r, slog.Default())
 	require.NoError(t, err) // root privileges work fine
@@ -137,7 +139,8 @@ func TestMovePrivilegesMultipleSources(t *testing.T) {
 	defer utils.CloseAndLog(lowPrivDB)
 
 	r := Resources{
-		Sources: []SourceResource{
+		Runtime: Move,
+		Sources: []Endpoint{
 			{DB: rootDB, Config: rootConfig},
 			{DB: lowPrivDB, Config: lowPrivConfig},
 		},
@@ -154,7 +157,8 @@ func TestMovePrivilegesMultipleSources(t *testing.T) {
 	defer utils.CloseAndLog(rootDB2)
 
 	r = Resources{
-		Sources: []SourceResource{
+		Runtime: Move,
+		Sources: []Endpoint{
 			{DB: rootDB, Config: rootConfig},
 			{DB: rootDB2, Config: rootConfig},
 		},
@@ -227,7 +231,7 @@ func TestMovePrivilegesWithRDSSuperuserRole(t *testing.T) {
 	// The role is empty, so SHOW GRANTS lists nothing that shows events or
 	// routines, and both checks refuse.
 	lowPrivDB := open()
-	r := Resources{Sources: []SourceResource{{DB: lowPrivDB, Config: sourceConfig}}}
+	r := Resources{Runtime: Move, Sources: []Endpoint{{DB: lowPrivDB, Config: sourceConfig}}}
 	grants, err := readGrants(t.Context(), lowPrivDB)
 	require.NoError(t, err)
 	require.Contains(t, grants, "GRANT `rds_superuser_role`@`%` TO `"+user+"`@`%`")
@@ -261,7 +265,7 @@ func TestMovePrivilegesWithRDSSuperuserRole(t *testing.T) {
 		_, err := db.ExecContext(t.Context(), "REVOKE CONNECTION_ADMIN ON *.* FROM "+user)
 		require.NoError(t, err)
 		noConnectionAdmin := open()
-		r := Resources{Sources: []SourceResource{{DB: noConnectionAdmin, Config: sourceConfig}}}
+		r := Resources{Runtime: Move, Sources: []Endpoint{{DB: noConnectionAdmin, Config: sourceConfig}}}
 		err = privilegesCheck(t.Context(), r, slog.Default())
 		require.ErrorContains(t, err, "Needed: CONNECTION_ADMIN/SUPER or EXECUTE on mysql.rds_kill")
 		require.ErrorContains(t, err, "missing CONNECTION_ADMIN or SUPER privilege, or EXECUTE on mysql.rds_kill")
@@ -344,8 +348,8 @@ func TestMovePrivilegesSchemaObjectVisibility(t *testing.T) {
 
 	t.Run("old minimal grants", func(t *testing.T) {
 		db, cfg := createMoveTestUser(t, "testmovevis_old", schema, oldMinimalMoveGrants(schema)...)
-		src := []SourceResource{{DB: db, Config: cfg}}
-		err := privilegesCheck(t.Context(), Resources{Sources: src}, slog.Default())
+		src := []Endpoint{{DB: db, Config: cfg}}
+		err := privilegesCheck(t.Context(), Resources{Runtime: Move, Sources: src}, slog.Default())
 		require.ErrorContains(t, err, "insufficient privileges to run a move")
 		require.ErrorContains(t, err, eventMissing)
 		require.ErrorContains(t, err, routineMissing)
@@ -369,7 +373,7 @@ func TestMovePrivilegesSchemaObjectVisibility(t *testing.T) {
 	t.Run("old minimal grants plus EVENT", func(t *testing.T) {
 		db, cfg := createMoveTestUser(t, "testmovevis_event", schema,
 			append(oldMinimalMoveGrants(schema), "GRANT EVENT ON `"+schema+"`.* TO %s")...)
-		err := privilegesCheck(t.Context(), Resources{Sources: []SourceResource{{DB: db, Config: cfg}}}, slog.Default())
+		err := privilegesCheck(t.Context(), Resources{Runtime: Move, Sources: []Endpoint{{DB: db, Config: cfg}}}, slog.Default())
 		require.ErrorContains(t, err, routineMissing)
 		require.NotContains(t, err.Error(), eventMissing)
 	})
@@ -377,7 +381,7 @@ func TestMovePrivilegesSchemaObjectVisibility(t *testing.T) {
 	t.Run("old minimal grants plus SHOW_ROUTINE", func(t *testing.T) {
 		db, cfg := createMoveTestUser(t, "testmovevis_routine", schema,
 			append(oldMinimalMoveGrants(schema), "GRANT SHOW_ROUTINE ON *.* TO %s")...)
-		err := privilegesCheck(t.Context(), Resources{Sources: []SourceResource{{DB: db, Config: cfg}}}, slog.Default())
+		err := privilegesCheck(t.Context(), Resources{Runtime: Move, Sources: []Endpoint{{DB: db, Config: cfg}}}, slog.Default())
 		require.ErrorContains(t, err, eventMissing)
 		require.NotContains(t, err.Error(), routineMissing)
 	})
@@ -400,15 +404,15 @@ func TestMovePrivilegesSchemaObjectVisibility(t *testing.T) {
 	t.Run("EVENT and SHOW_ROUTINE through a default role", func(t *testing.T) {
 		db, cfg := createMoveTestUser(t, "testmovevis_defrole", schema,
 			append(oldMinimalMoveGrants(schema), "GRANT `"+role+"` TO %s", "SET DEFAULT ROLE `"+role+"` TO %s")...)
-		src := []SourceResource{{DB: db, Config: cfg}}
-		require.NoError(t, privilegesCheck(t.Context(), Resources{Sources: src}, slog.Default()))
+		src := []Endpoint{{DB: db, Config: cfg}}
+		require.NoError(t, privilegesCheck(t.Context(), Resources{Runtime: Move, Sources: src}, slog.Default()))
 		require.EqualError(t, SourceSchemaObjectsError(t.Context(), src), allObjects)
 	})
 
 	t.Run("EVENT and SHOW_ROUTINE through a role that is not active", func(t *testing.T) {
 		db, cfg := createMoveTestUser(t, "testmovevis_inactiverole", schema,
 			append(oldMinimalMoveGrants(schema), "GRANT `"+role+"` TO %s")...)
-		err := privilegesCheck(t.Context(), Resources{Sources: []SourceResource{{DB: db, Config: cfg}}}, slog.Default())
+		err := privilegesCheck(t.Context(), Resources{Runtime: Move, Sources: []Endpoint{{DB: db, Config: cfg}}}, slog.Default())
 		require.ErrorContains(t, err, eventMissing)
 		require.ErrorContains(t, err, routineMissing)
 	})
@@ -427,8 +431,8 @@ func TestMovePrivilegesSchemaObjectVisibility(t *testing.T) {
 		t.Run("EVENT and "+tc.name, func(t *testing.T) {
 			db, cfg := createMoveTestUser(t, tc.user, schema,
 				append(oldMinimalMoveGrants(schema), "GRANT EVENT ON `"+schema+"`.* TO %s", tc.grant)...)
-			src := []SourceResource{{DB: db, Config: cfg}}
-			require.NoError(t, privilegesCheck(t.Context(), Resources{Sources: src}, slog.Default()))
+			src := []Endpoint{{DB: db, Config: cfg}}
+			require.NoError(t, privilegesCheck(t.Context(), Resources{Runtime: Move, Sources: src}, slog.Default()))
 			require.EqualError(t, SourceSchemaObjectsError(t.Context(), src), allObjects)
 		})
 	}
@@ -453,8 +457,8 @@ func TestSchemaObjectVisibilityWildcardGrantShadowedByExactGrant(t *testing.T) {
 		"SELECT COUNT(*) FROM information_schema.EVENTS WHERE EVENT_SCHEMA = ?", schema).Scan(&visible))
 	require.Zero(t, visible, "the server hides the event from this user")
 
-	src := []SourceResource{{DB: db, Config: cfg}}
-	require.ErrorIs(t, privilegesCheck(t.Context(), Resources{Sources: src}, slog.Default()), ErrRefused)
+	src := []Endpoint{{DB: db, Config: cfg}}
+	require.ErrorIs(t, privilegesCheck(t.Context(), Resources{Runtime: Move, Sources: src}, slog.Default()), ErrRefused)
 	require.ErrorIs(t, SourceSchemaObjectsError(t.Context(), src), ErrRefused)
 	// The reverse-window check uses the same evaluation.
 	err := ReverseWindowSchemaObjectsError(t.Context(), src)
@@ -469,8 +473,8 @@ func TestSchemaObjectVisibilityWildcardGrantShadowedByExactGrant(t *testing.T) {
 // see. Missing grants are a refusal; failing to read the grants is not.
 func TestSourceSchemaObjectsCheckRequiresVisibility(t *testing.T) {
 	const visibilityPrefix = "insufficient privileges to run a move: move refuses source schemas that contain triggers, views, events or stored routines, and information_schema hides them from users without these grants. Needed: "
-	scopes := []ScopeFlag{ScopePreflight, ScopePostSetup, ScopeResume, ScopePreCutover}
-	only := otherChecks("source_schema_objects_preflight", "source_schema_objects", "source_schema_objects_resume", "source_schema_objects_precutover")
+	scopes := []Phase{PhasePreflight, PhasePostSetup, PhaseResume, PhaseCutoverLocked}
+	only := otherChecks("source_schema_objects")
 	for _, tc := range []struct {
 		name, user, revoke, create, needed string
 	}{
@@ -484,8 +488,8 @@ func TestSourceSchemaObjectsCheckRequiresVisibility(t *testing.T) {
 			testutils.RunSQLInDatabase(t, schema, "CREATE TABLE t1 (id INT NOT NULL PRIMARY KEY, v INT)")
 			db, cfg := createMoveTestUser(t, tc.user, schema,
 				append(oldMinimalMoveGrants(schema), "GRANT EVENT ON `"+schema+"`.* TO %s", "GRANT SHOW_ROUTINE ON *.* TO %s")...)
-			src := []SourceResource{{DB: db, Config: cfg}}
-			r := Resources{Sources: src}
+			src := []Endpoint{{DB: db, Config: cfg}}
+			r := Resources{Runtime: Move, Sources: src}
 			for _, scope := range scopes {
 				require.NoError(t, RunChecks(t.Context(), r, slog.Default(), scope, only...), "scope %d", scope)
 			}
@@ -624,7 +628,7 @@ func TestSourcePrivilegesBaseGrantShadowedByExactGrant(t *testing.T) {
 	const full = "ALTER, CREATE, DELETE, DROP, INDEX, INSERT, LOCK TABLES, SELECT, TRIGGER, UPDATE"
 	const global = "GRANT REPLICATION CLIENT, REPLICATION SLAVE, RELOAD, EVENT, SHOW_ROUTINE ON *.* TO `u`@`%`"
 	run := func(grants ...string) error {
-		return sourcePrivileges(t.Context(), stubDB{DB: db, grants: append(grants, global)}, "app_1", noForceKillProbe)
+		return sourcePrivileges(t.Context(), Move, stubDB{DB: db, grants: append(grants, global)}, "app_1", noForceKillProbe)
 	}
 
 	require.NoError(t, run("GRANT "+full+" ON `app\\_%`.* TO `u`@`%`"))
@@ -668,7 +672,7 @@ func TestVisibilityReadErrorsAreNotRefusals(t *testing.T) {
 
 	t.Run("SHOW GRANTS", func(t *testing.T) {
 		stub := stubDB{DB: db, grants: withRole, fail: "SHOW GRANTS"}
-		err := sourcePrivileges(t.Context(), stub, "app", noForceKillProbe)
+		err := sourcePrivileges(t.Context(), Move, stub, "app", noForceKillProbe)
 		require.ErrorContains(t, err, errStubQuery.Error())
 		require.NotErrorIs(t, err, ErrRefused)
 		err = schemaObjectVisibility(t.Context(), stub, "app", allSchemaObjects...)
@@ -686,14 +690,14 @@ func TestVisibilityReadErrorsAreNotRefusals(t *testing.T) {
 		}
 		stub := stubDB{DB: db, grants: withBase}
 		readFailed := func(context.Context) error { return errStubQuery }
-		err := sourcePrivileges(t.Context(), stub, "app", readFailed)
+		err := sourcePrivileges(t.Context(), Move, stub, "app", readFailed)
 		require.EqualError(t, err, "could not check the privileges force-kill needs: "+errStubQuery.Error())
 		require.NotErrorIs(t, err, ErrRefused)
 
 		missing := func(context.Context) error {
 			return fmt.Errorf("%w: missing CONNECTION_ADMIN or SUPER privilege, or EXECUTE on mysql.rds_kill", dbconn.ErrForceKillPrivilegeMissing)
 		}
-		err = sourcePrivileges(t.Context(), stub, "app", missing)
+		err = sourcePrivileges(t.Context(), Move, stub, "app", missing)
 		require.ErrorContains(t, err, "insufficient privileges to run a move with force-kill enabled. Needed: CONNECTION_ADMIN/SUPER or EXECUTE on mysql.rds_kill")
 		require.ErrorContains(t, err, "missing CONNECTION_ADMIN or SUPER privilege, or EXECUTE on mysql.rds_kill")
 	})
@@ -705,9 +709,11 @@ func TestVisibilityReadErrorsAreNotRefusals(t *testing.T) {
 		require.NoError(t, closed.Close())
 		cfg, err := mysql.ParseDSN(testutils.DSN())
 		require.NoError(t, err)
-		src := []SourceResource{{DB: closed, Config: cfg}}
+		src := []Endpoint{{DB: closed, Config: cfg}}
 		for name, check := range map[string]func() error{
-			"privilegesCheck":                 func() error { return privilegesCheck(t.Context(), Resources{Sources: src}, slog.Default()) },
+			"privilegesCheck": func() error {
+				return privilegesCheck(t.Context(), Resources{Runtime: Move, Sources: src}, slog.Default())
+			},
 			"SourceSchemaObjectsError":        func() error { return SourceSchemaObjectsError(t.Context(), src) },
 			"ReverseWindowSchemaObjectsError": func() error { return ReverseWindowSchemaObjectsError(t.Context(), src) },
 		} {
@@ -726,13 +732,13 @@ func TestVisibilityReadErrorsAreNotRefusals(t *testing.T) {
 		err := schemaObjectVisibility(t.Context(), stub, "app", allSchemaObjects...)
 		require.ErrorIs(t, err, ErrRefused)
 		require.ErrorContains(t, err, needed)
-		err = sourcePrivileges(t.Context(), stub, "app", noForceKillProbe)
+		err = sourcePrivileges(t.Context(), Move, stub, "app", noForceKillProbe)
 		require.ErrorIs(t, err, ErrRefused)
 		require.ErrorContains(t, err, needed)
 		// The role's expanded privileges, as SHOW GRANTS lists them for an
 		// active role, are counted.
 		expanded := stubDB{DB: db, grants: append(slices.Clone(withRole), "GRANT SELECT, EVENT, TRIGGER ON *.* TO `u`@`%`")}
-		require.NoError(t, sourcePrivileges(t.Context(), expanded, "app", noForceKillProbe))
+		require.NoError(t, sourcePrivileges(t.Context(), Move, expanded, "app", noForceKillProbe))
 		require.NoError(t, schemaObjectVisibility(t.Context(), expanded, "app", allSchemaObjects...))
 	})
 }

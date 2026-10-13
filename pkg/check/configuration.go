@@ -10,14 +10,30 @@ import (
 )
 
 func init() {
-	register(check{name: "configuration", run: configurationCheck, phases: PhasePreflight, runtimes: Migration})
+	register(check{name: "configuration", run: configurationCheck, phases: PhasePreflight, runtimes: Migration | Move})
 }
 
-// check the configuration of the database. There are some hard nos,
-// and some suggestions around configuration for performance.
+// configurationCheck checks the configuration of every source. There are some
+// hard nos, and some suggestions around configuration for performance.
 func configurationCheck(ctx context.Context, r Resources, logger *slog.Logger) error {
+	if len(r.Sources) == 0 {
+		return errors.New("no sources configured")
+	}
+	for i, src := range r.Sources {
+		if src.DB == nil {
+			return r.sourceError(i, errors.New("database connection is not initialized"))
+		}
+		if err := sourceConfiguration(ctx, r.Runtime, src, logger); err != nil {
+			return r.sourceError(i, err)
+		}
+	}
+	return nil
+}
+
+// sourceConfiguration checks the configuration of one source.
+func sourceConfiguration(ctx context.Context, runtime Runtime, src Endpoint, logger *slog.Logger) error {
 	var binlogFormat, innodbAutoincLockMode, binlogRowImage, logBin, logSlaveUpdates, binlogRowValueOptions, performanceSchema, binlogOrderCommits string
-	err := r.sourceDB().QueryRowContext(ctx,
+	err := src.DB.QueryRowContext(ctx,
 		`SELECT @@global.binlog_format,
 		@@global.innodb_autoinc_lock_mode,
 		@@global.binlog_row_image,
@@ -41,11 +57,13 @@ func configurationCheck(ctx context.Context, r Resources, logger *slog.Logger) e
 	if binlogFormat != "ROW" {
 		return errors.New("binlog_format must be ROW")
 	}
-	if innodbAutoincLockMode != "2" {
+	if innodbAutoincLockMode != "2" && runtime == Migration {
 		// This is strongly encouraged because otherwise running parallel threads is pointless.
 		// i.e. on a test with 2 threads running INSERT INTO new SELECT * FROM old WHERE <range>
 		// the inserts will run in serial when there is an autoinc column on new and innodbAutoincLockMode != "2"
 		// This is the auto-inc lock. It won't show up in SHOW PROCESSLIST that they are serial.
+		// Only a migration writes to the source server; a move's or sync's
+		// inserts land on the target, where this source setting has no effect.
 		logger.Warn("innodb_autoinc_lock_mode != 2. This will cause the migration to run slower than expected because concurrent inserts to the new table will be serialized.", "innodb_autoinc_lock_mode", innodbAutoincLockMode)
 	}
 	// Spirit's replication applier reads full row images directly from the
@@ -68,7 +86,7 @@ func configurationCheck(ctx context.Context, r Resources, logger *slog.Logger) e
 	// variable only exists on MySQL 8.0.20+; on older servers compression
 	// cannot be enabled at all, so unknown-variable passes the check.
 	var binlogTransactionCompression string
-	err = r.sourceDB().QueryRowContext(ctx, `SELECT @@global.binlog_transaction_compression`).Scan(&binlogTransactionCompression)
+	err = src.DB.QueryRowContext(ctx, `SELECT @@global.binlog_transaction_compression`).Scan(&binlogTransactionCompression)
 	if err != nil {
 		if myErr, ok := errors.AsType[*mysql.MySQLError](err); !ok || myErr.Number != parsermysql.ErrUnknownSystemVariable {
 			return err
@@ -77,7 +95,7 @@ func configurationCheck(ctx context.Context, r Resources, logger *slog.Logger) e
 		return errors.New("binlog_transaction_compression must be OFF: spirit does not support compressed transactions in the binary log")
 	}
 	var partialRevokes string
-	err = r.sourceDB().QueryRowContext(ctx, `SELECT @@global.partial_revokes`).Scan(&partialRevokes)
+	err = src.DB.QueryRowContext(ctx, `SELECT @@global.partial_revokes`).Scan(&partialRevokes)
 	if err := partialRevokesError(partialRevokes, err); err != nil {
 		return err
 	}
@@ -113,8 +131,8 @@ func configurationCheck(ctx context.Context, r Resources, logger *slog.Logger) e
 	}
 	// There is no GTID preflight here: the change source is selected
 	// automatically (change.NewAutoClient probes gtid_mode /
-	// enforce_gtid_consistency itself), so a server without GTIDs simply
-	// gets the binlog file+position client rather than an error.
+	// enforce_gtid_consistency per source itself), so a server without GTIDs
+	// simply gets the binlog file+position client rather than an error.
 	return nil
 }
 
