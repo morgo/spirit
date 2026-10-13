@@ -1106,9 +1106,9 @@ func (r *Runner) setThrottlerOnPhases() {
 // on non-Aurora targets, so this is safe to call unconditionally.
 //
 // OpenMonitor is invoked lazily by Build only after IsAurora returns true, so
-// non-Aurora users never pay the connect cost. MaxOpenConnections=2 lets both
-// Aurora throttlers poll concurrently without serializing on a single conn,
-// with a touch of headroom.
+// non-Aurora users never pay the connect cost. The monitor pool holds
+// dbconn.MonitorPoolSize connections, so both Aurora throttlers poll
+// concurrently without serializing on a single conn.
 //
 // A test throttler replaces the Aurora throttlers entirely, so there is no
 // probe and autoscaling cannot engage.

@@ -1,6 +1,7 @@
 package throttler
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"io"
@@ -120,15 +121,21 @@ func TestAuroraSetup_IsAuroraProbeFailureIsNonFatal(t *testing.T) {
 }
 
 // closeCounter is a Throttler that counts Close calls and returns err from
-// each.
+// each. With a monitor set, it records whether the pool still answered a ping
+// inside its Close: a real throttler's poller reads that pool until it closes.
 type closeCounter struct {
 	Noop
-	closes int
-	err    error
+	closes      int
+	err         error
+	monitor     *sql.DB
+	monitorLive bool
 }
 
 func (c *closeCounter) Close() error {
 	c.closes++
+	if c.monitor != nil {
+		c.monitorLive = c.monitor.PingContext(context.Background()) == nil
+	}
 	return c.err
 }
 
@@ -143,12 +150,15 @@ func TestAuroraResultClose(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, monitor.PingContext(t.Context()))
 
-	first, second := &closeCounter{}, &closeCounter{err: errors.New("second failed")}
+	first := &closeCounter{monitor: monitor}
+	second := &closeCounter{err: errors.New("second failed"), monitor: monitor}
 	res := AuroraResult{Throttlers: []Throttler{first, second}, MonitorDB: monitor}
 	err = res.Close()
 	require.ErrorContains(t, err, "second failed", "a throttler's Close error is returned")
 	require.Equal(t, 1, first.closes)
 	require.Equal(t, 1, second.closes, "an earlier error does not skip later throttlers")
+	require.True(t, first.monitorLive, "throttlers close before the monitor pool they poll")
+	require.True(t, second.monitorLive, "throttlers close before the monitor pool they poll")
 	require.ErrorContains(t, monitor.PingContext(t.Context()), "database is closed",
 		"the monitor pool is closed even when a throttler's Close failed")
 }

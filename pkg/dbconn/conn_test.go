@@ -504,8 +504,9 @@ func TestNewAddsDSNTimeoutToDeadline(t *testing.T) {
 	require.Less(t, elapsed, 10*time.Second)
 }
 
-// TestMonitorOpener pins the Aurora monitor pool's shape: MonitorPoolSize
-// connections, a copy of the caller's config (the caller's pool size must not
+// TestMonitorOpener pins the Aurora monitor pool's shape: two connections
+// (one per Aurora poller, so neither serializes on the other, while bounding
+// the extra connections held on the primary), a copy of the caller's config (the caller's pool size must not
 // change), and the label in connect errors so a failed monitor connect is told
 // apart from the main pool's.
 func TestMonitorOpener(t *testing.T) {
@@ -514,7 +515,7 @@ func TestMonitorOpener(t *testing.T) {
 	db, err := MonitorOpener(testutils.DSN(), cfg, "test monitor")()
 	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
-	require.Equal(t, MonitorPoolSize, db.Stats().MaxOpenConnections)
+	require.Equal(t, 2, db.Stats().MaxOpenConnections)
 	require.Equal(t, 17, cfg.MaxOpenConnections, "MonitorOpener mutated the caller's config")
 	require.NoError(t, db.PingContext(t.Context()))
 
