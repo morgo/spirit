@@ -14,17 +14,20 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// testDB opens the test server the way FmtCmd.Run does, with dbconn, so
-// canonicalize runs under the production session settings (sql_mode,
-// time_zone, charset).
-func testDB(t *testing.T) *sql.DB {
+// testDB opens the test server the way FmtCmd.Run does, with dbconn and
+// formatSession, so canonicalize runs under the production session settings
+// (sql_mode, time_zone, charset).
+func testDB(t *testing.T) *sql.Conn {
 	t.Helper()
 	cfg := dbconn.NewDBConfig()
 	cfg.MaxOpenConnections = 1
 	db, err := dbconn.New(testutils.DSN(), cfg)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
-	return db
+	conn, err := formatSession(t.Context(), db)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+	return conn
 }
 
 // Unit tests for parseAndPrepare
@@ -202,19 +205,36 @@ func TestBuildDSN(t *testing.T) {
 }
 
 // TestCanonicalize_SpiritSQLMode pins a decision: fmt canonicalizes under
-// spirit's session sql_mode (NO_AUTO_VALUE_ON_ZERO), not the server default,
-// so a definition that strict mode rejects, such as a zero-date default, is
-// accepted and canonicalized the way spirit sees it.
+// spirit's session sql_mode (NO_AUTO_VALUE_ON_ZERO) plus formatSQLMode. The
+// zero-date checks stay off, so a zero-date default is accepted and
+// canonicalized the way spirit sees it.
 func TestCanonicalize_SpiritSQLMode(t *testing.T) {
 	db := testDB(t)
 	var sqlMode string
 	require.NoError(t, db.QueryRowContext(t.Context(), "SELECT @@SESSION.sql_mode").Scan(&sqlMode))
-	require.Equal(t, "NO_AUTO_VALUE_ON_ZERO", sqlMode)
+	require.Equal(t, "NO_AUTO_VALUE_ON_ZERO,STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION", sqlMode)
 
 	input := "CREATE TABLE `fmt_zero_date` (\n  `id` int NOT NULL,\n  `d` date NOT NULL DEFAULT '0000-00-00',\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB"
 	canonical, err := canonicalize(t.Context(), db, input)
 	require.NoError(t, err)
 	require.Contains(t, canonical, "`d` date NOT NULL DEFAULT '0000-00-00'")
+}
+
+// TestCanonicalize_RejectsDefinitionsTheServerWouldRewrite checks that a
+// definition MySQL only accepts by changing it is an error, never a different
+// table written back into the user's file.
+func TestCanonicalize_RejectsDefinitionsTheServerWouldRewrite(t *testing.T) {
+	db := testDB(t)
+	for name, input := range map[string]string{
+		"index too long":  "CREATE TABLE `fmt_long_key` (\n  `id` int NOT NULL,\n  `a` varchar(2000) CHARACTER SET utf8mb4 DEFAULT NULL,\n  PRIMARY KEY (`id`),\n  KEY `a` (`a`)\n) ENGINE=InnoDB",
+		"varchar too big": "CREATE TABLE `fmt_big_varchar` (\n  `id` int NOT NULL,\n  `b` varchar(70000) DEFAULT NULL,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB",
+		"unknown engine":  "CREATE TABLE `fmt_bad_engine` (\n  `id` int NOT NULL,\n  PRIMARY KEY (`id`)\n) ENGINE=NDBCLUSTER",
+	} {
+		t.Run(name, func(t *testing.T) {
+			canonical, err := canonicalize(t.Context(), db, input)
+			require.Error(t, err, canonical)
+		})
+	}
 }
 
 // TestFmtCmd_Run runs the command end to end, as a user whose password uses

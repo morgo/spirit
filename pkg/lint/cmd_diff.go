@@ -91,9 +91,7 @@ func (cmd *DiffCmd) Run() error {
 			fmt.Fprintf(os.Stderr, "Error converting target schema: %s\n", err)
 			os.Exit(2)
 		}
-		diffOpts := statement.NewDiffOptions()
-		diffOpts.LowerCaseTableNames = lowerCaseTableNames
-		plan, err := PlanChanges(currentSchemas, targetSchemas, diffOpts, &config)
+		plan, err := PlanChanges(currentSchemas, targetSchemas, diffOptions(lowerCaseTableNames), &config)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error planning changes: %s\n", err)
 			os.Exit(2)
@@ -104,6 +102,14 @@ func (cmd *DiffCmd) Run() error {
 		}
 	}
 	return nil
+}
+
+// diffOptions returns the options for diffing against a source server whose
+// lower_case_table_names is lowerCaseTableNames.
+func diffOptions(lowerCaseTableNames int) *statement.DiffOptions {
+	opts := statement.NewDiffOptions()
+	opts.LowerCaseTableNames = lowerCaseTableNames
+	return opts
 }
 
 // loadSource loads the source schema from a DSN or a directory, with the

@@ -294,6 +294,15 @@ func parseCreateTables(t *testing.T, sqls ...string) []*statement.CreateTable {
 
 // TestDiffCmd_DSNs runs the diff command end to end with both schemas read
 // from a server, the path `spirit diff --source-dsn --target-dsn` takes.
+// TestDiffOptionsLowerCaseTableNames pins that the source server's
+// lower_case_table_names reaches the diff. CI's servers all run with 0, so the
+// end-to-end tests cannot tell it apart from a dropped value.
+func TestDiffOptionsLowerCaseTableNames(t *testing.T) {
+	for _, v := range []int{0, 1, 2} {
+		require.Equal(t, v, diffOptions(v).LowerCaseTableNames)
+	}
+}
+
 func TestDiffCmd_DSNs(t *testing.T) {
 	sourceName, sourceDB := testutils.CreateUniqueTestDatabase(t)
 	targetName, targetDB := testutils.CreateUniqueTestDatabase(t)
