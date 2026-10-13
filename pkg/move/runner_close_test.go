@@ -292,7 +292,10 @@ func TestCloseRunsAllClosersOnError(t *testing.T) {
 func TestRunClosesOpenedSourcesWhenALaterSourceFailsToConnect(t *testing.T) {
 	srcName, _ := testutils.CreateUniqueTestDatabase(t)
 	tgtName, _ := testutils.CreateUniqueTestDatabase(t)
-	const missing = "move_conn_leak_missing" // never created: connecting to it fails with ER_BAD_DB_ERROR
+	// A unique name, dropped again, so source 1 is guaranteed to fail with
+	// ER_BAD_DB_ERROR even on a shared server.
+	missing, _ := testutils.CreateUniqueTestDatabase(t)
+	testutils.RunSQL(t, "DROP DATABASE "+missing)
 
 	runner, err := NewRunner(&Move{
 		SourceDSNs: []string{testutils.DSNForDatabase(srcName), testutils.DSNForDatabase(missing)},
