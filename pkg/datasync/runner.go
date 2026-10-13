@@ -66,7 +66,8 @@ type Runner struct {
 	autoscale                        copier.AutoscaleConfig
 	flushConcurrency, flushBatchSize int
 	// buildAurora and auroraVCPUs are the instance probes setupThrottling runs.
-	// NewRunner sets them to the throttler package's; tests replace them,
+	// NewRunner sets buildAurora to throttler.BuildAurora; a nil auroraVCPUs is
+	// throttler.AuroraVCPUs (concurrency.Request.VCPUs). Tests replace them,
 	// because CI has no Aurora to probe.
 	buildAurora func(context.Context, throttler.AuroraSetup) (throttler.AuroraResult, error)
 	auroraVCPUs func(context.Context, *sql.DB) (int, error)
@@ -192,14 +193,9 @@ func NewRunner(s *Sync) (*Runner, error) {
 		metricsSink:      &metrics.NoopSink{},
 		locklessReadyCh:  make(chan struct{}),
 		firstCleanPassCh: make(chan struct{}),
-		buildAurora:      buildAurora,
-		auroraVCPUs:      throttler.AuroraVCPUs,
+		buildAurora:      throttler.BuildAurora,
 	}
 	return r, nil
-}
-
-func buildAurora(ctx context.Context, setup throttler.AuroraSetup) (throttler.AuroraResult, error) {
-	return setup.Build(ctx)
 }
 
 // replClientConfig is the built-in source feed's change-client config,
@@ -862,12 +858,8 @@ func (r *Runner) setupThrottling(ctx context.Context) error {
 		return nil
 	}
 	result, err := r.buildAurora(ctx, throttler.AuroraSetup{
-		Source: r.target.DB,
-		OpenMonitor: func() (*sql.DB, error) {
-			cfg := *r.targetDBConfig
-			cfg.MaxOpenConnections = 2
-			return dbconn.NewWithConnectionType(r.target.Config.FormatDSN(), &cfg, "sync target monitor")
-		},
+		Source:                 r.target.DB,
+		OpenMonitor:            dbconn.MonitorOpener(r.target.Config.FormatDSN(), r.targetDBConfig, "sync target monitor"),
 		CommitLatencyThreshold: r.sync.MaxCommitLatency,
 		Logger:                 r.logger,
 	})
@@ -894,10 +886,7 @@ func (r *Runner) openLoadSignal(ctx context.Context, result throttler.AuroraResu
 	}
 	signal := throttler.NewMultiThrottler(result.Throttlers...)
 	if err := signal.Open(ctx); err != nil {
-		_ = signal.Close()
-		if result.MonitorDB != nil {
-			_ = result.MonitorDB.Close()
-		}
+		_ = result.Close()
 		return err
 	}
 	r.progMu.Lock()
