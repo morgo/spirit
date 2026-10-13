@@ -34,10 +34,11 @@ import (
 // What stays on each client is everything that does: the buffered/flushed
 // position fields and their accessors, the client's own flush (which
 // snapshots and advances the position), blockWait, Start/recreateStreamer,
-// readStream and the decoding of every event other than a rows event. An embedded struct cannot call the
-// embedding type's methods, so the shared methods that need the client's
-// flush or BlockWait take them as arguments (see flushFunc), and each
-// client keeps a one-line Source method that passes its own.
+// readStream and the decoding of every event other than a rows event. An
+// embedded struct cannot call the embedding type's methods, so the shared
+// methods that need the client's flush or BlockWait take them as arguments
+// (see flushFunc), and each client keeps a one-line Source method that passes
+// its own.
 type feedCore struct {
 	// mu protects the flush bookkeeping fields below, cfg, the syncer /
 	// streamer / cancelFunc fields (see streamer for its unlocked reader),
@@ -52,7 +53,8 @@ type feedCore struct {
 	// already held.
 	mu sync.Mutex
 
-	// host is the source's host:port, parsed by prepareSyncerConfig.
+	// host is the source's raw host:port. prepareSyncerConfig splits it into
+	// cfg.Host and cfg.Port.
 	host     string
 	username string
 	password string
