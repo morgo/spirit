@@ -508,7 +508,7 @@ func (c *SingleChecker) logChunkSummary() {
 	if c.chunks == nil {
 		return
 	}
-	if summary := c.chunks.summary(table.ChunkerDefaultTarget); summary != "" {
+	if summary := c.chunks.summary(); summary != "" {
 		c.logger.Info("checksum chunk size distribution", "stats", summary)
 	}
 }
