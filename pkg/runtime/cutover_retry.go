@@ -38,7 +38,8 @@ type CutoverRetry struct {
 	// Attempts is the number of attempts. A value below 1 is one attempt.
 	Attempts int
 	// InitialBackoff and MaxBackoff shape the delay between attempts. A zero
-	// value takes CutoverInitialBackoff or CutoverMaxBackoff.
+	// value takes CutoverInitialBackoff or CutoverMaxBackoff. MaxBackoff caps
+	// every delay, the first one included.
 	InitialBackoff, MaxBackoff time.Duration
 	// Logger logs each attempt and failure. Nil logs to slog.Default().
 	Logger *slog.Logger
@@ -88,6 +89,7 @@ func RetryCutover(
 	if maxBackoff <= 0 {
 		maxBackoff = CutoverMaxBackoff
 	}
+	backoff = min(backoff, maxBackoff)
 	logger := cfg.Logger
 	if logger == nil {
 		logger = slog.Default()

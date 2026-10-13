@@ -63,6 +63,16 @@ func TestRetryCutoverCustomBackoff(t *testing.T) {
 	require.Equal(t, []time.Duration{time.Second, 2 * time.Second, 3 * time.Second}, fs.sleeps)
 }
 
+// TestRetryCutoverInitialBackoffIsCapped checks MaxBackoff caps the first
+// delay too, including against the default cap.
+func TestRetryCutoverInitialBackoffIsCapped(t *testing.T) {
+	fs := &fakeSleep{}
+	err := RetryCutover(t.Context(), CutoverRetry{Attempts: 3, InitialBackoff: time.Hour, Sleep: fs.sleep},
+		func(context.Context, int) error { return errors.New("lock wait timeout") }, retry, nil, nil)
+	require.Error(t, err)
+	require.Equal(t, []time.Duration{CutoverMaxBackoff, CutoverMaxBackoff}, fs.sleeps)
+}
+
 func TestRetryCutoverJoinsAttemptErrors(t *testing.T) {
 	fs := &fakeSleep{}
 	errs := []error{errors.New("first"), errors.New("second"), errors.New("third")}
