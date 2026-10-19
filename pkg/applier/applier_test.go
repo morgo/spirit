@@ -121,6 +121,25 @@ func TestSplitRowsIntoChunklets(t *testing.T) {
 		}
 	})
 
+	t.Run("exactly at byte threshold", func(t *testing.T) {
+		// Two rows exactly fill the byte budget; the third must start a new
+		// chunklet without splitting early or losing any rows.
+		overhead := utils.EstimateRenderedRowSize([]any{""})
+		payload := strings.Repeat("x", MaxStatementSizeBytes/2-overhead)
+		rows := []rowData{
+			{values: []any{payload}},
+			{values: []any{payload}},
+			{values: []any{"next"}},
+		}
+		require.Equal(t, MaxStatementSizeBytes,
+			utils.EstimateRenderedRowSize(rows[0].values)+utils.EstimateRenderedRowSize(rows[1].values))
+
+		chunklets := splitRowsIntoChunklets(rows)
+		require.Len(t, chunklets, 2)
+		require.Equal(t, rows[:2], chunklets[0])
+		require.Equal(t, rows[2:], chunklets[1])
+	})
+
 	t.Run("mixed row sizes", func(t *testing.T) {
 		// Mix of small and large rows
 		rows := make([]rowData, 100)
