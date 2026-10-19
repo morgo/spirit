@@ -1043,14 +1043,13 @@ therefore fails on the first chunk containing a too-long value:
 Reducing a `DECIMAL`'s scale behaves the same way, via `Note 1265` — the
 warning *level* is not consulted, only its code.
 
-One write path is **not** covered by that gate: the final change-feed flush
-performed under the cut-over table lock goes through
-`dbconn.TableLock.ExecUnderLock`, which executes the statement directly and
-does not run `SHOW WARNINGS`. It is a narrow window — the backlog at that point
-is whatever arrived since the last flush, and any value that would truncate has
-almost certainly been seen by an earlier, gated flush already — but a
-truncation that appears *only* in that last batch is applied without the
-warning being inspected.
+The final change-feed flush under the cutover table lock checks the same
+warnings through `dbconn.TableLock.ExecUnderLockWithWarnings`. It reads
+`SHOW WARNINGS` on the locking connection immediately after each DML statement,
+so a truncating value that arrives only in that final batch also stops cutover.
+These locked writes are autocommitted: detecting a warning does not roll back
+the write, but the shadow table is not promoted. DDL uses `ExecUnderLock`
+separately, so warnings do not hide a successful rename's ownership transfer.
 
 **What reaches the checksum is what MySQL does not warn about.** The canonical
 case is adding a `UNIQUE` index to non-unique data: the duplicate row is

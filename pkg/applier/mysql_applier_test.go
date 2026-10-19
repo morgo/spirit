@@ -1631,3 +1631,34 @@ func TestUnderLockSharedConnection(t *testing.T) {
 	require.NoError(t, rows.Err())
 	require.Equal(t, []int64{2, 3, 4}, ids)
 }
+
+// TestUnderLockRejectsUnsafeWarnings reproduces a value arriving only in the
+// final flush: non-strict REPLACE succeeds on the server but truncates it.
+// Both the ordinary and locked flush must reject that warning.
+func TestUnderLockRejectsUnsafeWarnings(t *testing.T) {
+	source := testutils.NewTestTable(t, "locked_warning_source",
+		"CREATE TABLE locked_warning_source (id INT PRIMARY KEY, value VARCHAR(50))")
+	target := testutils.NewTestTable(t, "locked_warning_target",
+		"CREATE TABLE locked_warning_target (id INT PRIMARY KEY, value VARCHAR(5))")
+	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	sourceTable := table.NewTableInfo(source.DB, cfg.DBName, source.Name)
+	targetTable := table.NewTableInfo(db, cfg.DBName, target.Name)
+	require.NoError(t, sourceTable.SetInfo(t.Context()))
+	require.NoError(t, targetTable.SetInfo(t.Context()))
+	mapping := table.NewColumnMapping(sourceTable, targetTable, nil)
+	appl, err := New([]Target{{DB: db}}, NewApplierDefaultConfig())
+	require.NoError(t, err)
+	rows := []LogicalRow{{RowImage: []any{int64(1), "too long"}}}
+	_, err = appl.UpsertRows(t.Context(), mapping, rows, nil)
+	var warning *dbconn.UnsafeWarningError
+	require.ErrorAs(t, err, &warning)
+	lock, err := dbconn.NewTableLock(t.Context(), db, []*table.TableInfo{targetTable}, dbconn.NewDBConfig(), slog.Default())
+	require.NoError(t, err)
+	defer utils.CloseAndLogWithContext(t.Context(), lock)
+	_, err = appl.UpsertRows(t.Context(), mapping, rows, []*dbconn.TableLock{lock})
+	require.ErrorAs(t, err, &warning, "a locked flush must not silently accept truncated data")
+}

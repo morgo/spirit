@@ -55,6 +55,8 @@ Table locks are session-scoped, so the helper reserves a dedicated `sql.Conn` un
 
 Discarding prevents reuse of the session, but does not guarantee that server-side locks have been released when `Close` returns. If a statement was interrupted, MySQL may retain the session and its locks until that statement detects the disconnected client or finishes.
 
+`ExecUnderLockWithWarnings` is the DML path for a final change-feed flush. It checks `SHOW WARNINGS` on the locking connection after each statement, with the same policy as ordinary flush writes. Unsafe warnings stop the flush and prevent cutover. The DML is already committed when its warnings are read; the method does not start a transaction, which would release `LOCK TABLES`. DDL continues to use `ExecUnderLock` so a warning cannot obscure a completed rename.
+
 ## Transaction Pool
 
 `TrxPool` pre-creates a pool of `REPEATABLE READ` transactions with `START TRANSACTION WITH CONSISTENT SNAPSHOT`. This ensures all worker threads see the same point-in-time data, which is essential for parallel checksum verification.

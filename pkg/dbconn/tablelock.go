@@ -227,7 +227,25 @@ func (s *TableLock) DB() *sql.DB {
 func (s *TableLock) ExecUnderLock(ctx context.Context, stmts ...string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.execUnderLock(ctx, stmts...)
+	return s.execUnderLock(ctx, false, stmts...)
+}
+
+// ExecUnderLockWithWarnings executes DML on the locking session and checks
+// SHOW WARNINGS after every statement, using the same policy as an ordinary
+// change-feed flush (ErrorOnDupKey). A warning or a failed warning read stops
+// execution before the next statement, so the caller must not proceed to cutover.
+//
+// Like ExecUnderLock, a started statement finishes despite caller cancellation.
+// The warning read shares that detached completion budget. No transaction is
+// opened: BEGIN would release LOCK TABLES. A warning therefore reports a write
+// that has already committed; it does not roll it back.
+//
+// DDL callers use ExecUnderLock: a warning after a successful RENAME must not
+// turn a known ownership transfer into an ordinary failed-attempt result.
+func (s *TableLock) ExecUnderLockWithWarnings(ctx context.Context, stmts ...string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.execUnderLock(ctx, true, stmts...)
 }
 
 // ExecUnderLockWithoutForeignKeyChecks is ExecUnderLock with the locking
@@ -246,20 +264,20 @@ func (s *TableLock) ExecUnderLockWithoutForeignKeyChecks(ctx context.Context, st
 	if err := s.lockConn.QueryRowContext(ctx, "SELECT @@session.foreign_key_checks").Scan(&checks); err != nil {
 		return err
 	}
-	if err := s.execUnderLock(ctx, "SET SESSION foreign_key_checks = 0"); err != nil {
+	if err := s.execUnderLock(ctx, false, "SET SESSION foreign_key_checks = 0"); err != nil {
 		s.discard = true
 		return err
 	}
-	execErr := s.execUnderLock(ctx, stmts...)
+	execErr := s.execUnderLock(ctx, false, stmts...)
 	// Restore even after a cancel: the statements may have used up ctx.
-	if err := s.execUnderLock(context.WithoutCancel(ctx), fmt.Sprintf("SET SESSION foreign_key_checks = %d", checks)); err != nil {
+	if err := s.execUnderLock(context.WithoutCancel(ctx), false, fmt.Sprintf("SET SESSION foreign_key_checks = %d", checks)); err != nil {
 		s.discard = true
 		return errors.Join(execErr, err)
 	}
 	return execErr
 }
 
-func (s *TableLock) execUnderLock(ctx context.Context, stmts ...string) error {
+func (s *TableLock) execUnderLock(ctx context.Context, inspectWarnings bool, stmts ...string) error {
 	if s.lockConn == nil {
 		return sql.ErrConnDone
 	}
@@ -274,8 +292,17 @@ func (s *TableLock) execUnderLock(ctx context.Context, stmts ...string) error {
 		stopKill := s.killReferencedBlockers(ctx, execCtx)
 		_, err := s.lockConn.ExecContext(execCtx, stmt)
 		expired := execCtx.Err() != nil
-		cancel()
 		stopKill()
+		if err == nil && inspectWarnings {
+			// Read the diagnostics before any other statement can replace them.
+			// The successful DML outcome is known even if reading its warnings fails.
+			_, err = checkWarnings(execCtx, s.lockConn, ErrorOnDupKey)
+			if err != nil {
+				cancel()
+				return fmt.Errorf("checking locked statement warnings: %w", err)
+			}
+		}
+		cancel()
 		if err != nil {
 			if expired {
 				return fmt.Errorf("%w: %w", ErrStatementOutcomeUnknown, err)
