@@ -864,7 +864,7 @@ The `example` package provides demonstration linters for learning purposes:
 
 ### TableNameLengthLinter
 
-Checks table names against a configurable maximum length, defaulting to 58 characters (MySQL's hard limit is 64). The example linters are not registered automatically; call `lint.Register` to enable them.
+A demonstration of a configurable linter, not a built-in Spirit rule. Its illustrative 58-character default does not constrain migrations: Spirit supports MySQL's 64-character table names and truncates auxiliary names with `utils.AuxTableName`. Only the example package's tests register this linter; the CLI does not enable it.
 
 ### DuplicateColumnLinter
 
