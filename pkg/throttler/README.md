@@ -45,7 +45,9 @@ type GradualThrottler interface {
 }
 ```
 
-The copier and checksum autoscalers type-assert for this and only engage when it is present. The two Aurora throttlers implement it; the replication-lag throttler deliberately does **not** — lag is an SLO-style budget, not a load gauge, so steering on it would park replicas behind. Binary-signal throttlers protect only via the `IsThrottled()` / `BlockWait()` hard-stop.
+The copier autoscaler requires this interface to engage. An enabled checksum autoscaler can shed readers as change-feed residuals grow and recover to its starting count without it; only growth above the starting count requires a continuous utilization signal. The runners currently enable checksum scaling only when Aurora autoscaling engages.
+
+The two Aurora throttlers implement it; the replication-lag throttler deliberately does **not** — lag is an SLO-style budget, not a load gauge, so steering on it would park replicas behind. Binary-signal throttlers protect only via the `IsThrottled()` / `BlockWait()` hard-stop.
 
 The distinction also decides *who is allowed to pause whom*. `GradualOnly(t)` returns a view of a composite that keeps only its gradual children, for consumers that cannot cause what a binary throttler protects: the checksum reads inside a `REPEATABLE READ` snapshot and emits no binlog events, so pausing it on replica lag cannot reduce that lag, while the pause holds the snapshot open and retains undo. The view is read-only — its `Open`, `Close` and `UpdateLag` are no-ops, because the composite it came from is still what gets opened, polled and closed.
 
