@@ -951,7 +951,7 @@ func (a *MySQLApplier) DeleteKeys(ctx context.Context, sourceTable, targetTable 
 			if shardLocks != nil {
 				// ExecUnderLock does not report affected rows; the total
 				// is reported as the key count after collection, below.
-				if err = shardLocks[shard.shardID].ExecUnderLock(ctx, deleteStmt); err != nil {
+				if err = shardLocks[shard.shardID].ExecUnderLockWithWarnings(ctx, deleteStmt); err != nil {
 					err = fmt.Errorf("failed to execute delete under lock on shard %d: %w", shard.shardID, err)
 				}
 			} else {
@@ -1163,7 +1163,7 @@ func (a *MySQLApplier) UpsertRows(ctx context.Context, mapping *table.ColumnMapp
 			// The lock connection is the only connection allowed to write
 			// to this shard's table while LOCK TABLES is held.
 			if shardLocks != nil {
-				if err = shardLocks[sid].ExecUnderLock(ctx, upsertStmt); err != nil {
+				if err = shardLocks[sid].ExecUnderLockWithWarnings(ctx, upsertStmt); err != nil {
 					err = fmt.Errorf("failed to execute upsert under lock on shard %d: %w", sid, err)
 				} else {
 					// ExecUnderLock does not report affected rows, so return

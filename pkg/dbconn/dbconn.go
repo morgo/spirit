@@ -248,7 +248,7 @@ func IsLockContentionError(err error) bool {
 	return val.Number == parsermysql.ErrLockWaitTimeout || val.Number == parsermysql.ErrLockDeadlock
 }
 
-// DupKeyHandling selects how RetryableTransaction treats duplicate-key (1062)
+// DupKeyHandling selects how warning checks treat duplicate-key (1062)
 // warnings. Copy / INSERT IGNORE paths legitimately expect dup-key warnings
 // (e.g. resume re-inserts); checksum-fix DELETE/REPLACE/UPSERT paths do not and
 // want them surfaced. Using a named int enum (rather than a bool) keeps call
@@ -263,11 +263,17 @@ const (
 	IgnoreDupKeyWarnings
 )
 
-// checkWarnings returns an error for any SHOW WARNINGS entry left by the
-// statement just executed on trx, other than the ones RetryableTransaction
-// tolerates. fatal reports that retrying the transaction cannot help.
-func checkWarnings(ctx context.Context, trx *sql.Tx, dupKeyHandling DupKeyHandling) (fatal bool, err error) {
-	rows, err := trx.QueryContext(ctx, "SHOW WARNINGS")
+// warningReader is the session that executed the statement: a transaction for
+// ordinary writes or the reserved connection for a locked flush. Warnings are
+// session-local, so querying the pool could inspect an unrelated statement.
+type warningReader interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
+// checkWarnings returns an error for any unsafe SHOW WARNINGS entry left by
+// the preceding statement. fatal reports that retrying cannot help.
+func checkWarnings(ctx context.Context, session warningReader, dupKeyHandling DupKeyHandling) (fatal bool, err error) {
+	rows, err := session.QueryContext(ctx, "SHOW WARNINGS")
 	if err != nil {
 		return false, err
 	}

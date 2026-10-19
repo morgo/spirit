@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	parsermysql "github.com/block/spirit/pkg/parser/mysql"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
@@ -598,4 +599,77 @@ func TestExecUnderLockWithoutForeignKeyChecks(t *testing.T) {
 	require.Error(t, lock.ExecUnderLockWithoutForeignKeyChecks(t.Context(), "ALTER TABLE no_such_table ENGINE=InnoDB"))
 	require.Equal(t, 1, readChecks())
 	require.False(t, lock.discard)
+}
+
+func TestExecUnderLockWithWarnings(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		statement string
+		code      uint16
+	}{
+		{"truncation", "REPLACE INTO %s VALUES (2, 'too long', 1)", parsermysql.WarnDataTruncated},
+		{"out_of_range", "REPLACE INTO %s VALUES (2, 'ok', 1000)", parsermysql.ErrWarnDataOutOfRange},
+		{"duplicate", "INSERT IGNORE INTO %s VALUES (1, 'ok', 1)", parsermysql.ErrDupEntry},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			name := "checked_lock_" + tc.name
+			tt := testutils.NewTestTable(t, name, fmt.Sprintf("CREATE TABLE %s (id INT PRIMARY KEY, value VARCHAR(5), n TINYINT)", name))
+			db, err := New(testutils.DSN(), testConfig())
+			require.NoError(t, err)
+			defer utils.CloseAndLog(db)
+			var schema string
+			require.NoError(t, db.QueryRowContext(t.Context(), "SELECT DATABASE()").Scan(&schema))
+			info := table.NewTableInfo(db, schema, tt.Name)
+			require.NoError(t, info.SetInfo(t.Context()))
+			lock, err := NewTableLock(t.Context(), db, []*table.TableInfo{info}, testConfig(), slog.Default())
+			require.NoError(t, err)
+			defer utils.CloseAndLogWithContext(t.Context(), lock)
+			require.NoError(t, lock.ExecUnderLockWithWarnings(t.Context(), fmt.Sprintf("INSERT INTO %s VALUES (1, 'ok', 1)", name)))
+			err = lock.ExecUnderLockWithWarnings(t.Context(), "", fmt.Sprintf(tc.statement, name), fmt.Sprintf("INSERT INTO %s VALUES (99, 'later', 1)", name))
+			var warning *UnsafeWarningError
+			require.ErrorAs(t, err, &warning)
+			require.Equal(t, tc.code, warning.Warning.Number)
+			// A warning means the DML completed, not an unknown statement outcome.
+			require.NotErrorIs(t, err, ErrStatementOutcomeUnknown)
+			var count int
+			require.NoError(t, lock.lockConn.QueryRowContext(t.Context(), fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE id=99", name)).Scan(&count))
+			require.Zero(t, count, "statements after the warning must not execute")
+			// The warning check must keep the lock session usable; clean DML and
+			// DELETE of a missing key both have no unsafe diagnostics.
+			require.NoError(t, lock.ExecUnderLockWithWarnings(t.Context(), fmt.Sprintf("DELETE FROM %s WHERE id=99", name)))
+			require.NoError(t, lock.ExecUnderLockWithWarnings(t.Context(), fmt.Sprintf("REPLACE INTO %s VALUES (2, 'clean', 1)", name)))
+			require.NoError(t, lock.Close(t.Context()))
+			require.ErrorIs(t, lock.ExecUnderLockWithWarnings(t.Context(), "SELECT 1"), sql.ErrConnDone)
+		})
+	}
+}
+
+// The final flush must still inspect diagnostics if the operator cancels
+// while its autocommit DML is running. Reading SHOW WARNINGS with the cancelled
+// caller context would lose the data-loss verdict after the write committed.
+func TestExecUnderLockWithWarningsDuringCancel(t *testing.T) {
+	tt := testutils.NewTestTable(t, "checked_lock_cancel", "CREATE TABLE checked_lock_cancel (id INT PRIMARY KEY, value VARCHAR(5))")
+	cfg := testConfig()
+	cfg.ForceKill = false
+	db, err := New(testutils.DSN(), cfg)
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+	lock, err := NewTableLock(t.Context(), db, []*table.TableInfo{{TableName: tt.Name}}, cfg, slog.Default())
+	require.NoError(t, err)
+	defer utils.CloseAndLogWithContext(t.Context(), lock)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	timer := time.AfterFunc(200*time.Millisecond, cancel)
+	defer timer.Stop()
+	err = lock.ExecUnderLockWithWarnings(ctx,
+		"INSERT INTO checked_lock_cancel SELECT 1, CONCAT('too long', SLEEP(1))",
+		"INSERT INTO checked_lock_cancel VALUES (2, 'later')")
+	require.ErrorIs(t, ctx.Err(), context.Canceled)
+	var warning *UnsafeWarningError
+	require.ErrorAs(t, err, &warning)
+	require.Equal(t, uint16(parsermysql.WarnDataTruncated), warning.Warning.Number)
+	require.NoError(t, lock.Close(ctx))
+	var count int
+	require.NoError(t, tt.DB.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM checked_lock_cancel").Scan(&count))
+	require.Equal(t, 1, count)
 }
