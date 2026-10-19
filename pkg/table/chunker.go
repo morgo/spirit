@@ -193,6 +193,7 @@ func NewChunker(t *TableInfo, config ChunkerConfig) (MappedChunker, error) {
 		// like resuming from a checkpoint.
 		newTable = t
 	}
+	sizer := dynamicChunkSizer{ChunkerTarget: config.TargetChunkTime, TargetChunkBytes: config.TargetChunkBytes}
 	// Use the optimistic chunker for auto_increment tables with a single
 	// column key, unless a specific key/where is requested.
 	if len(t.KeyColumns) == 1 && t.KeyIsAutoInc && config.Key == "" && config.Where == "" {
@@ -200,7 +201,7 @@ func NewChunker(t *TableInfo, config ChunkerConfig) (MappedChunker, error) {
 			Ti:                t,
 			NewTi:             newTable,
 			columnMapping:     config.ColumnMapping,
-			dynamicChunkSizer: dynamicChunkSizer{ChunkerTarget: config.TargetChunkTime, TargetChunkBytes: config.TargetChunkBytes},
+			dynamicChunkSizer: sizer,
 			watermarkTracker:  watermarkTracker{lowerBoundWatermarkMap: make(map[string]*Chunk)},
 			logger:            config.Logger,
 		}, nil
@@ -211,7 +212,7 @@ func NewChunker(t *TableInfo, config ChunkerConfig) (MappedChunker, error) {
 		columnMapping:     config.ColumnMapping,
 		keyName:           config.Key,
 		where:             config.Where,
-		dynamicChunkSizer: dynamicChunkSizer{ChunkerTarget: config.TargetChunkTime},
+		dynamicChunkSizer: sizer,
 		watermarkTracker:  watermarkTracker{lowerBoundWatermarkMap: make(map[string]*Chunk)},
 		logger:            config.Logger,
 	}, nil
