@@ -42,7 +42,7 @@ Durable mutation and physical ownership are correctness facts, not metrics. `mig
 
 ## Task Interface
 
-The `Task` interface defines the contract that a migration runner must implement: reporting progress, returning a status string, dumping checkpoints, and cancelling. Both the `migration.Runner` and `move.Runner` implement this interface.
+The `Task` interface defines the contract that a migration runner must implement: reporting progress, returning a status string, dumping checkpoints, and cancelling. All three runners (`migration.Runner`, `move.Runner` and `datasync.Runner`) implement this interface.
 
 ## Background Monitoring
 
@@ -92,7 +92,7 @@ Alongside the summary it carries structured fields for the things a wrapper woul
 
 `Copy` is the runner-wide row copy as a `CopyProgress{RowsCopied, RowsTotal}`. It is the sum of `Tables`, so the two always reconcile: both count settled rows against the tables' cardinality estimates, and neither is the optimistic chunker's keyspace position, which is what the copier paces on and what the ETA is derived from. It is populated as soon as the copy chunker exists and keeps its final reading through the later phases, so "how much did this run copy" stays answerable after the copy ends.
 
-Two caveats carry over from the per-table counts. `RowsCopied` counts rows the copy settled, so a row the binlog applier wrote before the copy reached it is not counted (the copy inserts with `INSERT IGNORE`, which reports it as unaffected), and on a busy table the copy finishes short of `RowsTotal`; a resume restores the count from the checkpoint and continues it, though a move deletes and re-copies the rows at or above the resume position, so the rows among them settled before the checkpoint are counted again. And on an auto_increment key the ETA's `DUE` is paced on the keyspace, so over a sparse key range `Copy` can read close to complete while the ETA is still counting down, or the reverse; `Summary` carries both halves.
+Two caveats carry over from the per-table counts. `RowsCopied` counts rows the copy settled, so a row the binlog applier wrote before the copy reached it is not counted (the copy inserts with `INSERT IGNORE`, which reports it as unaffected), and on a busy table the copy finishes short of `RowsTotal`; a resume restores the count from the checkpoint and continues it, though a move deletes and re-copies the rows at or above the resume position, so the rows among them settled before the checkpoint are counted again. On an auto_increment key, the ETA uses keyspace distance unless the key space is more than five times wider than the row estimate, when it switches to settled rows. Until that switch, gaps can make `Copy` and the ETA's pacing measure disagree; `Summary` carries both halves.
 
 ### `Resume`
 
@@ -121,11 +121,12 @@ Which signals count depends on the phase, and the runner reports only the ones t
 | --- | --- |
 | `CopyRows` | The whole composite. The copier writes, so it honours every signal. |
 | `Checksum` | Load signals only, matching `checksum`'s `loadOnlyThrottler` — a read-only snapshot pass cannot cause replica lag, so pausing it on lag would only hold the snapshot open for longer. |
-| everything else | Zero value. Nothing there consults a throttler: the sentinel wait runs the continuous checker (which takes none), and the changeset applies and cutover are not paced. |
+| `WaitingOnSentinelTable` | Load signals only while a continuous checksum pass is active; zero value between passes. |
+| everything else | Zero value. Changeset drains and cutover are not paced. |
 
-That last row matters for a wrapper polling after a run ends: a loaded server — or a replica-lag throttler that fails closed once its poll loop has stopped — must not make a finished migration, a cutover, or a sentinel wait look paused.
+That last row matters for a wrapper polling after a run ends: a loaded server — or a replica-lag throttler that fails closed once its poll loop has stopped — must not make a finished migration, a cutover, or an interval between continuous checksum passes look paused.
 
-A `move` reports the combined load signal of its Aurora targets, whether or not autoscaling is enabled: the whole signal in `CopyRows`, load signals only in `Checksum` and — while its continuous checksum runs — in `WaitingOnSentinelTable`, and the zero value elsewhere. A `sync` reports its Aurora target's load signal in `CopyRows` and `ApplyChangeset`. A target that is not Aurora, or whose Aurora probe fails, contributes no signal.
+Migration and move follow the same phase rules. A `move` reports the combined load signal of its Aurora targets, whether or not autoscaling is enabled: the whole signal in `CopyRows`, load signals only in `Checksum` and — while its continuous checksum runs — in `WaitingOnSentinelTable`, and the zero value elsewhere. A `sync` reports its Aurora target's load signal in `CopyRows` and `ApplyChangeset`. A target that is not Aurora, or whose Aurora probe fails, contributes no signal.
 
 ## See Also
 

@@ -6,9 +6,9 @@ Checksums validate data consistency between two tables. During schema changes, t
 
 - **Column mapping**: The checksum uses `ColumnMapping` to determine which columns to compare between source and target tables. This handles the intersection of columns (every non-generated target column with a source counterpart, including a source column that was generated and is now regular), column renames, and type casting automatically.
 - **Type normalization**: A `CAST` operation converts columns to a comparable type before comparison. This enables comparisons when data types have changed and their string representations differ (e.g., `TIMESTAMP` vs. `TIMESTAMP(6)`).
-- **Automatic repair**: When inconsistencies are detected, the checksum automatically repairs differences by recopying affected chunks.
+- **Repair during initial verification**: `Run` repairs confirmed differences by recopying affected chunks. `RunContinuous` never repairs; a confirmed divergence aborts the run.
 - **Parallel execution**: Checksums process chunks concurrently across multiple threads for efficient handling of large tables. The worker count is resizable while a pass runs — see [Pacing and scaling](#pacing-and-scaling).
-- **Consistent snapshot or optimistic reads**: `SingleChecker` takes a brief table lock to establish a consistent snapshot, so it is immune to concurrent modifications. `LocklessChecker` takes no lock and re-reads a chunk until it matches (see [Lockless checksum](#lockless-checksum)).
+- **Consistent snapshot or optimistic reads**: `SingleChecker` takes a brief table lock to establish a consistent snapshot segment, so reads within that segment are immune to concurrent modifications. `LocklessChecker` takes no lock and re-reads a chunk until it matches (see [Lockless checksum](#lockless-checksum)).
 - **Server-side execution**: The checksum computation is pushed down to MySQL, with each chunk returning only a CRC32 value and row count to Spirit. This minimizes network overhead and is significantly more efficient than approaches that extract all data for client-side comparison.
 
 ## Why Checksums Matter
@@ -138,8 +138,9 @@ replica.
 
 `migrate` and `move` gate cutover on a mandatory repairing checksum, so this
 never reaches trusted data — the visible cost is a `differencesFound > 0` and a
-chunk recopy. `sync` repairs lazily, so its target can serve a
-missing/stale/phantom row until a later pass covers that chunk. A consumer of
+chunk recopy. `sync` repairs during its initial checksum, so its target can serve a
+missing/stale/phantom row until that initial verification covers the chunk.
+After the first clean pass, a confirmed divergence stops the sync. A consumer of
 `pkg/copier` + `pkg/change` that runs no checksum at all has no backstop.
 
 The field signature of a run that hit this is `keys_dropped_above_high > 0` in

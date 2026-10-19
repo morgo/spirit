@@ -87,10 +87,11 @@ type CopierConfig struct {
 - **`Throttler`** (default: `Noop`): Controls when copying should pause to protect system health. See `pkg/throttler` for implementations.
 - **`Logger`** (default: `slog.Default()`): Structured logger for debugging and monitoring.
 - **`MetricsSink`** (default: `NoopSink`): Destination for metrics like chunk processing time and row counts.
-- **`Applier`**: Writes rows to the target. Required (non-nil). The migration runner shares one applier between the copier and the replication client, so the copy and the binlog replay go through the same write pipeline.
+- **`Applier`**: Writes rows to the target. Required (non-nil). The migration runner shares one applier between the copier and the replication client, the copy uses its asynchronous workers and the binlog replay uses its synchronous methods.
 
-Note that chunk sizing is **not** configured here — it lives entirely in the chunker. Configure it via `table.ChunkerConfig` when you build the chunker: `TargetChunkBytes` for the copier's in-memory byte-budget signal, or `TargetChunkTime` (default `table.ChunkerDefaultTarget`) for the wall-clock signal the checksum uses.
-- **`Autoscale`** (`AutoscaleConfig`, default: disabled): configures the write-thread autoscaler. The runners set it when autoscaling engages (on Aurora, unless `--skip-autoscaling` is set). When `Enabled`, it scales the applier's live write-worker count between `StartThreads` and `MaxThreads`, and its own read-worker count between `Concurrency` and `MaxReadThreads`, based on throttler utilization. Requires a dynamically-scalable applier. See [Autoscaling](#autoscaling) under Core Concepts.
+Note that chunk sizing is **not** configured here — it lives entirely in the chunker. Configure it via `table.ChunkerConfig` when you build the chunker: `TargetChunkBytes` for the optimistic chunker's in-memory byte-budget signal, or `TargetChunkTime` (default `table.ChunkerDefaultTarget`) for the wall-clock signal. The composite chunker currently uses time-based sizing for both copying and checksumming.
+
+- **`Autoscale`** (`AutoscaleConfig`, default: disabled): configures the read/write-thread autoscaler. The runners set it when autoscaling engages (on Aurora, unless `--skip-autoscaling` is set). When `Enabled`, it scales the applier's live write-worker count between `StartThreads` and `MaxThreads`, and its own read-worker count between `Concurrency` and `MaxReadThreads`, based on throttler utilization. Requires a dynamically-scalable applier. See [Autoscaling](#autoscaling) under Core Concepts.
 
 ## Usage
 
@@ -125,7 +126,7 @@ if err := chunker.Open(); err != nil {
 
 // Create an applier: it owns the write side of the pipeline.
 applierConfig := applier.NewApplierDefaultConfig()
-rowApplier, err := applier.New([]applier.Target{{DB: targetDB}}, applierConfig)
+rowApplier, err := applier.New([]applier.Target{{DB: db}}, applierConfig)
 if err != nil {
     return err
 }
@@ -202,7 +203,7 @@ The copier uses goroutines for parallel chunk processing:
 
 ### Autoscaling
 
-When `AutoscaleConfig.Enabled` is set (the runners set it when autoscaling engages; `--skip-autoscaling` disables it), the copier runs a control loop that adjusts both of the pipeline's live worker pools — its own read workers (between `Concurrency` and `MaxReadThreads`, defaulting to 2× the start when the caller supplies none) and the applier's write workers (between `StartThreads` and `MaxThreads`) — based on a throttler's continuous **utilization** signal. It only engages when the throttler implements `throttler.GradualThrottler` (the Aurora throttlers do) and the applier implements the dynamic-scaling capability (both built-in appliers do); otherwise it is skipped.
+When `AutoscaleConfig.Enabled` is set (the runners set it when autoscaling engages; `--skip-autoscaling` disables it), the copier runs a control loop that adjusts both of the pipeline's live worker pools — its own read workers (between `Concurrency` and `MaxReadThreads`, defaulting to 2× the start when the caller supplies none) and the applier's write workers (between `StartThreads` and `MaxThreads`) — based on a throttler's continuous **utilization** signal. It only engages when the throttler implements `throttler.GradualThrottler` (the Aurora throttlers do) and the applier implements the dynamic-scaling capability (the built-in MySQL applier does); otherwise it is skipped.
 
 Each tick (5s, aligned to the throttler poll) it reads utilization — `0` = idle, `1.0` = the point the hard-stop trips — and steers toward a dead band. Utilization alone cannot decide *which* pool to move — both pools feed the same signal — so the applier queue between them arbitrates: near-empty with ~zero queue wait reads as **read-starved**, near-full with waits at/above write time reads as **write-limited**, anything else is **balanced**. A state must persist two consecutive ticks before it arbitrates, so chunk-size transients don't flap the controller.
 
@@ -274,7 +275,7 @@ The copier checks the throttler before processing each chunk:
 c.throttler.BlockWait(ctx)
 ```
 
-This call blocks if `throttler.IsThrottled()` returns true, pausing the copy operation until conditions improve. The throttler is pluggable, with a built-in implementation for high replication lag, but in future other implementations may also be used, such as an external throttling service (Freno, Doorman).
+This call blocks if `throttler.IsThrottled()` returns true, pausing the copy operation until conditions improve. The throttler is pluggable. Built-in implementations protect against replica lag and Aurora load (running threads and commit latency); custom implementations can integrate an external service.
 
 See `pkg/throttler` for details on throttler implementations.
 

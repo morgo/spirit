@@ -104,8 +104,10 @@ alter := stmts[0].(*ast.AlterTableStmt)
 ## Regenerating the parser
 
 `parser.go` and `hintparser.go` are generated from `parser.y` and
-`hintparser.y` by [goyacc](https://gitlab.com/cznic/goyacc). After
-editing a `.y` file:
+`hintparser.y` by the vendored `goyacc` generator in [`goyacc/`](goyacc/).
+It is a separate Go module, built by the Makefile, so its `modernc.org`
+dependencies do not enter Spirit's runtime dependency graph. After editing
+a `.y` file:
 
 ```bash
 cd pkg/parser

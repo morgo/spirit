@@ -2,7 +2,7 @@
 
 The `autoscale` package holds the primitives shared by Spirit's phase-level thread-count controllers. Two phases currently scale their worker pools at runtime — the copier's read/write pools ([issue #831](https://github.com/block/spirit/issues/831)) and the checksum's reader pool ([#1087](https://github.com/block/spirit/pull/1087)) — and both apply the same control law to different pools. Defining that law once means the two cannot silently drift apart. The same holds across commands: `migrate`, `move` and `sync` all size and scale their pools with these primitives.
 
-Autoscaling is on by default and engages only on Aurora; `--skip-autoscaling` turns it off. When it is off or does not engage, no controller runs and every pool keeps its configured size. A few pieces are used either way: both checksum checkers gate their workers through `Limiter` at a fixed limit, and `Tick` paces the applier's stats emitter.
+Autoscaling is on by default and engages only on Aurora; `--skip-autoscaling` turns it off. When it is off, no controller runs and pools use their configured sizes, subject to connection-pool read bounds. When it does not engage, a small Aurora instance still receives the fixed small-instance shape described below; other servers keep their configured sizes, subject to the same read bounds. A few pieces are used either way: both checksum checkers gate their workers through `Limiter` at a fixed limit, and `Tick` paces the applier's stats emitter.
 
 ## The zone law
 
