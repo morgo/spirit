@@ -26,7 +26,7 @@ The name matches the standard library's `runtime` package. A file that needs bot
 
 Migration and move walk the same states with the same subsystems. Their status block and `Progress` report are therefore built once, from a `Snapshot`. The runner builds a new `Snapshot` on every call. The `Snapshot` reads the state once, so every field of one report describes the same state.
 
-`Source` is a struct of functions that read the runner's subsystems: copier, applier, checker, feeds and throttler. They are functions because setup assigns the subsystems while an API caller may already be polling. A `Snapshot` calls only the functions that the current state reports on. By the time the run is in that state, setup has assigned those subsystems. Each runner fills in `Source` inline in its `snapshot` method, so no runner declares an adapter type. `SentinelSchema` is optional. A move leaves it nil, because its sources can span several schemas.
+`Source` is a struct of functions that read the runner's subsystems: copier, applier, checker, feeds and throttler. They are functions because setup assigns the subsystems while an API caller may already be polling. A `Snapshot` calls only the functions that the current state reports on. By the time the run is in that state, setup has assigned those subsystems. Each runner fills in `Source` inline in its `snapshot` method, so no runner declares an adapter type. `SentinelSchema` is optional. A move leaves it nil, because its sources can span several schemas. `Snapshot` reports load throttling during the sentinel wait only while `Checker.ContinuousActive()` reports an active verification pass; interval waits report no throttling.
 
 ### `FatalGate`
 

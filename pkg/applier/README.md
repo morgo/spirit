@@ -115,8 +115,10 @@ The applier interface provides both asynchronous and synchronous methods:
 - `Apply(ctx, chunk, rows, callback)`: Queues rows for writing and returns immediately. The callback is invoked when all rows have been written. Emits `INSERT IGNORE INTO target (cols) VALUES (...)`, not `REPLACE` — see the checksum's [Chunk repair](../checksum/README.md#chunk-repair) for why repair depends on that.
 
 **Synchronous (used by subscription)**:
-- `DeleteKeys(ctx, sourceTable, targetTable, keys, lock)`: Deletes rows by primary key and waits for completion. Emits `DELETE FROM target WHERE (pk) IN (...)`.
-- `UpsertRows(ctx, mapping, rows, lock)`: Upserts rows using a `ColumnMapping` and waits for completion. Emits `REPLACE INTO target (cols) VALUES (...)` — see [REPLACE INTO semantics](#replace-into-semantics-and-eventual-consistency) below.
+- `DeleteKeys(ctx, sourceTable, targetTable, keys, locks)`: Deletes rows by primary key and waits for completion. Emits `DELETE FROM target WHERE (pk) IN (...)`.
+- `UpsertRows(ctx, mapping, rows, locks)`: Upserts rows using a `ColumnMapping` and waits for completion. Emits `REPLACE INTO target (cols) VALUES (...)` — see [REPLACE INTO semantics](#replace-into-semantics-and-eventual-consistency) below.
+
+`locks` is a `[]*dbconn.TableLock`. Leave it nil for ordinary flushes; under-lock writes require exactly one lock per distinct target `*sql.DB`. Targets sharing a database handle must share one lock covering all their tables; duplicate lock entries for the same handle are rejected. These synchronous methods execute on the calling flush goroutines, independently of the asynchronous copy-worker pool.
 
 This distinction exists because:
 - The **copier** processes large batches of rows and benefits from async processing with callbacks to advance its watermark.
@@ -154,15 +156,18 @@ With `INSERT ... ON DUPLICATE KEY UPDATE`, the random map iteration order in the
 When the copier calls `Apply()`, it provides a callback function:
 
 ```go
+started := time.Now()
 callback := func(affectedRows int64, err error) {
     if err != nil {
         // Handle error
         return
     }
     // All rows have been written, advance watermark
-    chunker.Feedback(affectedRows)
+    chunker.Feedback(chunk, time.Since(started), uint64(affectedRows))
 }
-applier.Apply(ctx, chunk, rows, callback)
+if err := rowApplier.Apply(ctx, chunk, rows, callback); err != nil {
+    return err
+}
 ```
 
 The applier tracks all pending work internally and invokes the callback only when:
@@ -201,7 +206,7 @@ The applier only tracks changes by `PRIMARY KEY`, not by sharding column (vindex
 
 ### Writing under a table lock
 
-`DeleteKeys` and `UpsertRows` take an optional list of table locks, used for the final flush at cutover. There must be exactly one lock per target, acquired on that target's own `*sql.DB`. The applier matches locks to targets by connection identity, and returns an error before writing anything if a target has no lock, has two, or a lock matches no target. Executing a target's statements on another server's lock connection would write the rows to the wrong server.
+`DeleteKeys` and `UpsertRows` take an optional list of table locks, used for the final flush at cutover. There must be exactly one lock per distinct target `*sql.DB`, acquired on that handle and covering every target table that uses it. Targets sharing a handle share that lock. The applier matches locks to targets by connection identity, and returns an error before writing anything if a handle has no lock, has two, or a lock matches no target. Executing a target's statements on another server's lock connection would write the rows to the wrong server.
 
 ### Write-worker scaling
 

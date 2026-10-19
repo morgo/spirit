@@ -100,7 +100,8 @@ ct, err := statement.ParseCreateTable("CREATE TABLE t1 (id INT PRIMARY KEY)")
 // ct.TableName = "t1"
 // ct.Columns[0].Name = "id"
 // ct.Columns[0].Type = "int"
-// ct.Columns[0].PrimaryKey = true
+// ct.Columns[0].PrimaryKey = false (normalized into ct.Indexes)
+// ct.Indexes.ByName("").Type = "PRIMARY KEY"
 ```
 
 ### CREATE INDEX
@@ -110,12 +111,11 @@ Automatically rewritten to ALTER TABLE:
 ```go
 stmts, err := statement.New("CREATE INDEX idx ON t1 (a)")
 // stmts[0].Table = "t1"
-// stmts[0].Alter = "ADD INDEX idx (a)"
-// stmts[0].Statement = "/* rewritten from CREATE INDEX */ ALTER TABLE `t1` ADD INDEX idx (a)"
+// stmts[0].Alter = "ADD INDEX `idx` (`a`)"
+// stmts[0].Statement = "/* rewritten from CREATE INDEX */ ALTER TABLE `t1` ADD INDEX `idx` (`a`)"
 ```
 
-**Limitations:**
-- Functional indexes cannot be converted (use `ALTER TABLE ADD INDEX` directly). See [issue 444](https://github.com/block/spirit/issues/444).
+Functional index expressions and mixed expression/column key parts are preserved in the rewrite. `DROP INDEX idx ON t1` is also rewritten, as ``ALTER TABLE `t1` DROP INDEX `idx` ``.
 
 ### DROP TABLE
 
@@ -234,10 +234,13 @@ type Column struct {
     Precision  *int              // For DECIMAL(10,2), Precision = 10
     Scale      *int              // For DECIMAL(10,2), Scale = 2
     Unsigned   *bool
+    Zerofill   *bool
     EnumValues []string          // For ENUM('a','b'), EnumValues = ["a", "b"]
     SetValues  []string          // For SET('x','y'), SetValues = ["x", "y"]
     Nullable   bool
-    Default    *string           // the value MySQL stores, as SHOW CREATE TABLE reports it (normalized; compared)
+    Default    *string           // normalized stored value, used for comparison
+    DefaultIsExpr bool           // expression default, emitted in parentheses
+    DefaultKind DefaultKind      // literal form read from the AST
     DefaultAsWritten *DefaultLiteral // the literal as the schema spelled it (emitted); nil for an expression default
     OnUpdate   *string           // ON UPDATE CURRENT_TIMESTAMP[(n)] for TIMESTAMP/DATETIME
     GeneratedExpr   *string      // Expression for GENERATED ALWAYS AS (...) columns
@@ -265,9 +268,10 @@ type Column struct {
 col := ct.Columns.ByName("email")
 // col.Name = "email"
 // col.Type = "varchar"
-// col.Length = 255
+// *col.Length = 255
 // col.Nullable = false
-// col.Unique = true
+// col.Unique = false (normalized into ct.Indexes)
+// ct.Indexes.ByName("email").Type = "UNIQUE"
 ```
 
 ### Index Information
@@ -276,10 +280,11 @@ Each `Index` provides:
 
 ```go
 type Index struct {
-    Raw          *ast.Constraint   // Raw AST node from parser
     Name         string
     Type         string            // "PRIMARY KEY", "UNIQUE", "INDEX", "FULLTEXT", "SPATIAL"
-    Columns      []string
+    Columns      []string          // plain column names; use ColumnList for full details
+    ColumnList   []IndexColumn     // names, expressions, prefix lengths, descending order
+    InlineDerived bool             // synthesized from an inline UNIQUE
     Invisible    *bool
     Using        *string           // "BTREE", "HASH", "RTREE"
     Comment      *string
@@ -330,7 +335,7 @@ type TableOptions struct {
 **Example:**
 
 ```go
-idx := ct.Indexes.ByName("PRIMARY")
+idx := ct.Indexes.ByName("") // parsed PRIMARY KEY indexes have an empty name
 // idx.Type = "PRIMARY KEY"
 // idx.Columns = ["id"]
 
@@ -365,7 +370,7 @@ For partitioned tables, `PartitionOptions` provides:
 
 ```go
 type PartitionOptions struct {
-    Type         string                // "RANGE", "LIST", "HASH", "KEY", "SYSTEM_TIME"
+    Type         string                // "RANGE", "LIST", "HASH", "KEY"
     Expression   *string               // For HASH, RANGE and LIST
     Columns      []string              // For KEY, RANGE COLUMNS, LIST COLUMNS
     Linear       bool
@@ -532,6 +537,7 @@ Compares two CREATE TABLE statements and generates ALTER TABLE to add missing in
 source := `CREATE TABLE t1 (
     id INT PRIMARY KEY,
     email VARCHAR(255),
+    created_at DATETIME,
     INDEX idx_email (email),
     INDEX idx_created (created_at)
 )`
@@ -539,6 +545,7 @@ source := `CREATE TABLE t1 (
 target := `CREATE TABLE t1 (
     id INT PRIMARY KEY,
     email VARCHAR(255),
+    created_at DATETIME,
     INDEX idx_email (email)
 )`
 
@@ -620,10 +627,11 @@ if ct.Constraints.HasForeignKeys() {
     fmt.Println("Table has foreign key constraints")
 }
 
-// Find specific column
-col := ct.Columns.ByName("email")
-if col != nil && col.Unique {
-    fmt.Println("Email column has UNIQUE constraint")
+// Inline UNIQUE declarations have already become table-level indexes.
+for _, idx := range ct.Indexes {
+    if idx.Type == "UNIQUE" && len(idx.ColumnList) == 1 && idx.ColumnList[0].Name == "email" {
+        fmt.Println("Email column has a single-column UNIQUE index")
+    }
 }
 ```
 
@@ -676,18 +684,17 @@ if alterStmt != "" {
 
 ## Limitations
 
-1. **Functional Indexes**: `CREATE INDEX` with functional expressions cannot be converted to `ALTER TABLE`
+1. **Index rewrite options**: `CREATE INDEX` preserves the key type, name and key parts, but does not carry all index options into the rewritten ALTER. Use `ALTER TABLE ADD INDEX` when specifying options such as visibility, comments, or a parser.
 2. **Single Schema**: Multi-table operations must use the same schema
-3. **SPATIAL Indexes**: Not fully supported in some helper functions
-4. **Statements must be parseable by pkg/parser**: unparseable DDL cannot be migrated. The most commonly occurring scenarios tend to be complex DEFAULT or CHECK expressions; since the parser is part of this repo, fixes land here directly.
+3. **Statements must be parseable by pkg/parser**: unparseable DDL cannot be migrated. The most commonly occurring scenarios tend to be complex DEFAULT or CHECK expressions; since the parser is part of this repo, fixes land here directly.
 
-5. **FLOAT default precision:** `SHOW CREATE TABLE` and `INFORMATION_SCHEMA.COLUMNS.COLUMN_DEFAULT` print unscaled `FLOAT` defaults with only six significant digits. Distinct stored values can therefore have identical metadata. Comparing the declared literal exactly prevents additional rounding, but cannot recover precision already lost by the server: a live default of `1234567` reports `1234570`, so a desired default of `1234570` can still produce no diff. Apply that default change explicitly when exact values matter.
-6. **Implicit foreign-key indexes:** when writing a desired schema by hand, declare each foreign key's supporting index explicitly. Otherwise a later diff can try to drop the implicit index shown by MySQL, and MySQL refuses the drop while the foreign key needs it.
+4. **FLOAT default precision:** `SHOW CREATE TABLE` and `INFORMATION_SCHEMA.COLUMNS.COLUMN_DEFAULT` print unscaled `FLOAT` defaults with only six significant digits. Distinct stored values can therefore have identical metadata. Comparing the declared literal exactly prevents additional rounding, but cannot recover precision already lost by the server: a live default of `1234567` reports `1234570`, so a desired default of `1234570` can still produce no diff. Apply that default change explicitly when exact values matter.
+5. **Implicit foreign-key indexes:** when writing a desired schema by hand, declare each foreign key's supporting index explicitly. Otherwise a later diff can try to drop the implicit index shown by MySQL, and MySQL refuses the drop while the foreign key needs it.
 
 ## Best Practices
 
-1. **Use SHOW CREATE TABLE**: Always parse the output of `SHOW CREATE TABLE` rather than user-provided CREATE statements. We refer to this in some places as "the canonical show create table".
-2. **Use ALTER TABLE**: Use `ALTER TABLE` syntax over `CREATE/DROP INDEX` syntax. The rewriting of `CREATE INDEX` is best-effort and does not support complex expressions.
+1. **Use SHOW CREATE TABLE for live schemas**: Parse the server's definition when comparing against an existing table. Desired schemas can be authored CREATE statements; normalization handles equivalent representations, subject to the limitations above.
+2. **Use ALTER TABLE for complete index definitions**: Index-statement rewriting is best-effort. `ALTER TABLE ADD INDEX` preserves index options directly.
 
 ## See Also
 
