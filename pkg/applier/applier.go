@@ -183,12 +183,12 @@ func deleteKeysInClause(sourceTable *table.TableInfo, keys [][]any) (string, err
 	return strings.Join(pkValues, ","), nil
 }
 
+// ApplierConfig configures the write workers and their connections. Chunklet
+// limits are fixed at chunkletMaxRows and MaxStatementSizeBytes.
 type ApplierConfig struct {
-	Threads         int // number of write threads
-	ChunkletMaxRows int
-	ChunkletMaxSize int
-	Logger          *slog.Logger
-	DBConfig        *dbconn.DBConfig
+	Threads  int // number of write threads
+	Logger   *slog.Logger
+	DBConfig *dbconn.DBConfig
 	// MetricsSink, when non-nil, makes the applier periodically report its
 	// Stats() snapshot as gauges (see pkg/metrics applier_* names). Nil
 	// disables emission entirely — no goroutine is started.
@@ -198,11 +198,9 @@ type ApplierConfig struct {
 // NewApplierDefaultConfig returns a default config for the applier.
 func NewApplierDefaultConfig() *ApplierConfig {
 	return &ApplierConfig{
-		Threads:         defaultWriteWorkers,
-		ChunkletMaxRows: chunkletMaxRows,       // will be renamed soon.
-		ChunkletMaxSize: MaxStatementSizeBytes, // will be supported soon.
-		Logger:          slog.Default(),
-		DBConfig:        dbconn.NewDBConfig(),
+		Threads:  defaultWriteWorkers,
+		Logger:   slog.Default(),
+		DBConfig: dbconn.NewDBConfig(),
 	}
 }
 
@@ -214,16 +212,9 @@ func (cfg *ApplierConfig) Validate() error {
 	if cfg.Logger == nil {
 		return errors.New("logger must be non-nil")
 	}
-	// We can set defaults for other fields.
-	// If they are not set its not important.
+	// Nonpositive worker counts use the default.
 	if cfg.Threads <= 0 {
 		cfg.Threads = defaultWriteWorkers
-	}
-	if cfg.ChunkletMaxRows <= 0 {
-		cfg.ChunkletMaxRows = chunkletMaxRows
-	}
-	if cfg.ChunkletMaxSize <= 0 {
-		cfg.ChunkletMaxSize = MaxStatementSizeBytes
 	}
 	return nil
 }

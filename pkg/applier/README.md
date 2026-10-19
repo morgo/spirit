@@ -94,7 +94,7 @@ Without the applier layer, the copier would need to handle all of this complexit
 
 A "chunklet" is an internal batching unit used by appliers. This is **different** from the "chunk" concept in `pkg/table/`, which refers to the range of rows the copier reads from the source table.
 
-When the copier calls `Apply()` with a batch of rows (typically from one chunk), the applier splits those rows into smaller "chunklets" for writing. Each chunklet defaults to:
+When the copier calls `Apply()` with a batch of rows (typically from one chunk), the applier splits those rows into smaller "chunklets" for writing. The limits are fixed, not configurable through `ApplierConfig`:
 
 - **Row count**: Maximum 1,000 rows per chunklet
 - **Size**: Maximum 1 MiB of estimated data per chunklet
