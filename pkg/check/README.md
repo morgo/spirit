@@ -9,7 +9,7 @@ Every check registers in an `init()` with two bitmasks:
 - **`Phase`**: when in a run the check runs (`PhasePreRun`, `PhaseStatement`, `PhasePreflight`, `PhasePostSetup`, `PhaseResume`, `PhaseCutover`, `PhaseCutoverLocked`). The doc comment on each phase constant states what a check in it may assume and what its failure means.
 - **`Runtime`**: which runner the check applies to (`Migration`, `Move`, `Sync`).
 
-`RunChecks(ctx, r, logger, phase, exclude...)` runs every check registered for both `r.Runtime` and `phase`, in name order, and stops at the first error. A check that does not apply to a runtime is never run by it. A check that does apply must fail, rather than pass, when the runner does not supply a resource it needs.
+`RunChecks(ctx, r, logger, phase, exclude...)` runs every check registered for both `r.Runtime` and `phase`, in name order, and stops at the first error. `Resources.Runtime` must name exactly one runtime; an invalid runtime or an unregistered exclusion name returns an error. A check that does not apply to a runtime is never run by it. A check that does apply must fail, rather than pass, when the runner does not supply a resource it needs.
 
 `Checks(runtime, phase)` reports the names `RunChecks` would run. A caller that relies on a phase's contract, such as an external planner using `StatementRefusal`, can pin the set it was written against.
 

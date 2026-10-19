@@ -53,7 +53,7 @@ There is one change source (`change.Source`) for the whole migration, with one s
 
 The change source is whatever `change.NewAutoClient` selects for the server. A fresh migration uses the GTID client when the server has GTIDs enabled, and the binlog file:offset client otherwise. A resumed migration stays in the coordinate scheme its checkpoint was written in. See [GTID auto-detection](../../docs/migrate.md#gtid-auto-detection).
 
-The copier, the change source and the checksum's chunk repair all write through **one applier**. The copy and the binlog replay therefore share one write pipeline and one write-concurrency setting (`--write-threads`).
+The copier, the change source and the checksum's chunk repair all write through **one applier**. The copier uses its asynchronous worker pool (`--write-threads`); change-feed flushes use synchronous writes with a separate flush-concurrency limit.
 
 The copier and the change source run in parallel during the row copy. The only hard ordering requirement is that the change source starts before the copier, so that every change made after a row is copied is captured. The copy is a *dirty* copy: a chunk does not account for changes made to its rows while it is being read. The change source reconciles this by replaying every change onto `_new`. The [checksum](../checksum/README.md) then proves the two tables match before cutover.
 
@@ -79,7 +79,7 @@ The copier and the change source run in parallel during the row copy. The only h
 | 14 | Cutover checks; atomic `RENAME TABLE` | `CutOver` | `cutover.go` |
 | 15 | Drop `_old` (unless `--skip-drop-after-cutover`) and the checkpoint table | `CutOver` | `Run` |
 
-`Close()` sets `Close`, and a fatal change-feed condition sets `ErrCleanup` (see [Failure handling](#failure-handling)). `RestoreSecondaryIndexes` and `ReverseWindow` are states used only by `move`; a migration never enters them.
+`Close()` sets `Close`, and a fatal change-feed condition sets `ErrCleanup` (see [Failure handling](#failure-handling)). `RestoreSecondaryIndexes` is used by move and sync, and `ReverseWindow` only by move; a migration never enters either.
 
 ### 1–2. Statement handling
 
@@ -89,7 +89,7 @@ For `ALTER TABLE`, the runner rejects a user-supplied `ALGORITHM=` or `LOCK=` cl
 
 ### 3. Advisory locks
 
-Migrations serialize per table using `dbconn.AdvisoryLock`, a `GET_LOCK` held on a dedicated connection and refreshed every minute. Two migrations on the same table block each other; migrations on different tables run concurrently. These are MySQL user-level locks, not table locks: they do not block the application.
+Migrations serialize per table using `dbconn.AdvisoryLock`, a `GET_LOCK` held on a dedicated connection and refreshed every minute. A second migration on the same table fails immediately with `dbconn.ErrLockHeld`; migrations on different tables run concurrently. These are MySQL user-level locks, not table locks: they do not block the application.
 
 An atomic multi-table migration also takes a schema-scoped lock (`dbconn.WithMultiTableSchemaLock`). See [Atomic multi-table migrations](#atomic-multi-table-migrations).
 
@@ -121,9 +121,9 @@ Setup ends by attaching the throttlers, enabling the watermark optimization, and
 
 ### 8. Row copy
 
-The copier reads chunks of the source table into Spirit and writes them through the applier with `INSERT IGNORE INTO _new VALUES (...)`. The change source writes through the same applier with `REPLACE INTO _new VALUES (...)`. Chunk size adapts to a byte budget (`--target-chunk-size`). See [pkg/copier/README.md](../copier/README.md).
+The copier reads chunks of the source table into Spirit and writes them through the applier with `INSERT IGNORE INTO _new VALUES (...)`. The change source writes through the same applier with `REPLACE INTO _new VALUES (...)`. Optimistic chunkers adapt to a byte budget (`--target-chunk-size`); composite chunkers currently adapt to the chunk-time target. See [pkg/copier/README.md](../copier/README.md).
 
-While the copy runs, the change source applies binlog row images to `_new`. With the **watermark optimization** on, it discards changes to rows above the copier's high watermark, because the copier will read those rows later anyway. This is only safe while the copier is still running, so the runner disables it when the copy finishes. See [pkg/change/README.md](../change/README.md#watermark-optimization).
+While the copy runs, the change source applies binlog row images to `_new`. With the **watermark optimization** on, it discards changes to rows above the copier's high watermark, because the copier will read those rows later anyway. This approximation relies on the repairing initial checksum to catch collation and binlog-visibility races. The runner disables it when the copy finishes, before verification. See [pkg/change/README.md](../change/README.md#watermark-optimization).
 
 ### 9–12. Post-copy
 

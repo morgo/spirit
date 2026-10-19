@@ -1,6 +1,6 @@
 # move
 
-The `move` package implements multi-table database migration for MoveTables and resharding operations. While the `migration` package performs online schema changes (ALTER TABLE on a single table within the same server), `move` copies one or more tables between different MySQL servers, optionally resharding data across multiple targets.
+The `move` package implements multi-table database migration for MoveTables and resharding operations. While the `migration` package performs online schema changes (ALTER TABLE on one or more tables within the same server), `move` copies one or more tables between different MySQL servers, optionally resharding data across multiple targets.
 
 ## Lifecycle
 
@@ -18,7 +18,7 @@ A move operation follows this sequence:
 
 ### Multi-table Awareness
 
-Unlike `migration` which operates on a single table, `move` discovers and copies all tables in a source database (or a specified subset). A single replication client tracks changes across all tables, and the cutover renames all source tables atomically.
+`move` discovers and copies all tables in each source database (or a specified subset). Each source has one change feed tracking its tables. With multiple sources, the final renames run per source under the source locks; there is no cross-server atomic `RENAME TABLE`. `migration` also supports multiple tables, with one atomic rename on its single server.
 
 ### Sharding Support
 
@@ -28,7 +28,7 @@ When a `ShardingProvider` is configured, each source table is annotated with a s
 
 Every move monitors its Aurora targets, whether or not autoscaling is skipped. `pkg/host` groups target connections independently of schema and credentials; the same groups drive index restoration and Aurora monitor ownership. One monitor per host feeds a maximum-utilization multi-throttler, which pauses the copy and narrows binlog flushes when any target is overloaded.
 
-Unless `SkipAutoscaling` is set, move adds conservative host-aware thread scaling on top of that signal, for both single-target and sharded moves. The copier resizes every shard's write pool together, and both checksums consume the same signal. Bounds account for targets sharing a host and the client CPU budget. See [the flag documentation](../../docs/move.md#skip-autoscaling) for eligibility, fallback and limitations.
+Unless `SkipAutoscaling` is set, move adds conservative host-aware thread scaling on top of that signal, for both single-target and sharded moves. The copier resizes every shard's write pool together, and both the initial and continuous checksum passes consume the same signal. A small Aurora target selects fixed single-threaded operation instead of a controller. Bounds account for targets sharing a host and the client CPU budget. See [the flag documentation](../../docs/move.md#skip-autoscaling) for eligibility, fallback and limitations.
 
 ### Deferred Secondary Indexes
 
@@ -53,7 +53,7 @@ When `DeferCutOver` is enabled, the runner creates a `_spirit_sentinel` table on
 
 Only a deferred move waits, and `DeferCutOver` is read once, at startup. Without it, the runner neither creates nor waits on a sentinel: it cuts over even while a `_spirit_sentinel` exists on targets[0], whether created by hand during the run or left behind by an earlier deferred run that was cancelled. The rule is `flags.Cutover.WaitsOnSentinel`, shared with migrate.
 
-While the sentinel blocks the cutover, the runner re-runs the checksum in a loop (the "continuous checksum") so that the data is re-verified close to the moment of cutover, even if the sentinel sits for hours. The first iteration starts one hour after the initial checksum, and subsequent iterations are capped at one per hour; the wait is interrupted when the sentinel is dropped. Both checksums use the lockless checker, aggregating each chunk across every source and every target. The continuous checksum does not repair: a divergence that survives a drain of the change feeds aborts the move, and a resumed move's initial checksum repairs it. See [docs/move.md](../../docs/move.md) for the user-facing description.
+While the sentinel blocks the cutover, the runner re-runs the checksum in a loop (the "continuous checksum") so that the data is re-verified close to the moment of cutover, even if the sentinel sits for hours. The first iteration starts one hour after the initial checksum, and subsequent iterations are capped at one per hour; the wait is interrupted when the sentinel is dropped. Both checksum modes use the same lockless checker, aggregating each chunk across every source and every target. The continuous checksum does not repair: a divergence that survives a drain of the change feeds aborts the move, and a resumed move's initial checksum repairs it. See [docs/move.md](../../docs/move.md) for the user-facing description.
 
 ### Cutover Function
 
