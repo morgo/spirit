@@ -30,7 +30,7 @@ applies it through the applier interface:
   final state is stored).
 - Uses the applier's `UpsertRows` and `DeleteKeys` to write changes — there
   is no `SELECT FROM original` round-trip.
-- Flushes changes through the applier's parallel write workers.
+- Flushes batches concurrently through the applier's synchronous `UpsertRows` and `DeleteKeys` methods. Flush concurrency is independent of the asynchronous copy-worker pool.
 
 **Advantages:**
 - **Excellent deduplication**: if a row is modified 100 times, only one upsert is performed.
@@ -77,8 +77,7 @@ would apply events out of order. FIFO replay through the applier preserves
 binlog order; the target's own collation-aware uniqueness then collapses
 the events onto the right row.
 
-During the copy phase the chunker's own SELECT covers in-window
-case-collision races, so LWW map dedup is safe and considerably faster.
+During the copy phase LWW map dedup is faster but can misorder collation-equivalent keys. Its correctness depends on the repairing initial checksum after the FIFO switch, as with the watermark approximations below.
 When the watermark optimization is disabled at the end of the copy phase,
 `SetWatermarkOptimization` drains the map inline and the subscription
 switches into queue mode for the cutover/checksum window. The
@@ -197,10 +196,11 @@ During the initial copy phase, the copier is reading rows from the source table 
 The copier maintains a "watermark" representing its progress. The replication client uses this watermark to filter changes:
 
 - **High watermark**: Skip changes for rows that haven't been copied yet (they'll be picked up by the copier)
-- **Low watermark**: Skip changes for rows that are currently being copied (avoid races with the copier, which may cause deadlocks/lock waits)
+- **Low watermark**: Defer buffered changes while a chunk covering their key is in flight; keep them for a later flush (avoid races with the copier, which may cause deadlocks/lock waits)
 
 ```go
-// Ingest time (HasChanged): drop what the copier is guaranteed to pick up.
+// Ingest time (HasChanged): discard above-high keys during the copy.
+// The repairing initial checksum closes the visibility window discussed below.
 // keyNoter is the chunker's optional table.BufferedKeyNoter, asserted once
 // when the subscription is created; nil disables the discard (see below).
 if keyNoter != nil && chunker.KeyAboveHighWatermark(key[0]) {
@@ -212,7 +212,7 @@ if keyNoter != nil {
 
 // Flush time (bufferedMap.mustDeferKey): defer only the in-flight band.
 if !chunker.KeyBelowLowWatermark(key[0]) && !chunker.KeyNotYetDispatched(key[0]) {
-    continue  // Skip, copier is actively working on this range
+    continue  // Defer; keep the entry buffered until its chunk finishes
 }
 ```
 
@@ -360,11 +360,21 @@ Before a cutover operation can run, it's important to ensure that there are no u
 // with a lock held (ensures lock duration is as short as possible)
 err = client.Flush(ctx)
 
-// Acquire table lock
-lock, err := dbconn.LockTable(ctx, db, sourceTable)
+if err != nil {
+    return err
+}
 
-// Flush all remaining changes under the lock
-err = client.FlushUnderTableLock(ctx, lock)
+// Acquire both table locks on the same server for a schema change.
+lock, err := dbconn.NewTableLock(ctx, db, []*table.TableInfo{sourceTable, targetTable}, dbConfig, logger)
+if err != nil {
+    return err
+}
+defer lock.Close(ctx)
+
+// Supply one lock per applier target, matched by database handle.
+if err := client.FlushUnderTableLock(ctx, []*dbconn.TableLock{lock}); err != nil {
+    return err
+}
 
 // This check should be redundant, but we verify everything is applied
 if !client.AllChangesFlushed() {

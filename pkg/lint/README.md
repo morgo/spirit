@@ -161,7 +161,7 @@ Linters are enabled when registered; enable or disable them per run with `Config
 
 ## Built-in Linters
 
-The `lint` package includes 18 built-in linters covering schema design, data types, and safety best practices.
+The `lint` package includes 19 built-in linters covering schema design, data types, and safety best practices.
 
 ### allow_charset
 
@@ -507,11 +507,11 @@ ALTER TABLE users RENAME TO UserAccounts;
 
 ### primary_key
 
-**Severity**: Warning for existing tables, Error for new tables (CREATE TABLE in changes)  
+**Severity**: Warning for untouched existing primary key columns; Error for new tables and primary key columns added or modified by changes<br>
 **Configurable**: Yes  
-**Checks**: CREATE TABLE
+**Checks**: CREATE TABLE, ALTER TABLE (post-state)
 
-Ensures primary keys are defined and use appropriate data types (BIGINT UNSIGNED, BINARY, or VARBINARY by default). Severity is scoped by source: existing tables produce Warning so legacy schemas don't block unrelated ALTERs, while new CREATE TABLE statements in the incoming changes produce Error.
+Ensures primary keys are defined and use allowed data types (BIGINT, BINARY, or VARBINARY by default). Signed BIGINT is allowed too. The linter evaluates the schema after changes: untouched legacy primary key columns produce warnings, while a new table or a primary key column added or modified by the changes produces errors. An ALTER that fixes the key clears the old violation.
 
 **Configuration Options:**
 
@@ -595,8 +595,8 @@ A column can be flagged on both axes at once — a `VARCHAR(32) CHARACTER SET la
 **Examples:**
 
 ```sql
--- Rule 1: same-name mismatch
-CREATE TABLE orders   (id BIGINT UNSIGNED PRIMARY KEY, customer_id BIGINT UNSIGNED);
+-- Rule 1: same-name mismatch (at least one occurrence must be indexed)
+CREATE TABLE orders   (id BIGINT UNSIGNED PRIMARY KEY, customer_id BIGINT UNSIGNED, KEY (customer_id));
 CREATE TABLE invoices (id BIGINT UNSIGNED PRIMARY KEY, customer_id BIGINT UNSIGNED);
 CREATE TABLE returns  (id BIGINT UNSIGNED PRIMARY KEY, customer_id INT);
 -- ⚠️ returns.customer_id (INT) doesn't match the majority type (BIGINT UNSIGNED)
@@ -640,7 +640,7 @@ violations, err := lint.RunLinters(tables, stmts, lint.Config{
 **Configurable**: No  
 **Checks**: CREATE TABLE, ALTER TABLE (ADD/MODIFY/CHANGE COLUMN, RENAME)
 
-Checks for usage of MySQL reserved words in table and column names. Using reserved words as identifiers can cause syntax errors and requires backtick quoting. The linter uses a static list of 259 reserved words from MySQL 9.5.0.
+Checks for usage of MySQL reserved words in table and column names. Using reserved words as identifiers can cause syntax errors and requires backtick quoting. The linter uses a static union of 266 words reserved in at least one of the supported MySQL release lines (8.0, 8.4, 9.7 and 26.7). `TestReservedWordsCoverServer` checks coverage against each CI server.
 
 **Examples:**
 
@@ -667,7 +667,7 @@ ALTER TABLE users ADD COLUMN `select` VARCHAR(100);
 ALTER TABLE users RENAME TO `table`;
 ```
 
-**Note:** While MySQL allows reserved words as identifiers when quoted with backticks, it's better practice to avoid them entirely to prevent confusion and potential issues. The reserved words list is sourced directly from MySQL 9.5.0 and includes all keywords that cannot be used as unquoted identifiers.
+**Note:** While MySQL allows reserved words as identifiers when quoted with backticks, it's better practice to avoid them entirely to prevent confusion and potential issues. The list comes from `information_schema.KEYWORDS` on the tested patch releases. A word may be flagged even if it is not reserved on the particular server in use.
 
 ---
 
@@ -808,9 +808,9 @@ Detects TIMESTAMP columns, which have problematic behavior in MySQL (automatic i
 
 **Severity**: Warning  
 **Configurable**: No  
-**Checks**: CREATE TABLE
+**Checks**: CREATE TABLE, ALTER TABLE (post-state)
 
-Detects redundant indexes where one index is a prefix of another (e.g., INDEX(a) is redundant if INDEX(a, b) exists). Also detects duplicate indexes with the same column list.
+Detects duplicate indexes, indexes covered by another index's prefix, and redundant primary key prefixes or suffixes in secondary indexes. It evaluates the schema after changes, so adding a redundant index warns and removing one clears the warning.
 
 ### rename_column
 
@@ -844,13 +844,13 @@ ALTER TABLE users RENAME COLUMN phone TO PHONE;
 | `datetime_index_position` | ❌ | ✅ | ✅ | Warning |
 | `has_foreign_key` | ❌ | ✅ | ✅ | Warning |
 | `has_float` | ❌ | ✅ | ✅ | Warning |
-| `has_timestamp` | ❌ | ✅ | ✅ | Warning (existing) / Error (new) |
+| `has_timestamp` | ❌ | ✅ | ✅ | Warning (untouched existing) / Error (new or modified column) |
 | `index_visibility_mixed` | ❌ | ❌ | ✅ | Warning |
 | `invisible_index_before_drop` | ✅ | ❌ | ✅ | Error (default), Warning (configurable) |
 | `multiple_alter_table` | ❌ | ❌ | ✅ | Info |
 | `name_case` | ❌ | ✅ | ✅ | Warning |
-| `primary_key` | ✅ | ✅ | ❌ | Warning (existing) / Error (new) |
-| `redundant_indexes` | ❌ | ✅ | ❌ | Warning |
+| `primary_key` | ✅ | ✅ | ✅ | Warning (untouched existing) / Error (new or modified PK column) |
+| `redundant_indexes` | ❌ | ✅ | ✅ | Warning |
 | `rename_column` | ❌ | ❌ | ✅ | Error (rename) / Warning (case change) |
 | `reserved_words` | ❌ | ✅ | ✅ | Warning |
 | `spirit_compatible` | ❌ | ✅ | ❌ | Error |
@@ -864,7 +864,7 @@ The `example` package provides demonstration linters for learning purposes:
 
 ### TableNameLengthLinter
 
-Checks that table names don't exceed MySQL's 64 character limit.
+Checks table names against a configurable maximum length, defaulting to 58 characters (MySQL's hard limit is 64). The example linters are not registered automatically; call `lint.Register` to enable them.
 
 ### DuplicateColumnLinter
 

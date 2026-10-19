@@ -12,11 +12,11 @@ Throttlers were designed as an **interface from the start**, because it was alwa
 
 ## Current State
 
-In practice, throttlers haven't been used as extensively as originally envisioned. Because Spirit is primarily used with Aurora at Block, the replica throttler sees limited internal use. We have also found that by using Dynamic Chunking in the copier, schema changes actually self-throttle pretty well without a throttler.
+The runners automatically monitor Aurora load: `migrate` watches its server, `move` watches every target host, and `sync` watches its target. These protections remain active with `--skip-autoscaling`; that flag disables worker-count scaling, not throttling.
 
-However, it remains available and maintained for community use, particularly for users running traditional MySQL replication topologies. We are open to contributions to throttler improvements, such as being able to throttle on multiple replicas at once ([issue #220](https://github.com/block/spirit/issues/220)).
+The replica-lag throttler is available to migrations through `--replica-dsn`. Custom throttlers can be supplied through the Go interfaces.
 
-Two **Aurora-specific throttlers** were added later: an Aurora threads throttler ([#831](https://github.com/block/spirit/issues/831)) and a commit-latency throttler ([#468](https://github.com/block/spirit/issues/468)). On Aurora the threads throttler is **always enabled**, while commit-latency is enabled **by default** but gated on a positive `--max-commit-latency` (default `100ms`; set `--max-commit-latency=0` to disable it). These are the throttlers most Block migrations actually run, and they double as the continuous load signal that drives the copier's write-thread autoscaler (see [`GradualThrottler`](#gradualthrottler-optional-extension) below).
+Two **Aurora-specific throttlers** were added later: an Aurora threads throttler ([#831](https://github.com/block/spirit/issues/831)) and a commit-latency throttler ([#468](https://github.com/block/spirit/issues/468)). On Aurora the threads throttler is **always enabled**, while commit-latency is enabled **by default** but gated on a positive `--max-commit-latency` (default `100ms`; set `--max-commit-latency=0` to disable it). These are the throttlers most Block migrations actually run, and they double as the continuous load signal that drives the copier's read/write autoscaler and the checksum's reader autoscaler (see [`GradualThrottler`](#gradualthrottler-optional-extension) below).
 
 ## Interface
 
@@ -45,7 +45,7 @@ type GradualThrottler interface {
 }
 ```
 
-The copier's write-thread autoscaler type-asserts for this and only engages when it is present. The two Aurora throttlers implement it; the replication-lag throttler deliberately does **not** — lag is an SLO-style budget, not a load gauge, so steering on it would park replicas behind. Binary-signal throttlers protect only via the `IsThrottled()` / `BlockWait()` hard-stop.
+The copier and checksum autoscalers type-assert for this and only engage when it is present. The two Aurora throttlers implement it; the replication-lag throttler deliberately does **not** — lag is an SLO-style budget, not a load gauge, so steering on it would park replicas behind. Binary-signal throttlers protect only via the `IsThrottled()` / `BlockWait()` hard-stop.
 
 The distinction also decides *who is allowed to pause whom*. `GradualOnly(t)` returns a view of a composite that keeps only its gradual children, for consumers that cannot cause what a binary throttler protects: the checksum reads inside a `REPEATABLE READ` snapshot and emits no binlog events, so pausing it on replica lag cannot reduce that lag, while the pause holds the snapshot open and retains undo. The view is read-only — its `Open`, `Close` and `UpdateLag` are no-ops, because the composite it came from is still what gets opened, polled and closed.
 
@@ -74,7 +74,7 @@ Note this is a requirement on the *method*, not a claim about the status path: `
 
 ### Noop Throttler
 
-The default throttler that performs no throttling. Used when throttling is not required.
+A throttler that performs no throttling. It is the copier configuration default; runners replace or combine it with the signals available for their servers.
 
 ```go
 throttler := &throttler.Noop{}

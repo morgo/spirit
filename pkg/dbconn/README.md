@@ -4,7 +4,7 @@ The `dbconn` package provides MySQL database connection management and locking u
 
 ## Connection Setup
 
-When creating a new connection, Spirit appends standardized DSN parameters to ensure consistent behavior across all connections. These include setting `sql_mode=""` (to be able to copy legacy data like `0000-00-00`), `time_zone=+00:00`, `transaction_isolation=read-committed`, `charset=utf8mb4`, `collation=utf8mb4_bin`, and `rejectReadOnly=true` (for Aurora failover resilience). This means that regardless of the server's global configuration, Spirit connections behave predictably.
+When creating a new connection, Spirit appends standardized DSN parameters to ensure consistent behavior across all connections. These include setting `sql_mode="NO_AUTO_VALUE_ON_ZERO"` (to be able to copy legacy data like `0000-00-00`), `time_zone=+00:00`, `transaction_isolation=read-committed`, `charset=utf8mb4`, `collation=utf8mb4_bin`, and `rejectReadOnly=true` (for Aurora failover resilience). `NO_AUTO_VALUE_ON_ZERO` preserves explicit zero values in auto-increment columns. Spirit also sets session lock timeouts and checks write warnings, so using a non-strict mode does not silently permit lossy copies.
 
 ## Pool sizing
 
@@ -41,7 +41,7 @@ There are two important safety constraints:
 1. **Transaction weight threshold**: Transactions with a weight above 1,000,000 (as reported by `information_schema.innodb_trx.trx_weight`) are never killed, because their rollback would be expensive and disruptive.
 2. **Explicit table locks**: Connections holding `LOCK TABLES` are never killed. Instead, an `ErrTableLockFound` error is returned. This is because killing non-transactional locks is unsafe.
 
-## Metadata Lock
+## Advisory Lock
 
 `AdvisoryLock` provides an advisory locking mechanism using MySQL's `GET_LOCK()` function. It runs on a dedicated single-connection database pool with a background goroutine that periodically refreshes the lock. If the connection drops, it automatically reconnects and re-acquires locks.
 
@@ -49,7 +49,7 @@ Lock names are deterministic hashes of `schema.table`, truncated with a SHA1 suf
 
 ## Table Lock
 
-`TableLock` wraps MySQL's `LOCK TABLES ... WRITE` statement. It integrates with the force-kill mechanism to automatically kill blocking transactions if the lock cannot be acquired within the timeout. This is used during checksum setup and cutover.
+`TableLock` wraps MySQL's `LOCK TABLES ... WRITE` statement. It integrates with the force-kill mechanism to automatically kill blocking transactions if the lock cannot be acquired within the timeout. This is used during legacy snapshot checksum setup and cutover. The default lockless checksum takes no table lock.
 
 Table locks are session-scoped, so the helper reserves a dedicated `sql.Conn` until `Close`. A transaction cannot provide that ownership: cancellation can automatically roll it back and return its connection to the pool while table locks remain held. Callers must defer `Close` after successful acquisition. It ignores the caller's cancellation and starts its own 30-second cleanup timeout when invoked. A successful unlock returns the connection to the pool; a failed unlock or failed acquisition discards the connection. This does not depend on driver session-reset support.
 
